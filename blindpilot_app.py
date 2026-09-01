@@ -4319,15 +4319,15 @@ class SessionPanel(wx.Panel):
         worker = self._worker
         text = self.prompt.GetValue().strip()
         if worker is None or not worker.is_alive():
-            self._set_status("Error: Nothing is running to steer")
+            self._announce("Error: Nothing is running to steer")
             return
         if not text:
-            self._set_status("Error: Type a message first, then steer")
+            self._announce("Error: Type a message first, then steer")
             return
         if not getattr(worker, "steer")(text):
             # The turn finished between typing and pressing. Leave the text in
             # place so it can just be sent as the next prompt.
-            self._set_status("Error: The run already finished. Press Send to ask it now.")
+            self._announce("Error: The run already finished. Press Send to ask it now.")
             return
         self.prompt.SetValue("")
         self._earcons.play_send()
@@ -4344,7 +4344,7 @@ class SessionPanel(wx.Panel):
         """
         worker = self._worker
         if worker is None or not worker.is_alive():
-            self._set_status("Error: Nothing is running to stop")
+            self._announce("Error: Nothing is running to stop")
             return
         self.stop_btn.Disable()
         self.steer_btn.Disable()
@@ -4765,7 +4765,7 @@ class SessionPanel(wx.Panel):
             return
         row = self._displayed[sel]
         if not _copy_to_clipboard(row.payload):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(self._copy_message(row))
 
@@ -4775,7 +4775,7 @@ class SessionPanel(wx.Panel):
         row = self._displayed[sel]
         text = reassemble(self._rows, row.response_number)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(f"Copied whole response {row.response_number}")
 
@@ -4838,7 +4838,7 @@ class SessionPanel(wx.Panel):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(row.payload)
         except OSError as exc:
-            self._set_status(f"Error saving file: {exc}")
+            self._announce(f"Error saving file: {exc}")
             return
         self._announce(f"Saved code to {os.path.basename(path)}")
 
@@ -4853,18 +4853,18 @@ class SessionPanel(wx.Panel):
     def _action_copy_response(self, row: Row) -> None:
         text = reassemble(self._rows, row.response_number)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(f"Copied whole response {row.response_number}")
 
     def _action_copy_conversation(self) -> None:
         """Every row in the list, first to last, on the clipboard."""
         if not self._rows:
-            self._set_status("Error: Nothing to copy yet")
+            self._announce("Error: Nothing to copy yet")
             return
         text = reassemble_all(self._rows)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         n = len(self._rows)
         self._announce(f"Copied whole conversation, {n} {'row' if n == 1 else 'rows'}")
