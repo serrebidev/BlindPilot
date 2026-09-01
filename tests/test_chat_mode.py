@@ -78,9 +78,13 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
             "after",
             "before",
         ]
-        # Shift+Tab out of the tab strip is the only way back to Mode.
+        # Shift+Tab out of the tab strip is the only way back to Mode. Where
+        # focus actually lands cannot be read back on a headless runner, so
+        # record the request rather than querying the platform for it.
+        mode_focus_calls: list[str] = []
+        frame.mode_combo.SetFocus = lambda: mode_focus_calls.append("mode")
         assert frame._route_agent_tab(frame.tab_switcher, shift=True)
-        assert frame._focus_is_within(wx.Window.FindFocus(), frame.mode_combo)
+        assert mode_focus_calls == ["mode"]
 
         frame._set_app_mode(blindpilot_app.APP_MODE_CHAT, announce_change=False)
 
