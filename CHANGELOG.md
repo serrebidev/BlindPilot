@@ -4,6 +4,12 @@ Readable release history for BlindPilot. When adjacent releases were part of the
 same fix stream, they are combined with a version range such as
 `v0.3.6-v0.3.7`.
 
+## v0.7.2 - 2026-09-01
+
+- Claude Code runs stay open until every background agent started by the turn has finished. BlindPilot previously treated the parent turn's first result as the end of the whole run, closed Claude's input, and killed the CLI five seconds later, taking every helper agent and its unfinished work with it. The live view now announces how many agents remain and reminds the person that Stop Task can end the run immediately; helper narration remains visible while only Claude's own reply is collected as the final answer.
+- Claude Code failures retain the information needed to understand them. Standard error is drained continuously so a full pipe cannot freeze the child, malformed UTF-8 is replaced instead of ending the reader, exceptions in the stream loop are reported, and an answer already produced is preserved when the CLI later exits non-zero. A turn that ends without a result leaves its exit details in `claude-worker.log` beside BlindPilot's settings.
+- Sound cues can be turned off from **Options, Play sound cues**. The preference is remembered, muting stops a progress sound already playing, and cues remain enabled by default for existing behaviour.
+
 ## v0.7.1 - 2026-08-31
 
 - A FreeBuff that starts and then paints nothing is reported in two minutes instead of being waited out for the whole hour a turn is allowed. FreeBuff 0.0.163 starts, connects, and then never draws a prompt to type into, on a bare terminal as readily as under BlindPilot; because the terminal neither died nor became ready, the message bought an hour of silence and was then reported unsent. Start-up is now bounded by how long FreeBuff goes without painting anything, so a first launch that is visibly downloading, unpacking, or offering the model picker is never cut off, while one that has stopped is reported in its own last words.

@@ -1,36 +1,34 @@
-# BlindPilot 0.7.1
+# BlindPilot 0.7.2
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-## A FreeBuff that never starts now says so
+## Claude's background agents finish their work
 
-FreeBuff 0.0.163 can start, connect, and then paint nothing at all. It is still running
-and still holding its connections, so nothing ever ends and nothing is ever drawn to type
-a message into. This happens on a bare terminal exactly as readily as it does inside
-BlindPilot, so it is FreeBuff's own fault rather than BlindPilot's — but BlindPilot
-handled it badly.
+Claude Code can finish its own turn while helper agents it started are still working.
+BlindPilot previously took that first result as the end of the entire run, closed Claude's
+input, waited five seconds, and then stopped the CLI. Every background agent stopped with
+it, so a large task could lose all of its delegated work and report only an exit code.
 
-A turn is given an hour to finish, and a terminal that neither dies nor reaches a prompt
-used all of it. From the outside that was a message sent into complete silence, with the
-failure finally spoken an hour later.
+BlindPilot now keeps the stream open until all of those agents have completed, failed, or
+been stopped. While it waits, the live view announces how many agents remain and reminds
+you that Stop Task can end the run immediately. Helper-agent narration is still shown
+live, but it is no longer mixed into Claude's final reply.
 
-FreeBuff's start-up is now bounded by how long it goes without painting anything, rather
-than by the clock. Any repaint counts as progress and starts the wait over, so a first
-launch that is downloading and unpacking FreeBuff, showing a splash, or offering the model
-picker is never cut off no matter how long it takes. A FreeBuff that has simply stopped is
-reported after two minutes, quoting the last thing it managed to show, or saying plainly
-that it showed nothing at all and suggesting FreeBuff be run in a terminal to confirm
-where the fault lies.
+## A bad ending keeps its explanation
 
-## GLM 5.3 is the preferred FreeBuff model
+Claude's error stream is now read continuously, preventing a full error pipe from freezing
+the process. One malformed character can no longer end the reader, an unexpected reading
+error is reported in plain language, and a good answer is retained even if Claude exits
+non-zero afterwards.
 
-FreeBuff has removed `deepseek/deepseek-v4-pro` from its catalogue, which is the model
-BlindPilot preferred by default. GLM 5.3 (`z-ai/glm-5.3-flash`) takes its place.
+When a Claude turn ends without producing its result event, BlindPilot records the exit
+code and Claude's error output in `claude-worker.log` beside the settings file. This gives
+an interrupted run something useful to diagnose after the window is gone.
 
-This remains a preference rather than a requirement. FreeBuff drops and renames models
-between releases, so BlindPilot still reads the catalogue out of the installed release at
-run time, and a release that no longer offers GLM 5.3 falls back to a model that release
-does offer instead of driving the picker toward a row that will never appear. A model
-chosen explicitly in BlindPilot still wins over both.
+## Sound cues can be muted
+
+The Options menu now includes **Play sound cues**. Turning it off mutes the sent, working,
+and received earcons immediately, including a progress cue already playing. The choice is
+remembered between launches, and sound remains on by default.
