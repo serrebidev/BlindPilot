@@ -1206,6 +1206,7 @@ class CodexWorker(threading.Thread):
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
         self._stderr: list[str] = []
+        self._failed = False
 
     def accepting_input(self) -> bool:
         return self._accepting_input.is_set() and not self._cancelled
@@ -1257,9 +1258,26 @@ class CodexWorker(threading.Thread):
         if proc and proc.poll() is None:
             end_process_group(proc)
 
+    def _fail(self, message: str) -> None:
+        """Report why the turn ended, once.
+
+        The first account of a failure is the one that can be acted on. A crash
+        while cleaning up after it is not worth speaking over the top of it.
+        """
+        if self._failed:
+            return
+        self._failed = True
+        self._on_failed(message)
+
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # `finally` re-enables Send and stops the progress earcon either
+            # way, so anything thrown here used to end the turn exactly as a
+            # finished one ends - with no answer and nothing said. The
+            # traceback went to a stderr the windowed build does not have.
+            self._fail(f"BlindPilot stopped reading Codex: {exc}")
         finally:
             self._accepting_input.clear()
             proc = self._proc
@@ -1280,10 +1298,10 @@ class CodexWorker(threading.Thread):
     def _do_run(self) -> None:
         binary = find_backend_cli(BACKEND_CODEX)
         if not binary:
-            self._on_failed("Codex is not installed. Run: npm install -g @openai/codex")
+            self._fail("Codex is not installed. Run: npm install -g @openai/codex")
             return
         if self._compact and not self._session_id:
-            self._on_failed("There is no Codex conversation to compact yet")
+            self._fail("There is no Codex conversation to compact yet")
             return
         try:
             server_binary = _codex_app_server_binary(binary)
@@ -1305,7 +1323,7 @@ class CodexWorker(threading.Thread):
                 **no_window_kwargs(),
             )
         except OSError as exc:
-            self._on_failed(f"Failed to launch Codex: {exc}")
+            self._fail(f"Failed to launch Codex: {exc}")
             return
 
         if self._proc.stderr:
@@ -1371,12 +1389,12 @@ class CodexWorker(threading.Thread):
             if message.get("id") == thread_request:
                 error = message.get("error")
                 if error:
-                    self._on_failed(self._error_text(error, "Could not start a Codex session"))
+                    self._fail(self._error_text(error, "Could not start a Codex session"))
                     return
                 thread = (message.get("result") or {}).get("thread") or {}
                 self._thread_id = str(thread.get("id") or self._session_id or "")
                 if not self._thread_id:
-                    self._on_failed("Codex did not return a session id")
+                    self._fail("Codex did not return a session id")
                     return
                 self._on_session(self._thread_id)
                 if self._compact:
@@ -1411,7 +1429,7 @@ class CodexWorker(threading.Thread):
             if compact_request and message.get("id") == compact_request:
                 error = message.get("error")
                 if error:
-                    self._on_failed(self._error_text(error, "Codex could not compact"))
+                    self._fail(self._error_text(error, "Codex could not compact"))
                     return
                 # The result is empty; the compaction turn announces itself.
                 continue
@@ -1419,7 +1437,7 @@ class CodexWorker(threading.Thread):
             if turn_request and message.get("id") == turn_request:
                 error = message.get("error")
                 if error:
-                    self._on_failed(self._error_text(error, "Codex could not start the turn"))
+                    self._fail(self._error_text(error, "Codex could not start the turn"))
                     return
                 turn = (message.get("result") or {}).get("turn") or {}
                 self._turn_id = str(turn.get("id") or "")
@@ -1480,10 +1498,10 @@ class CodexWorker(threading.Thread):
                 turn = params.get("turn") or {}
                 status = turn.get("status")
                 if status == "failed":
-                    self._on_failed(self._error_text(turn.get("error"), "Codex turn failed"))
+                    self._fail(self._error_text(turn.get("error"), "Codex turn failed"))
                 elif status == "interrupted":
                     if not self._cancelled:
-                        self._on_failed("Codex turn was interrupted")
+                        self._fail("Codex turn was interrupted")
                 elif self._compact:
                     # A compaction turn produces no answer text of its own, so
                     # say what happened rather than finishing in silence.
@@ -1494,7 +1512,7 @@ class CodexWorker(threading.Thread):
 
         if not self._cancelled:
             detail = "\n".join(self._stderr[-10:]).strip()
-            self._on_failed(detail or "Codex app server closed before the turn completed")
+            self._fail(detail or "Codex app server closed before the turn completed")
 
     def _read_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:
@@ -2220,13 +2238,18 @@ _FREEBUFF_PREWARM_TTL = 15 * 60
 
 
 def _kill_pty(pty: object) -> None:
+    """End the terminal and give the pseudo-terminal itself back.
+
+    Both calls are wanted, not the first one that works: `terminate` stops
+    FreeBuff, `close` releases the handle the terminal was reached through.
+    Returning after a successful terminate left that handle open every time.
+    """
     for method, arguments in (("terminate", (True,)), ("close", (True,))):
         call = getattr(pty, method, None)
         if call is None:
             continue
         try:
             call(*arguments)
-            return
         except Exception:
             continue
 
@@ -2379,6 +2402,7 @@ class FreebuffWorker(threading.Thread):
         # see a second time before believing it.
         self._narrated: dict[str, str] = {}
         self._pending_frame: dict[str, str] = {}
+        self._failed = False
 
     def accepting_input(self) -> bool:
         return self._accepting_input.is_set() and not self._cancelled
@@ -2411,17 +2435,24 @@ class FreebuffWorker(threading.Thread):
         self._accepting_input.clear()
         pty = self._pty
         if pty is not None:
-            try:
-                pty.terminate(force=True)
-            except Exception:
-                try:
-                    pty.close(force=True)
-                except Exception:
-                    pass
+            # Every turn ends here, through `run`'s `finally`, so this is where
+            # a terminal that was stopped but never closed piles up.
+            _kill_pty(pty)
+
+    def _fail(self, message: str) -> None:
+        """Report why the turn ended, once."""
+        if self._failed:
+            return
+        self._failed = True
+        self._on_failed(message)
 
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # See CodexWorker.run: without this the terminal is torn down, Send
+            # comes back, and the turn is over with nothing said about why.
+            self._fail(f"BlindPilot stopped reading FreeBuff: {exc}")
         finally:
             self._accepting_input.clear()
             self.cancel()
@@ -2430,7 +2461,7 @@ class FreebuffWorker(threading.Thread):
     def _do_run(self) -> None:
         binary = find_backend_cli(BACKEND_FREEBUFF)
         if not binary:
-            self._on_failed("FreeBuff is not installed. Run: npm install -g freebuff")
+            self._fail("FreeBuff is not installed. Run: npm install -g freebuff")
             return
         # Reading the model catalog means scanning the whole of FreeBuff, which
         # is far too slow to do before sending a message. The recorded choice is
@@ -2440,7 +2471,7 @@ class FreebuffWorker(threading.Thread):
             self._model = self._model or _read_freebuff_choice() or FREEBUFF_PREFERRED_MODEL
             set_freebuff_model(self._model)
         except OSError as exc:
-            self._on_failed(f"Could not select the FreeBuff model: {exc}")
+            self._fail(f"Could not select the FreeBuff model: {exc}")
             return
         models: list[str] = []
         before = _freebuff_chat_dirs(self._cwd)
@@ -2474,19 +2505,19 @@ class FreebuffWorker(threading.Thread):
                 read = self._spawn_pty(args)
             except ImportError:
                 package = "pywinpty" if platform.system() == "Windows" else "pexpect"
-                self._on_failed(
+                self._fail(
                     f"FreeBuff support needs {package} and pyte. Reinstall BlindPilot dependencies."
                 )
                 return
             except Exception as exc:
-                self._on_failed(f"Failed to launch FreeBuff: {exc}")
+                self._fail(f"Failed to launch FreeBuff: {exc}")
                 return
         adopted_at = time.monotonic()
 
         try:
             import pyte
         except ImportError:
-            self._on_failed("FreeBuff support needs pyte. Reinstall BlindPilot dependencies.")
+            self._fail("FreeBuff support needs pyte. Reinstall BlindPilot dependencies.")
             return
         screen = pyte.HistoryScreen(180, 60, history=4000)
         stream = pyte.Stream(screen)
@@ -2565,7 +2596,7 @@ class FreebuffWorker(threading.Thread):
             try:
                 return self._spawn_pty(args)
             except Exception as exc:
-                self._on_failed(f"Failed to launch FreeBuff: {exc}")
+                self._fail(f"Failed to launch FreeBuff: {exc}")
                 return None
 
         while not self._cancelled and time.monotonic() < deadline:
@@ -2603,7 +2634,7 @@ class FreebuffWorker(threading.Thread):
                     # a missing Node, a failed download, a refused login. That
                     # sentence is the whole of what the person can act on, so
                     # it is reported instead of a guess.
-                    self._on_failed(_freebuff_launch_failure(last_visible))
+                    self._fail(_freebuff_launch_failure(last_visible))
                     return
                 # It ended mid-turn, so whatever was captured is the whole
                 # answer; fall through to report it rather than wait it out.
@@ -2690,7 +2721,7 @@ class FreebuffWorker(threading.Thread):
                 saw_busy = True
             if not sent and at_prompt:
                 if not self._submit_text(self._prompt):
-                    self._on_failed("Could not send the prompt to FreeBuff")
+                    self._fail("Could not send the prompt to FreeBuff")
                     return
                 sent = True
                 started = True
@@ -2708,7 +2739,7 @@ class FreebuffWorker(threading.Thread):
 
             now = time.monotonic()
             if not sent and now - screen_changed_at >= _FREEBUFF_STARTUP_SILENCE_SECONDS:
-                self._on_failed(
+                self._fail(
                     _freebuff_startup_silence(last_visible, _FREEBUFF_STARTUP_SILENCE_SECONDS)
                 )
                 return
@@ -2762,7 +2793,7 @@ class FreebuffWorker(threading.Thread):
                         agent_states[agent_id] = status
                     run_status = _freebuff_run_status(chat_path, log_offset)
                 if run_status == "cancelled":
-                    self._on_failed("FreeBuff reported that the response was interrupted")
+                    self._fail("FreeBuff reported that the response was interrupted")
                     return
                 if run_status == "complete":
                     if completion_seen_at is None:
@@ -2798,7 +2829,7 @@ class FreebuffWorker(threading.Thread):
         if self._cancelled:
             return
         if not sent:
-            self._on_failed("FreeBuff did not become ready for input")
+            self._fail("FreeBuff did not become ready for input")
             return
 
         self._accepting_input.clear()
@@ -2820,7 +2851,7 @@ class FreebuffWorker(threading.Thread):
                 self._on_activity("assistant", tail)
             self._on_complete(response)
         else:
-            self._on_failed("No response received from FreeBuff")
+            self._fail("No response received from FreeBuff")
             return
 
         after = _freebuff_chat_dirs(self._cwd)
@@ -3824,6 +3855,10 @@ class OpencodeWorker(threading.Thread):
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # See CodexWorker.run: without this the event stream is closed, Send
+            # comes back, and the turn is over with nothing said about why.
+            self._fail(f"BlindPilot stopped reading opencode: {exc}")
         finally:
             self._accepting_input.clear()
             self._close_stream()

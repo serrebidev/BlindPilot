@@ -347,6 +347,26 @@ def _no_window_kwargs() -> dict:
     return {"creationflags": _NO_WINDOW} if _NO_WINDOW else {}
 
 
+def _open_web_page(url: str) -> bool:
+    """Open a web address, and nothing but a web address.
+
+    Everything else handed to the platform opener is a protocol handler being
+    invoked rather than a page being shown: `file:` opens whatever is at that
+    path, and Windows gives `ms-msdt:` and its relatives to programs of their
+    own. Sign-in addresses arrive over a provider catalog BlindPilot neither
+    controls nor inspects, so the scheme is checked rather than trusted.
+
+    False means nothing was opened, for any reason. Every caller says the
+    address out loud in that case, so there is still a way through by hand.
+    """
+    if urllib.parse.urlsplit(url).scheme.casefold() not in ("http", "https"):
+        return False
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
+
+
 def _same_dir(a: str, b: str) -> bool:
     """Compare two directory strings the way the platform resolves them.
 
@@ -2956,6 +2976,10 @@ class QuestionDialog(wx.Dialog):
             style = wx.TE_PROCESS_ENTER | (wx.TE_PASSWORD if question.secret else 0)
             entry = wx.TextCtrl(self, style=style)
             entry.SetName(f"Your own answer to {question.question}")
+            # TE_PROCESS_ENTER takes Enter away from the dialog's default
+            # button and gives it to the box, so without this the key does
+            # nothing whatsoever in the one place a turn waits to be let go.
+            entry.Bind(wx.EVT_TEXT_ENTER, self._on_text_enter)
             label.Hide()
             entry.Hide()
             sizer.Add(label, 0, wx.LEFT | wx.RIGHT, 24)
@@ -3024,18 +3048,32 @@ class QuestionDialog(wx.Dialog):
             return
         event.Skip()
 
-    def _on_ok(self, event: wx.CommandEvent) -> None:
-        """Refuse a half-filled answer rather than send the backend a blank."""
+    def _answered(self) -> bool:
+        """Whether every question has an answer, saying what is missing if not.
+
+        Focus lands on the question that is short, so the next keystroke goes
+        somewhere useful rather than leaving the person to find it.
+        """
         for index, question in enumerate(self._questions):
             if self._wants_custom(index) and not self._texts[index].GetValue().strip():
                 announce("Error: type your own answer, or pick one of the choices")
                 self._texts[index].SetFocus()
-                return
+                return False
             if not self._chosen(index):
                 announce(f"Error: {question.question} has no answer yet")
                 self._pickers[index].SetFocus()
-                return
-        event.Skip()
+                return False
+        return True
+
+    def _on_ok(self, event: wx.CommandEvent) -> None:
+        """Refuse a half-filled answer rather than send the backend a blank."""
+        if self._answered():
+            event.Skip()
+
+    def _on_text_enter(self, _event: wx.CommandEvent) -> None:
+        """Enter in the answer box sends it, the way it does in the prompt."""
+        if self._answered():
+            self.EndModal(wx.ID_OK)
 
     def _chosen(self, index: int) -> list[str]:
         """The answers picked for one question, with "Other" resolved to text."""
@@ -3316,10 +3354,7 @@ class ConnectDialog(wx.Dialog):
             # opencode hands back the address and expects whoever asked to open
             # it. The address is spoken and shown either way, so a machine with
             # no default browser is not left with nothing to go on.
-            try:
-                opened = bool(webbrowser.open(url))
-            except Exception:
-                opened = False
+            opened = _open_web_page(url)
             if not opened:
                 announce(f"Could not open a browser. The sign-in address is {url}")
         if str(authorization.get("method")) == "code":
@@ -4557,15 +4592,15 @@ class SessionPanel(wx.Panel):
         worker = self._worker
         text = self.prompt.GetValue().strip()
         if worker is None or not worker.is_alive():
-            self._set_status("Error: Nothing is running to steer")
+            self._announce("Error: Nothing is running to steer")
             return
         if not text:
-            self._set_status("Error: Type a message first, then steer")
+            self._announce("Error: Type a message first, then steer")
             return
         if not getattr(worker, "steer")(text):
             # The turn finished between typing and pressing. Leave the text in
             # place so it can just be sent as the next prompt.
-            self._set_status("Error: The run already finished. Press Send to ask it now.")
+            self._announce("Error: The run already finished. Press Send to ask it now.")
             return
         self.prompt.SetValue("")
         self._earcons.play_send()
@@ -4582,7 +4617,7 @@ class SessionPanel(wx.Panel):
         """
         worker = self._worker
         if worker is None or not worker.is_alive():
-            self._set_status("Error: Nothing is running to stop")
+            self._announce("Error: Nothing is running to stop")
             return
         self.stop_btn.Disable()
         self.steer_btn.Disable()
@@ -5008,7 +5043,7 @@ class SessionPanel(wx.Panel):
             return
         row = self._displayed[sel]
         if not _copy_to_clipboard(row.payload):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(self._copy_message(row))
 
@@ -5018,7 +5053,7 @@ class SessionPanel(wx.Panel):
         row = self._displayed[sel]
         text = reassemble(self._rows, row.response_number)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(f"Copied whole response {row.response_number}")
 
@@ -5081,7 +5116,7 @@ class SessionPanel(wx.Panel):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(row.payload)
         except OSError as exc:
-            self._set_status(f"Error saving file: {exc}")
+            self._announce(f"Error saving file: {exc}")
             return
         self._announce(f"Saved code to {os.path.basename(path)}")
 
@@ -5096,18 +5131,18 @@ class SessionPanel(wx.Panel):
     def _action_copy_response(self, row: Row) -> None:
         text = reassemble(self._rows, row.response_number)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(f"Copied whole response {row.response_number}")
 
     def _action_copy_conversation(self) -> None:
         """Every row in the list, first to last, on the clipboard."""
         if not self._rows:
-            self._set_status("Error: Nothing to copy yet")
+            self._announce("Error: Nothing to copy yet")
             return
         text = reassemble_all(self._rows)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         n = len(self._rows)
         self._announce(f"Copied whole conversation, {n} {'row' if n == 1 else 'rows'}")
@@ -5231,7 +5266,10 @@ class BackendLogin:
         self.failure = ""
         self._info = BACKENDS[self.backend]
         self._timeout = timeout
-        self._opener = opener or webbrowser.open
+        # Same checked door as the opencode sign-in uses: a CLI's address is
+        # already constrained to http or https by the pattern it is read out
+        # of, and this leaves one place in the file that opens anything.
+        self._opener = opener or _open_web_page
         self._popen = popen or subprocess.Popen
         self._proc: Optional[subprocess.Popen] = None
         self._writing = threading.Lock()

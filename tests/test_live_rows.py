@@ -453,7 +453,9 @@ def _stub_panel(app, **overrides):
     panel._session_backend = app.BACKEND_FREEBUFF
     panel.announced = []
     panel.status = []
-    panel._announce = lambda text: panel.announced.append(text)
+    # The real `_announce` speaks and mirrors to the status bar; a stub that
+    # only recorded one of the two would hide which of them a caller used.
+    panel._announce = lambda text: (panel.announced.append(text), panel.status.append(text))
     panel._set_status = lambda text: panel.status.append(text)
     panel._refresh_list = lambda: None
     panel._say = lambda _text: False
@@ -500,6 +502,7 @@ def test_stop_without_a_running_task_says_so_and_does_nothing():
 
     app.SessionPanel._on_stop(panel)
 
+    assert panel.announced == ["Error: Nothing is running to stop"]
     assert panel.status == ["Error: Nothing is running to stop"]
     assert panel._stopping is False
 

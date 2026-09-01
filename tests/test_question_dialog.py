@@ -135,3 +135,55 @@ def test_a_question_that_takes_no_typed_answer_does_not_offer_one(frame):
         assert dlg._wants_custom(0) is False
     finally:
         dlg.Destroy()
+
+
+def _press_enter(entry) -> None:
+    """The event a text box with wx.TE_PROCESS_ENTER raises when Enter is hit."""
+    event = wx.CommandEvent(wx.EVT_TEXT_ENTER.typeId, entry.GetId())
+    event.SetEventObject(entry)
+    entry.GetEventHandler().ProcessEvent(event)
+
+
+def test_enter_in_the_typed_answer_box_sends_the_answer(frame):
+    """The box asks for Enter and then does nothing with it.
+
+    `wx.TE_PROCESS_ENTER` takes Enter away from the dialog's default button and
+    hands it to the control, so without a handler the key is simply eaten. This
+    is the one dialog that opens unannounced in the middle of a run and holds
+    the turn until it is answered, and the obvious way out of it did nothing.
+    """
+    dlg = _dialog(frame)
+    try:
+        single, several = dlg._pickers
+        single.SetSelection(single.GetCount() - 1)
+        several.Check(0, True)
+        dlg._on_choice(wx.CommandEvent())
+        dlg._texts[0].SetValue("two spaces, always")
+        ended: list[int] = []
+        dlg.EndModal = ended.append
+
+        _press_enter(dlg._texts[0])
+
+        assert ended == [wx.ID_OK], "Enter did nothing at all"
+        assert dlg.answers() == [["two spaces, always"], ["Tests"]]
+    finally:
+        dlg.Destroy()
+
+
+def test_enter_does_not_send_a_question_that_has_no_answer_yet(frame):
+    """Enter has to refuse exactly what the Send answer button refuses."""
+    dlg = _dialog(frame)
+    try:
+        single, _several = dlg._pickers
+        single.SetSelection(single.GetCount() - 1)
+        dlg._on_choice(wx.CommandEvent())
+        dlg._texts[0].SetValue("two spaces, always")
+        # The second question is still unanswered.
+        ended: list[int] = []
+        dlg.EndModal = ended.append
+
+        _press_enter(dlg._texts[0])
+
+        assert ended == [], "a half-filled answer was sent to the backend"
+    finally:
+        dlg.Destroy()
