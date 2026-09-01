@@ -4,8 +4,45 @@ import sqlite3
 
 import wx
 
-from accessible_ai.models import Account, Profile
+from accessible_ai.models import (
+    Account,
+    OPENROUTER_SERVER_TOOLS,
+    OpenRouterFeatures,
+    PDF_ENGINE_LABELS,
+    PDF_ENGINE_OFF,
+    PDF_ENGINES,
+    Profile,
+    REASONING_DEFAULT,
+    REASONING_EFFORT_LABELS,
+    REASONING_EFFORTS,
+    SEARCH_CONTEXT_DEFAULT,
+    SEARCH_CONTEXT_LABELS,
+    SEARCH_CONTEXT_SIZES,
+)
 from accessible_ai.storage.database import Database
+
+
+# Each picker offers "leave it alone" first, so a profile that says nothing
+# about a setting is the one a person lands on without choosing anything.
+_REASONING_VALUES = (REASONING_DEFAULT, *REASONING_EFFORTS)
+_SEARCH_CONTEXT_VALUES = (SEARCH_CONTEXT_DEFAULT, *SEARCH_CONTEXT_SIZES)
+_PDF_ENGINE_VALUES = (PDF_ENGINE_OFF, *PDF_ENGINES)
+
+
+def _index_of(values: tuple[str, ...], wanted: str) -> int:
+    """Where a saved value sits in a picker, or the first row if it is gone."""
+    return values.index(wanted) if wanted in values else 0
+
+
+def _optional_count(text: str, field_name: str) -> int | None:
+    """A whole number above zero, or None for a box left empty."""
+    text = text.strip()
+    if not text:
+        return None
+    number = int(text)
+    if number <= 0:
+        raise ValueError(f"{field_name} must be greater than zero.")
+    return number
 
 
 class ProfileEditorDialog(wx.Dialog):
@@ -67,7 +104,87 @@ class ProfileEditorDialog(wx.Dialog):
         self.streaming.SetName("Streaming preference")
         grid.Add(self.streaming, 1, wx.EXPAND)
 
+        grid.Add(wx.StaticText(panel, label="Thinking effort:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.reasoning_effort = wx.Choice(
+            panel, choices=[REASONING_EFFORT_LABELS[value] for value in _REASONING_VALUES]
+        )
+        self.reasoning_effort.SetName("Thinking effort")
+        self.reasoning_effort.SetToolTip(
+            "How long a reasoning model thinks before it answers. Models that do not think "
+            "ignore this."
+        )
+        grid.Add(self.reasoning_effort, 1, wx.EXPAND)
+
+        grid.Add(
+            wx.StaticText(panel, label="Thinking token budget, blank for effort-based:"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL,
+        )
+        self.reasoning_tokens = wx.TextCtrl(panel)
+        self.reasoning_tokens.SetName("Thinking token budget")
+        grid.Add(self.reasoning_tokens, 1, wx.EXPAND)
+
+        grid.Add(wx.StaticText(panel, label="Send the thinking back:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.show_reasoning = wx.CheckBox(panel, label="Read the thinking as it arrives")
+        self.show_reasoning.SetName("Send the thinking back")
+        self.show_reasoning.SetToolTip(
+            "Off still lets the model think. It just does not send the thinking back, which "
+            "keeps the response shorter and cheaper to read."
+        )
+        grid.Add(self.show_reasoning, 1, wx.EXPAND)
+
+        grid.Add(
+            wx.StaticText(panel, label="Web search results per search:"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL,
+        )
+        self.search_max_results = wx.TextCtrl(panel)
+        self.search_max_results.SetName("Web search results per search")
+        grid.Add(self.search_max_results, 1, wx.EXPAND)
+
+        grid.Add(wx.StaticText(panel, label="Web search depth:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.search_context = wx.Choice(
+            panel, choices=[SEARCH_CONTEXT_LABELS[value] for value in _SEARCH_CONTEXT_VALUES]
+        )
+        self.search_context.SetName("Web search depth")
+        self.search_context.SetToolTip("How much of each page found is given to the model.")
+        grid.Add(self.search_context, 1, wx.EXPAND)
+
+        grid.Add(
+            wx.StaticText(panel, label="Read attached PDFs with:"), 0, wx.ALIGN_CENTER_VERTICAL
+        )
+        self.pdf_engine = wx.Choice(
+            panel, choices=[PDF_ENGINE_LABELS[value] for value in _PDF_ENGINE_VALUES]
+        )
+        self.pdf_engine.SetName("Read attached PDFs with")
+        self.pdf_engine.SetToolTip(
+            "Turns an attached PDF into text OpenRouter can hand to any model, rather than "
+            "only the models that read one themselves."
+        )
+        grid.Add(self.pdf_engine, 1, wx.EXPAND)
+
         outer.Add(grid, 0, wx.EXPAND | wx.ALL, 12)
+
+        outer.Add(
+            wx.StaticText(panel, label="OpenRouter tools the model may call:"),
+            0,
+            wx.LEFT | wx.RIGHT,
+            12,
+        )
+        self.server_tools = wx.CheckListBox(
+            panel,
+            choices=[
+                f"{label} - {description}" for _name, label, description in OPENROUTER_SERVER_TOOLS
+            ],
+            size=(-1, 150),
+        )
+        self.server_tools.SetName("OpenRouter tools")
+        self.server_tools.SetToolTip(
+            "OpenRouter runs each of these itself and gives the model the result. Nothing here "
+            "runs on this computer, and nothing stops to ask permission. They apply to "
+            "OpenRouter accounts; other providers ignore them."
+        )
+        outer.Add(self.server_tools, 0, wx.EXPAND | wx.ALL, 12)
         outer.Add(wx.StaticText(panel, label="System prompt:"), 0, wx.LEFT | wx.RIGHT, 12)
         self.system_prompt = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_RICH2)
         self.system_prompt.SetName("System prompt")
@@ -111,6 +228,22 @@ class ProfileEditorDialog(wx.Dialog):
         else:
             self.streaming.SetSelection(2)
         self.system_prompt.SetValue(self.profile.system_prompt)
+        self._load_openrouter()
+
+    def _load_openrouter(self) -> None:
+        features = self.profile.openrouter
+        self.reasoning_effort.SetSelection(_index_of(_REASONING_VALUES, features.reasoning_effort))
+        self.reasoning_tokens.SetValue(
+            "" if features.reasoning_max_tokens is None else str(features.reasoning_max_tokens)
+        )
+        self.show_reasoning.SetValue(features.show_reasoning)
+        self.search_max_results.SetValue(
+            "" if features.search_max_results is None else str(features.search_max_results)
+        )
+        self.search_context.SetSelection(_index_of(_SEARCH_CONTEXT_VALUES, features.search_context))
+        self.pdf_engine.SetSelection(_index_of(_PDF_ENGINE_VALUES, features.pdf_engine))
+        for index, (name, _label, _description) in enumerate(OPENROUTER_SERVER_TOOLS):
+            self.server_tools.Check(index, name in features.server_tools)
 
     def _selected_account(self) -> Account | None:
         index = self.account.GetSelection()
@@ -152,6 +285,12 @@ class ProfileEditorDialog(wx.Dialog):
             max_tokens = None if not max_tokens_text else int(max_tokens_text)
             if max_tokens is not None and max_tokens <= 0:
                 raise ValueError("Maximum output tokens must be greater than zero.")
+            reasoning_tokens = _optional_count(
+                self.reasoning_tokens.GetValue(), "Thinking token budget"
+            )
+            search_results = _optional_count(
+                self.search_max_results.GetValue(), "Web search results per search"
+            )
         except ValueError as exc:
             wx.MessageBox(
                 f"Invalid generation setting: {exc}",
@@ -172,6 +311,19 @@ class ProfileEditorDialog(wx.Dialog):
         self.profile.temperature = temperature
         self.profile.max_output_tokens = max_tokens
         self.profile.streaming = streaming
+        self.profile.openrouter = OpenRouterFeatures(
+            server_tools=[
+                name
+                for index, (name, _label, _description) in enumerate(OPENROUTER_SERVER_TOOLS)
+                if self.server_tools.IsChecked(index)
+            ],
+            search_max_results=search_results,
+            search_context=_SEARCH_CONTEXT_VALUES[max(self.search_context.GetSelection(), 0)],
+            reasoning_effort=_REASONING_VALUES[max(self.reasoning_effort.GetSelection(), 0)],
+            reasoning_max_tokens=reasoning_tokens,
+            show_reasoning=self.show_reasoning.GetValue(),
+            pdf_engine=_PDF_ENGINE_VALUES[max(self.pdf_engine.GetSelection(), 0)],
+        )
 
         try:
             self.db.save_profile(self.profile)
