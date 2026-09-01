@@ -82,6 +82,7 @@ from agent_backends import (
     QuestionOption,
     backend_auth_ok,
     backend_label,
+    backend_status,
     blindpilot_config_dir,
     blindpilot_data_dir,
     codex_model_options,
@@ -1630,6 +1631,7 @@ _BLINDPILOT_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/models", "Refresh and pick a model in a dialog [BlindPilot]"),
     ("/model [model-id]", "Switch straight to a model [BlindPilot]"),
     ("/resume", "Reopen a past conversation in a new tab [BlindPilot]"),
+    ("/status", "Show the backend, model, and account this tab uses [BlindPilot]"),
 ]
 
 _CLAUDE_SLASH_COMMANDS: list[tuple[str, str]] = [
@@ -1642,7 +1644,6 @@ _CLAUDE_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/pr_comments", "View pull request comments"),
     ("/release-notes", "Show Claude Code release notes"),
     ("/review", "Review a file or directory"),
-    ("/status", "Show account and subscription status"),
 ]
 
 # opencode's own commands are not a fixed list: a project can define its own,
@@ -1693,6 +1694,7 @@ _CYCLE_VALUES = [DEFAULT_PERMISSION_MODE, "acceptEdits", "plan"]
 _MODE_LABELS = [label for _v, label, _d in PERMISSION_MODES]
 _MODE_VALUES = [value for value, _l, _d in PERMISSION_MODES]
 _MODE_DESCRIPTIONS = {value: desc for value, _l, desc in PERMISSION_MODES}
+_MODE_LABEL_BY_VALUE = {value: label for value, label, _d in PERMISSION_MODES}
 
 
 def _default_permission_mode(cwd: str, backend: str = BACKEND_CLAUDE) -> str:
@@ -4112,6 +4114,67 @@ class SessionPanel(wx.Panel):
             dlg.Destroy()
         self.prompt.SetFocus()
 
+    def open_status_dialog(self) -> None:
+        """/status — what this tab is set to, and who the backend signed in as.
+
+        Offered for every backend, because none of them answers it themselves
+        in the headless mode BlindPilot drives them in: Claude Code's own
+        /status is interactive-only and replies "/status isn't available in
+        this environment" when it arrives as a message, and Codex, FreeBuff and
+        opencode have no status command at all. Each is asked in the way it can
+        answer instead, on a thread of its own — reaching a provider CLI
+        takes a second or two, and the window stays usable meanwhile.
+        """
+        backend = self.selected_backend()
+        self._announce(f"Reading {backend_label(backend)} status")
+
+        def work() -> None:
+            report = backend_status(backend)
+            wx.CallAfter(self._show_status, backend, report)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _session_status_lines(self) -> list[str]:
+        """What this tab will do with the next message, as the report says it."""
+        backend = self.selected_backend()
+        conversation = "continuing" if self._session_id else "new, nothing sent yet"
+        if self._session_id and backend != self._session_backend:
+            conversation = "new, the backend changed since the last message"
+        if BACKENDS[backend].supports_permissions:
+            mode = _MODE_LABEL_BY_VALUE.get(self.mode, self.mode)
+        else:
+            # The picker is disabled for these, so reporting the remembered
+            # value would name a setting that has no effect on this backend.
+            mode = "not offered by this backend"
+        return [
+            f"Model: {self.model or self._cli_model or 'CLI default'}",
+            f"Effort: {self.effort or self._cli_effort or 'CLI default'}",
+            f"Permission mode: {mode}",
+            f"Folder: {self.cwd}",
+            f"Conversation: {conversation}",
+        ]
+
+    def _show_status(self, backend: str, report: str) -> None:
+        """Put the finished report on screen, once the probe has answered."""
+        if not self:  # tab closed while the probe was running
+            return
+        if normalize_backend(backend) != self.selected_backend():
+            # The backend was switched while this was being read, so the report
+            # is about one that is no longer selected. Say so rather than
+            # presenting it as the status of what is chosen now.
+            self._announce(
+                f"Backend changed while {backend_label(backend)} status was being read. "
+                "Send /status again."
+            )
+            return
+        text = "\n".join([report, "", *self._session_status_lines()])
+        dlg = ReadView(self, text, "Status")
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+        self.prompt.SetFocus()
+
     def set_model(self, model: str, effort: str = "") -> None:
         """Apply the model / effort to every message sent from here on."""
         if self.selected_backend() == BACKEND_FREEBUFF and model != self.model:
@@ -4489,6 +4552,10 @@ class SessionPanel(wx.Panel):
         if low == "/connect":
             self.prompt.SetValue("")
             self.open_connect_dialog()
+            return
+        if low == "/status":
+            self.prompt.SetValue("")
+            self.open_status_dialog()
             return
 
         if (

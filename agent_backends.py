@@ -613,6 +613,146 @@ def _opencode_auth_ok() -> bool:
     return bool(os.environ.get("OPENCODE_API_KEY", "").strip())
 
 
+def _probe_backend(binary: str, args: list[str], timeout: int) -> tuple[Optional[int], str]:
+    """Run a short provider command. Returns (exit code, what it printed).
+
+    The exit code is ``None`` when the command could not be run at all, which
+    is a different answer from "it ran and said no" and is reported as such.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=subprocess_env(binary),
+            **no_window_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, ""
+    # These CLIs draw their own output, so what comes back is wrapped in the
+    # escape sequences that would otherwise be spelled out letter by letter.
+    return proc.returncode, _strip_terminal_noise(proc.stdout) or _strip_terminal_noise(proc.stderr)
+
+
+def _claude_account_lines(code: Optional[int], text: str) -> list[str]:
+    """Read `claude auth status`, which answers in JSON."""
+    if code is None:
+        return ["Signed in: could not ask Claude Code"]
+    payload: object = None
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            payload = json.loads(text[start : end + 1])
+        except ValueError:
+            payload = None
+    if not isinstance(payload, dict):
+        # A future release that stops answering in JSON still has something to
+        # say, and its own words are better than a shrug.
+        return [f"Signed in: {'yes' if code == 0 else 'no'}"] + ([text] if text else [])
+    lines = [f"Signed in: {'yes' if payload.get('loggedIn') else 'no'}"]
+    for field, caption in (
+        ("email", "Account"),
+        ("subscriptionType", "Subscription"),
+        ("authMethod", "Signed in with"),
+        ("orgName", "Organisation"),
+    ):
+        value = str(payload.get(field) or "").strip()
+        if value:
+            lines.append(f"{caption}: {value}")
+    return lines
+
+
+def _codex_account_lines(code: Optional[int], text: str) -> list[str]:
+    """Read `codex login status`, which answers in one sentence."""
+    if code is None:
+        return ["Signed in: could not ask Codex"]
+    lines = [f"Signed in: {'yes' if code == 0 else 'no'}"]
+    if text:
+        lines.append(f"Account: {' '.join(text.split())}")
+    return lines
+
+
+def _freebuff_account_lines() -> list[str]:
+    """FreeBuff has no status command; its stored credentials are the answer."""
+    credential = Path.home() / ".config" / "manicode" / "credentials.json"
+    try:
+        payload = json.loads(credential.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["Signed in: no"]
+    account = payload.get("default") if isinstance(payload, dict) else None
+    if not isinstance(account, dict):
+        return ["Signed in: no"]
+    signed_in = all(
+        isinstance(account.get(field), str) and account[field].strip()
+        for field in ("authToken", "fingerprintId", "fingerprintHash")
+    )
+    lines = [f"Signed in: {'yes' if signed_in else 'no'}"]
+    for field, caption in (("name", "Account"), ("email", "Email")):
+        value = str(account.get(field) or "").strip()
+        if value:
+            lines.append(f"{caption}: {value}")
+    return lines
+
+
+def _opencode_account_lines() -> list[str]:
+    """opencode has no status command either; its stored credentials answer.
+
+    Read off disk rather than asked of its server, because /status should not
+    be the thing that starts one — a report on what is already set up has no
+    business spending ten seconds bringing a server to life to say so.
+    """
+    providers: list[str] = []
+    try:
+        payload = json.loads((_opencode_data_dir() / "auth.json").read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            providers = sorted(str(name) for name in payload)
+    except (OSError, ValueError):
+        providers = []
+    if os.environ.get("OPENCODE_API_KEY", "").strip():
+        providers.append("OPENCODE_API_KEY in the environment")
+    if not providers:
+        return ["Signed in: no", "Connected providers: none"]
+    return ["Signed in: yes", f"Connected providers: {', '.join(providers)}"]
+
+
+def backend_status(backend: str, timeout: int = 20) -> str:
+    """What the chosen backend can say about itself, as lines of plain text.
+
+    This is what ``/status`` reports, and every backend answers it. None of
+    them answers it themselves in the headless mode BlindPilot drives them in:
+    Claude Code's own ``/status`` is interactive-only and replies "/status
+    isn't available in this environment" when it is sent as a message, and
+    Codex, FreeBuff and opencode have no status command at all. So each one is
+    asked in the way it can actually answer — a CLI subcommand where there is
+    one, the credentials it stored where there is not — and the answers are
+    written the same way, so the report reads the same whichever backend is
+    selected.
+    """
+    backend = normalize_backend(backend)
+    lines = [f"Backend: {backend_label(backend)}"]
+    binary = find_backend_cli(backend)
+    if not binary:
+        lines.append("Command line: not installed")
+        return "\n".join(lines)
+    lines.append(f"Command line: {binary}")
+    _code, version = _probe_backend(binary, ["--version"], min(timeout, 20))
+    if version:
+        lines.append(f"Version: {version.splitlines()[0].strip()}")
+    if backend == BACKEND_CLAUDE:
+        lines.extend(_claude_account_lines(*_probe_backend(binary, ["auth", "status"], timeout)))
+    elif backend == BACKEND_CODEX:
+        lines.extend(_codex_account_lines(*_probe_backend(binary, ["login", "status"], timeout)))
+    elif backend == BACKEND_FREEBUFF:
+        lines.extend(_freebuff_account_lines())
+    else:
+        lines.extend(_opencode_account_lines())
+    return "\n".join(lines)
+
+
 # A macOS application launched from Finder or the Dock inherits launchd's PATH
 # — /usr/bin:/bin:/usr/sbin:/sbin — and nothing else. Every provider CLI
 # installed by npm or Homebrew is a `#!/usr/bin/env node` shim, so a child

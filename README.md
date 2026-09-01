@@ -98,6 +98,8 @@ opencode providers login
 
 opencode reaches a model through a provider you connect to it, so BlindPilot carries opencode's `/connect` as a dialog of its own: type `/connect` in the prompt (or use **Connect a Provider** in the wizard) to pick from every provider opencode knows, give it an API key, or sign in through your browser. Nothing about that flow needs a terminal.
 
+Type `/status` in the prompt to hear what the tab is about to do and whose account it will do it on: the backend, the model and effort, the permission mode, the folder, whether the next message continues this conversation or starts one, and who that backend is signed in as. Every backend answers it. Claude Code has a `/status` of its own but only inside its interactive terminal — sent as a message it replies that the command is not available here — and Codex, FreeBuff and opencode have no status command at all, so BlindPilot asks each one the way it can answer and reports all four the same way.
+
 ## Keyboard
 
 - **Ctrl+L** focus the prompt, **Ctrl+T** open a session, **Ctrl+W** close it.
