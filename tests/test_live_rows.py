@@ -459,6 +459,10 @@ def _stub_panel(app, **overrides):
     panel._set_status = lambda text: panel.status.append(text)
     panel._refresh_list = lambda: None
     panel._say = lambda _text: False
+    # Whether a turn is still going is asked through the real method, so a stub
+    # cannot quietly disagree with the window about it.
+    panel._worker = None
+    panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
     panel.send_btn = _Button()
     panel.steer_btn = _Button()
     panel.stop_btn = _Button()
@@ -691,6 +695,10 @@ def _compaction_panel(backend, session_id):
         (),
         {
             "_worker": None,
+            # The real one: compaction refuses while a turn is still being
+            # applied, and a stub must not be able to disagree about when
+            # that is.
+            "_run_in_progress": claude_reader.SessionPanel._run_in_progress,
             "_session_id": session_id,
             "_session_backend": backend,
             "selected_backend": lambda self: backend,
