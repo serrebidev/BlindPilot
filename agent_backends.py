@@ -2238,13 +2238,18 @@ _FREEBUFF_PREWARM_TTL = 15 * 60
 
 
 def _kill_pty(pty: object) -> None:
+    """End the terminal and give the pseudo-terminal itself back.
+
+    Both calls are wanted, not the first one that works: `terminate` stops
+    FreeBuff, `close` releases the handle the terminal was reached through.
+    Returning after a successful terminate left that handle open every time.
+    """
     for method, arguments in (("terminate", (True,)), ("close", (True,))):
         call = getattr(pty, method, None)
         if call is None:
             continue
         try:
             call(*arguments)
-            return
         except Exception:
             continue
 
@@ -2430,13 +2435,9 @@ class FreebuffWorker(threading.Thread):
         self._accepting_input.clear()
         pty = self._pty
         if pty is not None:
-            try:
-                pty.terminate(force=True)
-            except Exception:
-                try:
-                    pty.close(force=True)
-                except Exception:
-                    pass
+            # Every turn ends here, through `run`'s `finally`, so this is where
+            # a terminal that was stopped but never closed piles up.
+            _kill_pty(pty)
 
     def _fail(self, message: str) -> None:
         """Report why the turn ended, once."""
