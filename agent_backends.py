@@ -2,7 +2,8 @@
 
 BlindPilot began as Claude Code Reader. Claude's adapter remains in
 ``blindpilot_app.py``; this module contains the
-provider-neutral discovery helpers plus Codex and FreeBuff workers.
+provider-neutral discovery helpers plus the Codex, FreeBuff, and opencode
+workers.
 Hermes lives in ``hermes_backend.py`` and ``hermes_worker.py``, imported
 on demand so a machine without Hermes pays nothing for it.
 
@@ -21,12 +22,13 @@ import platform
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Protocol, cast
+from typing import Callable, Optional, Protocol, Sequence, cast
 
 from markdown_rows import _SENTENCE_END_RE as _markdown_sentence_end_re
 from markdown_rows import complete_sentences
@@ -44,10 +46,57 @@ def no_window_kwargs() -> dict:
     return {"creationflags": CREATE_NO_WINDOW} if CREATE_NO_WINDOW else {}
 
 
-# A pseudo-terminal is the one child that cannot be given CREATE_NO_WINDOW: the
-# flag belongs to its host, which pywinpty starts itself. Launched from a
-# windowed application, which owns no console to lend it, that host puts a real
-# console on screen. It can still be hidden the moment it appears.
+def own_group_kwargs() -> dict:
+    """``subprocess`` keyword arguments that give a child its own process group.
+
+    Half the provider CLIs are launchers rather than programs: npm's
+    ``@openai/codex`` is a Node script that runs the real Codex as a child of
+    its own, and FreeBuff's is the same shape. Killing the launcher leaves that
+    child running — still holding its lock, still waiting on a sign-in nobody
+    is completing. A child in a group of its own can be stopped as a group,
+    which is the only way to stop what it started too.
+    """
+    return {} if platform.system() == "Windows" else {"start_new_session": True}
+
+
+def end_process_group(proc: object, timeout: float = 0.0) -> None:
+    """Stop a child started with :func:`own_group_kwargs`, and its own children.
+
+    Returns as soon as the signals are away unless *timeout* is given: Stop
+    Task and a closing wizard both call this from the window's own thread, and
+    a wait there is a frozen application rather than a stopped task.
+
+    The group is only signalled when the child is demonstrably the leader of
+    one, which is exactly what ``start_new_session`` made it. Anything else —
+    a child started without its own group, a stand-in in a test, Windows — is
+    stopped on its own. That check is not a formality: a process still sitting
+    in BlindPilot's group would otherwise have BlindPilot signal itself, and
+    take every other backend down with it.
+    """
+    poll = getattr(proc, "poll", None)
+    if poll is not None and poll() is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    if platform.system() != "Windows" and isinstance(pid, int) and pid > 0:
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    kill = getattr(proc, "kill", None)
+    if kill is not None:
+        try:
+            kill()
+        except OSError:
+            pass
+    wait = getattr(proc, "wait", None)
+    if timeout and wait is not None:
+        try:
+            wait(timeout=timeout)
+        except Exception:
+            pass
+
+
 _CONSOLE_WINDOW_CLASSES = ("ConsoleWindowClass", "PseudoConsoleWindow")
 
 
@@ -209,22 +258,110 @@ def hide_console_windows(roots: Optional[set[int]] = None) -> int:
 BACKEND_CLAUDE = "claude"
 BACKEND_CODEX = "codex"
 BACKEND_FREEBUFF = "freebuff"
+BACKEND_OPENCODE = "opencode"
 BACKEND_HERMES = "hermes"
-BACKEND_IDS = (BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_FREEBUFF, BACKEND_HERMES)
+BACKEND_IDS = (
+    BACKEND_CLAUDE,
+    BACKEND_CODEX,
+    BACKEND_FREEBUFF,
+    BACKEND_OPENCODE,
+    BACKEND_HERMES,
+)
 BACKEND_LABELS = {
     BACKEND_CLAUDE: "Claude Code",
     BACKEND_CODEX: "Codex",
     BACKEND_FREEBUFF: "FreeBuff",
+    BACKEND_OPENCODE: "opencode",
     BACKEND_HERMES: "Hermes",
 }
 
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
 # package and downloaded executable do contain the live picker catalog, so the
 # adapter discovers that catalog at runtime and writes the same setting the
-# picker uses. Pro remains the preferred default when FreeBuff still offers it.
-FREEBUFF_PREFERRED_MODEL = "deepseek/deepseek-v4-pro"
+# picker uses. GLM 5.3 is the preferred default while FreeBuff still offers it;
+# FreeBuff drops and renames models between releases, so this is a preference
+# rather than a requirement, and a release without it falls back to FreeBuff's
+# own choice rather than failing.
+FREEBUFF_PREFERRED_MODEL = "z-ai/glm-5.3-flash"
 _FREEBUFF_SETTINGS_LOCK = threading.Lock()
 _freebuff_catalog_cache: tuple[tuple[str, float, int], list[str]] | None = None
+
+
+# ----- Mid-run questions -----
+#
+# Every backend BlindPilot drives can stop mid-turn to ask the person a
+# multiple-choice question, and each one describes that question differently:
+# Claude Code sends the AskUserQuestion tool's input through a `can_use_tool`
+# control request, Codex sends an `item/tool/requestUserInput` JSON-RPC
+# request, opencode publishes a `question.asked` event, and FreeBuff draws its
+# `ask_user` tool straight onto its terminal. The window should not have to
+# know any of that, so each adapter translates its provider's shape into the
+# two types below, and translates the answers back on the way out.
+
+
+@dataclass(frozen=True)
+class QuestionOption:
+    """One answer a backend offers for a question."""
+
+    label: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class Question:
+    """One question a backend has paused its turn to ask.
+
+    ``id`` is whatever the backend needs to match the answer back to the
+    question — Codex's question id, or an empty string where the provider keys
+    answers by position or by the question's own text instead.
+    """
+
+    question: str
+    header: str = ""
+    options: tuple[QuestionOption, ...] = ()
+    multi_select: bool = False
+    id: str = ""
+    # Whether the provider accepts an answer that is not one of its options.
+    # Every backend does today, and all four say so in their tool descriptions
+    # ("the client will add a free-form Other option automatically"), so this
+    # is the default rather than the exception.
+    allow_custom: bool = True
+    # Codex alone marks a question whose answer should not be echoed back.
+    secret: bool = False
+
+
+# Given the questions, return one list of chosen answers per question — the
+# option labels the person picked, or the text they typed instead — or None if
+# they closed the dialog without answering. Called on the worker thread, and
+# blocks it: the backend's turn is waiting on this answer.
+AskQuestions = Callable[[Sequence[Question]], Optional[list[list[str]]]]
+
+
+def question_summary(questions: Sequence[Question], answers: Optional[list[list[str]]]) -> str:
+    """One row for the transcript saying what was asked and what was said.
+
+    Both halves are kept: read back later, a bare "Spaces" says nothing, and
+    the answer is the reason the rest of the turn went the way it did.
+    """
+    if answers is None:
+        asked = " ".join(question.question for question in questions)
+        return f"Question left unanswered: {asked}"
+    parts = []
+    for index, question in enumerate(questions):
+        chosen = answers[index] if index < len(answers) else []
+        if question.secret:
+            # Codex marks a question whose answer is a secret. The transcript
+            # is read back, copied, and saved, so it gets the fact of an answer
+            # and not the answer itself.
+            parts.append(
+                f'You answered "{question.question}".'
+                if chosen
+                else f'You left "{question.question}" unanswered.'
+            )
+            continue
+        said = ", ".join(chosen) if chosen else "nothing"
+        parts.append(f'You answered "{question.question}" with "{said}".')
+    return " ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -242,6 +379,16 @@ class BackendInfo:
     # up its context window. FreeBuff's CLI has no such command — its only
     # context control is starting a new conversation.
     supports_compaction: bool = False
+    # Whether the CLI opens the sign-in page itself. Claude Code and Codex do,
+    # even when BlindPilot starts them with no console; FreeBuff deliberately
+    # prints the address and tells you to open it yourself. Opening a page the
+    # CLI has already opened leaves two tabs on the same authorization, so
+    # BlindPilot only opens the ones nobody else will.
+    login_opens_browser: bool = False
+    # What the CLI's "paste the code from the browser" prompt looks like. It is
+    # written without a newline after it, so it is matched against the output
+    # as it arrives rather than line by line. Empty when the CLI never asks.
+    login_code_prompt: str = ""
     # Whether signing in has to happen in a terminal the user can type into.
     # Claude and Codex authenticate through a browser and report the result on
     # exit, so BlindPilot can run them hidden and watch. Hermes' equivalent is
@@ -263,12 +410,18 @@ BACKENDS = {
         "Claude Code",
         "claude",
         "See https://claude.com/claude-code",
-        ("/login",),
+        # "claude /login" is a slash command typed inside the interactive
+        # session, not a command line. Run that way it opens a terminal UI that
+        # BlindPilot has no console for, so it sat there until it timed out and
+        # no browser ever opened. "claude auth login" is the command line.
+        ("auth", "login"),
         True,
         True,
         True,
         True,
         supports_compaction=True,
+        login_opens_browser=True,
+        login_code_prompt=r"[Pp]aste code here[^>]*>",
     ),
     BACKEND_CODEX: BackendInfo(
         BACKEND_CODEX,
@@ -281,6 +434,7 @@ BACKENDS = {
         True,
         True,
         supports_compaction=True,
+        login_opens_browser=True,
     ),
     BACKEND_FREEBUFF: BackendInfo(
         BACKEND_FREEBUFF,
@@ -293,6 +447,18 @@ BACKENDS = {
         False,
         True,
         supports_compaction=False,
+    ),
+    BACKEND_OPENCODE: BackendInfo(
+        BACKEND_OPENCODE,
+        "opencode",
+        "opencode",
+        "npm install -g opencode-ai",
+        ("providers", "login"),
+        True,
+        True,
+        True,
+        True,
+        supports_compaction=True,
     ),
     BACKEND_HERMES: BackendInfo(
         BACKEND_HERMES,
@@ -318,13 +484,14 @@ BACKENDS = {
 # send, and any extra keyword arguments its worker needs.
 #
 # Claude Code takes ``/compact`` as an ordinary message even in headless
-# streaming mode, and acts on it. Codex has no such message — compaction is a
-# separate app-server request — so its worker is told to compact instead, and
-# ignores the text. The text is still shown to the user either way, so the row
-# in the list says what was asked for.
+# streaming mode, and acts on it. Codex and opencode have no such message —
+# for both it is a request of its own — so their workers are told to compact
+# instead, and ignore the text. The text is still shown to the user either
+# way, so the row in the list says what was asked for.
 _COMPACTION_REQUESTS: dict[str, tuple[str, dict]] = {
     BACKEND_CLAUDE: ("/compact", {}),
     BACKEND_CODEX: ("/compact", {"compact": True}),
+    BACKEND_OPENCODE: ("/compact", {"compact": True}),
     # Hermes compacts through a request of its own, like Codex. Its own name
     # for the command is /compress; the text shown to the user says what was
     # asked for in BlindPilot's words, and the worker acts on the flag.
@@ -347,6 +514,8 @@ def normalize_backend(value: object) -> str:
         "claudecode": BACKEND_CLAUDE,
         "codex": BACKEND_CODEX,
         "freebuff": BACKEND_FREEBUFF,
+        "opencode": BACKEND_OPENCODE,
+        "opencodeai": BACKEND_OPENCODE,
         "hermes": BACKEND_HERMES,
         "hermesagent": BACKEND_HERMES,
         "nous": BACKEND_HERMES,
@@ -360,6 +529,8 @@ def backend_label(backend: str) -> str:
 
 def _fallback_cli_paths(name: str) -> tuple[Path, ...]:
     home = Path.home()
+    managed = blindpilot_data_dir() / "npm"
+    managed_bin = managed if platform.system() == "Windows" else managed / "bin"
     if platform.system() == "Windows":
         appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
         local = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
@@ -368,6 +539,7 @@ def _fallback_cli_paths(name: str) -> tuple[Path, ...]:
             filename = name + suffix
             candidates.extend(
                 [
+                    managed_bin / filename,
                     appdata / "npm" / filename,
                     home / ".local" / "bin" / filename,
                     home / ".volta" / "bin" / filename,
@@ -377,6 +549,7 @@ def _fallback_cli_paths(name: str) -> tuple[Path, ...]:
             )
         return tuple(candidates)
     return (
+        managed_bin / name,
         home / ".local" / "bin" / name,
         Path("/opt/homebrew/bin") / name,
         Path("/usr/local/bin") / name,
@@ -391,10 +564,21 @@ def find_backend_cli(backend: str) -> Optional[str]:
     if info.id == BACKEND_HERMES:
         # Hermes installs itself under its own home directory rather than into
         # a shared bin, so it has a search of its own that also knows about the
-        # virtual environment the gateway is launched from.
+        # virtual environment the gateway is launched from. It is not an npm
+        # package, so it returns before the managed-prefix search below.
         from hermes_backend import find_hermes_cli
 
         return find_hermes_cli()
+    # A backend BlindPilot installed itself is complete, writable by this user,
+    # and updated through the same prefix. Prefer it over an older system/npm
+    # copy that happens to occur earlier on PATH.
+    managed = blindpilot_data_dir() / "npm"
+    managed_bin = managed if platform.system() == "Windows" else managed / "bin"
+    suffixes = (".exe", ".cmd", ".ps1", "") if platform.system() == "Windows" else ("",)
+    for suffix in suffixes:
+        candidate = managed_bin / f"{info.executable}{suffix}"
+        if candidate.is_file():
+            return str(candidate)
     found = shutil.which(info.executable)
     if found:
         return found
@@ -437,6 +621,7 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=timeout,
+                env=subprocess_env(binary),
                 **no_window_kwargs(),
             )
             return proc.returncode == 0
@@ -447,22 +632,112 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=timeout,
+                env=subprocess_env(binary),
                 **no_window_kwargs(),
             )
             return proc.returncode == 0
         if backend == BACKEND_FREEBUFF:
             credential = Path.home() / ".config" / "manicode" / "credentials.json"
-            return credential.is_file() and credential.stat().st_size > 2
+            try:
+                payload = json.loads(credential.read_text(encoding="utf-8"))
+                account = payload.get("default") if isinstance(payload, dict) else None
+                return isinstance(account, dict) and all(
+                    isinstance(account.get(field), str) and account[field].strip()
+                    for field in ("authToken", "fingerprintId", "fingerprintHash")
+                )
+            except (OSError, ValueError):
+                return False
+        if backend == BACKEND_OPENCODE:
+            return _opencode_auth_ok()
     except (OSError, subprocess.TimeoutExpired):
         return False
     return True
 
 
-def _subprocess_env(binary: str) -> dict[str, str]:
+def _opencode_auth_ok() -> bool:
+    """Whether opencode has a provider it could actually run a model on.
+
+    Answered from the credentials opencode stored when a provider was
+    connected, which is where /connect puts them, plus its own key in the
+    environment. This has to answer without starting a server, because it is
+    asked while the setup wizard is on screen.
+
+    Deliberately not "is any ``*_API_KEY`` set": opencode does read a provider's
+    key straight out of the environment, but so do plenty of programs that have
+    nothing to do with it, and a confident yes that turns into a wall at the
+    first message is worse than an "unconfirmed" the wizard lets you walk past.
+    """
+    try:
+        payload = json.loads((_opencode_data_dir() / "auth.json").read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and payload:
+            return True
+    except (OSError, ValueError):
+        pass
+    return bool(os.environ.get("OPENCODE_API_KEY", "").strip())
+
+
+# A macOS application launched from Finder or the Dock inherits launchd's PATH
+# — /usr/bin:/bin:/usr/sbin:/sbin — and nothing else. Every provider CLI
+# installed by npm or Homebrew is a `#!/usr/bin/env node` shim, so a child
+# started with that PATH dies on "env: node: No such file or directory" before
+# it prints anything a person could act on. Asking the login shell what PATH it
+# would have given is the only way to recover the directories the user actually
+# installed into. It costs a shell start-up, so it is asked once.
+_login_shell_path: Optional[list[str]] = None
+_LOGIN_SHELL_PATH_LOCK = threading.Lock()
+
+
+def login_shell_path_dirs() -> list[str]:
+    """The PATH a terminal would have, for handing to children (POSIX only)."""
+    global _login_shell_path
+    with _LOGIN_SHELL_PATH_LOCK:
+        if _login_shell_path is not None:
+            return list(_login_shell_path)
+        dirs: list[str] = []
+        shell = os.environ.get("SHELL")
+        if platform.system() != "Windows" and shell and os.path.isfile(shell):
+            try:
+                proc = subprocess.run(
+                    [shell, "-l", "-c", "printf '%s\\n' \"$PATH\""],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                if proc.returncode == 0:
+                    dirs = [
+                        entry for entry in proc.stdout.strip().split(os.pathsep) if entry.strip()
+                    ]
+            # A login shell runs the user's own startup files and can fail in
+            # ways nothing here can predict. This is a best-effort addition to
+            # a PATH that already works for most installs, so a shell that
+            # misbehaves costs the addition and nothing else.
+            except Exception:
+                dirs = []
+        _login_shell_path = dirs
+        return list(dirs)
+
+
+def subprocess_env(binary: str) -> dict[str, str]:
+    """The environment every provider CLI must be started with.
+
+    The CLI's own directory goes first — an npm or Homebrew shim finds its
+    sibling `node` that way — and the login shell's PATH is appended behind
+    whatever this process already has, so a Node installed somewhere else
+    entirely (nvm, Volta, asdf) is still reachable without displacing a
+    runtime BlindPilot manages itself.
+    """
     env = os.environ.copy()
+    entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry.strip()]
+    known = set(entries)
     directory = os.path.dirname(binary)
-    if directory and directory not in env.get("PATH", "").split(os.pathsep):
-        env["PATH"] = directory + os.pathsep + env.get("PATH", "")
+    if directory and directory not in known:
+        entries.insert(0, directory)
+        known.add(directory)
+    for entry in login_shell_path_dirs():
+        if entry not in known:
+            entries.append(entry)
+            known.add(entry)
+    env["PATH"] = os.pathsep.join(entries)
     return env
 
 
@@ -503,7 +778,7 @@ def codex_model_options(
             encoding="utf-8",
             errors="replace",
             timeout=30,
-            env=_subprocess_env(binary),
+            env=subprocess_env(binary),
             **no_window_kwargs(),
         )
         payload = json.loads(result.stdout)
@@ -553,6 +828,15 @@ def blindpilot_config_dir() -> Path:
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(base) / "BlindPilot"
     return Path.home() / ".config" / "blindpilot"
+
+
+def blindpilot_data_dir() -> Path:
+    """Per-user, non-roaming storage for managed runtimes and CLI packages."""
+    if platform.system() == "Windows":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "BlindPilot"
+    base = os.environ.get("XDG_DATA_HOME")
+    return (Path(base) if base else Path.home() / ".local" / "share") / "blindpilot"
 
 
 def _freebuff_choice_path() -> Path:
@@ -719,7 +1003,7 @@ def _freebuff_models_from_install(binary: Optional[str]) -> list[str]:
 
     pattern = re.compile(
         r'([A-Za-z_$][\w$]*)=\{id:([^,}]+),displayName:"([^"]+)"'
-        r'[^{}]{0,1000}?availability:"always"'
+        r'[^{}]{0,1000}?availability:"(?:always|off_peak_only)"'
     )
     matches = list(pattern.finditer(source))
     if not matches:
@@ -773,9 +1057,14 @@ def freebuff_model_options() -> tuple[list[str], list[str], str, str, str]:
         error = "Could not refresh FreeBuff's model catalog; showing the preferred default."
     else:
         error = ""
-    for candidate in (chosen, saved):
-        if candidate and candidate not in models:
-            models.append(candidate)
+    # A remembered choice is only worth offering while the catalog is unknown.
+    # When it was read successfully, a model missing from it is one this
+    # release has dropped, and listing it means picking it, waiting on a picker
+    # that will never show it, and losing the message.
+    if error:
+        for candidate in (chosen, saved):
+            if candidate and candidate not in models:
+                models.append(candidate)
     # BlindPilot's own record wins over FreeBuff's settings file. FreeBuff
     # rewrites that file to its recommended model after a turn, so honouring it
     # would quietly downgrade every following turn to the recommendation.
@@ -791,21 +1080,42 @@ def freebuff_model_options() -> tuple[list[str], list[str], str, str, str]:
     return models, [], current, "", error
 
 
+def _freebuff_display_key(text: str) -> str:
+    """Letters and digits only, with a version letter before a number dropped.
+
+    The picker paints a display name, never the model id, and the two disagree
+    in ways too small to be worth a table and too varied to keep up with:
+    ``mimo/mimo-v2.5`` is drawn "MiMo 2.5" and ``deepseek/deepseek-v4-flash``
+    is drawn "DeepSeek V4 Flash", so the ``v`` is dropped by one side or the
+    other depending on the model. Reducing both sides the same way makes the
+    id a substring of the row it belongs to whichever of them carries it.
+    """
+    return re.sub(r"v(?=\d)", "", re.sub(r"[^a-z0-9]+", "", text.casefold()))
+
+
 def _freebuff_picker_options(visible: str, models: list[str]) -> tuple[list[str], int]:
-    """Return the model IDs painted by FreeBuff's picker and its focused index."""
+    """Return the model IDs painted by FreeBuff's picker and its focused index.
+
+    The index matters as much as the list: the caller moves to a model by
+    pressing Down the difference between two positions in it, so a row that is
+    on screen and not in this list does not cost that model, it costs every
+    model below it. Matching therefore has to recognise every row the picker
+    can move to, or recognise none of them.
+    """
+    # Longest first, so a model whose id is a prefix of another's cannot claim
+    # the longer one's row.
+    keyed = sorted(
+        ((model, _freebuff_display_key(model.rsplit("/", 1)[-1])) for model in models),
+        key=lambda pair: len(pair[1]),
+        reverse=True,
+    )
     options: list[str] = []
     focused = -1
     for raw in visible.splitlines():
         if "│" not in raw:
             continue
-        words = set(re.findall(r"[a-z0-9]+", raw.casefold()))
-        matched = ""
-        for model in models:
-            leaf = model.rsplit("/", 1)[-1]
-            tokens = re.findall(r"[a-z0-9]+", leaf.casefold())
-            if tokens and all(token in words for token in tokens):
-                matched = model
-                break
+        row = _freebuff_display_key(raw)
+        matched = next((model for model, key in keyed if key and key in row), "")
         if not matched or matched in options:
             continue
         options.append(matched)
@@ -816,7 +1126,13 @@ def _freebuff_picker_options(visible: str, models: list[str]) -> tuple[list[str]
 
 def invalidate_backend_cache(backend: str | None = None) -> None:
     """Drop version-derived provider data before an explicit runtime refresh."""
-    global _freebuff_catalog_cache
+    global _freebuff_catalog_cache, _login_shell_path
+    # The wizard may have just put a backend on PATH. The answer cached before
+    # that happened is precisely the one that made putting it there necessary.
+    _login_shell_path = None
+    if backend is None or normalize_backend(backend) == BACKEND_OPENCODE:
+        with _OPENCODE_CATALOG_LOCK:
+            _opencode_catalog_cache.clear()
     if backend is None or normalize_backend(backend) == BACKEND_FREEBUFF:
         _freebuff_catalog_cache = None
         try:
@@ -852,6 +1168,56 @@ def set_freebuff_model(model: str) -> None:
         os.replace(temporary, settings)
 
 
+# Codex ships `request_user_input` — the tool it stops a turn to ask a
+# multiple-choice question with — switched off, and available only in plan mode
+# even when switched on. Both are settings rather than protocol, so they are
+# passed for this app server alone and nothing is written to the user's
+# ~/.codex/config.toml.
+_CODEX_QUESTION_FEATURE = "default_mode_request_user_input"
+_CODEX_QUESTION_ARGS = (
+    "-c",
+    "tools.experimental_request_user_input={enabled=true}",
+    "--enable",
+    _CODEX_QUESTION_FEATURE,
+)
+
+
+def _codex_questions(raw: object) -> tuple[Question, ...]:
+    """Read request_user_input's params into BlindPilot's own question shape.
+
+    A question with no options is a free-text one; `isOther` is Codex asking
+    for the "Other" answer its tool description tells the model not to write
+    itself, so the two together decide whether typing is offered.
+    """
+    if not isinstance(raw, list):
+        return ()
+    questions: list[Question] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("question") or "").strip()
+        if not text:
+            continue
+        options: list[QuestionOption] = []
+        for option in entry.get("options") or []:
+            if isinstance(option, dict) and option.get("label"):
+                options.append(
+                    QuestionOption(str(option["label"]), str(option.get("description") or ""))
+                )
+        questions.append(
+            Question(
+                question=text,
+                header=str(entry.get("header") or ""),
+                options=tuple(options),
+                multi_select=False,
+                allow_custom=bool(entry.get("isOther")) or not options,
+                secret=bool(entry.get("isSecret")),
+                id=str(entry.get("id") or ""),
+            )
+        )
+    return tuple(questions)
+
+
 class CodexWorker(threading.Thread):
     """Run one Codex turn through the official app-server JSONL protocol."""
 
@@ -871,6 +1237,7 @@ class CodexWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
+        on_question: Optional[AskQuestions] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -888,6 +1255,7 @@ class CodexWorker(threading.Thread):
         self._on_complete = on_complete
         self._on_failed = on_failed
         self._on_done = on_done
+        self._on_question = on_question
         self._proc: Optional[subprocess.Popen[str]] = None
         self._cancelled = False
         self._write_lock = threading.Lock()
@@ -901,6 +1269,7 @@ class CodexWorker(threading.Thread):
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
         self._stderr: list[str] = []
+        self._failed = False
 
     def accepting_input(self) -> bool:
         return self._accepting_input.is_set() and not self._cancelled
@@ -950,26 +1319,33 @@ class CodexWorker(threading.Thread):
             )
         proc = self._proc
         if proc and proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            end_process_group(proc)
+
+    def _fail(self, message: str) -> None:
+        """Report why the turn ended, once.
+
+        The first account of a failure is the one that can be acted on. A crash
+        while cleaning up after it is not worth speaking over the top of it.
+        """
+        if self._failed:
+            return
+        self._failed = True
+        self._on_failed(message)
 
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # `finally` re-enables Send and stops the progress earcon either
+            # way, so anything thrown here used to end the turn exactly as a
+            # finished one ends - with no answer and nothing said. The
+            # traceback went to a stderr the windowed build does not have.
+            self._fail(f"BlindPilot stopped reading Codex: {exc}")
         finally:
             self._accepting_input.clear()
             proc = self._proc
             if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except (OSError, subprocess.TimeoutExpired):
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
+                end_process_group(proc, timeout=2)
             self._on_done()
 
     @staticmethod
@@ -985,15 +1361,15 @@ class CodexWorker(threading.Thread):
     def _do_run(self) -> None:
         binary = find_backend_cli(BACKEND_CODEX)
         if not binary:
-            self._on_failed("Codex is not installed. Run: npm install -g @openai/codex")
+            self._fail("Codex is not installed. Run: npm install -g @openai/codex")
             return
         if self._compact and not self._session_id:
-            self._on_failed("There is no Codex conversation to compact yet")
+            self._fail("There is no Codex conversation to compact yet")
             return
         try:
             server_binary = _codex_app_server_binary(binary)
             self._proc = subprocess.Popen(
-                [server_binary, "app-server", "--stdio"],
+                [server_binary, *_CODEX_QUESTION_ARGS, "app-server", "--stdio"],
                 cwd=self._cwd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -1002,11 +1378,15 @@ class CodexWorker(threading.Thread):
                 bufsize=1,
                 encoding="utf-8",
                 errors="replace",
-                env=_subprocess_env(server_binary),
+                env=subprocess_env(server_binary),
+                # npm's `codex` is a Node launcher that runs the real Codex as
+                # a child of its own; stopping only the launcher leaves that
+                # child holding the app-server session.
+                **own_group_kwargs(),
                 **no_window_kwargs(),
             )
         except OSError as exc:
-            self._on_failed(f"Failed to launch Codex: {exc}")
+            self._fail(f"Failed to launch Codex: {exc}")
             return
 
         if self._proc.stderr:
@@ -1022,7 +1402,11 @@ class CodexWorker(threading.Thread):
                         "name": "blindpilot",
                         "title": "BlindPilot",
                         "version": "0.3.0",
-                    }
+                    },
+                    # request_user_input is still marked experimental in the
+                    # app-server protocol, and Codex only sends experimental
+                    # requests to a client that asked for them.
+                    "capabilities": {"experimentalApi": True},
                 },
             }
         )
@@ -1068,12 +1452,12 @@ class CodexWorker(threading.Thread):
             if message.get("id") == thread_request:
                 error = message.get("error")
                 if error:
-                    self._on_failed(self._error_text(error, "Could not start a Codex session"))
+                    self._fail(self._error_text(error, "Could not start a Codex session"))
                     return
                 thread = (message.get("result") or {}).get("thread") or {}
                 self._thread_id = str(thread.get("id") or self._session_id or "")
                 if not self._thread_id:
-                    self._on_failed("Codex did not return a session id")
+                    self._fail("Codex did not return a session id")
                     return
                 self._on_session(self._thread_id)
                 if self._compact:
@@ -1108,7 +1492,7 @@ class CodexWorker(threading.Thread):
             if compact_request and message.get("id") == compact_request:
                 error = message.get("error")
                 if error:
-                    self._on_failed(self._error_text(error, "Codex could not compact"))
+                    self._fail(self._error_text(error, "Codex could not compact"))
                     return
                 # The result is empty; the compaction turn announces itself.
                 continue
@@ -1116,7 +1500,7 @@ class CodexWorker(threading.Thread):
             if turn_request and message.get("id") == turn_request:
                 error = message.get("error")
                 if error:
-                    self._on_failed(self._error_text(error, "Codex could not start the turn"))
+                    self._fail(self._error_text(error, "Codex could not start the turn"))
                     return
                 turn = (message.get("result") or {}).get("turn") or {}
                 self._turn_id = str(turn.get("id") or "")
@@ -1166,17 +1550,21 @@ class CodexWorker(threading.Thread):
                     self._tool_outputs.setdefault(item_id, []).append(delta)
             elif method in ("warning", "configWarning"):
                 warning = str(params.get("message") or params.get("summary") or "")
-                if warning:
+                if warning and _CODEX_QUESTION_FEATURE not in warning:
+                    # The one warning that is skipped is Codex's notice that
+                    # BlindPilot switched a still-developing feature on. It is
+                    # true, it is deliberate, and repeating it at the top of
+                    # every single turn is noise nobody can act on.
                     self._on_activity("tool", f"Codex warning: {warning}")
             elif method == "turn/completed":
                 self._accepting_input.clear()
                 turn = params.get("turn") or {}
                 status = turn.get("status")
                 if status == "failed":
-                    self._on_failed(self._error_text(turn.get("error"), "Codex turn failed"))
+                    self._fail(self._error_text(turn.get("error"), "Codex turn failed"))
                 elif status == "interrupted":
                     if not self._cancelled:
-                        self._on_failed("Codex turn was interrupted")
+                        self._fail("Codex turn was interrupted")
                 elif self._compact:
                     # A compaction turn produces no answer text of its own, so
                     # say what happened rather than finishing in silence.
@@ -1187,7 +1575,7 @@ class CodexWorker(threading.Thread):
 
         if not self._cancelled:
             detail = "\n".join(self._stderr[-10:]).strip()
-            self._on_failed(detail or "Codex app server closed before the turn completed")
+            self._fail(detail or "Codex app server closed before the turn completed")
 
     def _read_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:
@@ -1216,6 +1604,8 @@ class CodexWorker(threading.Thread):
                 "accept" if mode in ("acceptEdits", "auto", "bypassPermissions") else "decline"
             )
             self._send({"id": request_id, "result": {"decision": decision}})
+        elif method == "item/tool/requestUserInput":
+            self._answer_user_input(request_id, message.get("params") or {})
         else:
             self._send(
                 {
@@ -1226,6 +1616,26 @@ class CodexWorker(threading.Thread):
                     },
                 }
             )
+
+    def _answer_user_input(self, request_id: object, params: dict) -> None:
+        """Put request_user_input in front of the person and answer it.
+
+        Codex keys the answers by each question's own id, and takes a list per
+        question even where only one answer was asked for. A question nobody
+        answered is sent back with an empty list, which is how Codex reads
+        "the person had nothing to say to this" — the turn then carries on
+        rather than waiting for an answer that is not coming.
+        """
+        questions = _codex_questions(params.get("questions"))
+        answers = self._on_question(questions) if (questions and self._on_question) else None
+        self._on_activity("tool", question_summary(questions, answers))
+        payload = {
+            question.id or question.question: {
+                "answers": answers[index] if answers is not None and index < len(answers) else []
+            }
+            for index, question in enumerate(questions)
+        }
+        self._send({"id": request_id, "result": {"answers": payload}})
 
     def _item_started(self, item: dict) -> None:
         kind = item.get("type")
@@ -1331,6 +1741,125 @@ def _freebuff_chat_path(cwd: str, session_id: str) -> Optional[Path]:
 
 _FREEBUFF_INTERRUPTED = "[response interrupted]"
 
+# The title FreeBuff draws on the box its `ask_user` tool opens. It is the one
+# thing on that screen that is always there and never part of an answer, so it
+# is what says a turn has stopped to ask something.
+# What FreeBuff's start screen says while it is waiting for a model to be
+# chosen. The wording has moved between releases - the card was once labelled
+# RECOMMENDED and is now introduced by a heading - so all of it is recognised:
+# a chooser nobody answers is a terminal that never reaches its composer, and a
+# message that is never sent.
+_FREEBUFF_PICKER_RE = re.compile(r"(?i)RECOMMENDED|Start coding for free|See all \d+ models?")
+
+_FREEBUFF_QUESTION_MARKER = "Some questions for you"
+
+# A question in that box: collapsed (right-pointing) or open (down-pointing),
+# numbered only when there is more than one.
+_FREEBUFF_QUESTION_RE = re.compile(r"^([▼▶])\s*(?:\d+\.\s*)?(\S.*?)\s*$")
+
+# One answer in the open question: a radio circle, or a checkbox where the
+# question takes more than one answer.
+_FREEBUFF_OPTION_RE = re.compile(r"^\s+([○●☐☑])\s+(\S.*?)\s*$")
+
+# FreeBuff adds this entry itself, below the model's own options, and opens a
+# text field when it is chosen. BlindPilot's dialog offers the same thing in
+# its own words, so the entry is not repeated there.
+_FREEBUFF_CUSTOM_LABEL = "Custom"
+
+_FREEBUFF_MULTI_MARKER = "(Select multiple options)"
+
+# The box's bottom-left corner, and the side it draws down both edges.
+_FREEBUFF_BOX_BOTTOM = "╰"
+_FREEBUFF_BOX_SIDE = "│"
+_FREEBUFF_OPEN_MARK = "▼"
+_FREEBUFF_CHECKBOXES = ("☐", "☑")
+
+# Keys the box understands. Down moves through the answers, wrapping into the
+# next question once it runs off the end of one; Enter chooses; Tab jumps to
+# Submit; Escape closes the box, which FreeBuff reports to the model as the
+# questions having been skipped.
+_KEY_DOWN = "\x1b[B"
+_KEY_ENTER = "\r"
+_KEY_TAB = "\t"
+_KEY_ESCAPE = "\x1b"
+
+# Long enough for OpenTUI to repaint between keystrokes.
+_FREEBUFF_KEY_SETTLE = 0.15
+
+# FreeBuff's own tool takes at least one question and puts no ceiling on
+# them; this is the point past which a box has stopped being a question
+# and started being a loop.
+_FREEBUFF_MAX_QUESTIONS = 8
+
+
+def _freebuff_question_box(visible: str) -> list[str]:
+    """The lines of FreeBuff's question box, with its border taken off."""
+    lines = visible.split("\n")
+    start = next(
+        (index for index, line in enumerate(lines) if _FREEBUFF_QUESTION_MARKER in line),
+        -1,
+    )
+    if start < 0:
+        return []
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith(_FREEBUFF_BOX_BOTTOM):
+            break
+        if stripped.startswith(_FREEBUFF_BOX_SIDE):
+            stripped = stripped[1:]
+        if stripped.endswith(_FREEBUFF_BOX_SIDE):
+            stripped = stripped[:-1]
+        body.append(stripped.rstrip())
+    return body
+
+
+def _freebuff_open_question(visible: str) -> tuple[int, int, Optional[Question]]:
+    """(how many questions there are, which one is open, and that question).
+
+    FreeBuff shows one question's answers at a time and keeps the rest folded
+    away, so this reads whichever one is open. The count is what says how many
+    more are still to come.
+    """
+    body = _freebuff_question_box(visible)
+    if not body:
+        return 0, -1, None
+    total = 0
+    open_index = -1
+    text = ""
+    options: list[QuestionOption] = []
+    multi = False
+    for line in body:
+        header = _FREEBUFF_QUESTION_RE.match(line)
+        if header:
+            if header.group(1) == _FREEBUFF_OPEN_MARK:
+                if open_index >= 0:
+                    # Two open questions at once is a half-drawn frame; keep
+                    # the first, which is the one already read.
+                    break
+                open_index = total
+                text = header.group(2)
+                options = []
+                multi = False
+            total += 1
+            continue
+        if open_index < 0 or total != open_index + 1:
+            continue
+        if _FREEBUFF_MULTI_MARKER in line:
+            multi = True
+            continue
+        option = _FREEBUFF_OPTION_RE.match(line)
+        if option:
+            if option.group(1) in _FREEBUFF_CHECKBOXES:
+                multi = True
+            options.append(QuestionOption(option.group(2)))
+    if open_index < 0 or not text:
+        return total, -1, None
+    if options and options[-1].label == _FREEBUFF_CUSTOM_LABEL:
+        options = options[:-1]
+    return total, open_index, Question(question=text, options=tuple(options), multi_select=multi)
+
+
 # How long a frame must hold still before it is read out. The terminal repaints
 # in bursts, so this is only long enough to let one burst land whole.
 _FREEBUFF_FRAME_SECONDS = 0.1
@@ -1339,6 +1868,18 @@ _FREEBUFF_FRAME_SECONDS = 0.1
 # repainting is. Text that arrives faster than the frames settle would otherwise
 # never reach the listener until the turn ended.
 _FREEBUFF_MAX_LAG_SECONDS = 0.4
+
+# How long a starting FreeBuff may paint nothing at all before the message is
+# given up on. This bounds the wait by silence rather than by the clock: any
+# repaint at all -- a download progress bar, a splash, the model picker -- is
+# progress and starts it again, so a slow first launch that is visibly doing
+# something is never cut off. What it does catch is a FreeBuff that starts,
+# connects, and then paints nothing ever again, which is what 0.0.163 does
+# here: the turn's own deadline is an hour, so waiting that out cost the
+# message and an hour of silence with it. Two minutes because a first launch
+# downloads a 125MB FreeBuff and then unpacks it, and only the download half
+# draws a progress bar.
+_FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
 
 # Sentence-ending punctuation, or the end of a paragraph, either of which is a
 # place a listener expects the reading to stop. The definition lives in
@@ -1573,6 +2114,61 @@ def _freebuff_run_status(chat: Optional[Path], offset: int = 0) -> str:
     return ""
 
 
+def _freebuff_launch_failure(visible: str) -> str:
+    """Say why FreeBuff's terminal closed, in its own words where it gave any.
+
+    A terminal that dies during start-up has usually printed one line saying
+    why. ``env: node: No such file or directory`` is the common one on macOS,
+    where an application started from the Dock inherits a PATH holding no Node
+    at all, and it is far more use than a guess at reinstalling.
+    """
+    lines = [line.strip() for line in _strip_terminal_noise(visible).splitlines()]
+    reason = next((line for line in reversed(lines) if line), "")
+    if len(reason) > 200:
+        reason = reason[:199] + "\u2026"
+    if not reason:
+        return (
+            "FreeBuff's terminal closed before it was ready for a prompt, "
+            "without saying why. Check that FreeBuff runs in a terminal, then "
+            "try again."
+        )
+    if "node" in reason.casefold() and "not found" in reason.casefold().replace(
+        "no such file or directory", "not found"
+    ):
+        return (
+            f"FreeBuff could not start: {reason}. FreeBuff runs on Node.js, and "
+            "BlindPilot could not find it. Install Node.js, or use File \u2192 "
+            "Manage Backends to let BlindPilot install one for you."
+        )
+    return f"FreeBuff's terminal closed before it was ready for a prompt: {reason}"
+
+
+def _freebuff_startup_silence(visible: str, seconds: float) -> str:
+    """Say that FreeBuff started, went quiet, and never asked for a prompt.
+
+    A terminal that dies prints why on its way out, and
+    :func:`_freebuff_launch_failure` reports that sentence. This is the other
+    shape of the same lost message: FreeBuff is still running, still connected,
+    and simply never paints a composer to type into.
+    """
+    waited = int(seconds)
+    lines = [line.strip() for line in _strip_terminal_noise(visible).splitlines()]
+    reason = next((line for line in reversed(lines) if line), "")
+    if len(reason) > 200:
+        reason = reason[:199] + "\u2026"
+    if reason:
+        return (
+            f"FreeBuff stopped short of a prompt and printed nothing for {waited} "
+            f"seconds. The last thing it showed was: {reason}"
+        )
+    return (
+        f"FreeBuff started but printed nothing at all for {waited} seconds, so "
+        "there was never a prompt to send the message to. Run freebuff in a "
+        "terminal to see what it does there: if it hangs there too, the "
+        "installed FreeBuff release is at fault rather than BlindPilot."
+    )
+
+
 class FreebuffTerminal(Protocol):
     """The pseudo-terminal handle, whichever library produced it.
 
@@ -1673,6 +2269,11 @@ def _spawn_freebuff_pty(
         args[1:],
         cwd=cwd,
         encoding="utf-8",
+        # Without this the terminal inherits whatever PATH the window was
+        # started with. Launched from the macOS Dock that is launchd's, which
+        # holds no Node, and FreeBuff's `#!/usr/bin/env node` shim dies before
+        # it can paint anything.
+        env=subprocess_env(args[0]),
         dimensions=(60, 180),
         timeout=0.25,
     )
@@ -1701,13 +2302,18 @@ _FREEBUFF_PREWARM_TTL = 15 * 60
 
 
 def _kill_pty(pty: object) -> None:
+    """End the terminal and give the pseudo-terminal itself back.
+
+    Both calls are wanted, not the first one that works: `terminate` stops
+    FreeBuff, `close` releases the handle the terminal was reached through.
+    Returning after a successful terminate left that handle open every time.
+    """
     for method, arguments in (("terminate", (True,)), ("close", (True,))):
         call = getattr(pty, method, None)
         if call is None:
             continue
         try:
             call(*arguments)
-            return
         except Exception:
             continue
 
@@ -1836,6 +2442,7 @@ class FreebuffWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
+        on_question: Optional[AskQuestions] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -1848,6 +2455,7 @@ class FreebuffWorker(threading.Thread):
         self._on_complete = on_complete
         self._on_failed = on_failed
         self._on_done = on_done
+        self._on_question = on_question
         self._cancelled = False
         self._accepting_input = threading.Event()
         self._write_lock = threading.Lock()
@@ -1858,6 +2466,7 @@ class FreebuffWorker(threading.Thread):
         # see a second time before believing it.
         self._narrated: dict[str, str] = {}
         self._pending_frame: dict[str, str] = {}
+        self._failed = False
 
     def accepting_input(self) -> bool:
         return self._accepting_input.is_set() and not self._cancelled
@@ -1890,17 +2499,24 @@ class FreebuffWorker(threading.Thread):
         self._accepting_input.clear()
         pty = self._pty
         if pty is not None:
-            try:
-                pty.terminate(force=True)
-            except Exception:
-                try:
-                    pty.close(force=True)
-                except Exception:
-                    pass
+            # Every turn ends here, through `run`'s `finally`, so this is where
+            # a terminal that was stopped but never closed piles up.
+            _kill_pty(pty)
+
+    def _fail(self, message: str) -> None:
+        """Report why the turn ended, once."""
+        if self._failed:
+            return
+        self._failed = True
+        self._on_failed(message)
 
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # See CodexWorker.run: without this the terminal is torn down, Send
+            # comes back, and the turn is over with nothing said about why.
+            self._fail(f"BlindPilot stopped reading FreeBuff: {exc}")
         finally:
             self._accepting_input.clear()
             self.cancel()
@@ -1909,7 +2525,7 @@ class FreebuffWorker(threading.Thread):
     def _do_run(self) -> None:
         binary = find_backend_cli(BACKEND_FREEBUFF)
         if not binary:
-            self._on_failed("FreeBuff is not installed. Run: npm install -g freebuff")
+            self._fail("FreeBuff is not installed. Run: npm install -g freebuff")
             return
         # Reading the model catalog means scanning the whole of FreeBuff, which
         # is far too slow to do before sending a message. The recorded choice is
@@ -1919,7 +2535,7 @@ class FreebuffWorker(threading.Thread):
             self._model = self._model or _read_freebuff_choice() or FREEBUFF_PREFERRED_MODEL
             set_freebuff_model(self._model)
         except OSError as exc:
-            self._on_failed(f"Could not select the FreeBuff model: {exc}")
+            self._fail(f"Could not select the FreeBuff model: {exc}")
             return
         models: list[str] = []
         before = _freebuff_chat_dirs(self._cwd)
@@ -1953,19 +2569,19 @@ class FreebuffWorker(threading.Thread):
                 read = self._spawn_pty(args)
             except ImportError:
                 package = "pywinpty" if platform.system() == "Windows" else "pexpect"
-                self._on_failed(
+                self._fail(
                     f"FreeBuff support needs {package} and pyte. Reinstall BlindPilot dependencies."
                 )
                 return
             except Exception as exc:
-                self._on_failed(f"Failed to launch FreeBuff: {exc}")
+                self._fail(f"Failed to launch FreeBuff: {exc}")
                 return
         adopted_at = time.monotonic()
 
         try:
             import pyte
         except ImportError:
-            self._on_failed("FreeBuff support needs pyte. Reinstall BlindPilot dependencies.")
+            self._fail("FreeBuff support needs pyte. Reinstall BlindPilot dependencies.")
             return
         screen = pyte.HistoryScreen(180, 60, history=4000)
         stream = pyte.Stream(screen)
@@ -2000,6 +2616,28 @@ class FreebuffWorker(threading.Thread):
         completion_seen_at: Optional[float] = None
         deadline = time.monotonic() + 60 * 60
 
+        def refresh(wait: float) -> str:
+            """Feed whatever the terminal has produced and re-read the screen.
+
+            The question box is driven a keystroke at a time, and every one of
+            them has to be seen to land before the next is sent. This is the
+            main loop's own reading, pulled out so both can use it.
+            """
+            nonlocal last_visible, screen_changed_at, screen_dirty
+            until = time.monotonic() + max(0.0, wait)
+            while True:
+                waiting = read(0.03)
+                if waiting:
+                    stream.feed(waiting)
+                if time.monotonic() >= until:
+                    break
+            current = "\n".join(line.rstrip() for line in screen.display).strip()
+            if current != last_visible:
+                last_visible = current
+                screen_changed_at = time.monotonic()
+                screen_dirty = True
+            return current
+
         def restart() -> Optional[Callable[[float], str]]:
             """Replace a terminal that was waiting and is no longer usable.
 
@@ -2022,7 +2660,7 @@ class FreebuffWorker(threading.Thread):
             try:
                 return self._spawn_pty(args)
             except Exception as exc:
-                self._on_failed(f"Failed to launch FreeBuff: {exc}")
+                self._fail(f"Failed to launch FreeBuff: {exc}")
                 return None
 
         while not self._cancelled and time.monotonic() < deadline:
@@ -2050,13 +2688,17 @@ class FreebuffWorker(threading.Thread):
                 stream = pyte.Stream(screen)
                 last_visible = ""
                 screen_dirty = False
+                # The replacement has painted nothing yet, and nothing is what
+                # the startup wait is measured in, so start it again here.
+                screen_changed_at = time.monotonic()
                 continue
             if not chunk and self._stream_ended.is_set():
                 if not sent:
-                    self._on_failed(
-                        "FreeBuff's terminal closed before it was ready for a prompt. "
-                        "Reinstall BlindPilot, then try again."
-                    )
+                    # Whatever killed it said so on the terminal before dying —
+                    # a missing Node, a failed download, a refused login. That
+                    # sentence is the whole of what the person can act on, so
+                    # it is reported instead of a guess.
+                    self._fail(_freebuff_launch_failure(last_visible))
                     return
                 # It ended mid-turn, so whatever was captured is the whole
                 # answer; fall through to report it rather than wait it out.
@@ -2070,10 +2712,14 @@ class FreebuffWorker(threading.Thread):
                     screen_changed_at = time.monotonic()
                     screen_dirty = True
 
-            # The first FreeBuff launch opens an accessible model chooser.
-            # Accept its highlighted recommended model so the hidden terminal
-            # reaches the composer; later launches remember the selection.
-            if not accepted_recommended_model and not sent and "RECOMMENDED" in last_visible:
+            # FreeBuff opens on a model chooser rather than the composer.
+            # Accept its highlighted model, or navigate to the chosen one, so
+            # the hidden terminal reaches a prompt it can be given a message at.
+            if (
+                not accepted_recommended_model
+                and not sent
+                and _FREEBUFF_PICKER_RE.search(last_visible)
+            ):
                 if not models:
                     models = freebuff_model_options()[0]
                 picker_models, focused = _freebuff_picker_options(last_visible, models)
@@ -2106,8 +2752,32 @@ class FreebuffWorker(threading.Thread):
                     accepted_recommended_model = True
                     continue
                 if time.monotonic() - picker_expanded_at >= 5:
-                    self._on_failed(f"FreeBuff's model picker did not offer {self._model}")
-                    return
+                    # FreeBuff drops models between releases. Throwing the
+                    # message away over that is a worse answer than running it
+                    # on what FreeBuff is offering instead, provided the swap
+                    # is said out loud rather than made quietly.
+                    self._on_activity(
+                        "tool",
+                        f"FreeBuff no longer offers {self._model}; "
+                        "using the model it recommends instead",
+                    )
+                    self._write(_KEY_ENTER)
+                    accepted_recommended_model = True
+                    continue
+
+            if (
+                sent
+                and _FREEBUFF_QUESTION_MARKER in last_visible
+                # An answered box stays on screen with every question folded
+                # away, so the title alone is not enough: it is a question
+                # actually being asked that stops the turn.
+                and _freebuff_open_question(last_visible)[2] is not None
+            ):
+                # The turn has stopped to ask something and will not move again
+                # until it is answered, so this takes over the loop until the
+                # box is gone.
+                if self._answer_questions(refresh):
+                    continue
 
             at_prompt = bool(self._PROMPT_RE.search(last_visible))
             busy = bool(self._BUSY_RE.search(last_visible))
@@ -2115,7 +2785,7 @@ class FreebuffWorker(threading.Thread):
                 saw_busy = True
             if not sent and at_prompt:
                 if not self._submit_text(self._prompt):
-                    self._on_failed("Could not send the prompt to FreeBuff")
+                    self._fail("Could not send the prompt to FreeBuff")
                     return
                 sent = True
                 started = True
@@ -2132,6 +2802,11 @@ class FreebuffWorker(threading.Thread):
                 continue
 
             now = time.monotonic()
+            if not sent and now - screen_changed_at >= _FREEBUFF_STARTUP_SILENCE_SECONDS:
+                self._fail(
+                    _freebuff_startup_silence(last_visible, _FREEBUFF_STARTUP_SILENCE_SECONDS)
+                )
+                return
             if sent and now >= next_session_check:
                 next_session_check = now + 1.0
                 if chat_path is None:
@@ -2182,7 +2857,7 @@ class FreebuffWorker(threading.Thread):
                         agent_states[agent_id] = status
                     run_status = _freebuff_run_status(chat_path, log_offset)
                 if run_status == "cancelled":
-                    self._on_failed("FreeBuff reported that the response was interrupted")
+                    self._fail("FreeBuff reported that the response was interrupted")
                     return
                 if run_status == "complete":
                     if completion_seen_at is None:
@@ -2218,7 +2893,7 @@ class FreebuffWorker(threading.Thread):
         if self._cancelled:
             return
         if not sent:
-            self._on_failed("FreeBuff did not become ready for input")
+            self._fail("FreeBuff did not become ready for input")
             return
 
         self._accepting_input.clear()
@@ -2240,7 +2915,7 @@ class FreebuffWorker(threading.Thread):
                 self._on_activity("assistant", tail)
             self._on_complete(response)
         else:
-            self._on_failed("No response received from FreeBuff")
+            self._fail("No response received from FreeBuff")
             return
 
         after = _freebuff_chat_dirs(self._cwd)
@@ -2252,6 +2927,114 @@ class FreebuffWorker(threading.Thread):
         # terminal to start, so start one now, while nobody is waiting on it.
         if session:
             prewarm_freebuff(self._cwd, session, self._model, delay=1.0)
+
+    def _press(self, key: str, times: int = 1) -> None:
+        """Send one of the box's keys, giving OpenTUI time to repaint."""
+        for _ in range(max(0, times)):
+            self._write(key)
+            time.sleep(_FREEBUFF_KEY_SETTLE)
+
+    def _answer_questions(self, refresh: Callable[[float], str]) -> bool:
+        """Work through FreeBuff's question box and submit the answers.
+
+        FreeBuff has no way to be told an answer other than the box it drew, so
+        this is the box being used: each question is put to the person in a
+        dialog, and what they chose is walked to with the arrow keys and chosen
+        with Enter. Only one question's answers are on screen at a time, which
+        is why they are asked one at a time rather than all at once.
+
+        Returns whether the box was dealt with, so a frame that turned out to
+        be half-drawn can be left for the next pass.
+        """
+        answered: set[str] = set()
+        submit = False
+        # Bounded so a box that never changes cannot spin: two passes per
+        # question is already more than any answer needs.
+        for _pass in range(2 * _FREEBUFF_MAX_QUESTIONS):
+            if self._cancelled:
+                return True
+            visible = refresh(_FREEBUFF_KEY_SETTLE)
+            if _FREEBUFF_QUESTION_MARKER not in visible:
+                # FreeBuff closed the box itself; nothing left to answer.
+                return bool(answered)
+            total, index, question = _freebuff_open_question(visible)
+            if question is None:
+                visible = refresh(0.5)
+                total, index, question = _freebuff_open_question(visible)
+                if question is None:
+                    return False
+            if question.question in answered:
+                # The same question is still open, so the keystrokes did not
+                # land where they were meant to. Send what has been answered
+                # rather than ask again in a loop.
+                submit = True
+                break
+            chosen = self._ask_one(question)
+            if chosen is None:
+                # Escape closes the box, and FreeBuff tells the model the
+                # questions were skipped — which is the truth.
+                self._press(_KEY_ESCAPE)
+                refresh(0.5)
+                return True
+            answered.add(question.question)
+            self._choose(question, chosen)
+            if index >= total - 1:
+                submit = True
+                break
+        if submit:
+            # Tab moves to Submit from an answer and is ignored once Submit
+            # already has the focus, so it is safe either way.
+            self._press(_KEY_TAB)
+            self._press(_KEY_ENTER)
+        refresh(0.5)
+        return True
+
+    def _ask_one(self, question: Question) -> Optional[list[str]]:
+        """Put one question to the person. None if they closed the dialog."""
+        if self._on_question is None:
+            return None
+        answers = self._on_question([question])
+        chosen = answers[0] if answers else None
+        self._on_activity("tool", question_summary([question], answers))
+        if not chosen:
+            return None
+        return chosen
+
+    def _choose(self, question: Question, chosen: list[str]) -> None:
+        """Walk the box to the chosen answers and take them."""
+        # The focus opens on the first answer, and "Custom" sits one past the
+        # last of the model's own, which is where anything typed goes.
+        labels = [option.label for option in question.options]
+        custom = len(labels)
+        position = 0
+        if not question.multi_select:
+            answer = chosen[0]
+            target = labels.index(answer) if answer in labels else custom
+            self._press(_KEY_DOWN, target)
+            self._press(_KEY_ENTER)
+            if target == custom:
+                # Choosing "Custom" opens a text field with the cursor in it;
+                # Enter closes it and moves on to the next question.
+                self._write(answer)
+                time.sleep(_FREEBUFF_KEY_SETTLE)
+                self._press(_KEY_ENTER)
+            # A chosen answer moves the box on by itself.
+            return
+        typed = [text for text in chosen if text not in labels]
+        for target in sorted(labels.index(text) for text in chosen if text in labels):
+            self._press(_KEY_DOWN, target - position)
+            self._press(_KEY_ENTER)
+            position = target
+        if typed:
+            self._press(_KEY_DOWN, custom - position)
+            self._press(_KEY_ENTER)
+            self._write(", ".join(typed))
+            time.sleep(_FREEBUFF_KEY_SETTLE)
+            self._press(_KEY_ENTER)
+            position = custom
+        # Ticking a box leaves the focus where it was, so the next question has
+        # to be walked to: one step past the last answer wraps onto it.
+        self._press(_KEY_DOWN, custom - position + 1)
 
     def _emit_screen_delta(self, kind: str, spoken: str, current: str, whole: bool = False) -> str:
         """Read out whatever the screen has gained since the last frame.
@@ -2395,6 +3178,1310 @@ class FreebuffWorker(threading.Thread):
         return self._freebuff_sections(visible)[1]
 
 
+# ------------------------------------------------------------------------
+# opencode
+#
+# opencode is driven through its own headless HTTP server rather than through
+# one process per turn, because the server is the same surface its terminal
+# interface talks to and is the only one that exposes everything BlindPilot
+# needs from a provider: a streaming answer, steering a turn that is already
+# running, answering a permission request, compaction, the catalog behind
+# ``/model``, and the provider catalog behind ``/connect``. One server is
+# started on first use and shared by every tab. It listens on the loopback
+# interface behind a password generated for this run, so nothing else on the
+# machine can drive it.
+
+_OPENCODE_SERVER_LOCK = threading.Lock()
+_opencode_server: Optional["OpencodeServer"] = None
+_OPENCODE_CATALOG_LOCK = threading.Lock()
+# One catalog per working directory: a project can pin its own model list.
+_opencode_catalog_cache: dict[str, dict] = {}
+
+# Effort levels are per-model in opencode — a model's "variants". The picker
+# wants one list, so the levels every model offers are pooled and shown in the
+# order a person would expect rather than the order they were discovered in.
+_OPENCODE_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "max", "thinking")
+
+# What BlindPilot's provider-neutral permission modes mean to opencode. A rule
+# set is applied in order, so the wildcard comes first and the exceptions
+# follow, which is the shape opencode's own agents use. "default" is absent on
+# purpose: it means "whatever opencode itself is configured to do", so no rule
+# set is sent at all.
+_OPENCODE_PERMISSIONS: dict[str, list[dict[str, str]]] = {
+    "acceptEdits": [
+        {"permission": "*", "pattern": "*", "action": "allow"},
+        {"permission": "bash", "pattern": "*", "action": "ask"},
+        {"permission": "external_directory", "pattern": "*", "action": "ask"},
+        {"permission": "doom_loop", "pattern": "*", "action": "ask"},
+    ],
+    "plan": [
+        {"permission": "*", "pattern": "*", "action": "allow"},
+        {"permission": "edit", "pattern": "*", "action": "deny"},
+        {"permission": "bash", "pattern": "*", "action": "ask"},
+        {"permission": "external_directory", "pattern": "*", "action": "deny"},
+    ],
+    "auto": [
+        {"permission": "*", "pattern": "*", "action": "allow"},
+        {"permission": "external_directory", "pattern": "*", "action": "ask"},
+    ],
+    "bypassPermissions": [
+        {"permission": "*", "pattern": "*", "action": "allow"},
+    ],
+}
+
+# opencode ships a "plan" agent whose whole job is the mode BlindPilot calls
+# plan, so plan mode selects it rather than trying to describe it in rules.
+_OPENCODE_AGENTS = {"plan": "plan"}
+
+
+def _opencode_data_dir() -> Path:
+    """Where opencode keeps its database and credentials, on every platform."""
+    override = os.environ.get("OPENCODE_DATA")
+    if override:
+        return Path(override)
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "opencode"
+
+
+def _free_port() -> int:
+    """A port the operating system says is free right now."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _opencode_server_binary(binary: str) -> str:
+    """Prefer opencode's own executable over an npm wrapper on Windows.
+
+    Same reason Codex gets the same treatment: terminating a ``.cmd`` launcher
+    does not terminate the native child it started, and a server nobody owns
+    keeps both its port and its database open for the rest of the session.
+    """
+    if platform.system() != "Windows" or Path(binary).suffix.casefold() == ".exe":
+        return binary
+    candidate = Path(binary).parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    return str(candidate) if candidate.is_file() else binary
+
+
+def opencode_error_text(error: object, fallback: str) -> str:
+    """A sentence worth speaking out of whatever the server or urllib raised."""
+    import urllib.error
+
+    if isinstance(error, urllib.error.HTTPError):
+        try:
+            payload = json.loads(error.read().decode("utf-8", "replace"))
+        except (OSError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict) and isinstance(data.get("message"), str):
+                return data["message"]
+            for key in ("message", "error"):
+                if isinstance(payload.get(key), str) and payload[key]:
+                    return str(payload[key])
+        return f"{fallback} (HTTP {error.code})"
+    if isinstance(error, dict):
+        data = error.get("data")
+        if isinstance(data, dict) and isinstance(data.get("message"), str):
+            return data["message"]
+        for key in ("message", "name"):
+            if isinstance(error.get(key), str) and error[key]:
+                return str(error[key])
+    text = str(error).strip()
+    return text or fallback
+
+
+class OpencodeServer:
+    """The one ``opencode serve`` process BlindPilot talks to."""
+
+    def __init__(self, binary: str) -> None:
+        import base64
+        import secrets
+        from collections import deque
+
+        password = secrets.token_urlsafe(24)
+        env = subprocess_env(binary)
+        env["OPENCODE_SERVER_PASSWORD"] = password
+        self._log: "deque[str]" = deque(maxlen=50)
+        self._url = ""
+        self._listening = threading.Event()
+        self._auth = "Basic " + base64.b64encode(f"opencode:{password}".encode("utf-8")).decode(
+            "ascii"
+        )
+        # Started from the home directory rather than any one project: one
+        # server serves them all, and the ``directory`` query parameter on each
+        # request is what says which project a call is about.
+        self._proc = subprocess.Popen(
+            [binary, "serve", "--port", str(_free_port()), "--hostname", "127.0.0.1"],
+            cwd=str(Path.home()),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            **own_group_kwargs(),
+            **no_window_kwargs(),
+        )
+        threading.Thread(target=self._pump, daemon=True).start()
+        self._listening.wait(60)
+        if not self._url:
+            self.stop()
+            detail = "\n".join(list(self._log)[-5:]).strip()
+            raise OSError(detail or "opencode's server did not start.")
+
+    # The reader doubles as the thing that keeps the pipe from filling up, so
+    # it runs for the life of the process rather than only until start-up.
+    def _pump(self) -> None:
+        stdout = self._proc.stdout
+        if stdout is not None:
+            for line in stdout:
+                text = line.rstrip()
+                if text:
+                    self._log.append(text)
+                if not self._url:
+                    found = re.search(r"listening on (http://\S+)", text)
+                    if found:
+                        self._url = found.group(1).rstrip("/")
+                        self._listening.set()
+        # The process ended. Release anyone still waiting to be told the URL.
+        self._listening.set()
+
+    @property
+    def base_url(self) -> str:
+        return self._url
+
+    def alive(self) -> bool:
+        return self._proc.poll() is None
+
+    def open(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        body: object = None,
+        timeout: Optional[float] = 120,
+    ):
+        """The raw response, for callers that want to read it as it arrives."""
+        import urllib.parse
+        import urllib.request
+
+        url = self._url + path
+        query = {key: value for key, value in (params or {}).items() if value}
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(url, data=data, method=method)
+        request.add_header("Authorization", self._auth)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        return urllib.request.urlopen(request, timeout=timeout)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        body: object = None,
+        timeout: Optional[float] = 120,
+    ) -> object:
+        with self.open(method, path, params, body, timeout) as response:
+            raw = response.read().decode("utf-8", "replace")
+        return json.loads(raw) if raw.strip() else None
+
+    def stop(self) -> None:
+        proc = self._proc
+        if proc.poll() is None:
+            # It owns a SQLite database, so it is asked to close before it is
+            # made to. The group sweep afterwards is for anything it started
+            # that did not go with it.
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            end_process_group(proc, timeout=5)
+
+
+def opencode_server() -> OpencodeServer:
+    """The shared server, started on first use and reused from then on."""
+    global _opencode_server
+    with _OPENCODE_SERVER_LOCK:
+        running = _opencode_server
+        if running is not None and running.alive():
+            return running
+        binary = find_backend_cli(BACKEND_OPENCODE)
+        if not binary:
+            raise OSError("opencode is not installed. Run: npm install -g opencode-ai")
+        _opencode_server = OpencodeServer(_opencode_server_binary(binary))
+        return _opencode_server
+
+
+def stop_opencode_server() -> None:
+    """Shut the shared server down — on exit, and before an update replaces it."""
+    global _opencode_server
+    with _OPENCODE_SERVER_LOCK:
+        running, _opencode_server = _opencode_server, None
+    if running is not None:
+        running.stop()
+
+
+atexit.register(stop_opencode_server)
+
+
+def _opencode_catalog(cwd: Optional[str] = None, refresh: bool = False) -> dict:
+    """opencode's providers, their models, and the defaults it would pick.
+
+    Asked per directory, because a project's own ``opencode.json`` can pin a
+    model or turn providers off, and cached per directory for the same reason.
+    Caching matters: the catalog is hundreds of models across nearly two
+    hundred providers, and the picker is opened far more often than a
+    project's set of providers changes.
+    """
+    key = cwd or ""
+    with _OPENCODE_CATALOG_LOCK:
+        cached = _opencode_catalog_cache.get(key)
+    if cached is not None and not refresh:
+        return cached
+    server = opencode_server()
+    params = {"directory": cwd} if cwd else None
+    providers = server.request("GET", "/config/providers", params=params, timeout=60)
+    config = server.request("GET", "/config", params=params, timeout=60)
+    commands = server.request("GET", "/command", params=params, timeout=60)
+    providers = providers if isinstance(providers, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    catalog = {
+        "providers": providers.get("providers") or [],
+        "default": providers.get("default") or {},
+        "model": config.get("model") or "",
+        "commands": _opencode_command_list(commands),
+    }
+    with _OPENCODE_CATALOG_LOCK:
+        _opencode_catalog_cache[key] = catalog
+    return catalog
+
+
+def _opencode_command_list(payload: object) -> list[tuple[str, str]]:
+    """opencode's slash commands, as (name, description).
+
+    Only the commands proper: opencode lists installed skills here as well, and
+    a picker a person arrows through is worth keeping to the length of what
+    they typed a slash to find.
+    """
+    commands: list[tuple[str, str]] = []
+    for entry in payload if isinstance(payload, list) else []:
+        if not isinstance(entry, dict) or entry.get("source") != "command":
+            continue
+        name = str(entry.get("name") or "")
+        if name:
+            commands.append((name, str(entry.get("description") or "")))
+    commands.sort()
+    return commands
+
+
+def opencode_commands(cwd: Optional[str] = None) -> list[tuple[str, str]]:
+    """The commands read for this directory, or none if it has not been read.
+
+    Deliberately never asks the server: the slash picker opens on a key press,
+    and the catalog is already read in the background whenever opencode is the
+    chosen backend.
+    """
+    with _OPENCODE_CATALOG_LOCK:
+        catalog = _opencode_catalog_cache.get(cwd or "")
+    commands = catalog.get("commands") if catalog else None
+    return list(commands) if isinstance(commands, list) else []
+
+
+def _opencode_models_from_cli() -> list[str]:
+    """The catalog as the CLI prints it, for when the server will not start."""
+    binary = find_backend_cli(BACKEND_OPENCODE)
+    if not binary:
+        return []
+    try:
+        result = subprocess.run(
+            [binary, "models"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            env=subprocess_env(binary),
+            **no_window_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    models: list[str] = []
+    for line in (result.stdout or "").splitlines():
+        name = line.strip()
+        if name and "/" in name and " " not in name and name not in models:
+            models.append(name)
+    return models
+
+
+def opencode_model_options(
+    cwd: Optional[str] = None,
+) -> tuple[list[str], list[str], str, str, str]:
+    """Every model opencode can reach, the effort levels they offer, and the
+    model it would use if BlindPilot named none."""
+    try:
+        catalog = _opencode_catalog(cwd)
+    except (OSError, ValueError) as exc:
+        models = _opencode_models_from_cli()
+        if not models:
+            return [], [], "", "", opencode_error_text(exc, "opencode's model list is unavailable.")
+        return (
+            models,
+            list(_OPENCODE_EFFORT_ORDER),
+            "",
+            "",
+            "Could not reach opencode's server; showing the list its CLI prints.",
+        )
+
+    models = []
+    efforts: list[str] = []
+    for provider in catalog["providers"]:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or "")
+        entries = provider.get("models")
+        if not provider_id or not isinstance(entries, dict):
+            continue
+        for model_id, model in sorted(entries.items()):
+            models.append(f"{provider_id}/{model_id}")
+            variants = model.get("variants") if isinstance(model, dict) else None
+            if isinstance(variants, dict):
+                for variant in variants:
+                    if variant not in efforts:
+                        efforts.append(variant)
+
+    known = [effort for effort in _OPENCODE_EFFORT_ORDER if effort in efforts]
+    efforts = known + sorted(effort for effort in efforts if effort not in known)
+    if not models:
+        return [], efforts, "", "", "opencode has no connected providers yet. Type /connect."
+    return models, efforts, opencode_default_model(catalog=catalog), "", ""
+
+
+def opencode_default_model(cwd: Optional[str] = None, catalog: Optional[dict] = None) -> str:
+    """The ``provider/model`` opencode itself would run, or "" if it has none."""
+    try:
+        catalog = catalog if catalog is not None else _opencode_catalog(cwd)
+    except (OSError, ValueError):
+        return ""
+    configured = catalog.get("model")
+    if isinstance(configured, str) and "/" in configured:
+        return configured
+    defaults = catalog.get("default") or {}
+    for provider in catalog.get("providers") or []:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or "")
+        model_id = defaults.get(provider_id)
+        if provider_id and isinstance(model_id, str) and model_id:
+            return f"{provider_id}/{model_id}"
+    return ""
+
+
+def opencode_split_model(model: str) -> tuple[str, str]:
+    """``provider/model`` as the two halves the server asks for separately."""
+    provider, _, name = (model or "").partition("/")
+    return (provider.strip(), name.strip()) if name.strip() else ("", "")
+
+
+def opencode_model_efforts(model: str, cwd: Optional[str] = None) -> list[str]:
+    """The effort levels this one model offers, so an unusable one is dropped.
+
+    opencode rejects a variant a model does not define, and the picker offers
+    the levels pooled across every model, so the choice has to be checked
+    against the model it is about to be sent with.
+    """
+    provider_id, model_id = opencode_split_model(model)
+    if not provider_id:
+        return []
+    try:
+        catalog = _opencode_catalog(cwd)
+    except (OSError, ValueError):
+        return []
+    for provider in catalog["providers"]:
+        if isinstance(provider, dict) and provider.get("id") == provider_id:
+            entry = (provider.get("models") or {}).get(model_id)
+            variants = entry.get("variants") if isinstance(entry, dict) else None
+            return list(variants) if isinstance(variants, dict) else []
+    return []
+
+
+# ---- /connect: the providers, and the credentials that reach them ----
+
+
+def opencode_providers() -> tuple[list[tuple[str, str]], set[str], str]:
+    """Every provider opencode knows, and which of them are already connected.
+
+    This is what its ``/connect`` command offers. The ones already reachable
+    come first, so the list opens on what is actually in use.
+    """
+    try:
+        server = opencode_server()
+        payload = server.request("GET", "/provider", timeout=60)
+    except (OSError, ValueError) as exc:
+        return [], set(), opencode_error_text(exc, "Could not read opencode's provider list.")
+    if not isinstance(payload, dict):
+        return [], set(), "opencode returned no provider list."
+    connected = {str(name) for name in (payload.get("connected") or [])}
+    everything: list[tuple[str, str]] = []
+    for provider in payload.get("all") or []:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or "")
+        if provider_id:
+            everything.append((provider_id, str(provider.get("name") or provider_id)))
+    everything.sort(key=lambda item: (item[0] not in connected, item[1].casefold()))
+    return everything, connected, ""
+
+
+def opencode_auth_methods(provider_id: str) -> list[dict]:
+    """How this provider can be signed in to.
+
+    Providers with nothing special to say are absent from opencode's own list;
+    for them the only way in is an API key, which is what the fallback says.
+    """
+    try:
+        server = opencode_server()
+        payload = server.request("GET", "/provider/auth", timeout=60)
+    except (OSError, ValueError):
+        payload = None
+    methods = payload.get(provider_id) if isinstance(payload, dict) else None
+    if isinstance(methods, list) and methods:
+        return [method for method in methods if isinstance(method, dict)]
+    return [{"type": "api", "label": "Manually enter API key"}]
+
+
+def opencode_connect_api_key(provider_id: str, key: str, metadata: Optional[dict] = None) -> str:
+    """Store an API key for a provider. Returns "" on success, else the error."""
+    body: dict = {"type": "api", "key": key}
+    if metadata:
+        body["metadata"] = {str(k): str(v) for k, v in metadata.items() if v}
+    try:
+        opencode_server().request("PUT", f"/auth/{provider_id}", body=body, timeout=60)
+    except (OSError, ValueError) as exc:
+        return opencode_error_text(exc, f"Could not connect {provider_id}.")
+    invalidate_backend_cache(BACKEND_OPENCODE)
+    return ""
+
+
+def opencode_disconnect(provider_id: str) -> str:
+    """Forget a provider's credentials. Returns "" on success, else the error."""
+    try:
+        opencode_server().request("DELETE", f"/auth/{provider_id}", timeout=60)
+    except (OSError, ValueError) as exc:
+        return opencode_error_text(exc, f"Could not disconnect {provider_id}.")
+    invalidate_backend_cache(BACKEND_OPENCODE)
+    return ""
+
+
+def opencode_oauth_start(
+    provider_id: str, method: int, inputs: Optional[dict] = None
+) -> tuple[dict, str]:
+    """Begin a browser sign-in. Returns (authorization, error).
+
+    The authorization carries the URL to open, instructions worth reading out,
+    and whether the provider finishes on its own ("auto") or hands back a code
+    the user has to paste ("code").
+    """
+    body: dict = {"method": method}
+    if inputs:
+        body["inputs"] = {str(k): str(v) for k, v in inputs.items() if v}
+    try:
+        payload = opencode_server().request(
+            "POST", f"/provider/{provider_id}/oauth/authorize", body=body, timeout=120
+        )
+    except (OSError, ValueError) as exc:
+        return {}, opencode_error_text(exc, f"Could not start sign-in for {provider_id}.")
+    return (payload if isinstance(payload, dict) else {}), ""
+
+
+def opencode_oauth_finish(provider_id: str, method: int, code: str = "") -> str:
+    """Complete a browser sign-in. Returns "" on success, else the error."""
+    body: dict = {"method": method}
+    if code:
+        body["code"] = code
+    try:
+        opencode_server().request(
+            "POST", f"/provider/{provider_id}/oauth/callback", body=body, timeout=300
+        )
+    except (OSError, ValueError) as exc:
+        return opencode_error_text(exc, f"Could not finish signing in to {provider_id}.")
+    invalidate_backend_cache(BACKEND_OPENCODE)
+    return ""
+
+
+def _opencode_tool_label(name: str, arguments: object) -> str:
+    """One spoken line for a tool that has just started."""
+    values = arguments if isinstance(arguments, dict) else {}
+    detail = ""
+    for key in ("command", "filePath", "path", "pattern", "query", "url", "description"):
+        value = values.get(key)
+        if isinstance(value, str) and value.strip():
+            detail = " ".join(value.split())
+            break
+    verbs = {
+        "bash": "Running",
+        "edit": "Editing",
+        "write": "Writing",
+        "read": "Reading",
+        "glob": "Finding files",
+        "grep": "Searching",
+        "list": "Listing",
+        "webfetch": "Fetching",
+        "websearch": "Searching the web",
+        "task": "Delegating",
+    }
+    verb = verbs.get(name, f"Using {name}")
+    return f"{verb}: {detail}" if detail else verb
+
+
+# An assistant message the provider refuses on replay poisons the whole
+# conversation: opencode rebuilds the request from its stored history every
+# step, so once one malformed message is in, every later turn fails with the
+# same 400 until the message is gone. DeepSeek-class providers report it as
+# "content or tool_calls must be set"; the paired complaint about tool results
+# left dangling is the same break in a different coat.
+_POISON_HISTORY_RE = re.compile(
+    r"Invalid assistant message|tool_calls['?]? must be followed by tool messages"
+    r"|missing in assistant tool call message|reasoning_content.*must be passed back",
+    re.IGNORECASE,
+)
+
+
+def _poison_history_error(text: str) -> bool:
+    """Whether a backend error says the stored history itself was refused."""
+    return bool(_POISON_HISTORY_RE.search(text or ""))
+
+
+def _opencode_questions(raw: object) -> tuple[Question, ...]:
+    """Read a question.asked event into BlindPilot's own question shape.
+
+    opencode's own flags are `multiple` for more than one answer and `custom`
+    for a typed one. Only `multiple` is trusted as written: its tool tells the
+    model not to offer an "Other" of its own because the client adds one, so a
+    typed answer is offered whether or not `custom` was set.
+    """
+    if not isinstance(raw, list):
+        return ()
+    questions: list[Question] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("question") or "").strip()
+        if not text:
+            continue
+        options: list[QuestionOption] = []
+        for option in entry.get("options") or []:
+            if isinstance(option, dict) and option.get("label"):
+                options.append(
+                    QuestionOption(str(option["label"]), str(option.get("description") or ""))
+                )
+        questions.append(
+            Question(
+                question=text,
+                header=str(entry.get("header") or ""),
+                options=tuple(options),
+                multi_select=bool(entry.get("multiple")),
+            )
+        )
+    return tuple(questions)
+
+
+class OpencodeWorker(threading.Thread):
+    """Run one opencode turn against the shared headless server."""
+
+    def __init__(
+        self,
+        prompt: str,
+        session_id: Optional[str],
+        cwd: str,
+        permission_mode: str,
+        *,
+        model: str = "",
+        effort: str = "",
+        compact: bool = False,
+        on_session: Callable[[str], None],
+        on_started: Callable[[], None],
+        on_activity: Callable[[str, str], None],
+        on_complete: Callable[[str], None],
+        on_failed: Callable[[str], None],
+        on_done: Callable[[], None],
+        on_question: Optional[AskQuestions] = None,
+    ) -> None:
+        super().__init__(daemon=True)
+        self._prompt = prompt
+        self._session_id = session_id or ""
+        self._cwd = cwd
+        self._permission_mode = permission_mode
+        self._model = model
+        self._effort = effort
+        # Compaction is a request of its own rather than a message, so this
+        # turn summarises the conversation instead of adding to it.
+        self._compact = compact
+        self._on_session = on_session
+        self._on_started = on_started
+        self._on_activity = on_activity
+        self._on_complete = on_complete
+        self._on_failed = on_failed
+        self._on_done = on_done
+        self._on_question = on_question
+        self._server: Optional[OpencodeServer] = None
+        self._stream: object = None
+        # Resolved once the turn starts. Working out whether a model offers the
+        # chosen effort can mean reading opencode's catalog, and a message can
+        # be steered into a running turn from the window's own thread.
+        self._variant = ""
+        self._cancelled = False
+        self._accepting_input = threading.Event()
+        self._roles: dict[str, str] = {}
+        self._emitted: set[str] = set()
+        # A command runs on a request that only answers once the turn is over,
+        # so a failure can be noticed from either thread. This is what keeps
+        # the turn from being reported as failed twice.
+        self._settled = threading.Event()
+        self._answer: list[str] = []
+        self._tools_running: set[str] = set()
+        # Set when a question was answered this turn. The provider poison that
+        # a broken question replay leaves behind is only worth the surgery
+        # below where a question was actually part of the turn.
+        self._question_answered = False
+        # One repair per turn: if the retry is refused too, report it rather
+        # than looping.
+        self._history_repaired = False
+
+    # ----- what the window drives -----
+
+    def accepting_input(self) -> bool:
+        return self._accepting_input.is_set() and not self._cancelled
+
+    def steer(self, text: str) -> bool:
+        """Add a message to the turn that is already running.
+
+        opencode admits a prompt sent mid-turn and hands it to the model at the
+        next step, which is exactly what steering means here.
+
+        Answers from what this worker already knows and sends on a thread of
+        its own, because this is called from the window's thread: a request
+        waited on there is a window that stops answering the screen reader.
+        Whether the turn is still accepting input is the question being asked,
+        and that is known here; a message opencode then refuses is rare enough
+        to belong in the transcript rather than in a frozen window.
+        """
+        if not self.accepting_input() or not self._session_id or self._server is None:
+            return False
+        server, session, body = self._server, self._session_id, self._prompt_body(text)
+
+        def deliver() -> None:
+            try:
+                server.request(
+                    "POST",
+                    f"/session/{session}/prompt_async",
+                    params={"directory": self._cwd},
+                    body=body,
+                    timeout=60,
+                )
+            except (OSError, ValueError) as exc:
+                if not self._cancelled:
+                    detail = opencode_error_text(exc, "the request failed")
+                    self._on_activity(
+                        "tool", f"opencode did not take the steering message: {detail}"
+                    )
+
+        threading.Thread(target=deliver, daemon=True).start()
+        return True
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self._accepting_input.clear()
+        server, session = self._server, self._session_id
+        if server is not None and session:
+            try:
+                server.request(
+                    "POST",
+                    f"/session/{session}/abort",
+                    params={"directory": self._cwd},
+                    timeout=30,
+                )
+            except (OSError, ValueError):
+                pass
+        # Closing the event stream is what unblocks the run loop. The server
+        # itself is shared, and stays up for the next turn.
+        self._close_stream()
+
+    def run(self) -> None:
+        try:
+            self._do_run()
+        except Exception as exc:
+            # See CodexWorker.run: without this the event stream is closed, Send
+            # comes back, and the turn is over with nothing said about why.
+            self._fail(f"BlindPilot stopped reading opencode: {exc}")
+        finally:
+            self._accepting_input.clear()
+            self._close_stream()
+            self._on_done()
+
+    def _close_stream(self) -> None:
+        stream = self._stream
+        if stream is not None:
+            try:
+                stream.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    # ----- the turn -----
+
+    def _fail(self, message: str) -> None:
+        if not self._settled.is_set():
+            self._settled.set()
+            self._on_failed(message)
+
+    def _on_session_error(self, properties: dict) -> bool:
+        """A session.error ends the turn — unless one repair attempt fits.
+
+        A provider that refuses a stored message refuses every following
+        request too, so an ordinary failure here would leave the conversation
+        permanently stuck behind a turn that can never be replayed. The one
+        break BlindPilot itself can walk into is a question round-trip, so
+        when the error reads like refused history and a question was answered
+        this turn, the question's step is deleted and the prompt sent again.
+
+        Returns False when the turn is over for good (failure reported, or the
+        reader should keep going on the repaired conversation).
+        """
+        text = opencode_error_text(properties.get("error"), "opencode reported an error")
+        if not (_poison_history_error(text) and self._question_answered):
+            self._fail(text)
+            return False
+        if self._history_repaired or self._cancelled:
+            self._fail(text)
+            return False
+        self._history_repaired = True
+        if self._repair_history():
+            self._on_activity(
+                "tool",
+                "opencode refused the conversation after the question; "
+                "removing the broken step and trying again.",
+            )
+            self._resend()
+            return True
+        self._fail(text)
+        return False
+
+    def _repair_history(self) -> bool:
+        """Delete the poisoned question step and everything after it.
+
+        The message the provider cannot replay is two-fold: the question
+        step whose tool call comes back unpaired, and the empty assistant
+        step it died on — neither content nor tool calls, which is the very
+        text of the 400. Both go, and so does anything written after them,
+        since every later step is refused for the same reason.
+
+        Returns True when something was actually removed. The listing's order
+        is not counted on: the question step to cut at is the latest one by
+        its own timestamp.
+        """
+        server = self._server
+        session = self._session_id
+        if server is None or not session:
+            return False
+        try:
+            messages = server.request(
+                "GET", f"/session/{session}/message", params={"directory": self._cwd}, timeout=60
+            )
+        except (OSError, ValueError):
+            return False
+        entries = [
+            entry
+            for entry in (messages if isinstance(messages, list) else [])
+            if isinstance(entry, dict)
+        ]
+
+        def stamp(entry: dict) -> float:
+            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
+            time = info.get("time") if isinstance(info.get("time"), dict) else {}
+            try:
+                return float(time.get("created") or info.get("time_created") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        cutoff_id = ""
+        cutoff_stamp = -1.0
+        for entry in entries:
+            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
+            if str(info.get("role") or "") != "assistant":
+                continue
+            message_id = str(info.get("id") or "")
+            if not message_id:
+                continue
+            parts = entry.get("parts") if isinstance(entry.get("parts"), list) else []
+            for part in parts:
+                if not isinstance(part, dict) or str(part.get("tool") or "") != "question":
+                    continue
+                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                if str(state.get("status") or "") != "completed":
+                    continue
+                when = stamp(entry)
+                if when >= cutoff_stamp:
+                    cutoff_id, cutoff_stamp = message_id, when
+                break
+        if not cutoff_id:
+            return False
+        # The step the question died on has no timestamp of its own worth
+        # trusting, so the cut is by position in the listing relative to the
+        # question step, and by time for anything ordered oddly.
+        try:
+            index = next(
+                position
+                for position, entry in enumerate(entries)
+                if (entry.get("info") if isinstance(entry.get("info"), dict) else entry).get("id")
+                == cutoff_id
+            )
+        except StopIteration:
+            return False
+        doomed = [
+            entry
+            for position, entry in enumerate(entries)
+            if position >= index and stamp(entry) >= cutoff_stamp
+        ]
+        removed = False
+        for entry in doomed:
+            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
+            message_id = str(info.get("id") or "")
+            if not message_id:
+                continue
+            try:
+                server.request(
+                    "DELETE",
+                    f"/session/{session}/message/{message_id}",
+                    params={"directory": self._cwd},
+                    timeout=60,
+                )
+            except (OSError, ValueError):
+                return removed
+            removed = True
+        return removed
+
+    def _resend(self) -> None:
+        """Send this turn's prompt again on the repaired conversation."""
+        server = self._server
+        if server is None or not self._session_id:
+            self._fail("opencode's server went away while repairing the conversation")
+            return
+        command = self._as_command()
+        try:
+            if command is not None:
+                self._start_command(*command)
+            else:
+                server.request(
+                    "POST",
+                    f"/session/{self._session_id}/prompt_async",
+                    params={"directory": self._cwd},
+                    body=self._prompt_body(self._prompt),
+                    timeout=120,
+                )
+        except (OSError, ValueError) as exc:
+            self._fail(opencode_error_text(exc, "opencode would not take the message again."))
+            return
+        self._answer.clear()
+        self._emitted.clear()
+        self._accepting_input.set()
+
+    def _prompt_body(self, text: str) -> dict:
+        body: dict = {"parts": [{"type": "text", "text": text}]}
+        provider_id, model_id = opencode_split_model(self._model)
+        if provider_id:
+            body["model"] = {"providerID": provider_id, "modelID": model_id}
+        agent = _OPENCODE_AGENTS.get(self._permission_mode)
+        if agent:
+            body["agent"] = agent
+        if self._variant:
+            body["variant"] = self._variant
+        return body
+
+    def _do_run(self) -> None:
+        try:
+            self._server = opencode_server()
+        except OSError as exc:
+            self._fail(opencode_error_text(exc, "opencode's server could not be started."))
+            return
+        if self._compact and not self._session_id:
+            self._fail("There is no opencode conversation to compact yet")
+            return
+        # Effort levels are per model in opencode, and it rejects one the model
+        # does not define, so the pooled choice from the picker is checked
+        # against the model this turn will use.
+        if self._effort:
+            model = self._model or opencode_default_model(self._cwd)
+            if self._effort in opencode_model_efforts(model, self._cwd):
+                self._variant = self._effort
+
+        # Subscribing before anything is asked for is what makes the first
+        # words of the answer part of this turn rather than of the next one.
+        try:
+            self._stream = self._server.open(
+                "GET", "/event", params={"directory": self._cwd}, timeout=None
+            )
+        except (OSError, ValueError) as exc:
+            self._fail(opencode_error_text(exc, "Could not follow opencode's progress."))
+            return
+
+        try:
+            self._open_session()
+        except (OSError, ValueError) as exc:
+            self._fail(opencode_error_text(exc, "Could not start an opencode conversation."))
+            return
+        self._on_session(self._session_id)
+
+        command = self._as_command()
+        try:
+            if self._compact:
+                self._start_compaction()
+            elif command is not None:
+                self._start_command(*command)
+            else:
+                self._server.request(
+                    "POST",
+                    f"/session/{self._session_id}/prompt_async",
+                    params={"directory": self._cwd},
+                    body=self._prompt_body(self._prompt),
+                    timeout=120,
+                )
+        except (OSError, ValueError) as exc:
+            self._fail(opencode_error_text(exc, "opencode would not accept the message."))
+            return
+
+        self._accepting_input.set()
+        self._on_started()
+        self._read_events()
+
+    def _open_session(self) -> None:
+        assert self._server is not None
+        rules = _OPENCODE_PERMISSIONS.get(self._permission_mode)
+        if self._session_id:
+            # A resumed conversation keeps its id, but the permission mode may
+            # have been changed since, so its rules are re-stated every turn.
+            if rules is not None:
+                self._server.request(
+                    "PATCH",
+                    f"/session/{self._session_id}",
+                    params={"directory": self._cwd},
+                    body={"permission": rules},
+                    timeout=60,
+                )
+            return
+        body: dict = {}
+        if rules is not None:
+            body["permission"] = rules
+        agent = _OPENCODE_AGENTS.get(self._permission_mode)
+        if agent:
+            body["agent"] = agent
+        provider_id, model_id = opencode_split_model(self._model)
+        if provider_id:
+            body["model"] = {"providerID": provider_id, "id": model_id}
+        created = self._server.request(
+            "POST", "/session", params={"directory": self._cwd}, body=body, timeout=120
+        )
+        session_id = created.get("id") if isinstance(created, dict) else None
+        if not session_id:
+            raise OSError("opencode did not return a conversation id")
+        self._session_id = str(session_id)
+
+    def _as_command(self) -> Optional[tuple[str, str]]:
+        """(command, arguments) if the prompt names one of opencode's commands.
+
+        opencode's commands are prompt templates its server expands — the text
+        "/init" sent as a message is just those five characters, and would be
+        answered rather than run. Anything it does not recognise stays an
+        ordinary message, so a sentence that happens to start with a slash is
+        not swallowed.
+        """
+        text = self._prompt.strip()
+        if not text.startswith("/"):
+            return None
+        # Split on any whitespace, not a space: a command sent with attached
+        # files has their paths on the lines after it.
+        parts = text[1:].split(None, 1)
+        if not parts:
+            return None
+        name, arguments = parts[0], parts[1] if len(parts) > 1 else ""
+        known = {command for command, _description in opencode_commands(self._cwd)}
+        return (name, arguments.strip()) if name in known else None
+
+    def _start_command(self, command: str, arguments: str) -> None:
+        """Run one of opencode's commands, and narrate it like any other turn.
+
+        Its command request only answers once the whole turn is over, so it is
+        made from a thread of its own and the event stream is what the window
+        hears from — the same way it hears an ordinary message.
+        """
+        body: dict = {"command": command, "arguments": arguments}
+        provider_id, model_id = opencode_split_model(self._model)
+        if provider_id:
+            body["model"] = f"{provider_id}/{model_id}"
+        agent = _OPENCODE_AGENTS.get(self._permission_mode)
+        if agent:
+            body["agent"] = agent
+
+        def work() -> None:
+            try:
+                assert self._server is not None
+                self._server.request(
+                    "POST",
+                    f"/session/{self._session_id}/command",
+                    params={"directory": self._cwd},
+                    body=body,
+                    timeout=None,
+                )
+            except (OSError, ValueError) as exc:
+                if self._cancelled:
+                    return
+                detail = opencode_error_text(exc, "the request failed")
+                self._fail(f"opencode could not run /{command}: {detail}")
+                # Nothing else will end the turn now, so release the reader.
+                self._close_stream()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_compaction(self) -> None:
+        assert self._server is not None
+        provider_id, model_id = opencode_split_model(
+            self._model or opencode_default_model(self._cwd)
+        )
+        if not provider_id:
+            raise OSError("Choose an opencode model before compacting")
+        self._server.request(
+            "POST",
+            f"/session/{self._session_id}/summarize",
+            params={"directory": self._cwd},
+            body={"providerID": provider_id, "modelID": model_id},
+            timeout=120,
+        )
+
+    def _read_events(self) -> None:
+        stream = self._stream
+        assert stream is not None
+        try:
+            for raw in stream:  # type: ignore[attr-defined]
+                if self._cancelled:
+                    return
+                line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                kind = str(event.get("type") or "")
+                properties = event.get("properties") or {}
+                # Every session on the server shares one stream — the title
+                # writer and any subagent included — so anything that names a
+                # different conversation belongs to somebody else's turn.
+                if properties.get("sessionID") not in (None, self._session_id):
+                    continue
+                if kind == "session.error":
+                    # The repair path re-sends and keeps reading; only an
+                    # unrepaired failure returns here for good.
+                    if not self._on_session_error(properties):
+                        return
+                if kind in ("session.idle", "session.compacted"):
+                    self._finish()
+                    return
+                self._handle_event(kind, properties)
+        except Exception as exc:
+            # Deliberately broad: Stop closes this connection from another
+            # thread, mid-read, and what a socket torn out from under the HTTP
+            # reader raises is not something to enumerate. A stop is expected
+            # and silent; anything else is still reported as the failure it is.
+            if not self._cancelled:
+                self._fail(opencode_error_text(exc, "opencode's event stream ended"))
+            return
+        finally:
+            self._accepting_input.clear()
+        if not self._cancelled:
+            self._fail("opencode closed the connection before the turn finished")
+
+    def _finish(self) -> None:
+        if self._settled.is_set():
+            return
+        self._settled.set()
+        if self._compact:
+            # A compaction produces no answer of its own, so say what happened
+            # rather than finishing in silence.
+            self._on_complete("Conversation compacted.")
+        else:
+            # opencode writes an answer as one text part per step, and a step
+            # boundary is a paragraph boundary — run together they read as one
+            # sentence that was never written.
+            self._on_complete("\n\n".join(self._answer).strip())
+
+    def _handle_event(self, kind: str, properties: dict) -> None:
+        if kind == "message.updated":
+            info = properties.get("info") or {}
+            if isinstance(info, dict) and info.get("id"):
+                self._roles[str(info["id"])] = str(info.get("role") or "")
+        elif kind == "message.part.updated":
+            self._part(properties.get("part") or {})
+        elif kind in ("permission.asked", "permission.v2.asked"):
+            self._answer_permission(properties)
+        elif kind in ("question.asked", "question.v2.asked"):
+            self._answer_question(properties)
+        elif kind == "session.status":
+            status = properties.get("status") or {}
+            if isinstance(status, dict) and status.get("type") == "retry":
+                self._on_activity(
+                    "tool", f"opencode is retrying (attempt {status.get('attempt') or 1})"
+                )
+
+    def _part(self, part: object) -> None:
+        if not isinstance(part, dict):
+            return
+        part_id = str(part.get("id") or "")
+        kind = str(part.get("type") or "")
+        if kind in ("text", "reasoning"):
+            # The user's own message arrives as a part too; only the model's
+            # side of the conversation belongs in the response rows.
+            if self._roles.get(str(part.get("messageID") or "")) != "assistant":
+                return
+            # opencode opens a part empty, streams it a token at a time, then
+            # repeats it in full: that last repeat is what says it is finished
+            # and can be read out as one row rather than a hundred.
+            text = str(part.get("text") or "").strip()
+            if not text or part_id in self._emitted:
+                return
+            self._emitted.add(part_id)
+            if kind == "reasoning":
+                self._on_activity("thinking", text)
+            else:
+                self._answer.append(text)
+                self._on_activity("assistant", text)
+        elif kind == "tool":
+            self._tool(part_id, part)
+
+    def _tool(self, part_id: str, part: dict) -> None:
+        state = part.get("state")
+        if not isinstance(state, dict):
+            return
+        status = str(state.get("status") or "")
+        name = str(part.get("tool") or "tool")
+        if status == "running" and part_id not in self._tools_running:
+            self._tools_running.add(part_id)
+            self._on_activity("tool", _opencode_tool_label(name, state.get("input")))
+        elif status == "completed":
+            output = str(state.get("output") or "").strip()
+            if output:
+                self._on_activity("result", output)
+        elif status == "error":
+            message = str(state.get("error") or "").strip()
+            self._on_activity("result", message or f"{name} failed")
+
+    def _post(self, routes: list[tuple[str, Optional[dict]]], what: str) -> bool:
+        """POST to the first of these routes opencode accepts.
+
+        A permission request and a question both hold the turn open until they
+        are answered, and opencode is in the middle of moving both onto new
+        endpoints. Trying the old one and then the new one costs one failed
+        request in the worst case; getting it wrong costs a turn that never
+        ends, so the routes are tried rather than guessed at.
+        """
+        if self._server is None:
+            return False
+        problem = ""
+        for path, body in routes:
+            try:
+                self._server.request(
+                    "POST", path, params={"directory": self._cwd}, body=body, timeout=30
+                )
+                return True
+            except (OSError, ValueError) as exc:
+                problem = opencode_error_text(exc, f"opencode would not accept {what}")
+        # Saying so matters: unanswered, the turn waits for an answer that is
+        # never coming, and silence would look like the model thinking.
+        self._on_activity("tool", f"Could not answer {what}: {problem}")
+        return False
+
+    def _answer_permission(self, properties: dict) -> None:
+        """Answer a permission request the way the chosen mode says to.
+
+        BlindPilot decides from the permission mode rather than interrupting
+        with a dialog, the same way its Codex adapter does, so a run never
+        stops waiting on an answer nobody was asked for.
+        """
+        request_id = str(properties.get("id") or "")
+        if not request_id or self._server is None:
+            return
+        permission = str(properties.get("permission") or "")
+        mode = self._permission_mode
+        if mode == "bypassPermissions":
+            reply = "always"
+        elif mode == "auto":
+            reply = "once"
+        elif mode == "acceptEdits" and permission in ("edit", "write", "patch"):
+            reply = "once"
+        else:
+            reply = "reject"
+        answered = self._post(
+            [
+                (
+                    f"/session/{self._session_id}/permissions/{request_id}",
+                    {"response": reply},
+                ),
+                (
+                    f"/api/session/{self._session_id}/permission/{request_id}/reply",
+                    {"reply": reply},
+                ),
+            ],
+            "a permission request",
+        )
+        if answered and reply == "reject":
+            self._on_activity(
+                "tool",
+                f"Declined {permission or 'a request'} — the permission mode does not allow it",
+            )
+
+    def _answer_question(self, properties: dict) -> None:
+        """Put a mid-run question to the person and send opencode their answers.
+
+        opencode takes one list of chosen labels per question, in the order it
+        asked them, and a question left unanswered has to be rejected rather
+        than replied to — a turn waiting on an answer that is never coming
+        never ends. It is in the middle of moving both onto new endpoints, so
+        each is tried in turn the same way a permission reply is.
+        """
+        request_id = str(properties.get("id") or "")
+        if not request_id or self._server is None:
+            return
+        questions = _opencode_questions(properties.get("questions"))
+        answers = self._on_question(questions) if (questions and self._on_question) else None
+        self._on_activity("tool", question_summary(questions, answers))
+        if answers is None:
+            self._post(
+                [
+                    (f"/question/{request_id}/reject", None),
+                    (f"/api/session/{self._session_id}/question/{request_id}/reject", None),
+                ],
+                "a question",
+            )
+            return
+        self._question_answered = True
+        body = {"answers": [list(answer) for answer in answers]}
+        self._post(
+            [
+                (f"/question/{request_id}/reply", body),
+                (f"/api/session/{self._session_id}/question/{request_id}/reply", body),
+            ],
+            "a question",
+        )
+
+
 class AgentWorker(Protocol):
     """The part of a backend's worker that the window actually drives.
 
@@ -2427,10 +4514,12 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         return CodexWorker
     if backend == BACKEND_FREEBUFF:
         return FreebuffWorker
+    if backend == BACKEND_OPENCODE:
+        return OpencodeWorker
     if backend == BACKEND_HERMES:
         # Imported here rather than at module scope so a machine without Hermes
         # pays nothing for it, and an import error in the adapter cannot stop
-        # the other three backends from working.
+        # the other backends from working.
         from hermes_worker import HermesWorker
 
         return HermesWorker

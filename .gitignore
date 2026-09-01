@@ -16,3 +16,5 @@ artifacts/
 .release-setup/
 .venv-test/
 .venv-win/
+.freebuff/
+.ruff_cache/

@@ -52,7 +52,7 @@ jobs:
           python -m ruff format --check .
 
       - name: Compile source
-        run: python -m py_compile blind_pilot.py blindpilot_app.py app_updater.py claude_reader.py agent_backends.py markdown_rows.py
+        run: python -m py_compile blind_pilot.py blindpilot_app.py linux_accessibility.py app_updater.py claude_reader.py agent_backends.py markdown_rows.py session_history.py
 
       - name: Build Windows application
         if: matrix.kind == 'windows'
@@ -67,11 +67,13 @@ jobs:
           # the package alone leaves out submodules it loads at runtime, and the
           # remote Hermes backend then reports the package as missing on a
           # machine that has it. Measured on a packaged build, not assumed.
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --add-data "EarCons;EarCons" --collect-submodules accessible_output2 --collect-all winpty --collect-all websocket blind_pilot.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --add-data "EarCons;EarCons" --additional-hooks-dir hooks --collect-submodules accessible_output2 --collect-all winpty --collect-all websocket blind_pilot.py
           $startupSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-smoke" -PassThru -Wait
           if ($startupSmoke.ExitCode -ne 0) { throw "Packaged startup smoke test failed: $($startupSmoke.ExitCode)" }
           $guiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-gui-smoke" -PassThru -Wait
           if ($guiSmoke.ExitCode -ne 0) { throw "Packaged GUI startup smoke test failed: $($guiSmoke.ExitCode)" }
+          $chatGuiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-chat-gui-smoke" -PassThru -Wait
+          if ($chatGuiSmoke.ExitCode -ne 0) { throw "Packaged Chat GUI startup smoke test failed: $($chatGuiSmoke.ExitCode)" }
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           Compress-Archive -Path dist\BlindPilot -DestinationPath "artifacts\${{ matrix.asset }}" -CompressionLevel Optimal
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "artifacts\${{ matrix.asset }}").Hash.ToLowerInvariant()

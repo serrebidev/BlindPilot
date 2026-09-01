@@ -9,15 +9,17 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 import app_updater
 from app_updater import (
     ReleaseInfo,
+    UpdateCancelled,
     UpdateError,
     _WINDOWS_HELPER,
     asset_name_for_platform,
@@ -129,11 +131,209 @@ def test_download_accepts_the_published_hash():
         downloaded.unlink(missing_ok=True)
 
 
+def test_cancelled_download_is_removed_before_any_bytes_are_kept(tmp_path, monkeypatch):
+    archive = b"verified"
+    release = ReleaseInfo(
+        version="0.4.0",
+        tag="v0.4.0",
+        title="Update",
+        notes="",
+        page_url="https://github.com/release",
+        asset_name="BlindPilot-Windows-x64.zip",
+        asset_url="https://github.com/download/update.zip",
+        asset_size=len(archive),
+        sha256=hashlib.sha256(archive).hexdigest(),
+    )
+    temporary = tmp_path / "cancelled.zip"
+    descriptor = os.open(temporary, os.O_CREAT | os.O_RDWR)
+    monkeypatch.setattr(tempfile, "mkstemp", lambda **_kwargs: (descriptor, str(temporary)))
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(UpdateCancelled, match="cancelled"):
+        download_update(
+            release,
+            "0.3.0",
+            cancel=cancel,
+            opener=lambda *_args, **_kwargs: _Response(archive),
+        )
+
+    assert not temporary.exists()
+
+
 def test_schedule_install_rejects_source_runs(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", False, raising=False)
 
     with pytest.raises(UpdateError, match="packaged builds only"):
         schedule_install(tmp_path / "update.zip")
+
+
+def test_macos_installer_is_preflighted_started_detached_and_reports_failures(
+    monkeypatch, tmp_path
+):
+    app = tmp_path / "Applications" / "BlindPilot.app"
+    executable = app / "Contents" / "MacOS" / "BlindPilot"
+    archive = tmp_path / "BlindPilot update.zip"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"old application")
+    archive.write_bytes(b"verified archive")
+    launched = {}
+
+    def popen(argv, **kwargs):
+        launched["argv"] = argv
+        launched["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr("app_updater.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("app_updater.subprocess.Popen", popen)
+    monkeypatch.setattr("app_updater.tempfile.gettempdir", lambda: str(tmp_path))
+
+    schedule_install(archive)
+
+    argv = launched["argv"]
+    helper = Path(argv[1])
+    try:
+        script = helper.read_text(encoding="utf-8")
+        assert argv[0] == "/bin/sh"
+        assert argv[2] == str(os.getpid())
+        assert argv[3] == str(archive)
+        assert argv[4] == str(app.resolve())
+        assert argv[5].endswith(".log")
+        assert argv[6].endswith(app_updater.STATUS_FILE_NAME)
+        assert launched["kwargs"]["start_new_session"] is True
+        assert "creationflags" not in launched["kwargs"]
+        assert launched["kwargs"]["close_fds"] is True
+        assert launched["kwargs"]["cwd"] == str(tmp_path)
+
+        # An unsigned update must have quarantine removed before the old bundle
+        # is touched and checked again before Launch Services is asked to open it.
+        assert script.index('if ! clear_quarantine "$new_app"; then') < script.index(
+            'mv "$app_path" "$backup"'
+        )
+        assert script.index('if ! clear_quarantine "$app_path"; then') < script.index(
+            'log "Update applied. Restarting BlindPilot."'
+        )
+        assert 'open -n "$app_path"' in script
+        assert 'save_failure "$1"' in script
+        assert 'ditto "$backup" "$app_path"' in script
+    finally:
+        helper.unlink(missing_ok=True)
+
+
+def test_macos_update_rejects_a_translocated_application():
+    problem = app_updater.macos_install_problem(
+        PurePosixPath("/private/var/folders/example/AppTranslocation/token/d/BlindPilot.app")
+    )
+
+    assert "read-only copy" in problem
+    assert "Applications folder" in problem
+
+
+def test_macos_update_rejects_an_application_the_user_cannot_replace(monkeypatch):
+    monkeypatch.setattr("app_updater.os.access", lambda *_args: False)
+
+    problem = app_updater.macos_install_problem(Path("/Applications/BlindPilot.app"))
+
+    assert "not allowed to change" in problem
+    assert "home folder" in problem
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS ditto and xattr")
+def test_macos_helper_replaces_a_quarantined_unsigned_update_and_relaunches(tmp_path):
+    install_parent = tmp_path / "Installed Applications"
+    app = install_parent / "BlindPilot.app"
+    old_executable = app / "Contents" / "MacOS" / "BlindPilot"
+    old_executable.parent.mkdir(parents=True)
+    old_executable.write_text("old application", encoding="utf-8")
+    old_executable.chmod(0o755)
+
+    package = tmp_path / "package" / "BlindPilot.app"
+    new_executable = package / "Contents" / "MacOS" / "BlindPilot"
+    new_executable.parent.mkdir(parents=True)
+    new_executable.write_text("new application", encoding="utf-8")
+    new_executable.chmod(0o755)
+    archive = tmp_path / "BlindPilot update.zip"
+    subprocess.run(
+        ["/usr/bin/ditto", "-c", "-k", "--keepParent", str(package), str(archive)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    helper = tmp_path / "BlindPilot updater.sh"
+    helper.write_text(app_updater._MACOS_HELPER, encoding="utf-8")
+    helper.chmod(0o700)
+    log = tmp_path / "update.log"
+    status = tmp_path / app_updater.STATUS_FILE_NAME
+    open_marker = tmp_path / "opened.txt"
+
+    # The wrappers make the test deterministic: extraction receives the same
+    # quarantine metadata as an internet download, while opening records the
+    # relaunch request without starting a GUI during CI.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_open = fake_bin / "open"
+    fake_open.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$OPEN_MARKER"\n', encoding="utf-8")
+    fake_open.chmod(0o755)
+    fake_ditto = fake_bin / "ditto"
+    fake_ditto.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-x" ]; then\n'
+        '    /usr/bin/ditto "$@" || exit $?\n'
+        '    /usr/bin/xattr -w com.apple.quarantine test-download "$4/BlindPilot.app"\n'
+        "    exit $?\n"
+        "fi\n"
+        'exec /usr/bin/ditto "$@"\n',
+        encoding="utf-8",
+    )
+    fake_ditto.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+    environment["TMPDIR"] = str(tmp_path)
+    environment["OPEN_MARKER"] = str(open_marker)
+    # The helper waits for its parent PID to close before replacing the bundle.
+    # Passing a PID that is already gone makes that wait end at once. Zero is
+    # wrong here: kill(2) reads pid 0 as the caller's own process group, so the
+    # helper would wait out its 30-second window and then signal this test's
+    # whole process group.
+    dead_parent = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    dead_parent_pid = dead_parent.pid
+    dead_parent.wait()
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            str(helper),
+            str(dead_parent_pid),
+            str(archive),
+            str(app),
+            str(log),
+            str(status),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert old_executable.read_text(encoding="utf-8") == "new application"
+    attributes = subprocess.run(
+        ["/usr/bin/xattr", "-lr", str(app)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert "com.apple.quarantine:" not in attributes.stdout
+    assert open_marker.read_text(encoding="utf-8").splitlines() == ["-n", str(app)]
+    assert not list(install_parent.glob("BlindPilot.app.update-backup-*"))
+    assert not archive.exists()
+    assert not helper.exists()
+    assert not log.exists()
+    assert not status.exists()
 
 
 def test_windows_installer_waits_swaps_and_relaunches(monkeypatch, tmp_path):

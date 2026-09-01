@@ -342,6 +342,13 @@ class HermesWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
+        # Every backend the window drives is handed this, because four of them
+        # can pause a turn to ask a multiple-choice question. Hermes' gateway
+        # protocol has no such request, so the callback is accepted and never
+        # called -- accepted rather than omitted, because the window passes it
+        # unconditionally and a worker that refused it would fail every turn
+        # with a TypeError the moment the caller stopped special-casing us.
+        on_question: Optional[Callable[..., object]] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -378,6 +385,8 @@ class HermesWorker(threading.Thread):
         self._on_complete = on_complete
         self._on_failed = on_failed
         self._on_done = on_done
+        # Kept so the accessor below can answer honestly rather than by guess.
+        self._on_question = on_question
         self._transport: Optional[Transport] = None
         self._cancelled = False
         self._accepting_input = threading.Event()

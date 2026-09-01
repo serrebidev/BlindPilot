@@ -19,7 +19,8 @@ the prompt box; arrowing Up from the prompt enters the newest row, while arrow
 keys at either end of the list stay in the list. Tab is the only navigation key
 that moves from the responses into the prompt.
 
-Multi-session: the main window hosts a notebook with one tab per conversation.
+Multi-session: a tab strip across the top selects one of the window's
+switchable conversation pages.
 Each tab owns its own conversation (session_id, prompt, rows) and its subprocess
 runs with that directory as cwd, mirroring how a user would open multiple
 terminal sessions in different project folders.
@@ -27,21 +28,31 @@ terminal sessions in different project folders.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
+import zipfile
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
+
+from linux_accessibility import announce as _linux_native_announce
 
 import wx
 
@@ -63,22 +74,40 @@ from agent_backends import (
     BACKEND_HERMES,
     BACKEND_IDS,
     BACKEND_LABELS,
+    BACKEND_OPENCODE,
     BACKENDS,
     FREEBUFF_PREFERRED_MODEL,
     AgentWorker,
+    AskQuestions,
+    Question,
+    QuestionOption,
     backend_auth_ok,
     backend_label,
     blindpilot_config_dir,
+    blindpilot_data_dir,
     codex_model_options,
     compaction_request,
     discard_freebuff_prewarm,
+    end_process_group,
     find_backend_cli,
     freebuff_model_options,
     invalidate_backend_cache,
     normalize_backend,
+    opencode_auth_methods,
+    opencode_commands,
+    opencode_connect_api_key,
+    opencode_disconnect,
+    opencode_model_options,
+    opencode_oauth_finish,
+    opencode_oauth_start,
+    opencode_providers,
+    own_group_kwargs,
     prewarm_freebuff,
+    question_summary,
     reserve_hidden_console,
     set_freebuff_model,
+    stop_opencode_server,
+    subprocess_env,
     worker_class,
 )
 from hermes_backend import (
@@ -101,6 +130,7 @@ from session_history import (
     describe_age,
     list_history,
     load_turns,
+    make_title,
 )
 
 # Optional macOS-only path for posting NSAccessibility announcements so
@@ -133,12 +163,23 @@ if platform.system() == "Windows":
         _SPEAKER = None
 
 
+def _linux_announce(text: str) -> bool:
+    """Post an ATK announcement that Orca reads without moving keyboard focus."""
+    if wx.GetApp() is None:
+        return False
+    if not wx.IsMainThread():
+        wx.CallAfter(_linux_announce, text)
+        return True
+    return _linux_native_announce(text)
+
+
 def announce(text: str) -> None:
     """Speak `text` via the screen reader without stealing focus.
 
-    macOS uses the NSAccessibility announcement API; Windows goes through
-    accessible_output2. Callers also mirror the message to the status bar so
-    there is a fallback the review cursor can reach.
+    macOS uses the NSAccessibility announcement API, Windows goes through
+    accessible_output2, and Linux posts an ATK announcement for Orca. Callers
+    also mirror the message to the status bar so there is a fallback the review
+    cursor can reach.
     """
     if _SPEAKER is not None:
         try:
@@ -147,6 +188,8 @@ def announce(text: str) -> None:
             _SPEAKER.speak(text, interrupt=False)
         except Exception:
             pass
+        return
+    if platform.system() == "Linux" and _linux_announce(text):
         return
     if not _MAC_ANNOUNCE:
         return
@@ -180,7 +223,10 @@ def announce(text: str) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.3.14"
+APP_VERSION = "0.8.1"
+APP_MODE_AGENT = "agent"
+APP_MODE_CHAT = "chat"
+APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
 
 # Streamed coding-agent output can arrive much faster than a native list and a
 # screen reader can consume it. Process a bounded number of events per GUI turn
@@ -306,6 +352,26 @@ _NO_WINDOW = 0x08000000 if platform.system() == "Windows" else 0
 
 def _no_window_kwargs() -> dict:
     return {"creationflags": _NO_WINDOW} if _NO_WINDOW else {}
+
+
+def _open_web_page(url: str) -> bool:
+    """Open a web address, and nothing but a web address.
+
+    Everything else handed to the platform opener is a protocol handler being
+    invoked rather than a page being shown: `file:` opens whatever is at that
+    path, and Windows gives `ms-msdt:` and its relatives to programs of their
+    own. Sign-in addresses arrive over a provider catalog BlindPilot neither
+    controls nor inspects, so the scheme is checked rather than trusted.
+
+    False means nothing was opened, for any reason. Every caller says the
+    address out loud in that case, so there is still a way through by hand.
+    """
+    if urllib.parse.urlsplit(url).scheme.casefold() not in ("http", "https"):
+        return False
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
 
 
 def _same_dir(a: str, b: str) -> bool:
@@ -762,6 +828,7 @@ def install_claude(log: Callable[[str], None]) -> Optional[str]:
 _NPM_BACKEND_PACKAGES = {
     BACKEND_CODEX: "@openai/codex",
     BACKEND_FREEBUFF: "freebuff",
+    BACKEND_OPENCODE: "opencode-ai",
 }
 
 
@@ -775,35 +842,267 @@ def _backend_installs_with_npm(backend: str) -> bool:
     return normalize_backend(backend) in _NPM_BACKEND_PACKAGES
 
 
+NODE_RELEASE_INDEX_URL = "https://nodejs.org/dist/index.json"
+NODE_RELEASE_BASE_URL = "https://nodejs.org/dist"
+_NODE_MINIMUM_MAJOR = 18
+
+
+def _managed_npm_prefix() -> Path:
+    """A writable per-user prefix owned by BlindPilot, never a system folder."""
+    return blindpilot_data_dir() / "npm"
+
+
+def _managed_npm_bin_dir() -> Path:
+    prefix = _managed_npm_prefix()
+    return prefix if platform.system() == "Windows" else prefix / "bin"
+
+
+def _node_runtime_root() -> Path:
+    return blindpilot_data_dir() / "runtimes" / "node"
+
+
+def _node_archive_spec(
+    version: str, system: Optional[str] = None, machine: Optional[str] = None
+) -> Optional[tuple[str, str]]:
+    """Return the official Node archive name and its extracted folder."""
+    system = system or platform.system()
+    machine = (machine or platform.machine()).casefold()
+    os_name = {"Windows": "win", "Darwin": "darwin", "Linux": "linux"}.get(system)
+    arch = {
+        "amd64": "x64",
+        "x86_64": "x64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }.get(machine)
+    if not os_name or not arch:
+        return None
+    stem = f"node-{version}-{os_name}-{arch}"
+    extension = ".zip" if system == "Windows" else ".tar.gz"
+    return stem + extension, stem
+
+
+def _managed_node_dir() -> Optional[Path]:
+    """Newest complete portable Node runtime previously installed by BlindPilot."""
+    spec = _node_archive_spec("v0.0.0")
+    if spec is None:
+        return None
+    marker = "-".join(spec[1].split("-")[-2:])
+    executable = "node.exe" if platform.system() == "Windows" else "bin/node"
+    npm = "npm.cmd" if platform.system() == "Windows" else "bin/npm"
+    candidates: list[tuple[tuple[int, ...], Path]] = []
+    try:
+        folders = _node_runtime_root().glob(f"node-v*-{marker}")
+        for folder in folders:
+            match = re.match(r"node-v(\d+(?:\.\d+)+)-", folder.name)
+            if match and (folder / executable).is_file() and (folder / npm).is_file():
+                candidates.append((tuple(int(part) for part in match.group(1).split(".")), folder))
+    except OSError:
+        return None
+    return max(candidates, default=((), None), key=lambda item: item[0])[1]
+
+
+def _managed_npm() -> Optional[str]:
+    runtime = _managed_node_dir()
+    if runtime is None:
+        return None
+    relative = "npm.cmd" if platform.system() == "Windows" else "bin/npm"
+    return str(runtime / relative)
+
+
+def activate_managed_cli_paths() -> None:
+    """Make BlindPilot-managed Node and backend launchers usable this run."""
+    runtime = _managed_node_dir()
+    if runtime is not None:
+        _add_to_process_path(runtime if platform.system() == "Windows" else runtime / "bin")
+    managed_bin = _managed_npm_bin_dir()
+    if managed_bin.is_dir():
+        _add_to_process_path(managed_bin)
+
+
+def _find_npm() -> Optional[str]:
+    return shutil.which("npm") or _managed_npm()
+
+
+def _automatic_npm_install_available() -> bool:
+    return _find_npm() is not None or _node_archive_spec("v0.0.0") is not None
+
+
+def _fetch_url_bytes(url: str, timeout: int = 30) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": f"BlindPilot/{APP_VERSION}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def _safe_extract_node_archive(archive_path: Path, destination: Path) -> None:
+    """Extract one verified Node archive without permitting path traversal."""
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    if archive_path.suffix.casefold() == ".zip":
+        with zipfile.ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                target = (destination / member.filename).resolve()
+                if os.path.commonpath((str(root), str(target))) != str(root):
+                    raise OSError("The Node.js archive contains an unsafe path.")
+            archive.extractall(destination)
+        return
+    with tarfile.open(archive_path, mode="r:gz") as archive:
+        archive.extractall(destination, filter="data")
+
+
+def install_portable_node(log: Callable[[str], None]) -> Optional[str]:
+    """Install the latest Node LTS and npm for this user, with no elevation."""
+    existing = _managed_npm()
+    if existing:
+        node_bin = Path(existing).parent
+        try:
+            changed = ensure_on_path(node_bin)
+            if changed:
+                log(f"Added {node_bin} to {changed}.")
+        except OSError as exc:
+            log(f"Node.js is installed, but adding it to PATH failed: {exc}")
+        return existing
+    if _node_archive_spec("v0.0.0") is None:
+        log(
+            f"Automatic Node.js installation is not available for "
+            f"{platform.system()} {platform.machine()}."
+        )
+        return None
+
+    log("Node.js and npm were not found. Installing the latest Node.js LTS for this user.")
+    try:
+        releases = json.loads(_fetch_url_bytes(NODE_RELEASE_INDEX_URL).decode("utf-8"))
+        release = next(
+            item
+            for item in releases
+            if isinstance(item, dict)
+            and item.get("lts")
+            and isinstance(item.get("version"), str)
+            and int(item["version"].lstrip("v").split(".", 1)[0]) >= _NODE_MINIMUM_MAJOR
+        )
+        version = release["version"]
+        archive_name, extracted_name = _node_archive_spec(version) or ("", "")
+        if not archive_name:
+            raise OSError("No official Node.js archive is available for this computer.")
+        release_url = f"{NODE_RELEASE_BASE_URL}/{version}"
+        checksums = _fetch_url_bytes(f"{release_url}/SHASUMS256.txt").decode("utf-8")
+        checksum = next(
+            line.split()[0] for line in checksums.splitlines() if line.split()[1:] == [archive_name]
+        )
+    except (OSError, ValueError, StopIteration, urllib.error.URLError) as exc:
+        log(f"Could not discover the current Node.js LTS release: {exc}")
+        return None
+
+    runtime_root = _node_runtime_root()
+    destination = runtime_root / extracted_name
+    if destination.is_dir():
+        npm = destination / ("npm.cmd" if platform.system() == "Windows" else "bin/npm")
+        return str(npm) if npm.is_file() else None
+
+    try:
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="install-", dir=runtime_root) as temporary:
+            temporary_path = Path(temporary)
+            archive_path = temporary_path / archive_name
+            log(f"Downloading Node.js {version} from nodejs.org...")
+            request = urllib.request.Request(
+                f"{release_url}/{archive_name}",
+                headers={"User-Agent": f"BlindPilot/{APP_VERSION}"},
+            )
+            digest = hashlib.sha256()
+            with (
+                urllib.request.urlopen(request, timeout=60) as response,
+                open(archive_path, "wb") as output,
+            ):
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+            if digest.hexdigest().casefold() != checksum.casefold():
+                raise OSError("The downloaded Node.js archive failed SHA-256 verification.")
+            extract_root = temporary_path / "extracted"
+            _safe_extract_node_archive(archive_path, extract_root)
+            extracted = extract_root / extracted_name
+            if not extracted.is_dir():
+                raise OSError("The Node.js archive did not contain its expected folder.")
+            try:
+                os.replace(extracted, destination)
+            except FileExistsError:
+                pass  # Another install thread completed the same release first.
+    except (OSError, tarfile.TarError, zipfile.BadZipFile, urllib.error.URLError) as exc:
+        log(f"Node.js installation failed: {exc}")
+        return None
+
+    npm_path = destination / ("npm.cmd" if platform.system() == "Windows" else "bin/npm")
+    node_bin = destination if platform.system() == "Windows" else destination / "bin"
+    if not npm_path.is_file():
+        log("Node.js was extracted, but npm was missing from the installed runtime.")
+        return None
+    try:
+        changed = ensure_on_path(node_bin)
+        if changed:
+            log(f"Added {node_bin} to {changed}.")
+    except OSError as exc:
+        log(f"Node.js was installed, but adding it to PATH failed: {exc}")
+    log(f"Installed Node.js and npm: {npm_path}")
+    return str(npm_path)
+
+
+def _npm_environment(npm: str) -> dict[str, str]:
+    """npm's own directory first, then everything a terminal would have.
+
+    npm is itself a shim that has to find `node`, so it fails from the macOS
+    Dock for exactly the reason the provider CLIs do.
+    """
+    return subprocess_env(npm)
+
+
 def _npm_install_argv(backend: str) -> Optional[List[str]]:
     """Return the npm command for a backend, or None if npm is unavailable."""
     package = _NPM_BACKEND_PACKAGES.get(normalize_backend(backend))
-    npm = shutil.which("npm")
+    npm = _find_npm()
     if not package or not npm:
         return None
-    return [npm, "install", "--global", package]
+    return [
+        npm,
+        "install",
+        "--global",
+        "--prefix",
+        str(_managed_npm_prefix()),
+        package,
+    ]
 
 
 def _npm_update_argv(backend: str) -> Optional[List[str]]:
     """Return an npm update command pinned to the package's latest tag."""
     package = _NPM_BACKEND_PACKAGES.get(normalize_backend(backend))
-    npm = shutil.which("npm")
+    npm = _find_npm()
     if not package or not npm:
         return None
-    return [npm, "install", "--global", f"{package}@latest"]
+    return [
+        npm,
+        "install",
+        "--global",
+        "--prefix",
+        str(_managed_npm_prefix()),
+        f"{package}@latest",
+    ]
 
 
-def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
-    """Install one selected backend and return its discovered executable."""
-    backend = normalize_backend(backend)
-    if backend == BACKEND_CLAUDE:
-        return install_claude(log)
-    argv = _npm_install_argv(backend)
-    label = backend_label(backend)
-    if argv is None:
-        log(f"npm was not found, so BlindPilot cannot install {label} automatically.")
-        return None
-    log(f"Installing {label} with npm. This can take a minute.")
+def _managed_backend_binary(backend: str) -> Optional[str]:
+    executable = BACKENDS[normalize_backend(backend)].executable
+    suffixes = (".exe", ".cmd", ".ps1", "") if platform.system() == "Windows" else ("",)
+    return next(
+        (
+            str(candidate)
+            for suffix in suffixes
+            if (candidate := _managed_npm_bin_dir() / f"{executable}{suffix}").is_file()
+        ),
+        None,
+    )
+
+
+def _run_logged_process(
+    argv: List[str], log: Callable[[str], None], env: Optional[dict[str, str]] = None
+) -> Optional[int]:
     try:
         proc = subprocess.Popen(
             argv,
@@ -813,6 +1112,7 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             **_no_window_kwargs(),
         )
     except OSError as exc:
@@ -823,12 +1123,48 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
         line = line.rstrip()
         if line:
             log(line)
-    rc = proc.wait()
-    binary = find_backend_cli(backend)
+    return proc.wait()
+
+
+def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
+    """Install one selected backend and return its discovered executable."""
+    backend = normalize_backend(backend)
+    if backend == BACKEND_CLAUDE:
+        return install_claude(log)
+    label = backend_label(backend)
+    npm = _find_npm()
+    if npm is None:
+        npm = install_portable_node(log)
+    argv = _npm_install_argv(backend) if npm else None
+    if argv is None:
+        log(f"npm could not be installed, so BlindPilot cannot install {label} automatically.")
+        return None
+    if backend == BACKEND_OPENCODE:
+        # Same reason as an update: npm cannot replace a running executable.
+        stop_opencode_server()
+    log(f"Installing {label} with npm. This can take a minute.")
+    rc = _run_logged_process(argv, log, env=_npm_environment(npm))
+    _add_to_process_path(_managed_npm_bin_dir())
+    binary = _managed_backend_binary(backend) or find_backend_cli(backend)
     if binary is None:
         log(f"npm finished with exit code {rc}, but {label} was not found afterwards.")
         return None
-    log(f"Installed: {binary}")
+    try:
+        changed = ensure_on_path(Path(binary).parent)
+        if changed:
+            log(f"Added {Path(binary).parent} to {changed}.")
+    except OSError as exc:
+        log(f"Installed, but adding it to PATH failed: {exc}")
+
+    # Freebuff's npm package is only a launcher. Asking every backend for its
+    # version both verifies it can start and makes Freebuff download and verify
+    # the native binary before the setup wizard advances to sign-in.
+    log(f"Verifying the {label} installation...")
+    verify_rc = _run_logged_process([binary, "--version"], log, env=_npm_environment(npm))
+    if verify_rc != 0:
+        log(f"{label} was installed but failed its startup check (exit code {verify_rc}).")
+        return None
+    log(f"Installed and verified: {binary}")
     return binary
 
 
@@ -842,6 +1178,7 @@ def _executable_version(binary: str) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            env=subprocess_env(binary),
             **_no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -899,36 +1236,45 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
     if backend == BACKEND_CLAUDE:
         argv = [binary, "update"]
     else:
+        if _find_npm() is None and install_portable_node(log) is None:
+            log(f"npm could not be installed, so BlindPilot cannot update {label} automatically.")
+            return False
         argv = _npm_update_argv(backend)
         if argv is None:
-            log(f"npm was not found, so BlindPilot cannot update {label} automatically.")
+            log(f"npm could not be found, so BlindPilot cannot update {label} automatically.")
             return False
+    if backend == BACKEND_OPENCODE:
+        # The server BlindPilot has been talking to *is* the executable npm is
+        # about to replace, and Windows will not overwrite one that is running.
+        # It is started again by the next thing that needs it.
+        log("Stopping opencode's server so its executable can be replaced...")
+        stop_opencode_server()
     log(f"Checking for {label} updates...")
-    try:
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **_no_window_kwargs(),
-        )
-    except OSError as exc:
-        log(f"The updater could not be started: {exc}")
-        return False
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line:
-            log(line)
-    rc = proc.wait()
+    npm = _find_npm() if backend != BACKEND_CLAUDE else None
+    rc = _run_logged_process(argv, log, env=_npm_environment(npm) if npm else None)
     if rc != 0:
         log(f"{label} update exited with code {rc}.")
         return False
     if backend == BACKEND_CLAUDE and not _repair_claude_native_update(binary, log):
         return False
+    if backend != BACKEND_CLAUDE:
+        _add_to_process_path(_managed_npm_bin_dir())
+        managed_binary = _managed_backend_binary(backend)
+        if managed_binary is None:
+            log(f"{label} updated, but its executable was not found afterwards.")
+            return False
+        try:
+            changed = ensure_on_path(Path(managed_binary).parent)
+            if changed:
+                log(f"Added {Path(managed_binary).parent} to {changed}.")
+        except OSError as exc:
+            log(f"{label} updated, but adding it to PATH failed: {exc}")
+        verify_rc = _run_logged_process(
+            [managed_binary, "--version"], log, env=_npm_environment(npm or "")
+        )
+        if verify_rc != 0:
+            log(f"{label} updated but failed its startup check (exit code {verify_rc}).")
+            return False
     if backend == BACKEND_FREEBUFF:
         invalidate_backend_cache(BACKEND_FREEBUFF)
         models, _efforts, _current, _effort, _error = freebuff_model_options()
@@ -966,7 +1312,7 @@ AUTH_ERROR_MARKERS = (
     "auth required",
     "oauth token",
 )
-AUTH_HINT = "Not signed in — run `claude /login` in a terminal, then try again."
+AUTH_HINT = "Not signed in — run `claude auth login` in a terminal, then try again."
 
 
 def _check_auth_quick(binary: str) -> bool:
@@ -978,6 +1324,7 @@ def _check_auth_quick(binary: str) -> bool:
             text=True,
             timeout=12,
             stdin=subprocess.DEVNULL,
+            env=subprocess_env(binary),
             **_no_window_kwargs(),
         )
         combined = (result.stdout + result.stderr).lower()
@@ -1081,6 +1428,7 @@ def _run_claude(binary: str, args: List[str], cwd: Optional[str], timeout: int) 
             stdin=subprocess.DEVNULL,
             encoding="utf-8",
             errors="replace",
+            env=subprocess_env(binary),
             **_no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -1207,6 +1555,17 @@ def probe_model_options(
     if backend == BACKEND_FREEBUFF:
         models, efforts, current_model, current_effort, error = freebuff_model_options()
         return ModelOptions(models, efforts, current_model, current_effort, error)
+
+    if backend == BACKEND_OPENCODE:
+        models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
+        options = ModelOptions(models, efforts, current_model, current_effort, error)
+        if models:
+            with _probe_lock:
+                _probe_cache[(f"{backend}:{cwd or ''}", _cli_stamp(binary))] = (
+                    time.time(),
+                    options,
+                )
+        return options
 
     # The two probes are independent, so the help text is fetched while the
     # slower `/model` status call is still running.
@@ -1339,6 +1698,13 @@ _CLAUDE_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/status", "Show account and subscription status"),
 ]
 
+# opencode's own commands are not a fixed list: a project can define its own,
+# and BlindPilot reads whichever ones this directory has. Only /connect is
+# always there, because that one is BlindPilot's.
+_OPENCODE_SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/connect", "Connect a provider to opencode, or disconnect one [BlindPilot]"),
+]
+
 _FREEBUFF_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/new", "Start a new FreeBuff conversation [BlindPilot]"),
     ("/history", "Open FreeBuff conversation history"),
@@ -1352,70 +1718,66 @@ _FREEBUFF_SLASH_COMMANDS: list[tuple[str, str]] = [
 ]
 
 
-def _slash_commands_for_backend(backend: str) -> list[tuple[str, str]]:
+def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list[tuple[str, str]]:
     commands = list(_BLINDPILOT_SLASH_COMMANDS)
     backend = normalize_backend(backend)
     if backend == BACKEND_CLAUDE:
         commands.extend(_CLAUDE_SLASH_COMMANDS)
     elif backend == BACKEND_FREEBUFF:
         commands.extend(_FREEBUFF_SLASH_COMMANDS)
+    elif backend == BACKEND_OPENCODE:
+        commands.extend(_OPENCODE_SLASH_COMMANDS)
+        # Whatever this directory's opencode actually offers, which is its two
+        # built-in commands plus any the project defines for itself.
+        commands.extend(
+            (f"/{name}", description or f"Run opencode's {name} command")
+            for name, description in opencode_commands(cwd)
+        )
     return commands
 
 
-_CYCLE_VALUES = ["default", "acceptEdits", "plan"]
+# BlindPilot runs its backends hands-off: a run that stops to ask a question
+# nobody is watching for is a run that never finishes. "bypassPermissions" is
+# what "never stop to ask" means to every provider that has such a mode, so it
+# is where a new tab starts and where the quick-cycle chord returns to.
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
+
+_CYCLE_VALUES = [DEFAULT_PERMISSION_MODE, "acceptEdits", "plan"]
 _MODE_LABELS = [label for _v, label, _d in PERMISSION_MODES]
 _MODE_VALUES = [value for value, _l, _d in PERMISSION_MODES]
 _MODE_DESCRIPTIONS = {value: desc for value, _l, desc in PERMISSION_MODES}
-
-
-def _claude_settings_files(cwd: str) -> List[Path]:
-    """Claude Code's own settings files, lowest precedence first.
-
-    Same order the CLI itself uses: your user settings, then the project's
-    checked-in settings, then the project's local (git-ignored) settings.
-    """
-    user_dir = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    project = Path(cwd) / ".claude"
-    return [
-        Path(user_dir) / "settings.json",
-        project / "settings.json",
-        project / "settings.local.json",
-    ]
-
-
-def _claude_config_permission_mode(cwd: str) -> str:
-    """``permissions.defaultMode`` from Claude Code's settings, or "" if unset."""
-    found = ""
-    for path in _claude_settings_files(cwd):
-        try:
-            with open(path, "r", encoding="utf-8-sig") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        perms = data.get("permissions")
-        if not isinstance(perms, dict):
-            continue
-        mode = perms.get("defaultMode")
-        if isinstance(mode, str) and mode in _MODE_VALUES:
-            found = mode  # later file wins
-    return found
 
 
 def _default_permission_mode(cwd: str, backend: str = BACKEND_CLAUDE) -> str:
     """The mode a new session tab starts in.
 
     Your last choice in this app wins, because it was made deliberately.
-    Failing that we use whatever Claude Code itself is configured to use, so
-    the app matches the CLI instead of always starting at "default".
+    Failing that every backend starts fully automatic: BlindPilot is driven by
+    ear, and a backend that stops mid-run to ask permission stops a run its
+    user cannot see is waiting.
+
+    ``cwd`` and ``backend`` are what a per-directory or per-provider default
+    would key off; neither changes the answer today, and both are kept so the
+    call sites do not have to change if one ever does.
     """
     saved = _load_config().get("permission_mode")
     if isinstance(saved, str) and saved in _MODE_VALUES:
         return saved
-    if normalize_backend(backend) == BACKEND_CLAUDE:
-        return _claude_config_permission_mode(cwd) or "default"
-    return "default"
+    return DEFAULT_PERMISSION_MODE
+
+
+def adopt_full_auto_default(config: dict) -> bool:
+    """Move a config written before full-auto was the default onto it.
+
+    Returns whether ``config`` was changed. Only a mode saved by an older
+    BlindPilot is moved: once this has run, a mode chosen in the picker is
+    the user's and is left exactly where they put it.
+    """
+    if config.get("permission_default") == DEFAULT_PERMISSION_MODE:
+        return False
+    config["permission_default"] = DEFAULT_PERMISSION_MODE
+    config["permission_mode"] = DEFAULT_PERMISSION_MODE
+    return True
 
 
 def _remember_permission_mode(value: str) -> None:
@@ -1443,11 +1805,21 @@ def _short_label(path: str) -> str:
 
 
 def _tab_title(text: str, limit: int = 32) -> str:
-    """Tab label for a resumed conversation: its first message, cut to fit."""
+    """A conversation's name, cut to something a tab strip can show."""
     flat = " ".join((text or "").split())
     if len(flat) <= limit:
         return flat
     return flat[: limit - 1].rstrip() + "…"
+
+
+def _tab_label(title: str, cwd: str) -> str:
+    """What a tab is called.
+
+    The conversation in it, which is the one thing that tells two tabs in the
+    same folder apart. A conversation has no name until its first message, so
+    until then the folder is the most useful thing the tab can say.
+    """
+    return _tab_title(title) or _short_label(cwd)
 
 
 def _tool_use_label(name: str, params: dict) -> str:
@@ -1671,6 +2043,7 @@ class _Settings:
         cfg = _load_config()
         self.live_rows = bool(cfg.get("live_rows", True))
         self.speak_live = bool(cfg.get("speak_live", True))
+        self.sounds_enabled = bool(cfg.get("sounds_enabled", True))
         self.text_view = bool(cfg.get("text_view", False))
         self.show_thinking = bool(cfg.get("show_thinking", False))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
@@ -1680,6 +2053,7 @@ class _Settings:
         cfg = _load_config()
         cfg["live_rows"] = self.live_rows
         cfg["speak_live"] = self.speak_live
+        cfg["sounds_enabled"] = self.sounds_enabled
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
         cfg["progress_cue"] = self.progress_cue
@@ -1801,9 +2175,10 @@ class Earcons:
     by re-spawning in a daemon thread). Missing files are silently ignored.
     """
 
-    def __init__(self, folder: str):
+    def __init__(self, folder: str, enabled: bool = True):
         self._folder = folder
         self._system = platform.system()
+        self.enabled = bool(enabled)
         self.send = self._resolve("send")
         self.received = self._resolve("received", "Recieved")
         self.in_progress = self._resolve("in-progress", "in_progress")
@@ -1834,7 +2209,7 @@ class Earcons:
         return None
 
     def _play_once(self, path: Optional[str]) -> None:
-        if not path:
+        if not self.enabled or not path:
             return
         try:
             if self._system == "Windows":
@@ -1853,11 +2228,13 @@ class Earcons:
             pass
 
     def play_send(self) -> None:
-        self._play_once(self.send)
+        if self.enabled:
+            self._play_once(self.send)
 
     def play_received(self) -> None:
         self.stop_progress()
-        self._play_once(self.received)
+        if self.enabled:
+            self._play_once(self.received)
 
     def start_progress(self) -> None:
         """Signal that a turn is running, in whichever way Options asks for.
@@ -1868,7 +2245,7 @@ class Earcons:
         still mark the boundaries of the turn.
         """
         self.stop_progress()
-        if not self.in_progress:
+        if not self.enabled or not self.in_progress:
             return
         mode = SETTINGS.progress_cue
         if mode == CUE_OFF:
@@ -1889,9 +2266,14 @@ class Earcons:
             except Exception:
                 pass
             return
+        # A fresh event per run, never the previous one reset: the thread this
+        # replaces may still be inside `wait()`, and clearing the event it is
+        # watching would set it looping again alongside the new one. Turn by
+        # turn that is how one progress cue becomes several playing at once.
         self._cue_sounding = True
-        self._loop_stop.clear()
-        self._loop_thread = threading.Thread(target=self._loop_unix, daemon=True)
+        stop = threading.Event()
+        self._loop_stop = stop
+        self._loop_thread = threading.Thread(target=self._loop_unix, args=(stop,), daemon=True)
         self._loop_thread.start()
 
     def _start_periodic(self, every_seconds: int) -> None:
@@ -1899,36 +2281,48 @@ class Earcons:
 
         One timer thread, woken by the stop event rather than by sleeping in
         fixed steps, so ``stop_progress`` ends it immediately instead of after
-        the current interval.
+        the current interval. The event is created fresh here for the same
+        reason as in the looping path above.
         """
-        self._loop_stop.clear()
+        stop = threading.Event()
+        self._loop_stop = stop
         self._loop_thread = threading.Thread(
-            target=self._periodic, args=(every_seconds,), daemon=True
+            target=self._periodic, args=(every_seconds, stop), daemon=True
         )
         self._loop_thread.start()
 
-    def _periodic(self, every_seconds: int) -> None:
-        while not self._loop_stop.is_set():
+    def _periodic(self, every_seconds: int, stop: threading.Event) -> None:
+        while not stop.is_set():
             self._play_once(self.in_progress)
             # Returns True the moment the turn ends, so the wait is not a
             # fixed sleep the stop has to outlast.
-            if self._loop_stop.wait(every_seconds):
+            if stop.wait(every_seconds):
                 return
 
-    def _loop_unix(self) -> None:
+    def _loop_unix(self, stop: threading.Event) -> None:
         player = self._unix_player()
         if not player:
             return
-        while not self._loop_stop.is_set():
+        while not stop.is_set():
+            started = time.monotonic()
             try:
-                self._loop_proc = subprocess.Popen(
+                proc = subprocess.Popen(
                     player + [self.in_progress],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                self._loop_proc.wait()
+                if stop.is_set():
+                    proc.kill()
+                    return
+                self._loop_proc = proc
+                proc.wait()
             except Exception:
-                break
+                return
+            # A player that cannot play the file returns at once, and looping
+            # on that spawns processes as fast as the machine allows. One cue
+            # that never sounds is a bug; a fork bomb behind it is a hang.
+            if not stop.is_set() and time.monotonic() - started < 0.05:
+                return
 
     def stop_progress(self) -> None:
         # The periodic thread exists on every platform, so its stop is set
@@ -1961,6 +2355,13 @@ class Earcons:
             except Exception:
                 pass
         self._loop_proc = None
+        self._loop_thread = None
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or mute cues, stopping the progress loop when muted."""
+        self.enabled = bool(enabled)
+        if not self.enabled:
+            self.stop_progress()
 
 
 def _copy_to_clipboard(text: str) -> bool:
@@ -1977,6 +2378,50 @@ def _copy_to_clipboard(text: str) -> bool:
 class Turn:
     prompt: str
     response: str = ""
+
+
+# The tool Claude Code stops a turn to ask a multiple-choice question with.
+ASK_USER_QUESTION_TOOL = "AskUserQuestion"
+
+# What to pass to `--permission-prompt-tool`. "stdio" means "this host answers
+# permission prompts on the JSON stream it is already reading", which is what
+# makes AskUserQuestion available at all in headless mode. Cleared for the rest
+# of the session if the installed Claude Code turns out not to know the flag,
+# so an older CLI keeps working exactly as it did — without questions.
+_CLAUDE_PERMISSION_PROMPT_TOOL = "stdio"
+
+
+def _claude_questions(raw: list) -> tuple[Question, ...]:
+    """Read AskUserQuestion's input into BlindPilot's own question shape.
+
+    Claude Code always offers an "Other" answer of its own, whatever the
+    question says, so `allow_custom` is not read from the payload.
+    """
+    questions: list[Question] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("question") or "").strip()
+        if not text:
+            continue
+        options: list[QuestionOption] = []
+        for option in entry.get("options") or []:
+            if isinstance(option, dict) and option.get("label"):
+                options.append(
+                    QuestionOption(
+                        str(option["label"]),
+                        str(option.get("description") or ""),
+                    )
+                )
+        questions.append(
+            Question(
+                question=text,
+                header=str(entry.get("header") or ""),
+                options=tuple(options),
+                multi_select=bool(entry.get("multiSelect")),
+            )
+        )
+    return tuple(questions)
 
 
 class ClaudeWorker(threading.Thread):
@@ -2001,6 +2446,7 @@ class ClaudeWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
+        on_question: Optional[AskQuestions] = None,
     ):
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -2015,6 +2461,7 @@ class ClaudeWorker(threading.Thread):
         self._on_complete = on_complete
         self._on_failed = on_failed
         self._on_done = on_done
+        self._on_question = on_question
         self._proc: Optional[subprocess.Popen] = None
         self._cancelled = False
         # Set once the process is up and the opening prompt has gone in, cleared
@@ -2022,17 +2469,127 @@ class ClaudeWorker(threading.Thread):
         # not there yet (or is already gone).
         self._accepting_input = threading.Event()
         self._write_lock = threading.Lock()
+        # stderr is read on its own thread from the moment the process starts.
+        # Waiting until it exited meant a child that wrote more than the pipe
+        # holds blocked on its own diagnostics, and a turn that fans out
+        # subagents is the loudest one there is.
+        self._stderr_lines: list[str] = []
+        self._stderr_thread: Optional[threading.Thread] = None
+        # A failure is reported once, so a crash late in the turn cannot talk
+        # over the explanation the turn already gave.
+        self._failed = False
+
+    def _fail(self, message: str) -> None:
+        """Report why the turn ended, once."""
+        if self._failed:
+            return
+        self._failed = True
+        self._on_failed(message)
+
+    def _drain_stderr(self) -> None:
+        """Keep stderr empty for as long as the process is running.
+
+        Whatever it says is kept: when the CLI exits without finishing a turn,
+        its stderr is usually the only account of why.
+        """
+        proc = self._proc
+        stream = proc.stderr if proc is not None else None
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                self._stderr_lines.append(line)
+                # A runaway child must not become a runaway list. The tail is
+                # the part that says how it ended.
+                if len(self._stderr_lines) > 4000:
+                    del self._stderr_lines[:2000]
+        except Exception:
+            # The pipe closed under us, which is what exiting looks like.
+            pass
+
+    def _stderr_text(self) -> str:
+        """Everything stderr said, once the draining thread has caught up."""
+        thread = self._stderr_thread
+        if thread is not None:
+            thread.join(timeout=2)
+        return "".join(self._stderr_lines).strip()
+
+    @staticmethod
+    def _background_agents_running(event: dict) -> int:
+        """How many agents this run started in the background are still going.
+
+        A turn that launches background agents finishes while they are still
+        working: the CLI stays up, and what each one finds arrives as a further
+        turn on this same stream. Treating that first result as the end of the
+        run closed the CLI's stdin, and stopping the CLI stops every agent it
+        had running — which is a whole fan-out of work lost at once.
+        """
+        stats = event.get("subagent_stats")
+        if not isinstance(stats, dict):
+            return 0
+        started = stats.get("started_in_background")
+        started = started if isinstance(started, int) else 0
+        settled = 0
+        for field in ("completed", "failed"):
+            value = stats.get(field)
+            settled += value if isinstance(value, int) else 0
+        killed = stats.get("killed")
+        if isinstance(killed, dict):
+            settled += sum(value for value in killed.values() if isinstance(value, int))
+        return max(0, started - settled)
+
+    @staticmethod
+    def _diagnostic_path() -> Path:
+        """Where a turn that ended badly leaves its account of itself."""
+        return blindpilot_config_dir() / "claude-worker.log"
+
+    def _log_unfinished_turn(self, rc: object, complete: bool, stderr_text: str) -> None:
+        """Record a turn the CLI did not finish.
+
+        A turn that dies mid-run is the hardest thing here to look into after
+        the fact: the window is gone, and an exit code says nothing about what
+        the run was doing. This is what is left behind to answer that.
+        """
+        try:
+            path = self._diagnostic_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(path, "a", encoding="utf-8", errors="replace") as fh:
+                fh.write(
+                    f"\n=== {stamp} claude turn ended early ===\n"
+                    f"exit code: {rc}\n"
+                    f"result event seen: {complete}\n"
+                    f"session: {self._session_id or '(new)'}\n"
+                    f"permission mode: {self._permission_mode}\n"
+                    f"model: {self._model or '(default)'}\n"
+                    f"cancelled: {self._cancelled}\n"
+                    f"stderr ({len(stderr_text)} chars):\n{stderr_text or '(nothing)'}\n"
+                )
+        except OSError:
+            # A missing log is not worth losing the failure message over.
+            pass
 
     def accepting_input(self) -> bool:
         """Whether the active Claude turn can accept a steering message."""
         return self._accepting_input.is_set() and not self._cancelled
 
-    def _write_message(self, text: str) -> bool:
-        """Push one user message into the running process. False if it failed."""
+    def _write_json(self, payload: dict) -> bool:
+        """Write one JSON line to the running process. False if it failed."""
         proc = self._proc
         if proc is None or proc.stdin is None:
             return False
-        payload = json.dumps(
+        try:
+            with self._write_lock:
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+        except (OSError, ValueError):
+            # Pipe closed underneath us — the turn finished as we wrote.
+            return False
+        return True
+
+    def _write_message(self, text: str) -> bool:
+        """Push one user message into the running process. False if it failed."""
+        return self._write_json(
             {
                 "type": "user",
                 "message": {
@@ -2041,14 +2598,6 @@ class ClaudeWorker(threading.Thread):
                 },
             }
         )
-        try:
-            with self._write_lock:
-                proc.stdin.write(payload + "\n")
-                proc.stdin.flush()
-        except (OSError, ValueError):
-            # Pipe closed underneath us — the turn finished as we wrote.
-            return False
-        return True
 
     def steer(self, text: str) -> bool:
         """Send a follow-up message into the turn that is already running.
@@ -2075,17 +2624,132 @@ class ClaudeWorker(threading.Thread):
         self._cancelled = True
         proc = self._proc
         if proc and proc.poll() is None:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            end_process_group(proc)
 
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # Anything thrown here used to end the turn without a word: the
+            # `finally` closed stdin, the CLI saw EOF in the middle of its work
+            # and exited, and the exit code was the whole explanation. Say what
+            # actually happened instead.
+            self._fail(f"BlindPilot stopped reading Claude Code: {exc}")
         finally:
             self._close_stdin()
             self._on_done()
+
+    @staticmethod
+    def _retry_without_prompt_tool(stderr_text: str) -> bool:
+        """Whether this failure was `--permission-prompt-tool` and is now off."""
+        global _CLAUDE_PERMISSION_PROMPT_TOOL
+        if not _CLAUDE_PERMISSION_PROMPT_TOOL:
+            return False
+        if "permission-prompt-tool" not in stderr_text:
+            return False
+        _CLAUDE_PERMISSION_PROMPT_TOOL = ""
+        return True
+
+    def _handle_control_request(self, event: dict) -> None:
+        """Answer one control request from the CLI.
+
+        Only `can_use_tool` reaches us, because that is the only kind
+        `--permission-prompt-tool stdio` turns on. AskUserQuestion arrives that
+        way too: the CLI asks permission to run it and takes the answers back in
+        the tool's own input, so the dialog is opened here and what the person
+        chose is written into `answers` before the tool is allowed to run.
+
+        Every request has to be answered. One left hanging holds the turn open
+        for good, which sounds exactly like a model that has stopped thinking.
+        """
+        request = event.get("request") or {}
+        request_id = event.get("request_id")
+        if not isinstance(request, dict) or not isinstance(request_id, str):
+            return
+        if request.get("subtype") != "can_use_tool":
+            # Nothing else is switched on for this session. Say so rather than
+            # stay silent, so an unexpected request cannot stall the turn.
+            self._write_json(
+                {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "error",
+                        "request_id": request_id,
+                        "error": "BlindPilot does not handle this request",
+                    },
+                }
+            )
+            return
+
+        tool = str(request.get("tool_name") or "")
+        payload = request.get("input")
+        payload = payload if isinstance(payload, dict) else {}
+        if tool == ASK_USER_QUESTION_TOOL and self._on_question is not None:
+            self._answer_ask_user_question(request_id, payload)
+            return
+        # Any other tool: the permission mode decided this before the prompt
+        # tool existed, and it still does. Headless Claude Code denies whatever
+        # its mode leaves to a prompt, so denying here keeps every mode behaving
+        # exactly as it did.
+        self._write_json(
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "deny",
+                        "message": (
+                            f"{tool or 'That tool'} needs approval, which the "
+                            f"{self._permission_mode or 'current'} permission mode does not give."
+                        ),
+                    },
+                },
+            }
+        )
+
+    def _answer_ask_user_question(self, request_id: str, payload: dict) -> None:
+        """Put AskUserQuestion in front of the person and send back their answers.
+
+        Claude Code takes the answers as part of the tool's input: a map from
+        each question's own text to the chosen labels, joined by commas when the
+        question allowed more than one. Allowing the call with that map filled in
+        is what makes the tool report the answers to the model.
+        """
+        raw = payload.get("questions")
+        questions = _claude_questions(raw if isinstance(raw, list) else [])
+        answers = self._on_question(questions) if (questions and self._on_question) else None
+        self._on_activity("tool", question_summary(questions, answers))
+        if answers is None:
+            self._write_json(
+                {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {
+                            "behavior": "deny",
+                            "message": "The user closed the question without answering it.",
+                        },
+                    },
+                }
+            )
+            return
+        updated = dict(payload)
+        updated["answers"] = {
+            question.question: ", ".join(answers[index]) if index < len(answers) else ""
+            for index, question in enumerate(questions)
+        }
+        self._write_json(
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {"behavior": "allow", "updatedInput": updated},
+                },
+            }
+        )
 
     def _do_run(self) -> None:
         binary = _find_claude()
@@ -2106,6 +2770,15 @@ class ClaudeWorker(threading.Thread):
             "stream-json",
             "--verbose",
         ]
+        # AskUserQuestion is the tool Claude Code stops a turn to ask with, and
+        # in headless mode the CLI leaves it out of the tool set unless the
+        # host says it can render a permission prompt. "stdio" is how it is
+        # told that: the prompt then arrives as a `can_use_tool` control
+        # request on this same stream, and the answer goes back the same way.
+        # Nothing else changes — every other tool's decision still comes from
+        # the permission mode, exactly as it did before.
+        if _CLAUDE_PERMISSION_PROMPT_TOOL:
+            cmd.extend(["--permission-prompt-tool", _CLAUDE_PERMISSION_PROMPT_TOOL])
         if self._permission_mode:
             cmd.extend(["--permission-mode", self._permission_mode])
         # Left off entirely when unset, so the CLI's own default applies.
@@ -2116,13 +2789,9 @@ class ClaudeWorker(threading.Thread):
         if self._session_id:
             cmd.extend(["--resume", self._session_id])
 
-        # Make sure the binary's directory is on PATH for the subprocess —
-        # `claude` is typically a shim that needs to find `node` (often a
-        # sibling in the same Homebrew/npm bin dir).
-        env = os.environ.copy()
-        bin_dir = os.path.dirname(binary)
-        if bin_dir and bin_dir not in env.get("PATH", "").split(os.pathsep):
-            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        # `claude` is typically a shim that needs to find `node`, and a window
+        # started from the macOS Dock has a PATH that holds neither.
+        env = subprocess_env(binary)
 
         try:
             self._proc = subprocess.Popen(
@@ -2134,21 +2803,42 @@ class ClaudeWorker(threading.Thread):
                 text=True,
                 bufsize=1,
                 encoding="utf-8",
+                # One malformed byte anywhere in a long run used to raise
+                # mid-stream and take the turn with it. A replacement character
+                # in a row of output costs nothing by comparison.
+                errors="replace",
                 env=env,
+                # `claude` may be a launcher with the real agent as its child;
+                # stopping a task has to stop that too.
+                **own_group_kwargs(),
                 **_no_window_kwargs(),
             )
         except OSError as exc:
-            self._on_failed(f"Failed to launch Claude Code: {exc}")
+            self._fail(f"Failed to launch Claude Code: {exc}")
             return
 
+        # Started before anything is sent, so the child never waits on a pipe
+        # nobody is emptying. The list is replaced rather than kept, so a retry
+        # does not inherit the first attempt's complaints.
+        self._stderr_lines = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            name="claude-stderr",
+            daemon=True,
+        )
+        self._stderr_thread.start()
+
         if not self._write_message(self._prompt):
-            self._on_failed("Could not send the prompt to Claude Code")
+            self._fail("Could not send the prompt to Claude Code")
             return
         self._accepting_input.set()
 
         text_parts: list[str] = []
         first_assistant_seen = False
         complete = False
+        # How many background agents the last wait was announced for, so the
+        # count is only spoken when it changes rather than at every result.
+        announced_waiting = 0
 
         assert self._proc.stdout is not None
         for raw_line in self._proc.stdout:
@@ -2169,7 +2859,13 @@ class ClaudeWorker(threading.Thread):
 
             etype = event.get("type")
 
-            if etype == "system" and event.get("subtype") == "init":
+            if etype == "control_request":
+                # Answered on this thread, so a question blocks reading the
+                # stream for as long as the dialog is open — which is what a
+                # turn waiting on an answer is supposed to do.
+                self._handle_control_request(event)
+
+            elif etype == "system" and event.get("subtype") == "init":
                 sid = event.get("session_id")
                 if sid:
                     self._on_session(sid)
@@ -2178,6 +2874,12 @@ class ClaudeWorker(threading.Thread):
                 if not first_assistant_seen:
                     first_assistant_seen = True
                     self._on_started()
+                # Work done by a subagent carries the id of the tool call that
+                # started it. It is shown live like everything else, but it is
+                # somebody else's running commentary rather than the answer to
+                # this turn — five agents' worth of it would otherwise be
+                # collected up and read out as the reply.
+                from_subagent = bool(event.get("parent_tool_use_id"))
                 message = event.get("message") or {}
                 for block in message.get("content") or []:
                     if not isinstance(block, dict):
@@ -2188,7 +2890,8 @@ class ClaudeWorker(threading.Thread):
                         # the list so the user reads the narration as it happens.
                         text = (block.get("text") or "").strip()
                         if text:
-                            text_parts.append(text)
+                            if not from_subagent:
+                                text_parts.append(text)
                             self._on_activity("assistant", text)
                     elif btype == "thinking":
                         # Extended-thinking blocks: Claude reasoning about what to
@@ -2226,12 +2929,27 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
+                still_working = self._background_agents_running(event)
+                if not event.get("is_error") and still_working:
+                    # The turn is over, the run is not: agents it started in
+                    # the background are still going, and what they find comes
+                    # back as further turns on this same stream. Ending here
+                    # stopped the CLI and took every one of them with it.
+                    if still_working != announced_waiting:
+                        announced_waiting = still_working
+                        self._on_activity(
+                            "tool",
+                            f"Waiting for {still_working} background "
+                            f"{'agent' if still_working == 1 else 'agents'} to finish. "
+                            "Stop Task ends the run now.",
+                        )
+                    continue
                 if event.get("is_error"):
                     detail = (event.get("result") or "").strip()
                     if _looks_like_auth_error(detail):
-                        self._on_failed(AUTH_HINT)
+                        self._fail(AUTH_HINT)
                     else:
-                        self._on_failed(detail or "Claude Code returned an error")
+                        self._fail(detail or "Claude Code returned an error")
                     return
                 # In streaming-input mode the process waits for more messages
                 # rather than ending at EOF, so the turn's own result event is
@@ -2251,21 +2969,37 @@ class ClaudeWorker(threading.Thread):
 
         rc = self._proc.returncode
         if rc != 0:
-            stderr_text = ""
-            if self._proc.stderr is not None:
-                try:
-                    stderr_text = self._proc.stderr.read().strip()
-                except Exception:
-                    pass
+            stderr_text = self._stderr_text()
             if _looks_like_auth_error(stderr_text):
-                self._on_failed(AUTH_HINT)
+                self._fail(AUTH_HINT)
                 return
+            if self._retry_without_prompt_tool(stderr_text):
+                # The installed Claude Code is older than the flag. Turn it off
+                # for the rest of the session and send the message again, so a
+                # missing question feature never costs somebody their turn.
+                self._do_run()
+                return
+            self._log_unfinished_turn(rc, complete, stderr_text)
             detail = f": {stderr_text}" if stderr_text else ""
-            self._on_failed(f"Claude Code exited with code {rc}{detail}")
-            return
+            if not detail and not complete:
+                # An exit code on its own explains nothing, and this is the
+                # shape a turn takes when the CLI dies in the middle of one.
+                detail = (
+                    " without finishing the turn, and without saying why. "
+                    f"BlindPilot kept a note of it in {self._diagnostic_path()}."
+                )
+            note = f"Claude Code exited with code {rc}{detail}"
+            if not complete and not text_parts:
+                self._fail(note)
+                return
+            # The turn answered before the process ended badly. How it ended is
+            # worth saying, but saying it instead of the answer threw away work
+            # that had already been done.
+            self._on_activity("result", note)
 
         if not complete and not text_parts:
-            self._on_failed("No response received")
+            self._log_unfinished_turn(rc, complete, self._stderr_text())
+            self._fail("No response received")
             return
 
         # Blank line between blocks: a turn now usually has several (the running
@@ -2401,6 +3135,549 @@ class ModelDialog(wx.Dialog):
             "" if model in (DEFAULT_CHOICE, self._model_keep) else model,
             "" if effort in (DEFAULT_CHOICE, self._effort_keep) else effort,
         )
+
+
+def _question_choice(option: QuestionOption) -> str:
+    """One answer as a single line, because that is how it is read aloud.
+
+    A colon rather than a dash: the descriptions have dashes of their own, and
+    two kinds of dash in one line is a sentence nobody can follow by ear.
+    """
+    if not option.description:
+        return option.label
+    return f"{option.label}: {option.description}"
+
+
+class QuestionDialog(wx.Dialog):
+    """A backend's own mid-run question, asked as a dialog.
+
+    Every backend BlindPilot drives can stop a turn to ask something, and all
+    four ask the same shape of question: some text, a short list of answers,
+    and permission to type one of your own instead. That last one is the
+    "Other" every one of their tools tells the model not to write itself, and
+    it is offered here as the final choice in each list: picking it opens a
+    text box underneath.
+
+    A question that takes one answer gets radio buttons, one that takes several
+    gets a checked list. Esc leaves the question unanswered, which each adapter
+    reports to its backend in whatever way that backend understands.
+    """
+
+    OTHER = "Other: type your own answer"
+
+    def __init__(self, parent: wx.Window, backend: str, questions: Sequence[Question]):
+        plural = "s" if len(questions) > 1 else ""
+        super().__init__(
+            parent,
+            title=f"{backend_label(backend)} question{plural}",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._questions = list(questions)
+        self._pickers: list[wx.Window] = []
+        self._texts: list[wx.TextCtrl] = []
+        self._labels: list[wx.StaticText] = []
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        intro = wx.StaticText(
+            self,
+            label=(
+                f"{backend_label(backend)} has paused this turn to ask "
+                f"{'you these questions' if plural else 'you a question'}."
+            ),
+        )
+        sizer.Add(intro, 0, wx.ALL, 12)
+
+        for index, question in enumerate(questions):
+            title = question.question
+            if len(questions) > 1:
+                title = f"{index + 1} of {len(questions)}. {title}"
+            if question.header:
+                title = f"{title} ({question.header})"
+            choices = [_question_choice(option) for option in question.options]
+            if question.allow_custom:
+                choices.append(self.OTHER)
+            if question.multi_select:
+                # A checked list is what a screen reader reads as "check box,
+                # not checked" per line, which is what "pick as many as you
+                # like" has to sound like.
+                heading = wx.StaticText(self, label=title)
+                heading.Wrap(560)
+                picker: wx.Window = wx.CheckListBox(self, choices=choices)
+                picker.SetName(question.question)
+                picker.Bind(wx.EVT_CHECKLISTBOX, self._on_choice)
+                sizer.Add(heading, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+                sizer.Add(picker, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
+            else:
+                picker = wx.RadioBox(
+                    self,
+                    label=title,
+                    choices=choices,
+                    majorDimension=1,
+                    style=wx.RA_SPECIFY_COLS,
+                )
+                picker.SetName(question.question)
+                picker.Bind(wx.EVT_RADIOBOX, self._on_choice)
+                sizer.Add(picker, 0, wx.EXPAND | wx.ALL, 12)
+            self._pickers.append(picker)
+
+            label = wx.StaticText(self, label="&Your own answer:")
+            # Codex can mark a question whose answer is a secret. Masking it is
+            # the whole of what that means here: the transcript already keeps
+            # the fact of an answer rather than the answer.
+            style = wx.TE_PROCESS_ENTER | (wx.TE_PASSWORD if question.secret else 0)
+            entry = wx.TextCtrl(self, style=style)
+            entry.SetName(f"Your own answer to {question.question}")
+            # TE_PROCESS_ENTER takes Enter away from the dialog's default
+            # button and gives it to the box, so without this the key does
+            # nothing whatsoever in the one place a turn waits to be let go.
+            entry.Bind(wx.EVT_TEXT_ENTER, self._on_text_enter)
+            label.Hide()
+            entry.Hide()
+            sizer.Add(label, 0, wx.LEFT | wx.RIGHT, 24)
+            sizer.Add(entry, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 24)
+            self._labels.append(label)
+            self._texts.append(entry)
+
+        buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+        ok = self.FindWindowById(wx.ID_OK)
+        if isinstance(ok, wx.Button):
+            ok.SetLabel("&Send answer" + plural)
+        cancel = self.FindWindowById(wx.ID_CANCEL)
+        if isinstance(cancel, wx.Button):
+            cancel.SetLabel("&Do not answer")
+        if buttons is not None:
+            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+        self.SetSizerAndFit(sizer)
+
+        self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        if self._pickers:
+            self._pickers[0].SetFocus()
+
+    def _picked(self, index: int) -> list[int]:
+        """Which entries are chosen for one question, by position in its list.
+
+        By position rather than by what the line says: the line is
+        "label — description", and a label with a dash of its own in it would
+        not survive being taken apart again.
+        """
+        picker = self._pickers[index]
+        if isinstance(picker, wx.CheckListBox):
+            return list(picker.GetCheckedItems())
+        if isinstance(picker, wx.RadioBox) and picker.GetSelection() != wx.NOT_FOUND:
+            return [picker.GetSelection()]
+        return []
+
+    def _wants_custom(self, index: int) -> bool:
+        """Whether "Other" is chosen — always the last entry, when offered."""
+        question = self._questions[index]
+        return question.allow_custom and len(question.options) in self._picked(index)
+
+    def _on_choice(self, event: wx.CommandEvent) -> None:
+        """Show the text box as soon as "Other" is chosen, and say so."""
+        event.Skip()
+        changed = False
+        for index in range(len(self._questions)):
+            wanted = self._wants_custom(index)
+            if wanted == self._texts[index].IsShown():
+                continue
+            self._labels[index].Show(wanted)
+            self._texts[index].Show(wanted)
+            changed = True
+        if not changed:
+            return
+        self.Layout()
+        self.Fit()
+        for index in range(len(self._questions)):
+            if self._texts[index].IsShown() and not self._texts[index].GetValue():
+                announce("Your own answer, edit text. Tab to it to type an answer.")
+                break
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        event.Skip()
+
+    def _answered(self) -> bool:
+        """Whether every question has an answer, saying what is missing if not.
+
+        Focus lands on the question that is short, so the next keystroke goes
+        somewhere useful rather than leaving the person to find it.
+        """
+        for index, question in enumerate(self._questions):
+            if self._wants_custom(index) and not self._texts[index].GetValue().strip():
+                announce("Error: type your own answer, or pick one of the choices")
+                self._texts[index].SetFocus()
+                return False
+            if not self._chosen(index):
+                announce(f"Error: {question.question} has no answer yet")
+                self._pickers[index].SetFocus()
+                return False
+        return True
+
+    def _on_ok(self, event: wx.CommandEvent) -> None:
+        """Refuse a half-filled answer rather than send the backend a blank."""
+        if self._answered():
+            event.Skip()
+
+    def _on_text_enter(self, _event: wx.CommandEvent) -> None:
+        """Enter in the answer box sends it, the way it does in the prompt."""
+        if self._answered():
+            self.EndModal(wx.ID_OK)
+
+    def _chosen(self, index: int) -> list[str]:
+        """The answers picked for one question, with "Other" resolved to text."""
+        question = self._questions[index]
+        answers: list[str] = []
+        for position in self._picked(index):
+            if position < len(question.options):
+                # The backend wants its own label back, not the line the
+                # dialog drew from it.
+                answers.append(question.options[position].label)
+                continue
+            typed = self._texts[index].GetValue().strip()
+            if typed:
+                answers.append(typed)
+        return answers
+
+    def answers(self) -> list[list[str]]:
+        """One list of answers per question, in the order they were asked."""
+        return [self._chosen(index) for index in range(len(self._questions))]
+
+
+class ConnectDialog(wx.Dialog):
+    """/connect — sign opencode in to a provider, or sign it out of one.
+
+    opencode reaches a model through a provider you have connected, and it can
+    reach nearly two hundred of them. This is that list: the ones already
+    connected first, so the dialog opens on what is in use, and everything else
+    after. Connecting either stores an API key or walks a browser sign-in,
+    whichever the provider offers; both are done through opencode's own server,
+    so the result is the same as having typed /connect in its terminal.
+
+    Every call to the server happens off the UI thread, because a sign-in can
+    take as long as it takes somebody to finish it in a browser, and a dialog
+    that stops answering is a dialog a screen reader cannot describe.
+    """
+
+    def __init__(self, parent: wx.Window):
+        super().__init__(parent, title="Connect a provider to opencode")
+        self._providers: List[tuple[str, str]] = []
+        self._connected: set[str] = set()
+        self._busy = False
+
+        self.status = wx.StaticText(self, label="Reading opencode's provider list…")
+        self.status.Wrap(520)
+
+        list_label = wx.StaticText(self, label="&Providers:")
+        self.list = wx.ListBox(self, choices=[], style=wx.LB_SINGLE)
+        self.list.SetName("Providers")
+        self.list.SetMinSize(wx.Size(420, 260))
+
+        self.connect_btn = wx.Button(self, label="&Connect…")
+        self.disconnect_btn = wx.Button(self, label="&Disconnect")
+        close_btn = wx.Button(self, wx.ID_CANCEL, "Close")
+        self.connect_btn.Bind(wx.EVT_BUTTON, lambda _e: self._connect())
+        self.disconnect_btn.Bind(wx.EVT_BUTTON, lambda _e: self._disconnect())
+        self.list.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._connect())
+
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        buttons.Add(self.connect_btn, 0, wx.RIGHT, 8)
+        buttons.Add(self.disconnect_btn, 0, wx.RIGHT, 8)
+        buttons.Add(close_btn, 0)
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.status, 0, wx.ALL, 12)
+        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT, 12)
+        sizer.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+        self.SetSizerAndFit(sizer)
+
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.list.SetFocus()
+        self._refresh()
+
+    # ----- the list -----
+
+    def _refresh(self) -> None:
+        self._set_busy(True, "Reading opencode's provider list…")
+
+        def work() -> None:
+            providers, connected, error = opencode_providers()
+            wx.CallAfter(self._show, providers, connected, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show(self, providers: List[tuple[str, str]], connected: set, error: str) -> None:
+        if not self:  # closed while the list was being read
+            return
+        # Read what was selected against the list it was selected in: connecting
+        # a provider moves it to the top, so the position no longer means what
+        # it did, and re-reading it afterwards would land on somebody else.
+        selected = self._selected_id()
+        self._providers = list(providers)
+        self._connected = set(connected)
+        self.list.Set(
+            [
+                f"{name} — connected" if provider_id in self._connected else name
+                for provider_id, name in self._providers
+            ]
+        )
+        if self._providers:
+            index = next((i for i, (pid, _n) in enumerate(self._providers) if pid == selected), 0)
+            self.list.SetSelection(index)
+        message = error or (
+            f"{len(self._connected)} of {len(self._providers)} providers connected."
+        )
+        self._set_busy(False, message)
+
+    def _selected_id(self) -> str:
+        index = self.list.GetSelection()
+        if 0 <= index < len(self._providers):
+            return self._providers[index][0]
+        return ""
+
+    def _selected_name(self) -> str:
+        index = self.list.GetSelection()
+        if 0 <= index < len(self._providers):
+            return self._providers[index][1]
+        return ""
+
+    def _set_busy(self, busy: bool, message: str) -> None:
+        self._busy = busy
+        self.connect_btn.Enable(not busy)
+        self.disconnect_btn.Enable(not busy)
+        self.status.SetLabel(message)
+        self.status.Wrap(520)
+        self.Layout()
+        announce(message)
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() == wx.WXK_ESCAPE and not self._busy:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        event.Skip()
+
+    # ----- connecting -----
+
+    def _ask(self, prompts: object, secret_key: str = "") -> Optional[dict]:
+        """Collect whatever a provider needs before it can be signed in to.
+
+        Providers ask for anything from an account id to a self-hosted URL, and
+        say so in their own words, so each question is asked as opencode words
+        it rather than as something guessed here. Returns None if cancelled.
+        """
+        answers: dict = {}
+        for prompt in prompts if isinstance(prompts, list) else []:
+            if not isinstance(prompt, dict):
+                continue
+            when = prompt.get("when")
+            if isinstance(when, dict):
+                # Some questions only apply given an earlier answer.
+                if answers.get(str(when.get("key"))) != when.get("value"):
+                    continue
+            key = str(prompt.get("key") or "")
+            message = str(prompt.get("message") or key)
+            if not key:
+                continue
+            if prompt.get("type") == "select":
+                options = [
+                    option for option in (prompt.get("options") or []) if isinstance(option, dict)
+                ]
+                labels = [
+                    " — ".join(
+                        part
+                        for part in (str(option.get("label") or ""), str(option.get("hint") or ""))
+                        if part
+                    )
+                    for option in options
+                ]
+                if not options:
+                    # A choice with nothing to choose from would be a dialog
+                    # with no answer; ask for the value in words instead.
+                    prompt = {**prompt, "type": "text"}
+                else:
+                    with wx.SingleChoiceDialog(self, message, "Connect", labels) as dlg:
+                        chosen = dlg.GetSelection() if dlg.ShowModal() == wx.ID_OK else -1
+                    if chosen < 0:
+                        return None
+                    answers[key] = str(options[chosen].get("value") or "")
+                    continue
+            placeholder = str(prompt.get("placeholder") or "")
+            label = f"{message}\n{placeholder}" if placeholder else message
+            with wx.TextEntryDialog(self, label, "Connect") as dlg:
+                if dlg.ShowModal() != wx.ID_OK:
+                    return None
+                answers[key] = dlg.GetValue().strip()
+        if secret_key:
+            with wx.TextEntryDialog(
+                self,
+                f"Paste the API key for {self._selected_name()}.\n"
+                "It is stored by opencode, not by BlindPilot.",
+                "Connect",
+                style=wx.TE_PASSWORD | wx.OK | wx.CANCEL,
+            ) as dlg:
+                if dlg.ShowModal() != wx.ID_OK:
+                    return None
+                key = dlg.GetValue().strip()
+            if not key:
+                return None
+            answers[secret_key] = key
+        return answers
+
+    def _connect(self) -> None:
+        if self._busy:
+            return
+        provider_id = self._selected_id()
+        if not provider_id:
+            announce("Choose a provider first.")
+            return
+        name = self._selected_name()
+        self._set_busy(True, f"Asking opencode how {name} can be signed in to…")
+
+        def work() -> None:
+            methods = opencode_auth_methods(provider_id)
+            wx.CallAfter(self._choose_method, provider_id, name, methods)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _choose_method(self, provider_id: str, name: str, methods: List[dict]) -> None:
+        if not self:
+            return
+        self._set_busy(False, f"{name}: choose how to sign in.")
+        if len(methods) == 1:
+            index = 0
+        else:
+            labels = [str(method.get("label") or method.get("type") or "") for method in methods]
+            with wx.SingleChoiceDialog(
+                self, f"How do you want to sign in to {name}?", "Connect", labels
+            ) as dlg:
+                if dlg.ShowModal() != wx.ID_OK:
+                    self._set_busy(False, "Sign-in cancelled.")
+                    return
+                index = dlg.GetSelection()
+        method = methods[index]
+        if str(method.get("type")) == "oauth":
+            self._oauth(provider_id, name, index, method)
+        else:
+            self._api_key(provider_id, name, method)
+
+    def _api_key(self, provider_id: str, name: str, method: dict) -> None:
+        answers = self._ask(method.get("prompts"), secret_key="__key__")
+        if answers is None:
+            self._set_busy(False, "Sign-in cancelled.")
+            return
+        key = answers.pop("__key__", "")
+        self._set_busy(True, f"Connecting {name}…")
+
+        def work() -> None:
+            error = opencode_connect_api_key(provider_id, key, answers)
+            wx.CallAfter(self._finished, name, error, "connected")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _oauth(self, provider_id: str, name: str, index: int, method: dict) -> None:
+        answers = self._ask(method.get("prompts"))
+        if answers is None:
+            self._set_busy(False, "Sign-in cancelled.")
+            return
+        self._set_busy(True, f"Starting the {name} sign-in…")
+
+        def work() -> None:
+            authorization, error = opencode_oauth_start(provider_id, index, answers)
+            wx.CallAfter(self._opened, provider_id, name, index, authorization, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _opened(
+        self, provider_id: str, name: str, index: int, authorization: dict, error: str
+    ) -> None:
+        if not self:
+            return
+        if error:
+            self._set_busy(False, error)
+            return
+        url = str(authorization.get("url") or "")
+        instructions = str(authorization.get("instructions") or "")
+        opened = True
+        if url:
+            # opencode hands back the address and expects whoever asked to open
+            # it. The address is spoken and shown either way, so a machine with
+            # no default browser is not left with nothing to go on.
+            opened = _open_web_page(url)
+            if not opened:
+                announce(f"Could not open a browser. The sign-in address is {url}")
+        if str(authorization.get("method")) == "code":
+            self._set_busy(False, f"Finish signing in to {name} in your browser.")
+            with wx.TextEntryDialog(
+                self,
+                f"{instructions or 'Sign in, then paste the code it gives you.'}\n\n{url}",
+                "Connect",
+            ) as dlg:
+                if dlg.ShowModal() != wx.ID_OK:
+                    self._set_busy(False, "Sign-in cancelled.")
+                    return
+                code = dlg.GetValue().strip()
+            if not code:
+                self._set_busy(False, "Sign-in cancelled — no code was pasted.")
+                return
+            self._set_busy(True, f"Waiting for {name} to confirm the sign-in…")
+        else:
+            code = ""
+            message = instructions or f"Finish signing in to {name} in your browser."
+            if url and not opened:
+                message = f"{message} Open this address yourself: {url}"
+            elif url:
+                message = f"{message} The address is {url}"
+            self._set_busy(True, f"{message} Waiting for {name} to confirm it…")
+
+        def work() -> None:
+            failure = opencode_oauth_finish(provider_id, index, code)
+            wx.CallAfter(self._finished, name, failure, "connected")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _disconnect(self) -> None:
+        if self._busy:
+            return
+        provider_id = self._selected_id()
+        name = self._selected_name()
+        if not provider_id:
+            announce("Choose a provider first.")
+            return
+        if provider_id not in self._connected:
+            announce(f"{name} is not connected.")
+            return
+        if (
+            wx.MessageBox(
+                f"Sign opencode out of {name}?",
+                "Disconnect",
+                wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
+                self,
+            )
+            != wx.YES
+        ):
+            return
+        self._set_busy(True, f"Disconnecting {name}…")
+
+        def work() -> None:
+            error = opencode_disconnect(provider_id)
+            wx.CallAfter(self._finished, name, error, "disconnected")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finished(self, name: str, error: str, what: str) -> None:
+        if not self:
+            return
+        if error:
+            self._set_busy(False, error)
+            return
+        # The model list is drawn from the connected providers, so it has to be
+        # re-read before /model is opened again.
+        invalidate_model_options(BACKEND_OPENCODE)
+        self._set_busy(False, f"{name} {what}. Type /model to pick one of its models.")
+        self._refresh()
 
 
 class NewSessionDialog(wx.Dialog):
@@ -2654,7 +3931,8 @@ class SessionPanel(wx.Panel):
     row. Arrow keys remain within the responses, including at the first and last
     rows; Tab is the way to move between the list and the prompt.
 
-    `on_status(panel, text)` lets the frame show only the active tab's status.
+    `on_status(panel, text)` lets the frame show only the active tab's status,
+    and `on_title(panel, text)` names the tab after the conversation in it.
     """
 
     def __init__(
@@ -2662,16 +3940,22 @@ class SessionPanel(wx.Panel):
         parent: wx.Window,
         cwd: str,
         on_status: Callable[["SessionPanel", str], None],
+        on_title: Callable[["SessionPanel", str], None],
         earcons: "Earcons",
         on_side_chat: Callable[[str, str], None],
         get_backend: Callable[[], str],
+        focus_before: Callable[[], None],
+        focus_after: Callable[[], None],
     ):
         super().__init__(parent)
         self.cwd = cwd
         self._on_status = on_status
+        self._on_title = on_title
         self._earcons = earcons
         self._on_side_chat = on_side_chat
         self._get_backend = get_backend
+        self._focus_before = focus_before
+        self._focus_after = focus_after
         self.last_status = "Ready"
 
         self._turns: List[Turn] = []
@@ -2688,6 +3972,10 @@ class SessionPanel(wx.Panel):
         # Set while the user's Stop is being carried out, so the backend's own
         # "cancelled" report is not announced to them as an error.
         self._stopping = False
+        # The backend's own question, while it is on screen. Held so stopping
+        # the run can close it: the worker thread is blocked on the answer, and
+        # the thread that would stop it is the one the dialog is running on.
+        self._question_dialog: Optional["QuestionDialog"] = None
         self._session_id: Optional[str] = None
         self._session_backend = normalize_backend(self._get_backend())
         self._worker: Optional[AgentWorker] = None
@@ -2742,7 +4030,10 @@ class SessionPanel(wx.Panel):
         self.responses_text.Bind(wx.EVT_SET_FOCUS, self._on_text_view_focus)
 
         prompt_label = wx.StaticText(self, label="Prompt:")
-        self.prompt = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER)
+        self.prompt = wx.TextCtrl(
+            self,
+            style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_RICH2,
+        )
         self.prompt.SetName("Prompt")
         self.prompt.SetHint(
             "Type your prompt. Enter to send, Shift+Enter for newline, Up to enter responses; "
@@ -2791,7 +4082,7 @@ class SessionPanel(wx.Panel):
         self.mode_picker.SetName("Permission mode")
         self.mode_picker.SetSelection(_MODE_VALUES.index(self.mode))
         self.mode_picker.Bind(wx.EVT_CHOICE, self._on_mode_choice)
-        self.mode_picker.Bind(wx.EVT_SET_FOCUS, self._on_mode_picker_focus)
+        self.mode_picker.Bind(wx.EVT_KEY_DOWN, self._on_mode_key)
 
         bottom_row = wx.BoxSizer(wx.HORIZONTAL)
         bottom_row.Add(self.send_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
@@ -2873,6 +4164,57 @@ class SessionPanel(wx.Panel):
     def focus_prompt(self) -> None:
         self.prompt.SetFocus()
 
+    def focus_first_control(self) -> None:
+        if self._row_count() == 0:
+            self.prompt.SetFocus()
+            return
+        control = self._responses_ctrl()
+        control.SetFocus()
+        if (
+            control is self.responses
+            and control.GetCount()
+            and control.GetSelection() == wx.NOT_FOUND
+        ):
+            control.SetSelection(0)
+
+    def focus_last_control(self) -> None:
+        for control in (
+            self.mode_picker,
+            self.slash_btn,
+            self.attach_btn,
+            self.stop_btn,
+            self.steer_btn,
+            self.send_btn,
+            self.prompt,
+            self._responses_ctrl(),
+        ):
+            if control.IsShown() and control.IsEnabled():
+                control.SetFocus()
+                return
+
+    def focus_first_action(self) -> None:
+        """Focus the first available control after Prompt."""
+        for control in (
+            self.send_btn,
+            self.steer_btn,
+            self.stop_btn,
+            self.attach_btn,
+            self.slash_btn,
+            self.mode_picker,
+        ):
+            if control.IsShown() and control.IsEnabled():
+                control.SetFocus()
+                return
+
+    def focus_first_action_delayed(self) -> None:
+        """Let NVDA finish its edit-field inspection before leaving Prompt."""
+
+        def move() -> None:
+            if self and self.prompt.HasFocus():
+                self.focus_first_action()
+
+        wx.CallLater(75, move)
+
     def _focus_row(self, index: int) -> None:
         if self._row_count() == 0:
             return
@@ -2881,7 +4223,8 @@ class SessionPanel(wx.Panel):
 
     def _on_text_view_focus(self, event: wx.FocusEvent) -> None:
         event.Skip()
-        wx.CallAfter(announce, "Responses, read only edit")
+        if _MAC_ANNOUNCE:
+            wx.CallAfter(announce, "Responses, read only edit")
 
     # ----- Permission mode -----
     def _set_mode(self, value: str, speak: bool = True) -> None:
@@ -2897,10 +4240,11 @@ class SessionPanel(wx.Panel):
     def _on_mode_choice(self, event: wx.CommandEvent) -> None:
         self._set_mode(_MODE_VALUES[self.mode_picker.GetSelection()])
 
-    def _on_mode_picker_focus(self, event: wx.FocusEvent) -> None:
+    def _on_mode_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() == wx.WXK_TAB and not event.ShiftDown():
+            self._focus_after()
+            return
         event.Skip()
-        label = _MODE_LABELS[_MODE_VALUES.index(self.mode)]
-        wx.CallAfter(announce, f"Permission mode: {label}")
 
     # ----- Backend -----
     def selected_backend(self) -> str:
@@ -2918,8 +4262,14 @@ class SessionPanel(wx.Panel):
             # be given a message. Start one now, so the first message of the
             # conversation does not spend that wait in silence.
             prewarm_freebuff(self.cwd, self._session_id, self.model)
+        if selected == BACKEND_OPENCODE:
+            # Same idea: opencode's server takes a few seconds to come up, and
+            # the model list and the first message both wait on it. Starting it
+            # now spends that wait while the user is still typing. The probe is
+            # what starts it, and it caches its answer for /model as well.
+            self.warm_model_probe()
         # Ask the backend what it supports rather than naming the one that does
-        # not: a fourth backend arriving is otherwise silently given a control
+        # not: a further backend arriving is otherwise silently given a control
         # its protocol has no answer for.
         supports_permissions = BACKENDS[selected].supports_permissions
         self.mode_picker.Enable(supports_permissions)
@@ -2929,8 +4279,9 @@ class SessionPanel(wx.Panel):
             )
         else:
             self.mode_picker.SetToolTip(
-                f"{backend_label(selected)} does not expose permission modes "
-                "through its command-line interface"
+                f"{backend_label(selected)} does not expose permission modes through "
+                "its command-line interface — it never stops to ask, so there is "
+                "nothing here to choose"
             )
         self.Layout()
 
@@ -3006,6 +4357,20 @@ class SessionPanel(wx.Panel):
             dlg.Destroy()
         self.set_model(model, effort)
 
+    def open_connect_dialog(self) -> None:
+        """/connect — opencode's provider list, as its own command offers it."""
+        if self.selected_backend() != BACKEND_OPENCODE:
+            self._announce(
+                "Error: /connect belongs to opencode. Switch the backend from the File menu first"
+            )
+            return
+        dlg = ConnectDialog(self)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+        self.prompt.SetFocus()
+
     def set_model(self, model: str, effort: str = "") -> None:
         """Apply the model / effort to every message sent from here on."""
         if self.selected_backend() == BACKEND_FREEBUFF and model != self.model:
@@ -3022,7 +4387,11 @@ class SessionPanel(wx.Panel):
         self.prompt.SetFocus()
 
     def cycle_mode(self) -> None:
-        """Quick-cycle the everyday subset (default → accept edits → plan)."""
+        """Quick-cycle the everyday subset (full auto → accept edits → plan).
+
+        Full auto comes first, and is where a mode outside the subset lands, so
+        the chord always has a way back to the mode nothing interrupts.
+        """
         if self.mode in _CYCLE_VALUES:
             nxt = _CYCLE_VALUES[(_CYCLE_VALUES.index(self.mode) + 1) % len(_CYCLE_VALUES)]
         else:
@@ -3044,7 +4413,7 @@ class SessionPanel(wx.Panel):
 
     def _pick_slash_command(self) -> None:
         """Slash-command picker: choose a command to insert into the prompt."""
-        commands = _slash_commands_for_backend(self.selected_backend())
+        commands = _slash_commands_for_backend(self.selected_backend(), self.cwd)
         labels = [f"{cmd}  —  {desc}" for cmd, desc in commands]
         dlg = wx.SingleChoiceDialog(
             self,
@@ -3139,7 +4508,8 @@ class SessionPanel(wx.Panel):
     # ----- Prompt focus / key handling -----
     def _on_prompt_focus(self, event: wx.FocusEvent) -> None:
         event.Skip()
-        wx.CallAfter(announce, "Prompt, edit text")
+        if _MAC_ANNOUNCE:
+            wx.CallAfter(announce, "Prompt, edit text")
 
     def _on_prompt_text_changed(self, event: wx.CommandEvent) -> None:
         event.Skip()
@@ -3155,6 +4525,13 @@ class SessionPanel(wx.Panel):
 
     def _on_prompt_key(self, event: wx.KeyEvent) -> None:
         key = event.GetKeyCode()
+        if key == wx.WXK_TAB and event.ShiftDown() and self._row_count() == 0:
+            # An empty native ListBox exposes transient invalid accessibility
+            # children on Windows. There is nothing to visit, so cross the
+            # page boundary directly instead of making NVDA announce
+            # "Responses, list, unknown" and log accRole failures.
+            self._focus_before()
+            return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             if event.ShiftDown():
                 event.Skip()  # default: insert newline
@@ -3181,6 +4558,74 @@ class SessionPanel(wx.Panel):
             self._on_send()
             return
         event.Skip()
+
+    # ----- Mid-run questions -----
+    def _ask_questions(self, questions: Sequence[Question]) -> Optional[list[list[str]]]:
+        """Put a backend's question to the user and wait for the answer.
+
+        Called on the worker thread, and blocks it: the turn that asked is
+        waiting, and every adapter needs the answer on the thread that read the
+        question. The dialog itself has to be opened on the GUI thread, so it is
+        handed there and the answer comes back through this event.
+
+        Returns None when there is nobody to ask - the tab is closing, or the
+        run is being stopped - which every adapter reports to its backend as
+        the question having gone unanswered.
+        """
+        if not questions:
+            return None
+        answered = threading.Event()
+        held: dict[str, Optional[list[list[str]]]] = {"answers": None}
+
+        def show() -> None:
+            try:
+                held["answers"] = self._show_question_dialog(questions)
+            finally:
+                answered.set()
+
+        wx.CallAfter(show)
+        while not answered.wait(0.2):
+            if self._stopping or not self:
+                # Stopped, or the tab went away, while the dialog was open. The
+                # backend is about to be killed either way.
+                return None
+        return held["answers"]
+
+    def _show_question_dialog(self, questions: Sequence[Question]) -> Optional[list[list[str]]]:
+        """Open the question dialog. GUI thread only."""
+        if not self:
+            return None
+        backend = self._session_backend or self.selected_backend()
+        self._announce(f"{backend_label(backend)} is asking a question")
+        # The progress loop means "still working", and it is not: the run is
+        # waiting on this dialog, and a loop under a question is only noise.
+        self._earcons.stop_progress()
+        dlg = QuestionDialog(self, backend, questions)
+        self._question_dialog = dlg
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                self._announce("Question left unanswered")
+                return None
+            answers = dlg.answers()
+        finally:
+            self._question_dialog = None
+            dlg.Destroy()
+            if self._worker is not None:
+                self._earcons.start_progress()
+        self._announce("Answer sent")
+        return answers
+
+    def _close_question_dialog(self) -> None:
+        """Take down an open question, because the run it belongs to is going.
+
+        Stopping a run happens on the GUI thread, which is the thread the
+        dialog's own event loop is running on, while the worker waits on the
+        answer. Closing it here is what lets both carry on.
+        """
+        dlg = self._question_dialog
+        if dlg is not None:
+            self._question_dialog = None
+            dlg.EndModal(wx.ID_CANCEL)
 
     # ----- Worker-to-GUI event mailbox -----
     def _queue_worker_event(self, name: str, *args: object) -> None:
@@ -3301,6 +4746,10 @@ class SessionPanel(wx.Panel):
             if callable(open_history):
                 wx.CallAfter(open_history)
             return
+        if low == "/connect":
+            self.prompt.SetValue("")
+            self.open_connect_dialog()
+            return
 
         if (
             self._worker is not None
@@ -3347,6 +4796,12 @@ class SessionPanel(wx.Panel):
             summary = self._attachment_summary()
             row_text = f"{send_text}\n{summary}" if send_text else summary
         self._turns.append(Turn(prompt=prompt))
+        if len(self._turns) == 1:
+            # A conversation is named by its first message — that is the title
+            # Recent Conversations lists it under — so the tab holding it takes
+            # the same name the moment there is one. Attachment paths are left
+            # out: the title has to be the words the person typed.
+            self._on_title(self, make_title(prompt))
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
         self._stopping = False
@@ -3381,6 +4836,7 @@ class SessionPanel(wx.Panel):
             on_complete=lambda txt: self._queue_worker_event("complete", txt),
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
+            on_question=self._ask_questions,
             **extra,
         )
         self._worker.start()
@@ -3413,15 +4869,15 @@ class SessionPanel(wx.Panel):
         worker = self._worker
         text = self.prompt.GetValue().strip()
         if worker is None or not worker.is_alive():
-            self._set_status("Error: Nothing is running to steer")
+            self._announce("Error: Nothing is running to steer")
             return
         if not text:
-            self._set_status("Error: Type a message first, then steer")
+            self._announce("Error: Type a message first, then steer")
             return
         if not getattr(worker, "steer")(text):
             # The turn finished between typing and pressing. Leave the text in
             # place so it can just be sent as the next prompt.
-            self._set_status("Error: The run already finished. Press Send to ask it now.")
+            self._announce("Error: The run already finished. Press Send to ask it now.")
             return
         self.prompt.SetValue("")
         self._earcons.play_send()
@@ -3438,11 +4894,12 @@ class SessionPanel(wx.Panel):
         """
         worker = self._worker
         if worker is None or not worker.is_alive():
-            self._set_status("Error: Nothing is running to stop")
+            self._announce("Error: Nothing is running to stop")
             return
         self.stop_btn.Disable()
         self.steer_btn.Disable()
         self._stopping = True
+        self._close_question_dialog()
         self._announce("Stopping")
         # cancel() waits on the process, so it must not run on the UI thread.
         threading.Thread(target=worker.cancel, daemon=True).start()
@@ -3541,6 +4998,9 @@ class SessionPanel(wx.Panel):
         self._stream_response = None
         self._streamed_assistant = ""
         self._refresh_list()
+        # Nothing has been said in this conversation yet, so it has no name;
+        # the tab falls back to the folder until the first message gives it one.
+        self._on_title(self, "")
         self._announce("New conversation started. The previous one is in Recent Conversations")
 
     def compact_conversation(self) -> None:
@@ -3606,6 +5066,7 @@ class SessionPanel(wx.Panel):
                 )
             self._rows.extend(parse_response(turn.response, number))
         self._refresh_list()
+        self._on_title(self, entry.title)
         # Picks up the restored session: relabels the backend line, and gives
         # FreeBuff's terminal a head start on the conversation being resumed.
         self.backend_changed()
@@ -3701,9 +5162,9 @@ class SessionPanel(wx.Panel):
             )
             self._say(flat)
         else:
-            # Reuse the Markdown segmenter; drop its header (index 0) since this
-            # turn already has one. The first row of each incoming message is
-            # Mark the first row with the active backend, the way "You:" marks
+            # Reuse the Markdown segmenter; drop its header (index 0) since
+            # this turn already has one. The first row of each incoming message
+            # is marked with the active backend's name, the way "You:" marks
             # the user's own messages.
             speaker = backend_label(self._session_backend)
             segments = parse_response(text, n)[1:]
@@ -3726,8 +5187,8 @@ class SessionPanel(wx.Panel):
         self._set_status(text[:99] + "…" if len(text) > 100 else text)
         if not SETTINGS.speak_live:
             return False
-        notebook = self.GetParent()
-        if isinstance(notebook, wx.Notebook) and notebook.GetCurrentPage() is not self:
+        book = self.GetParent()
+        if isinstance(book, wx.BookCtrlBase) and book.GetCurrentPage() is not self:
             return False
         announce(text)
         return True
@@ -3857,6 +5318,11 @@ class SessionPanel(wx.Panel):
         """Row keys for both responses controls — the list box and the
         read-only edit field, where a line is a row."""
         key = event.GetKeyCode()
+
+        if key == wx.WXK_TAB and event.ShiftDown():
+            self._focus_before()
+            return
+
         sel = self._selected_row()
 
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
@@ -3923,7 +5389,7 @@ class SessionPanel(wx.Panel):
             return
         row = self._displayed[sel]
         if not _copy_to_clipboard(row.payload):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(self._copy_message(row))
 
@@ -3933,7 +5399,7 @@ class SessionPanel(wx.Panel):
         row = self._displayed[sel]
         text = reassemble(self._rows, row.response_number)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(f"Copied whole response {row.response_number}")
 
@@ -3996,7 +5462,7 @@ class SessionPanel(wx.Panel):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(row.payload)
         except OSError as exc:
-            self._set_status(f"Error saving file: {exc}")
+            self._announce(f"Error saving file: {exc}")
             return
         self._announce(f"Saved code to {os.path.basename(path)}")
 
@@ -4011,18 +5477,18 @@ class SessionPanel(wx.Panel):
     def _action_copy_response(self, row: Row) -> None:
         text = reassemble(self._rows, row.response_number)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         self._announce(f"Copied whole response {row.response_number}")
 
     def _action_copy_conversation(self) -> None:
         """Every row in the list, first to last, on the clipboard."""
         if not self._rows:
-            self._set_status("Error: Nothing to copy yet")
+            self._announce("Error: Nothing to copy yet")
             return
         text = reassemble_all(self._rows)
         if not _copy_to_clipboard(text):
-            self._set_status("Error: Could not access clipboard")
+            self._announce("Error: Could not access clipboard")
             return
         n = len(self._rows)
         self._announce(f"Copied whole conversation, {n} {'row' if n == 1 else 'rows'}")
@@ -4067,6 +5533,7 @@ class SessionPanel(wx.Panel):
 
     # ----- Cleanup hook -----
     def cancel_worker(self) -> None:
+        self._close_question_dialog()
         if self._worker is not None and self._worker.is_alive():
             self._worker.cancel()
             self._worker.join(timeout=3)
@@ -4077,6 +5544,232 @@ class SessionPanel(wx.Panel):
         if held is not None:
             held.drop()  # type: ignore[attr-defined]
             self._held_hermes = None
+
+
+_LOGIN_URL_RE = re.compile(r"https?://[^\s\x1b<>]+", re.IGNORECASE)
+
+# What a CLI says when the sign-in itself went wrong, as opposed to a step of it
+# that is still in progress. Worth repeating verbatim: "Login failed: Request
+# failed with status code 400" is the only clue there is.
+_LOGIN_FAILED_RE = re.compile(
+    r"login failed|sign[- ]?in failed|authentication failed|not authenticated",
+    re.IGNORECASE,
+)
+
+
+# The callback a CLI listens on is not the page anyone signs in on. Codex
+# announces "Starting local login server on http://localhost:1455." before it
+# prints the address to actually visit, and opening the first URL in its output
+# lands the user on a blank local port.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
+
+
+_LOGIN_NOISE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[()][A-Z0-9])")
+
+
+def _login_speech(text: str) -> str:
+    """A line of CLI output as it should be read out.
+
+    Colour and cursor codes are invisible on a screen and gibberish out loud,
+    and a character the CLI wrote in some other encoding arrives here as
+    U+FFFD, which NVDA announces in the middle of the sentence it interrupts.
+    """
+    return " ".join(_LOGIN_NOISE_RE.sub("", text).replace("�", "").split())
+
+
+def _first_login_url(text: str) -> str:
+    """The sign-in address in a line of CLI output, or "" if it has none."""
+    for match in _LOGIN_URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,;:)]}'\"")
+        host = (urllib.parse.urlsplit(url).hostname or "").casefold()
+        if host in _LOOPBACK_HOSTS:
+            continue
+        return url
+    return ""
+
+
+class BackendLogin:
+    """Runs a provider CLI's sign-in from a window that has no console.
+
+    Every backend signs in the same shape: print an address, get the browser to
+    it, and wait. What differs is who opens the browser and whether the CLI then
+    wants a code typed back at it. Both are declared per backend, so this drives
+    all of them and none of them is a special case in the caller.
+
+    The output is read a character at a time rather than a line at a time,
+    because the code prompt ("Paste code here if prompted > ") is written
+    without a newline after it. Waiting for one would hide the very prompt the
+    user has to answer, which is what made a sign-in look like it had frozen.
+
+    The callbacks are called on the worker thread; a GUI caller marshals them.
+    """
+
+    def __init__(
+        self,
+        backend: str,
+        binary: str,
+        *,
+        timeout: float = 300.0,
+        opener: Optional[Callable[[str], bool]] = None,
+        popen: Optional[Callable[..., "subprocess.Popen"]] = None,
+    ):
+        self.backend = normalize_backend(backend)
+        self.binary = binary
+        self.url = ""
+        self.failure = ""
+        self._info = BACKENDS[self.backend]
+        self._timeout = timeout
+        # Same checked door as the opencode sign-in uses: a CLI's address is
+        # already constrained to http or https by the pattern it is read out
+        # of, and this leaves one place in the file that opens anything.
+        self._opener = opener or _open_web_page
+        self._popen = popen or subprocess.Popen
+        self._proc: Optional[subprocess.Popen] = None
+        self._writing = threading.Lock()
+
+    # ---- Driving it ----
+    def run(
+        self,
+        on_progress: Callable[[str], None],
+        on_url: Callable[[str, bool], None],
+        on_code_prompt: Callable[[str, str], None],
+    ) -> int:
+        """Sign in. Returns the CLI's exit code, -1 on timeout, -2 if it never ran."""
+        args = [self.binary, *self._info.login_args]
+        try:
+            proc = self._popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                # A pipe, not DEVNULL: a CLI that wants the code from the
+                # browser has to have somewhere to read it from.
+                stdin=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=subprocess_env(self.binary),
+                # A cancelled sign-in must not leave the CLI's own child still
+                # running and still waiting for a browser nobody is in.
+                **own_group_kwargs(),
+                **_no_window_kwargs(),
+            )
+        except OSError:
+            return -2
+        self._proc = proc
+        pattern = self._info.login_code_prompt
+        prompt = re.compile(pattern) if pattern else None
+        events: queue.Queue = queue.Queue()
+        threading.Thread(target=self._read, args=(proc, prompt, events), daemon=True).start()
+
+        deadline = time.monotonic() + self._timeout
+        asked = 0
+        ended = False
+        while not (ended and proc.poll() is not None):
+            if time.monotonic() > deadline:
+                self._stop()
+                return -1
+            try:
+                item = events.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is None:
+                ended = True
+                continue
+            kind, text = item
+            if kind == "prompt":
+                # The browser round-trip may still finish on its own, so this is
+                # an offer rather than a stop: the caller shows it and reading
+                # goes on. Three is enough for a mistyped code without letting a
+                # CLI that re-prompts forever keep the dialog up forever.
+                asked += 1
+                if asked > 3:
+                    self._stop()
+                    return -1
+                deadline = time.monotonic() + self._timeout
+                on_code_prompt(text.strip(), self.url)
+                continue
+            self._announce(text, on_progress, on_url)
+        return proc.returncode
+
+    def submit_code(self, code: str) -> None:
+        """Answer the CLI's code prompt. Safe to call from another thread."""
+        stdin = getattr(self._proc, "stdin", None)
+        if stdin is None:
+            return
+        with self._writing:
+            try:
+                stdin.write(f"{code}\n")
+                stdin.flush()
+            except (OSError, ValueError):
+                pass
+
+    def open_page(self) -> bool:
+        """Put the sign-in address in the browser. False if nothing happened."""
+        if not self.url:
+            return False
+        try:
+            return bool(self._opener(self.url))
+        except Exception:
+            return False
+
+    def cancel(self) -> None:
+        self._stop()
+
+    # ---- Internals ----
+    def _announce(
+        self,
+        text: str,
+        on_progress: Callable[[str], None],
+        on_url: Callable[[str, bool], None],
+    ) -> None:
+        spoken = _login_speech(text)
+        if _LOGIN_FAILED_RE.search(spoken):
+            self.failure = spoken
+        found = _first_login_url(text)
+        if found and not self.url:
+            self.url = found
+            # A CLI that opens its own page is left to it, so the user does not
+            # end up with two tabs on the same authorization. The wizard's Open
+            # Sign-in Page button opens it either way, for when that did not
+            # arrive.
+            opened = False if self._info.login_opens_browser else self.open_page()
+            on_url(found, opened)
+            return
+        if spoken:
+            on_progress(spoken)
+
+    def _read(self, proc, prompt, events: queue.Queue) -> None:
+        stream = proc.stdout
+        pending = ""
+        try:
+            while True:
+                char = stream.read(1)
+                if not char:
+                    break
+                if char == "\r":
+                    continue
+                if char == "\n":
+                    events.put(("line", pending))
+                    pending = ""
+                    continue
+                pending += char
+                if prompt is not None and prompt.search(pending):
+                    events.put(("prompt", pending))
+                    pending = ""
+        except (OSError, ValueError):
+            pass
+        finally:
+            if pending:
+                events.put(("line", pending))
+            events.put(None)
+
+    def _stop(self) -> None:
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        # Bounded rather than expected: the signals land immediately, and the
+        # wait is only there so a wizard never closes over a live sign-in.
+        end_process_group(proc, timeout=5)
 
 
 class SetupWizard(wx.Dialog):
@@ -4101,6 +5794,8 @@ class SetupWizard(wx.Dialog):
         self._step = 0
         self._backend_path: Optional[str] = None
         self._login_thread: Optional[threading.Thread] = None
+        self._login: Optional[BackendLogin] = None
+        self._code_dialog: Optional[wx.TextEntryDialog] = None
 
         self._step_label = wx.StaticText(self, label="")
         f = self._step_label.GetFont()
@@ -4140,6 +5835,7 @@ class SetupWizard(wx.Dialog):
         self.SetSizer(root)
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.Bind(wx.EVT_CLOSE, self._on_wizard_close)
         self._show_step(0)
 
     # ---- page builders ----
@@ -4222,8 +5918,8 @@ class SetupWizard(wx.Dialog):
             p,
             label=(
                 "BlindPilot needs you to be signed in to use the Claude Code backend.\n\n"
-                "If you have already run 'claude /login' in your terminal and it worked, "
-                "click Already Signed In to skip this step.\n\n"
+                "If you have already run 'claude auth login' in your terminal and "
+                "it worked, click Already Signed In to skip this step.\n\n"
                 "Otherwise click Sign In — your browser will open to complete authentication."
             ),
         )
@@ -4235,8 +5931,16 @@ class SetupWizard(wx.Dialog):
         self._signin_btn.Bind(wx.EVT_BUTTON, lambda _e: self._do_login())
         self._already_btn = wx.Button(p, label="Already Signed In")
         self._already_btn.Bind(wx.EVT_BUTTON, lambda _e: self._go(+1))
+        # The CLI opens the browser for some backends and refuses to for
+        # others, and a browser closed by accident used to mean starting the
+        # whole sign-in again. This reopens the address the CLI gave, whoever
+        # was meant to open it the first time.
+        self._open_page_btn = wx.Button(p, label="Open Sign-in Page")
+        self._open_page_btn.Bind(wx.EVT_BUTTON, lambda _e: self._open_sign_in_page())
+        self._open_page_btn.Disable()
         btn_row.Add(self._signin_btn, 0, wx.RIGHT, 12)
-        btn_row.Add(self._already_btn, 0)
+        btn_row.Add(self._already_btn, 0, wx.RIGHT, 12)
+        btn_row.Add(self._open_page_btn, 0)
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(self._signin_intro, 0, wx.ALL, 8)
         s.Add(self._signin_status, 0, wx.LEFT | wx.BOTTOM, 8)
@@ -4291,6 +5995,13 @@ class SetupWizard(wx.Dialog):
         info = BACKENDS[self.backend]
         label = info.label
         login = " ".join((info.executable, *info.login_args))
+        self._signin_btn.SetLabel(
+            "Connect a Provider" if self.backend == BACKEND_OPENCODE else "Sign In"
+        )
+        # opencode's sign-in runs through the Connect dialog, which opens the
+        # provider's page itself; there is no CLI address for this button to
+        # reopen, so it is not offered.
+        self._open_page_btn.Show(self.backend != BACKEND_OPENCODE)
         self._welcome_text.SetLabel(
             "Welcome to BlindPilot.\n\n"
             "Choose the coding-agent backend you want to use first. This wizard "
@@ -4301,7 +6012,14 @@ class SetupWizard(wx.Dialog):
         self._welcome_text.Wrap(520)
         self._cli_install_btn.SetLabel(f"Install {label}")
         self._cli_update_btn.SetLabel(f"Update {label}")
-        if info.login_needs_terminal:
+        if self.backend == BACKEND_OPENCODE:
+            self._signin_intro.SetLabel(
+                f"{label} reaches a model through a provider you connect it to.\n\n"
+                "Choose Connect a Provider to pick one and give it an API key, or to "
+                "sign in through your browser. If you have already connected one, or "
+                f"already ran '{login}' in a terminal, choose Already Signed In."
+            )
+        elif info.login_needs_terminal:
             self._signin_intro.SetLabel(
                 f"BlindPilot needs {label} to have a provider and model configured.\n\n"
                 f"If you have already run '{login}' in a terminal, choose Already "
@@ -4345,6 +6063,9 @@ class SetupWizard(wx.Dialog):
             return
         self.backend = BACKEND_IDS[selection]
         self._backend_path = None
+        # The address the previous CLI handed out signs you in to the previous
+        # provider. Opening it from here would be worse than offering nothing.
+        self._stop_login()
         self._signin_status.SetLabel("")
         self._refresh_backend_copy()
         self.Layout()
@@ -4358,7 +6079,12 @@ class SetupWizard(wx.Dialog):
     def _selected_install_argv(self) -> Optional[List[str]]:
         if self.backend == BACKEND_CLAUDE:
             return _install_argv()
-        return _npm_install_argv(self.backend)
+        argv = _npm_install_argv(self.backend)
+        if argv is not None:
+            return argv
+        # The actual Node.js command is discovered at install time. A sentinel
+        # keeps the accessible Install button available on a clean computer.
+        return ["managed-node-lts"] if _automatic_npm_install_available() else None
 
     # ---- navigation ----
 
@@ -4386,15 +6112,28 @@ class SetupWizard(wx.Dialog):
         if target < 0:
             return
         if target >= len(self._STEPS):
+            self._stop_login()
             self.EndModal(wx.ID_OK)
             return
         self._show_step(target)
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
+            self._stop_login()
             self.EndModal(wx.ID_CANCEL)
             return
         event.Skip()
+
+    def _on_wizard_close(self, event: wx.CloseEvent) -> None:
+        self._stop_login()
+        event.Skip()
+
+    def _stop_login(self) -> None:
+        """Leave no half-finished sign-in running behind a closed wizard."""
+        self._close_code_dialog()
+        login, self._login = self._login, None
+        if login is not None:
+            login.cancel()
 
     # ---- CLI step ----
 
@@ -4507,10 +6246,21 @@ class SetupWizard(wx.Dialog):
             self._next_btn.Enable(True)
         elif self._selected_install_argv() is not None:
             self._cli_status.SetLabel(f"{info.label} is not installed.")
-            self._cli_detail.SetLabel(
-                f"Choose Install {info.label} to run:\n\n{info.install_command}\n\n"
-                "You can also run that command in a terminal and choose Check Again."
-            )
+            if _find_npm() is None:
+                self._cli_detail.SetLabel(
+                    f"Choose Install {info.label}. BlindPilot will first install the "
+                    "latest Node.js LTS and npm for your user account, without administrator "
+                    f"rights, then install and verify {info.label} and add it to PATH.\n\n"
+                    f"To do it yourself, install Node.js and run:\n\n{info.install_command}\n\n"
+                    "Then choose Check Again."
+                )
+            else:
+                self._cli_detail.SetLabel(
+                    f"Choose Install {info.label} to run:\n\n{info.install_command}\n\n"
+                    "BlindPilot installs it for your user account, verifies that it starts, "
+                    "and adds it to PATH. You can also run the command in a terminal and "
+                    "choose Check Again."
+                )
             self._cli_install_btn.Show()
             self._cli_update_btn.Hide()
             self._cli_path_btn.Hide()
@@ -4536,9 +6286,9 @@ class SetupWizard(wx.Dialog):
         else:
             self._cli_status.SetLabel(f"{info.label} was not found.")
             self._cli_detail.SetLabel(
-                f"npm is required for automatic installation. Install Node.js and npm, "
-                f"then run:\n\n{info.install_command}\n\nThen choose Check Again, "
-                "or go Back and select another backend."
+                f"Automatic Node.js installation is unavailable on this computer. Install "
+                f"Node.js and npm, then run:\n\n{info.install_command}\n\nThen choose "
+                "Check Again, or go Back and select another backend."
             )
             self._cli_install_btn.Hide()
             self._cli_update_btn.Hide()
@@ -4668,6 +6418,7 @@ class SetupWizard(wx.Dialog):
 
     def _check_signin(self) -> None:
         label = backend_label(self.backend)
+        self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
         self._backend_path = self._find_selected_cli()
         if not self._backend_path:
             self._signin_status.SetLabel(
@@ -4682,6 +6433,18 @@ class SetupWizard(wx.Dialog):
         announce(self._signin_status.GetLabel())
 
     def _do_login(self) -> None:
+        if self.backend == BACKEND_OPENCODE:
+            # opencode signs in by picking a provider and giving it a key or a
+            # browser round-trip, which is exactly what /connect does. Shelling
+            # out to the CLI's version of it would leave a terminal prompt
+            # nobody can see, waiting on input nobody can give it.
+            dlg = ConnectDialog(self)
+            try:
+                dlg.ShowModal()
+            finally:
+                dlg.Destroy()
+            self._check_signin()
+            return
         if not self._backend_path:
             self._backend_path = self._find_selected_cli()
         if not self._backend_path:
@@ -4694,6 +6457,8 @@ class SetupWizard(wx.Dialog):
         self._signin_btn.Disable()
         self._already_btn.Disable()
         self._next_btn.Disable()
+        self._open_page_btn.Disable()
+        self._login = BackendLogin(self.backend, self._backend_path)
         self._signin_status.SetLabel(
             "Waiting for sign-in… Complete authentication in your browser, then return here."
         )
@@ -4704,41 +6469,33 @@ class SetupWizard(wx.Dialog):
         self._login_thread.start()
 
     def _run_login(self) -> None:
-        binary = self._backend_path
-        rc = -1
-        try:
-            assert binary is not None
-            args = [binary, *BACKENDS[self.backend].login_args]
-            if BACKENDS[self.backend].login_needs_terminal:
-                # An interactive setup cannot run hidden with no stdin: it dies
-                # immediately and the wizard would report a failed sign-in for a
-                # backend that is simply waiting to be asked. Give it a real
-                # console and let the user answer it.
-                self._launch_login_terminal(args)
+        if BACKENDS[self.backend].login_needs_terminal:
+            # An interactive setup cannot run hidden with no stdin: it dies
+            # immediately and the wizard would report a failed sign-in for a
+            # backend that is simply waiting to be asked. Give it a real
+            # console and let the user answer it. This is decided before
+            # BackendLogin runs, because watching output for a browser address
+            # is meaningless for a setup that asks its questions in a console.
+            binary = self._backend_path
+            if binary is None:
+                wx.CallAfter(self._on_login_terminal_opened, "", False)
                 return
-            proc = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **_no_window_kwargs(),
-            )
-            # Only the wait can time out, and killing the process is only
-            # possible once there is one, so the timeout is caught here rather
-            # than beside the failures that can happen before it starts.
-            try:
-                _out, _ = proc.communicate(timeout=300)
-                rc = proc.returncode
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                rc = -1
-        except Exception:
-            rc = -2
-        wx.CallAfter(self._on_login_done, rc)
+            self._launch_login_terminal([binary, *BACKENDS[self.backend].login_args])
+            return
+        login = self._login
+        assert login is not None
+        rc = login.run(
+            lambda text: wx.CallAfter(self._on_login_progress, text),
+            lambda url, opened: wx.CallAfter(self._on_login_url, url, opened),
+            lambda prompt, url: wx.CallAfter(self._ask_login_code, prompt, url),
+        )
+        # The CLI is the only thing that knows whether the browser round-trip
+        # landed, and not all of them say so with an exit code — Claude Code
+        # keeps running after a rejected code, and a kill for taking too long
+        # looks identical to one for going wrong. Asking the CLI whether it is
+        # signed in settles it either way.
+        ok = rc == 0 or backend_auth_ok(self.backend)
+        wx.CallAfter(self._on_login_done, ok, login.failure)
 
     def _launch_login_terminal(self, args: List[str]) -> None:
         """Open a real console for a backend whose setup asks questions.
@@ -4769,6 +6526,8 @@ class SetupWizard(wx.Dialog):
         wx.CallAfter(self._on_login_terminal_opened, command, True)
 
     def _on_login_terminal_opened(self, command: str, opened: bool) -> None:
+        if not self:
+            return
         self._signin_btn.Enable()
         self._already_btn.Enable()
         self._next_btn.Enable()
@@ -4778,26 +6537,107 @@ class SetupWizard(wx.Dialog):
                 "window. Answer its questions there, then come back and choose "
                 "Already Signed In."
             )
-        else:
+        elif command:
             self._signin_status.SetLabel(
                 f"BlindPilot could not open a terminal. Run this yourself, then "
                 f"choose Already Signed In:\n\n{command}"
+            )
+        else:
+            self._signin_status.SetLabel(
+                f"BlindPilot could not find {backend_label(self.backend)} to run. "
+                "Go back a page and install or locate it first."
             )
         self._pages[2].Layout()
         self.Layout()
         announce(self._signin_status.GetLabel())
 
-    def _on_login_done(self, rc: int) -> None:
+    def _on_login_progress(self, text: str) -> None:
+        if not self:
+            return
+        self._signin_status.SetLabel(text)
+        self._signin_status.Wrap(520)
+        self._pages[2].Layout()
+        self.Layout()
+        announce(text)
+
+    def _on_login_url(self, url: str, opened: bool) -> None:
+        """The CLI has said where to sign in. Say it, and offer to open it."""
+        if not self:
+            return
+        self._open_page_btn.Enable()
+        if opened:
+            text = "The sign-in page is open in your browser. Complete it, then return here."
+        else:
+            text = (
+                "Your browser should have opened the sign-in page. If it did not, "
+                f"choose Open Sign-in Page. The address is {url}"
+            )
+        self._on_login_progress(text)
+
+    def _open_sign_in_page(self) -> None:
+        """The browser did not arrive, or it was closed. Open it again."""
+        login = self._login
+        if login is None or not login.url:
+            announce("There is no sign-in page yet. Choose Sign In first.")
+            return
+        if login.open_page():
+            announce("Opened the sign-in page in your browser.")
+        else:
+            announce(f"Could not open a browser. The sign-in address is {login.url}")
+
+    def _ask_login_code(self, prompt: str, url: str) -> None:
+        """The CLI is waiting for the code the sign-in page hands back.
+
+        Not every sign-in ends this way — the same page usually completes the
+        round-trip on its own — so this dialog is a way in, not a wall. It
+        closes itself the moment the CLI finishes without it.
+        """
+        if not self or self._code_dialog is not None:
+            return
+        message = (
+            f"{prompt or 'Paste the code from the sign-in page.'}\n\n"
+            "If the page gave you a code, paste it here and choose OK.\n"
+            "If it did not, leave this alone — it closes by itself once the "
+            "browser has finished signing you in."
+        )
+        if url:
+            message = f"{message}\n\n{url}"
+        dlg = wx.TextEntryDialog(self, message, "Sign In")
+        self._code_dialog = dlg
+        try:
+            code = dlg.GetValue().strip() if dlg.ShowModal() == wx.ID_OK else ""
+        finally:
+            self._code_dialog = None
+            dlg.Destroy()
+        if code and self._login is not None:
+            self._login.submit_code(code)
+
+    def _close_code_dialog(self) -> None:
+        dlg = self._code_dialog
+        if dlg is None:
+            return
+        self._code_dialog = None
+        try:
+            dlg.EndModal(wx.ID_CANCEL)
+        except Exception:
+            pass
+
+    def _on_login_done(self, ok: bool, failure: str) -> None:
+        if not self:
+            return
+        self._close_code_dialog()
         self._signin_btn.Enable()
         self._already_btn.Enable()
         self._next_btn.Enable()
-        if rc == 0:
+        if ok:
             self._signin_status.SetLabel("Signed in successfully.")
             wx.CallAfter(self._go, +1)
         else:
+            trouble = f"{failure} " if failure else ""
             self._signin_status.SetLabel(
-                "Sign-in did not complete (or timed out). "
-                "Try again, or click Already Signed In if you are authenticated."
+                f"{trouble}Sign-in did not complete (or timed out). "
+                "Try again, choose Open Sign-in Page to reopen the browser, or "
+                "choose Already Signed In if you are authenticated."
             )
         self._pages[2].Layout()
         self.Layout()
@@ -4997,13 +6837,18 @@ class MainFrame(wx.Frame):
         super().__init__(None, title=APP_NAME, size=wx.Size(900, 760))
 
         # Shared audio cues (send / in-progress loop / received).
-        self.earcons = Earcons(os.path.join(_resource_dir(), "EarCons"))
+        self.earcons = Earcons(
+            os.path.join(_resource_dir(), "EarCons"),
+            enabled=SETTINGS.sounds_enabled,
+        )
         self._update_checking = False
 
         # Remembered "Projects folder" — the parent folder that holds the
         # user's project directories. New Session browses from there.
         cfg = _load_config()
         self._backend = normalize_backend(cfg.get("backend"))
+        self._app_mode = APP_MODE_CHAT if cfg.get("app_mode") == APP_MODE_CHAT else APP_MODE_AGENT
+        self.chat_panel = None
         pf = cfg.get("projects_folder")
         self._projects_folder: Optional[str] = pf if pf and os.path.isdir(pf) else None
 
@@ -5039,7 +6884,7 @@ class MainFrame(wx.Frame):
         manage_backends_item = file_menu.Append(
             wx.ID_ANY,
             "&Manage Backends...",
-            "Install, update, or sign in to Claude Code, Codex, or FreeBuff",
+            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
         )
         set_pf_item = file_menu.Append(
             wx.ID_ANY,
@@ -5075,6 +6920,20 @@ class MainFrame(wx.Frame):
             "Search the responses in this session",
         )
         file_menu.AppendSeparator()
+        # No "\t" in these two labels on purpose: that would register a menu
+        # accelerator, and Windows will not fire one whose key is Tab. The
+        # accelerator table below carries the chord; the label just says it.
+        next_tab_item = file_menu.Append(
+            wx.ID_ANY,
+            "Ne&xt Session (Ctrl+Tab)",
+            "Move to the next conversation tab",
+        )
+        prev_tab_item = file_menu.Append(
+            wx.ID_ANY,
+            "Previo&us Session (Ctrl+Shift+Tab)",
+            "Move to the previous conversation tab",
+        )
+        file_menu.AppendSeparator()
         close_item = file_menu.Append(
             wx.ID_CLOSE, "&Close Session\tCtrl+W", "Close the current session tab"
         )
@@ -5099,6 +6958,11 @@ class MainFrame(wx.Frame):
             "Include the backend's &reasoning",
             "Add the backend's own thinking to the activity. Off by default, "
             "so only its actions and its answer are shown",
+        )
+        self._sounds_item = options_menu.AppendCheckItem(
+            wx.ID_ANY,
+            "Play &sound cues",
+            "Play sounds when a message is sent, while it is working, and when a response arrives",
         )
         options_menu.AppendSeparator()
         self._text_view_item = options_menu.AppendCheckItem(
@@ -5145,6 +7009,7 @@ class MainFrame(wx.Frame):
         self._rows_item.Check(SETTINGS.live_rows)
         self._speak_item.Check(SETTINGS.speak_live)
         self._thinking_item.Check(SETTINGS.show_thinking)
+        self._sounds_item.Check(SETTINGS.sounds_enabled)
         self._text_view_item.Check(SETTINGS.text_view)
         {
             CUE_LOOP: self._cue_loop_item,
@@ -5153,12 +7018,64 @@ class MainFrame(wx.Frame):
         }[SETTINGS.progress_cue].Check(True)
         menubar.Append(options_menu, "&Options")
 
+        chat_menu = wx.Menu()
+        self._chat_accounts_item = chat_menu.Append(
+            wx.ID_ANY,
+            "&Accounts...",
+            "Add, edit, test, or remove Chat provider accounts",
+        )
+        self._chat_profiles_item = chat_menu.Append(
+            wx.ID_ANY,
+            "Conversation &profiles...",
+            "Manage Chat system prompts and generation defaults",
+        )
+        chat_menu.AppendSeparator()
+        self._chat_refresh_item = chat_menu.Append(
+            wx.ID_ANY,
+            "&Refresh models",
+            "Refresh the model list for the selected Chat account",
+        )
+        chat_history_menu = wx.Menu()
+        self._chat_history_list_item = chat_history_menu.AppendRadioItem(wx.ID_ANY, "&List")
+        self._chat_history_text_item = chat_history_menu.AppendRadioItem(
+            wx.ID_ANY, "&Read-only text"
+        )
+        self._chat_history_list_item.Check(True)
+        chat_menu.AppendSubMenu(
+            chat_history_menu,
+            "&History view",
+            "Choose how Chat conversation history is presented",
+        )
+        chat_menu.AppendSeparator()
+        self._chat_diagnostics_item = chat_menu.Append(
+            wx.ID_ANY,
+            "&Diagnostics...",
+            "Review the Chat provider diagnostic log",
+        )
+        self._chat_menu_items = [
+            self._chat_accounts_item,
+            self._chat_profiles_item,
+            self._chat_refresh_item,
+            self._chat_history_list_item,
+            self._chat_history_text_item,
+            self._chat_diagnostics_item,
+        ]
+        for item in self._chat_menu_items:
+            item.Enable(False)
+        menubar.Append(chat_menu, "&Chat")
+
         help_menu = wx.Menu()
         update_item = help_menu.Append(
             wx.ID_ANY,
             "Check for &Updates...",
             "Check GitHub for a newer BlindPilot release",
         )
+        self._automatic_updates_item = help_menu.AppendCheckItem(
+            wx.ID_ANY,
+            "Check for updates at &startup",
+            "Quietly check at startup and report only when a new version is available",
+        )
+        self._automatic_updates_item.Check(bool(cfg.get("check_for_updates_at_startup", True)))
         help_menu.AppendSeparator()
         about_item = help_menu.Append(
             wx.ID_ABOUT,
@@ -5172,6 +7089,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_live_rows(), self._rows_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_speak_live(), self._speak_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_show_thinking(), self._thinking_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._toggle_sounds(), self._sounds_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_text_view(), self._text_view_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._choose_progress_cue(CUE_LOOP), self._cue_loop_item)
         self.Bind(
@@ -5187,6 +7105,36 @@ class MainFrame(wx.Frame):
             lambda _e: self._use_silent_until_response_mode(),
             silent_response_item,
         )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._show_chat_accounts(),
+            self._chat_accounts_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._show_chat_profiles(),
+            self._chat_profiles_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._refresh_chat_models(),
+            self._chat_refresh_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._set_chat_history_view("list"),
+            self._chat_history_list_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._set_chat_history_view("text"),
+            self._chat_history_text_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._show_chat_diagnostics(),
+            self._chat_diagnostics_item,
+        )
         self.Bind(wx.EVT_MENU, lambda _e: self._new_session(), new_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._open_history(), history_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._compact_active(), self._compact_item)
@@ -5196,31 +7144,59 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda _e: self._create_desktop_shortcut(), desktop_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._stop_active(), stop_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._find_active(), find_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(+1), next_tab_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(-1), prev_tab_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._close_current_session(), close_item)
         self.Bind(wx.EVT_MENU, lambda _e: self.Close(), quit_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._check_for_updates(), update_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._toggle_automatic_updates(),
+            self._automatic_updates_item,
+        )
 
-        # ----- Top-level layout: session picker + notebook -----
+        # ----- Top-level layout: mode picker + active experience -----
         root = wx.Panel(self)
         root_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._root = root
+        self._root_sizer = root_sizer
 
         picker_row = wx.BoxSizer(wx.HORIZONTAL)
-        session_label = wx.StaticText(root, label="Session:")
-        self.session_picker = wx.Choice(root, choices=[])
-        self.session_picker.SetName("Session")
-        self.session_picker.Bind(wx.EVT_CHOICE, self._on_picker_change)
-        self.session_picker.Bind(wx.EVT_SET_FOCUS, self._on_picker_focus)
-        picker_row.Add(session_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
-        picker_row.Add(self.session_picker, 1, wx.ALIGN_CENTER_VERTICAL)
+        mode_label = wx.StaticText(root, label="Mode:")
+        self.mode_combo = wx.ComboBox(
+            root,
+            choices=[APP_MODE_LABELS[APP_MODE_AGENT], APP_MODE_LABELS[APP_MODE_CHAT]],
+            style=wx.CB_READONLY,
+        )
+        self.mode_combo.SetName("Mode")
+        self.mode_combo.SetSelection(1 if self._app_mode == APP_MODE_CHAT else 0)
+        self.mode_combo.SetToolTip("Choose coding-agent sessions or provider chat")
+        self.mode_combo.Bind(wx.EVT_COMBOBOX, self._on_app_mode_changed)
+        self.mode_combo.Bind(wx.EVT_KEY_DOWN, self._on_mode_combo_key)
+        picker_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        picker_row.Add(self.mode_combo, 0, wx.ALIGN_CENTER_VERTICAL)
 
-        # Simplebook = a notebook with no visible tab strip; the dropdown is
-        # the user-facing way to switch sessions.
+        # This is an intentional, keyboard-focusable native tab strip. Its
+        # pages are empty because the real session content lives in the
+        # Simplebook below; separating the two prevents Windows from announcing
+        # "tab control" merely because focus entered a conversation page.
+        self.tab_switcher = wx.Notebook(root, style=wx.NB_TOP)
+        self.tab_switcher.SetName("Session tabs")
+        self.tab_switcher.SetMinSize(wx.Size(-1, root.FromDIP(38)))
+        self.tab_switcher.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_tab_switcher_changed)
+        self._syncing_tab_switcher = False
+
+        # Session and Ctrl+Tab provide all session navigation. Simplebook has
+        # the same page-management API without a native tab strip. A native
+        # Notebook announces "tab control" whenever focus enters or leaves one
+        # of its pages, even when the strip itself rejects keyboard focus.
         self.notebook = wx.Simplebook(root)
-        self.notebook.SetName("Sessions")
+        self.notebook.SetName("Session pages")
         self.notebook.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_tab_changed)
 
         root_sizer.Add(picker_row, 0, wx.EXPAND | wx.ALL, 8)
+        root_sizer.Add(self.tab_switcher, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
         root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 4)
         root.SetSizer(root_sizer)
 
@@ -5228,8 +7204,13 @@ class MainFrame(wx.Frame):
         self._set_status_text("Ready")
 
         # Shortcuts. Cmd+L / Cmd+F focus the active tab's prompt / search.
-        # Cmd+Shift+] and Cmd+Shift+[ move between tabs (Mac-standard).
-        # Cmd+1..9 jump directly to tab N.
+        # Ctrl+Tab and Ctrl+Shift+Tab move between tabs, which is what every
+        # other tabbed application does; Cmd+Shift+] and Cmd+Shift+[ do the
+        # same and are what a Mac user reaches for. Cmd+1..9 jump straight to
+        # tab N. Tab shortcuts have to live in the accelerator table rather
+        # than on a menu item: Windows menus will not accept Tab as an
+        # accelerator key, so a tab-prefixed label would be shown and never
+        # fire. The menu items below therefore name the chord in their text.
         id_focus_prompt = wx.NewIdRef()
         id_next_tab = wx.NewIdRef()
         id_prev_tab = wx.NewIdRef()
@@ -5247,6 +7228,8 @@ class MainFrame(wx.Frame):
 
         accel_entries = [
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("L"), id_focus_prompt),
+            wx.AcceleratorEntry(wx.ACCEL_CTRL, wx.WXK_TAB, id_next_tab),
+            wx.AcceleratorEntry(wx.ACCEL_CTRL | wx.ACCEL_SHIFT, wx.WXK_TAB, id_prev_tab),
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("]"), id_next_tab),
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("["), id_prev_tab),
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("M"), id_cycle_mode),
@@ -5262,12 +7245,182 @@ class MainFrame(wx.Frame):
             accel_entries.append(wx.AcceleratorEntry(wx.ACCEL_CMD, ord(str(n)), tid))
 
         self.SetAcceleratorTable(wx.AcceleratorTable(accel_entries))
+        # EVT_KEY_DOWN is too late for Tab on native Windows Choice controls:
+        # wxWidgets has already performed dialog navigation. A frame-level
+        # character hook sees it first and routes only the page boundaries.
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_agent_char_hook)
 
         self._add_session(initial_cwd)
+        self._set_app_mode(self._app_mode, announce_change=False)
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
 
     # ----- Tab management -----
+    def _on_app_mode_changed(self, event: wx.CommandEvent) -> None:
+        mode = APP_MODE_CHAT if self.mode_combo.GetSelection() == 1 else APP_MODE_AGENT
+        self._set_app_mode(mode)
+        event.Skip()
+
+    @staticmethod
+    def _focus_is_within(focus: Optional[wx.Window], control: wx.Window) -> bool:
+        """Include native child windows used internally by combo controls."""
+        current = focus
+        while current is not None:
+            if current is control:
+                return True
+            current = current.GetParent()
+        return False
+
+    def _route_agent_tab(self, focus: Optional[wx.Window], shift: bool) -> bool:
+        """Route focus across Agent-page boundaries before native traversal."""
+        if self._app_mode != APP_MODE_AGENT:
+            return False
+        page = self.notebook.GetCurrentPage()
+        if not isinstance(page, SessionPanel):
+            return False
+
+        if self._focus_is_within(focus, self.mode_combo):
+            if shift:
+                page.focus_last_control()
+            else:
+                self.tab_switcher.SetFocus()
+            return True
+
+        if self._focus_is_within(focus, self.tab_switcher):
+            if shift:
+                self.mode_combo.SetFocus()
+            else:
+                page.focus_first_control()
+            return True
+
+        if self._focus_is_within(focus, page.mode_picker) and not shift:
+            self.mode_combo.SetFocus()
+            return True
+
+        responses = page._responses_ctrl()
+        if shift and self._focus_is_within(focus, responses):
+            self.tab_switcher.SetFocus()
+            return True
+
+        if shift and page._row_count() == 0 and self._focus_is_within(focus, page.prompt):
+            self.tab_switcher.SetFocus()
+            return True
+        if not shift and self._focus_is_within(focus, page.prompt):
+            # NVDA schedules a formatting query 50 ms after receiving Tab in
+            # an edit field. Keep the Prompt alive and focused until that query
+            # finishes instead of leaving it with a stale native text range.
+            page.focus_first_action_delayed()
+            return True
+        return False
+
+    def _on_agent_char_hook(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() != wx.WXK_TAB:
+            event.Skip()
+            return
+        if event.ControlDown() or event.CmdDown():
+            # Ctrl+Tab is session navigation from anywhere in the window,
+            # including from inside the tab strip, whose own native Ctrl+Tab
+            # would otherwise move the strip without moving the page. Handling
+            # it here rather than leaving it to the accelerator table keeps the
+            # hook from swallowing it as a plain Tab.
+            if self._app_mode == APP_MODE_AGENT:
+                self._cycle_tab(-1 if event.ShiftDown() else +1)
+                return
+            event.Skip()
+            return
+        if self._route_agent_tab(wx.Window.FindFocus(), event.ShiftDown()):
+            return
+        event.Skip()
+
+    def _on_mode_combo_key(self, event: wx.KeyEvent) -> None:
+        """Move backward into the end of the active Agent page."""
+        if (
+            self._app_mode == APP_MODE_AGENT
+            and event.GetKeyCode() == wx.WXK_TAB
+            and event.ShiftDown()
+        ):
+            page = self.notebook.GetCurrentPage()
+            if isinstance(page, SessionPanel):
+                page.focus_last_control()
+                return
+        event.Skip()
+
+    def _ensure_chat_panel(self):
+        if self.chat_panel is not None:
+            return self.chat_panel
+        from chat_integration import create_chat_panel
+
+        self.chat_panel = create_chat_panel(
+            self._root,
+            self._set_status_text,
+            announce,
+        )
+        self.chat_panel.refresh_models_item = self._chat_refresh_item
+        self.chat_panel.history_list_view_item = self._chat_history_list_item
+        self.chat_panel.history_text_view_item = self._chat_history_text_item
+        self._root_sizer.Add(self.chat_panel, 1, wx.EXPAND | wx.ALL, 4)
+        self.chat_panel.Hide()
+        return self.chat_panel
+
+    def _set_app_mode(self, mode: str, announce_change: bool = True) -> None:
+        mode = APP_MODE_CHAT if mode == APP_MODE_CHAT else APP_MODE_AGENT
+        if mode == APP_MODE_CHAT:
+            try:
+                chat_panel = self._ensure_chat_panel()
+            except Exception as exc:
+                self._app_mode = APP_MODE_AGENT
+                self.mode_combo.SetSelection(0)
+                message = f"Chat mode could not be opened: {exc}"
+                self._set_status_text(message)
+                wx.MessageBox(message, "Chat Mode", wx.OK | wx.ICON_ERROR, self)
+                return
+        else:
+            chat_panel = self.chat_panel
+
+        self._app_mode = mode
+        show_agent = mode == APP_MODE_AGENT
+        self.tab_switcher.Show(show_agent)
+        self.notebook.Show(show_agent)
+        if chat_panel is not None:
+            chat_panel.Show(not show_agent)
+        for item in self._chat_menu_items:
+            item.Enable(not show_agent)
+        self.mode_combo.SetSelection(0 if show_agent else 1)
+        self._refresh_compact_item()
+        self._root.Layout()
+
+        cfg = _load_config()
+        cfg["app_mode"] = mode
+        _save_config(cfg)
+        if show_agent:
+            page = self.notebook.GetCurrentPage()
+            if isinstance(page, SessionPanel):
+                page.focus_prompt()
+        else:
+            chat_panel.message_input.SetFocus()
+        if announce_change:
+            self._announce_setting(f"{APP_MODE_LABELS[mode]} mode")
+
+    def _refresh_chat_models(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_refresh_models(wx.CommandEvent())
+
+    def _show_chat_accounts(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_accounts(wx.CommandEvent())
+
+    def _show_chat_profiles(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_profiles(wx.CommandEvent())
+
+    def _set_chat_history_view(self, view: str) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel._set_history_view(view)
+
+    def _show_chat_diagnostics(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_diagnostics(wx.CommandEvent())
+
     def current_backend(self) -> str:
         return self._backend
 
@@ -5345,6 +7498,32 @@ class MainFrame(wx.Frame):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def automatic_update_check_enabled(self) -> bool:
+        return bool(_load_config().get("check_for_updates_at_startup", True))
+
+    def _toggle_automatic_updates(self) -> None:
+        enabled = self._automatic_updates_item.IsChecked()
+        cfg = _load_config()
+        cfg["check_for_updates_at_startup"] = enabled
+        _save_config(cfg)
+        self._announce_setting(
+            "BlindPilot will check for updates at startup"
+            if enabled
+            else "BlindPilot will not check for updates at startup"
+        )
+
+    def _show_update_dialog(self) -> None:
+        from update_dialog import UpdateDialog
+
+        dialog = UpdateDialog(self, APP_VERSION, announce)
+        try:
+            dialog.ShowModal()
+            restart = dialog.restart_pending
+        finally:
+            dialog.Destroy()
+        if restart:
+            self.Close(force=True)
+
     def check_for_updates_silently(self) -> None:
         """Startup entry point: report only an available update, never network noise."""
         self._check_for_updates(silent=True)
@@ -5379,6 +7558,14 @@ class MainFrame(wx.Frame):
         if release is None or not release.is_newer_than(APP_VERSION):
             if not silent:
                 self._announce_setting(f"BlindPilot {APP_VERSION} is the newest available version")
+            return
+        if silent:
+            message = (
+                f"BlindPilot {release.version} is available. "
+                "Open Help, Check for Updates to review and install it."
+            )
+            self._set_status_text(message)
+            announce(message)
             return
         notes = release.notes[:1500]
         message = (
@@ -5463,12 +7650,15 @@ class MainFrame(wx.Frame):
             self.notebook,
             cwd,
             on_status=self._panel_status_changed,
+            on_title=self._panel_title_changed,
             earcons=self.earcons,
             on_side_chat=self._open_side_chat,
             get_backend=self.current_backend,
+            focus_before=lambda: self.tab_switcher.SetFocus(),
+            focus_after=lambda: self.mode_combo.SetFocus(),
         )
-        self.notebook.AddPage(panel, _short_label(cwd), select=True)
-        self._refresh_picker()
+        self.notebook.AddPage(panel, _tab_label("", cwd), select=True)
+        self._sync_tab_switcher()
         # Model catalogs are intentionally lazy. FreeBuff's installed catalog
         # is embedded in a large executable, and scanning it here caused a
         # noticeable CPU spike every time BlindPilot started or opened a tab.
@@ -5487,23 +7677,41 @@ class MainFrame(wx.Frame):
         self._add_session(cwd, initial_prompt=message)
         wx.CallAfter(announce, f"Side chat opened in {_short_label(cwd)}")
 
-    def _refresh_picker(self) -> None:
-        labels: list[str] = []
-        for i in range(self.notebook.GetPageCount()):
-            labels.append(f"{i + 1}. {self.notebook.GetPageText(i)}")
-        self.session_picker.Set(labels)
-        sel = self.notebook.GetSelection()
-        if sel != wx.NOT_FOUND:
-            self.session_picker.SetSelection(sel)
+    def _sync_tab_switcher(self) -> None:
+        """Mirror the Simplebook's pages onto the visible tab strip.
 
-    def _on_picker_change(self, event: wx.CommandEvent) -> None:
-        sel = self.session_picker.GetSelection()
-        if sel != wx.NOT_FOUND and sel != self.notebook.GetSelection():
-            self.notebook.SetSelection(sel)
+        The strip's own pages stay empty placeholders: the conversation lives
+        in the Simplebook below, so a placeholder holds no focusable child and
+        Tab traversal walks straight past it into the real page.
+        """
+        self._syncing_tab_switcher = True
+        try:
+            count = self.notebook.GetPageCount()
+            while self.tab_switcher.GetPageCount() > count:
+                self.tab_switcher.DeletePage(self.tab_switcher.GetPageCount() - 1)
+            while self.tab_switcher.GetPageCount() < count:
+                self.tab_switcher.AddPage(wx.Panel(self.tab_switcher), "")
+            for index in range(count):
+                label = self.notebook.GetPageText(index)
+                if self.tab_switcher.GetPageText(index) != label:
+                    self.tab_switcher.SetPageText(index, label)
+            sel = self.notebook.GetSelection()
+            if 0 <= sel < count and self.tab_switcher.GetSelection() != sel:
+                # ChangeSelection, not SetSelection: this is the strip catching
+                # up with the book, and must not be reported back as a request
+                # to change the book.
+                self.tab_switcher.ChangeSelection(sel)
+        finally:
+            self._syncing_tab_switcher = False
 
-    def _on_picker_focus(self, event: wx.FocusEvent) -> None:
+    def _on_tab_switcher_changed(self, event: wx.BookCtrlEvent) -> None:
+        """Arrowing along the strip, or clicking a tab, switches the session."""
         event.Skip()
-        wx.CallAfter(announce, "Session picker, pop up button")
+        if self._syncing_tab_switcher:
+            return
+        sel = event.GetSelection()
+        if 0 <= sel < self.notebook.GetPageCount() and sel != self.notebook.GetSelection():
+            self.notebook.SetSelection(sel)
 
     # ----- Options menu -----
     def _toggle_live_rows(self) -> None:
@@ -5587,6 +7795,13 @@ class MainFrame(wx.Frame):
         SETTINGS.save()
         state = "shown" if SETTINGS.show_thinking else "hidden"
         self._announce_setting(f"The backend's reasoning is {state}")
+
+    def _toggle_sounds(self) -> None:
+        SETTINGS.sounds_enabled = self._sounds_item.IsChecked()
+        SETTINGS.save()
+        self.earcons.set_enabled(SETTINGS.sounds_enabled)
+        state = "on" if SETTINGS.sounds_enabled else "off"
+        self._announce_setting(f"Sound cues {state}")
 
     def _toggle_text_view(self) -> None:
         SETTINGS.text_view = self._text_view_item.IsChecked()
@@ -5686,14 +7901,10 @@ class MainFrame(wx.Frame):
             if candidate:
                 cwd = candidate
         panel = self._add_session(cwd)
+        # restore_history reports the conversation's name, which is what
+        # renames the tab: that title is what tells this conversation apart
+        # from the others open in the same folder.
         panel.restore_history(entry, turns)
-        # The first message names the tab, because that is what tells this
-        # conversation apart from the others open in the same folder.
-        # _add_session selects the page it adds, so that is the one to rename.
-        self.notebook.SetPageText(
-            self.notebook.GetSelection(), _tab_title(entry.title) or _short_label(cwd)
-        )
-        self._refresh_picker()
         responses = "1 response" if len(turns) == 1 else f"{len(turns)} responses"
         wx.CallAfter(announce, f"Resumed {entry.title}, {responses}")
 
@@ -5721,6 +7932,9 @@ class MainFrame(wx.Frame):
 
     def _new_conversation_active(self) -> None:
         """Start a fresh conversation in the active tab (Ctrl+Shift+N)."""
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_new_conversation(None)
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.clear_conversation()
@@ -5730,7 +7944,7 @@ class MainFrame(wx.Frame):
         item = getattr(self, "_compact_item", None)
         if item is None:
             return
-        supported = BACKENDS[self._backend].supports_compaction
+        supported = self._app_mode == APP_MODE_AGENT and BACKENDS[self._backend].supports_compaction
         item.Enable(supported)
         if supported:
             item.SetHelp("Summarise this conversation so the backend has room to keep going")
@@ -5769,19 +7983,33 @@ class MainFrame(wx.Frame):
         if isinstance(page, SessionPanel):
             page.cancel_worker()
         self.notebook.DeletePage(sel)
-        self._refresh_picker()
+        self._sync_tab_switcher()
 
     def _on_tab_changed(self, event: wx.BookCtrlEvent) -> None:
         event.Skip()
-        # Keep the picker selection mirroring the notebook.
+        self._sync_tab_switcher()
         sel = self.notebook.GetSelection()
-        if sel != wx.NOT_FOUND and self.session_picker.GetSelection() != sel:
-            self.session_picker.SetSelection(sel)
         page = self.notebook.GetCurrentPage()
-        if isinstance(page, SessionPanel):
-            self._set_status_text(page.last_status)
-            wx.CallAfter(announce, f"Session: {_short_label(page.cwd)}")
-            wx.CallAfter(page.focus_prompt)
+        if not isinstance(page, SessionPanel) or sel == wx.NOT_FOUND:
+            return
+        self._set_status_text(page.last_status)
+        # Arrowing along the tab strip changes the page on every keypress. The
+        # strip has to keep focus through that, or the second arrow press never
+        # reaches it, and the native tab control has already said which tab is
+        # selected — repeating it here would say everything twice.
+        if self._focus_is_within(wx.Window.FindFocus(), self.tab_switcher):
+            return
+        # The tab's own name first — it is the conversation, and that is what
+        # tells two tabs in the same folder apart — then which tab of how many,
+        # then the folder it runs in.
+        name = self.notebook.GetPageText(sel)
+        folder = _short_label(page.cwd)
+        spoken = name if name and name != folder else folder
+        wx.CallAfter(
+            announce,
+            f"Session {sel + 1} of {self.notebook.GetPageCount()}: {spoken}, in {folder}",
+        )
+        wx.CallAfter(page.focus_prompt)
 
     # ----- Status routing -----
     def _set_status_text(self, text: str) -> None:
@@ -5792,8 +8020,29 @@ class MainFrame(wx.Frame):
         if self.notebook.GetCurrentPage() is panel:
             self._set_status_text(text)
 
+    def _panel_title_changed(self, panel: SessionPanel, title: str) -> None:
+        """Name a tab after the conversation in it.
+
+        An empty title means the conversation has no name yet, which is when
+        the folder is the most useful thing the tab can say. The page is found
+        by identity rather than by the current selection: a background tab can
+        finish restoring, or be sent a side chat, while another one is in front.
+        """
+        label = _tab_label(title, panel.cwd)
+        for index in range(self.notebook.GetPageCount()):
+            if self.notebook.GetPage(index) is not panel:
+                continue
+            if self.notebook.GetPageText(index) != label:
+                self.notebook.SetPageText(index, label)
+                self._sync_tab_switcher()
+            return
+
     # ----- Focus delegation -----
     def _focus_active(self, which: str) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            if which == "prompt":
+                self.chat_panel.message_input.SetFocus()
+            return
         page = self.notebook.GetCurrentPage()
         if not isinstance(page, SessionPanel):
             return
@@ -5801,6 +8050,9 @@ class MainFrame(wx.Frame):
             page.focus_prompt()
 
     def _cycle_mode_active(self) -> None:
+        if self._app_mode == APP_MODE_CHAT:
+            self.mode_combo.SetFocus()
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.cycle_mode()
@@ -5819,16 +8071,34 @@ class MainFrame(wx.Frame):
         self._announce_setting(f"Desktop shortcut created at {link}")
 
     def _stop_active(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_stop(None)
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page._on_stop()
 
     def _attach_active(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_add_files(wx.CommandEvent())
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.attach_files()
 
     def _jump_to_latest_response(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            history = (
+                self.chat_panel.history_list
+                if self.chat_panel.history_view == "list"
+                else self.chat_panel.transcript
+            )
+            history.SetFocus()
+            if history is self.chat_panel.history_list and history.GetCount():
+                history.SetSelection(history.GetCount() - 1)
+            elif history is self.chat_panel.transcript:
+                history.SetInsertionPointEnd()
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.jump_to_latest_response()
@@ -5840,6 +8110,8 @@ class MainFrame(wx.Frame):
 
     # ----- Cleanup -----
     def _on_close(self, event: wx.CloseEvent) -> None:
+        if self.chat_panel is not None:
+            self.chat_panel.shutdown()
         for i in range(self.notebook.GetPageCount()):
             page = self.notebook.GetPage(i)
             if isinstance(page, SessionPanel):
@@ -5881,12 +8153,19 @@ def main() -> int:
             return 2
         if not APP_NAME or not version_tuple(APP_VERSION):
             return 3
+        # AppKit is how anything is said to VoiceOver. A build that packaged
+        # everything else and dropped it starts, runs, and is silent, which on
+        # this application is the same as not working at all.
+        if platform.system() == "Darwin" and not _MAC_ANNOUNCE:
+            return 4
         return 0
-    gui_startup_smoke = "--startup-gui-smoke" in sys.argv
+    chat_gui_startup_smoke = "--startup-chat-gui-smoke" in sys.argv
+    gui_startup_smoke = "--startup-gui-smoke" in sys.argv or chat_gui_startup_smoke
     # Before anything is started: nothing BlindPilot launches may inherit a
     # PATH that points back into its own install folder, or the files there
     # stay open long after BlindPilot has closed and cannot be updated.
     keep_bundle_off_child_path()
+    activate_managed_cli_paths()
     # Claim the console before anything can create one on screen. Doing it here,
     # rather than when a terminal is first needed, keeps it out of the way of
     # the first message as well as every later one.
@@ -5894,6 +8173,13 @@ def main() -> int:
     app = wx.App(False)
 
     cfg = _load_config()
+    # Installs that predate full-auto still carry the mode an older BlindPilot
+    # saved for them. Moving them over here is what makes "nothing stops to
+    # ask" true of an upgrade as well as of a fresh install.
+    if adopt_full_auto_default(cfg):
+        _save_config(cfg)
+    if chat_gui_startup_smoke:
+        cfg["app_mode"] = APP_MODE_CHAT
     # A packaged GUI smoke test runs with a clean temporary profile in CI. It
     # must exercise the real main window without waiting in the interactive
     # first-run wizard.
@@ -5926,7 +8212,8 @@ def main() -> int:
         # An update that failed did so with no window to report to, so its
         # reason is read out here, before anything else competes for attention.
         wx.CallLater(1200, frame.report_failed_update)
-        wx.CallLater(5000, frame.check_for_updates_silently)
+        if frame.automatic_update_check_enabled():
+            wx.CallLater(5000, frame.check_for_updates_silently)
         # Abandoned downloads are tens of megabytes each.
         wx.CallLater(8000, sweep_temporary_files)
     app.MainLoop()

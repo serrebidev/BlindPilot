@@ -28,16 +28,20 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import claude_reader  # noqa: E402
 from claude_reader import (  # noqa: E402
+    BACKEND_FREEBUFF,
     PATH_STANZA_MARKER,
+    _first_login_url,
     _fallback_claude_paths,
     _install_argv,
     _is_on_persistent_path,
+    _node_archive_spec,
     _native_bin_dir,
     _path_export_line,
     _path_with_entry,
     _same_dir,
     _shell_profile_file,
     ensure_on_posix_path,
+    install_backend,
     install_claude,
 )
 
@@ -96,6 +100,22 @@ class _PatchPopen:
 
     def __exit__(self, *exc):
         claude_reader.subprocess.Popen = self._real
+        return False
+
+
+class _PatchRun:
+    """Stand in for subprocess.run without replacing its exception types."""
+
+    def __init__(self, function):
+        self._function = function
+
+    def __enter__(self):
+        self._real = claude_reader.subprocess.run
+        claude_reader.subprocess.run = self._function
+        return self
+
+    def __exit__(self, *exc):
+        claude_reader.subprocess.run = self._real
         return False
 
 
@@ -248,21 +268,29 @@ def test_login_shell_path_split_keeps_entries_containing_spaces():
     Splitting PATH by word rather than by colon would shred it into fragments
     and make us wrongly report that claude's folder is not on PATH.
     """
-    shell = _real_posix_shell()
-    if shell is None:
-        return
-
+    shell = "/bin/sh"
     spaced = "/opt/Some App/bin"
-    old = os.environ.get("PATH", "")
-    os.environ["PATH"] = f"/usr/bin:{spaced}:/opt/x"
-    try:
+    called = {}
+
+    def run(argv, **kwargs):
+        called["argv"] = argv
+        called["kwargs"] = kwargs
+
+        class Result:
+            returncode = 0
+            stdout = f"/usr/bin\n{spaced}\n/opt/x\n"
+
+        return Result()
+
+    with _PatchRun(run):
         with _Patch(platform=_FakePlatform("Darwin"), _login_shell=lambda: shell):
             dirs = claude_reader._posix_persistent_path_dirs()
-    finally:
-        os.environ["PATH"] = old
 
     assert spaced in dirs, dirs
     assert not any(d == "/opt/Some" for d in dirs)
+    assert called["argv"][1:3] == ["-l", "-c"]
+    assert 'tr ":" "\\n"' in called["argv"][3]
+    assert called["kwargs"]["text"] is True
 
 
 def test_posix_check_stays_quiet_without_a_usable_login_shell():
@@ -536,6 +564,74 @@ def test_install_survives_a_path_write_failure():
     ):
         assert install_claude(log.append) == installed
     assert any("adding it to PATH failed" in line for line in log)
+
+
+# ---- Clean-machine npm backend installation -------------------------------
+
+
+def test_node_archive_matches_each_supported_platform():
+    assert _node_archive_spec("v24.1.0", "Windows", "AMD64") == (
+        "node-v24.1.0-win-x64.zip",
+        "node-v24.1.0-win-x64",
+    )
+    assert _node_archive_spec("v24.1.0", "Darwin", "arm64") == (
+        "node-v24.1.0-darwin-arm64.tar.gz",
+        "node-v24.1.0-darwin-arm64",
+    )
+    assert _node_archive_spec("v24.1.0", "Linux", "aarch64") == (
+        "node-v24.1.0-linux-arm64.tar.gz",
+        "node-v24.1.0-linux-arm64",
+    )
+    assert _node_archive_spec("v24.1.0", "Windows", "x86") is None
+
+
+def test_freebuff_login_url_is_recovered_from_hidden_cli_output():
+    text = "Open this URL: https://freebuff.com/login?token=abc123."
+    assert _first_login_url(text) == "https://freebuff.com/login?token=abc123"
+    assert _first_login_url("Waiting for login") == ""
+
+
+def test_clean_freebuff_install_bootstraps_node_registers_path_and_verifies():
+    state = {"npm": None}
+    log: list[str] = []
+    runs: list[list[str]] = []
+    paths: list[Path] = []
+    installed = str(Path("C:/BlindPilot/npm/freebuff.cmd"))
+
+    def install_node(_log):
+        state["npm"] = str(Path("C:/BlindPilot/node/npm.cmd"))
+        return state["npm"]
+
+    with _Patch(
+        _find_npm=lambda: state["npm"],
+        install_portable_node=install_node,
+        _managed_backend_binary=lambda _backend: installed,
+        _run_logged_process=lambda argv, _log, env=None: runs.append(list(argv)) or 0,
+        _add_to_process_path=lambda _path: None,
+        ensure_on_path=lambda path: paths.append(path) or "your user PATH",
+    ):
+        result = install_backend(BACKEND_FREEBUFF, log.append)
+
+    assert result == installed
+    assert runs[0][-1] == "freebuff"
+    assert runs[1] == [installed, "--version"]
+    assert paths == [Path(installed).parent]
+    assert any("verified" in line.casefold() for line in log)
+
+
+def test_backend_install_rejects_a_cli_that_cannot_start():
+    state = {"npm": str(Path("C:/BlindPilot/node/npm.cmd"))}
+    installed = str(Path("C:/BlindPilot/npm/freebuff.cmd"))
+    return_codes = iter((0, 1))
+
+    with _Patch(
+        _find_npm=lambda: state["npm"],
+        _managed_backend_binary=lambda _backend: installed,
+        _run_logged_process=lambda *_args, **_kwargs: next(return_codes),
+        _add_to_process_path=lambda _path: None,
+        ensure_on_path=lambda _path: None,
+    ):
+        assert install_backend(BACKEND_FREEBUFF, lambda _line: None) is None
 
 
 if __name__ == "__main__":

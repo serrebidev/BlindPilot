@@ -1,14 +1,16 @@
-"""Reading past conversations back off disk, for all three backends.
+"""Reading past conversations back off disk, for every backend.
 
-The transcripts here are trimmed copies of what Claude Code, Codex and FreeBuff
-actually write, including the context each of them injects into the user side
-of the conversation — which is exactly what must never end up as a title.
+The transcripts here are trimmed copies of what Claude Code, Codex, FreeBuff,
+and opencode actually write, including the context each of them injects into
+the user side of the conversation — which is exactly what must never end up as
+a title.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -37,6 +39,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import hermes_backend
 
     monkeypatch.setattr(hermes_backend, "wsl_sqlite_query", lambda _sql, _params=(): [])
+    # opencode honours these, and a developer machine may well set them.
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("OPENCODE_DATA", raising=False)
     return tmp_path
 
 
@@ -793,3 +798,153 @@ def test_ages_are_said_the_way_a_person_would() -> None:
     assert describe_age(now - 86400, now) == "yesterday"
     assert describe_age(now - 3 * 86400, now) == "3 days ago"
     assert describe_age(0, now) == "unknown"
+
+
+# ----- opencode -----
+
+_OPENCODE_SCHEMA = (
+    "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, "
+    "directory TEXT, title TEXT, time_updated INTEGER, time_archived INTEGER)",
+    "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)",
+    "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, "
+    "time_created INTEGER, data TEXT)",
+)
+
+
+def _write_opencode(
+    home: Path,
+    session_id: str,
+    directory: str,
+    title: str,
+    exchanges: list[tuple[str, str]],
+    parent_id: str | None = None,
+) -> None:
+    """Write one conversation into a throwaway copy of opencode's database."""
+    database = home / ".local" / "share" / "opencode" / "opencode.db"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(database)
+    with connection:
+        for statement in _OPENCODE_SCHEMA:
+            table = statement.split()[2]
+            if not connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone():
+                connection.execute(statement)
+        connection.execute(
+            "INSERT INTO session VALUES (?,?,?,?,?,?,?)",
+            (session_id, "global", parent_id, directory, title, 1_787_000_000_000, None),
+        )
+        clock = 0
+        for index, (role, text) in enumerate(exchanges):
+            message_id = f"msg_{session_id}_{index}"
+            clock += 1
+            connection.execute(
+                "INSERT INTO message VALUES (?,?,?,?)",
+                (message_id, session_id, clock, json.dumps({"role": role})),
+            )
+            clock += 1
+            connection.execute(
+                "INSERT INTO part VALUES (?,?,?,?,?)",
+                (
+                    f"prt_{session_id}_{index}",
+                    message_id,
+                    session_id,
+                    clock,
+                    json.dumps({"type": "text", "text": text}),
+                ),
+            )
+            if role == "assistant":
+                clock += 1
+                connection.execute(
+                    "INSERT INTO part VALUES (?,?,?,?,?)",
+                    (
+                        f"prt_{session_id}_{index}_think",
+                        message_id,
+                        session_id,
+                        clock,
+                        json.dumps({"type": "reasoning", "text": "thinking out loud"}),
+                    ),
+                )
+    connection.close()
+
+
+OPENCODE_CWD = str(Path("C:/work/demo") if Path("C:/").drive else "/work/demo")
+
+
+def test_opencode_conversations_are_read_out_of_its_database(home: Path) -> None:
+    _write_opencode(
+        home,
+        "ses_1",
+        OPENCODE_CWD,
+        "Honey garlic chicken",
+        [("user", "testing with a recipe"), ("assistant", "Here is the recipe.")],
+    )
+
+    entries = list_history("opencode", OPENCODE_CWD)
+
+    assert [(entry.session_id, entry.title) for entry in entries] == [
+        ("ses_1", "Honey garlic chicken")
+    ]
+    assert entries[0].cwd == OPENCODE_CWD
+    assert entries[0].folder == "demo"
+    # opencode records the time in milliseconds; the picker sorts in seconds.
+    assert entries[0].modified == 1_787_000_000.0
+
+
+def test_opencode_untitled_conversations_are_titled_by_their_first_message(home: Path) -> None:
+    """Its own placeholder is a timestamp, which the age column already says."""
+    _write_opencode(
+        home,
+        "ses_1",
+        OPENCODE_CWD,
+        "New session - 2026-05-24T22:55:37.511Z",
+        [("user", "what does markdown_rows do?"), ("assistant", "It parses.")],
+    )
+
+    assert [entry.title for entry in list_history("opencode")] == ["what does markdown_rows do?"]
+
+
+def test_opencode_subagent_conversations_are_not_offered_to_resume(home: Path) -> None:
+    """A subagent gets a session of its own, which nobody had with opencode."""
+    _write_opencode(home, "ses_1", OPENCODE_CWD, "Real conversation", [("user", "hello")])
+    _write_opencode(
+        home,
+        "ses_2",
+        OPENCODE_CWD,
+        "Audit the player modules (@general subagent)",
+        [("user", "audit")],
+        parent_id="ses_1",
+    )
+
+    assert [entry.title for entry in list_history("opencode")] == ["Real conversation"]
+
+
+def test_opencode_reasoning_is_not_part_of_the_answer(home: Path) -> None:
+    _write_opencode(
+        home,
+        "ses_1",
+        OPENCODE_CWD,
+        "Recipe",
+        [("user", "testing with a recipe"), ("assistant", "Here is the recipe.")],
+    )
+
+    turns = load_turns(list_history("opencode")[0])
+
+    assert [(turn.prompt, turn.response) for turn in turns] == [
+        ("testing with a recipe", "Here is the recipe.")
+    ]
+
+
+def test_opencode_history_is_empty_without_a_database(home: Path) -> None:
+    """Listing must never be what creates opencode's database."""
+    assert list_history("opencode") == []
+    assert not (home / ".local" / "share" / "opencode" / "opencode.db").exists()
+
+
+def test_opencode_conversations_are_limited_to_one_directory(home: Path) -> None:
+    other = str(Path("C:/work/other") if Path("C:/").drive else "/work/other")
+    _write_opencode(home, "ses_1", OPENCODE_CWD, "Here", [("user", "here")])
+    _write_opencode(home, "ses_2", other, "There", [("user", "there")])
+
+    assert [entry.title for entry in list_history("opencode", OPENCODE_CWD)] == ["Here"]
+    assert sorted(entry.title for entry in list_history("opencode")) == ["Here", "There"]

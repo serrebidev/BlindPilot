@@ -207,8 +207,12 @@ def test_periodic_plays_once_immediately_then_waits(config_dir: Path, monkeypatc
             self._set = True
             return True
 
-    cues._loop_stop = _Stop()
-    cues._periodic(settings.progress_cue_seconds)
+    # The stop event is passed in rather than read off the object: a fresh event
+    # per run is what keeps a replaced thread from looping alongside the new one,
+    # so the test hands over the same event the real caller would.
+    stop = _Stop()
+    cues._loop_stop = stop
+    cues._periodic(settings.progress_cue_seconds, stop)
 
     assert cues.played == ["in-progress.wav"]
     assert waits == [37]

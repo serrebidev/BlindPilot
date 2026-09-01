@@ -1,8 +1,9 @@
 """Unit tests for where a session's permission mode comes from.
 
-A new tab starts at the mode you last chose in this app; if you have never
-chosen one, it falls back to whatever Claude Code itself is configured to use,
-and only then to "default".
+BlindPilot runs its backends hands-off. A new tab starts at the mode you last
+chose in this app; if you have never chosen one, it starts fully automatic,
+because a run that stops to ask a question nobody is watching for is a run that
+never finishes.
 
 Run from the project root:
 
@@ -13,7 +14,6 @@ Run from the project root:
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
@@ -23,20 +23,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import claude_reader  # noqa: E402
 from claude_reader import (  # noqa: E402
-    _claude_config_permission_mode,
+    DEFAULT_PERMISSION_MODE,
     _default_permission_mode,
     _remember_permission_mode,
+    adopt_full_auto_default,
 )
 
 
-def _write_settings(path: Path, mode) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = {"permissions": {"defaultMode": mode}} if mode is not None else {}
-    path.write_text(json.dumps(body), encoding="utf-8")
-
-
 class _Sandbox:
-    """Temp user config dir + temp project, with the app's own config stubbed."""
+    """Temp project directory, with the app's own config stubbed."""
 
     def __init__(self, saved=None):
         self._saved = saved
@@ -44,13 +39,8 @@ class _Sandbox:
 
     def __enter__(self):
         root = Path(self._tmp.name)
-        self.user_dir = root / "claude-home"
-        self.user_dir.mkdir()
         self.project = root / "project"
         self.project.mkdir()
-
-        self._old_env = os.environ.get("CLAUDE_CONFIG_DIR")
-        os.environ["CLAUDE_CONFIG_DIR"] = str(self.user_dir)
 
         # The reader's own config.json is stubbed so tests never touch the
         # real one, and never write to it.
@@ -65,10 +55,6 @@ class _Sandbox:
     def __exit__(self, *exc):
         claude_reader._load_config = self._old_load
         claude_reader._save_config = self._old_save
-        if self._old_env is None:
-            os.environ.pop("CLAUDE_CONFIG_DIR", None)
-        else:
-            os.environ["CLAUDE_CONFIG_DIR"] = self._old_env
         self._tmp.cleanup()
         return False
 
@@ -77,76 +63,32 @@ class _Sandbox:
         return self._writes
 
 
-def test_user_settings_supply_the_mode():
+def test_full_auto_is_where_a_new_tab_starts():
     with _Sandbox() as box:
-        _write_settings(box.user_dir / "settings.json", "acceptEdits")
-        assert _claude_config_permission_mode(str(box.project)) == "acceptEdits"
-        assert _default_permission_mode(str(box.project)) == "acceptEdits"
-
-
-def test_project_settings_beat_user_settings():
-    with _Sandbox() as box:
-        _write_settings(box.user_dir / "settings.json", "acceptEdits")
-        _write_settings(box.project / ".claude" / "settings.json", "plan")
-        assert _default_permission_mode(str(box.project)) == "plan"
-
-
-def test_project_local_settings_win():
-    with _Sandbox() as box:
-        _write_settings(box.user_dir / "settings.json", "acceptEdits")
-        _write_settings(box.project / ".claude" / "settings.json", "plan")
-        _write_settings(box.project / ".claude" / "settings.local.json", "bypassPermissions")
+        assert DEFAULT_PERMISSION_MODE == "bypassPermissions"
         assert _default_permission_mode(str(box.project)) == "bypassPermissions"
 
 
-def test_no_settings_anywhere_falls_back_to_default():
+def test_every_backend_starts_full_auto():
     with _Sandbox() as box:
-        assert _claude_config_permission_mode(str(box.project)) == ""
-        assert _default_permission_mode(str(box.project)) == "default"
+        for backend in ("claude", "codex", "freebuff", "opencode"):
+            assert _default_permission_mode(str(box.project), backend) == "bypassPermissions"
 
 
-def test_settings_without_a_permissions_block_are_ignored():
-    with _Sandbox() as box:
-        _write_settings(box.user_dir / "settings.json", None)
-        assert _default_permission_mode(str(box.project)) == "default"
-
-
-def test_unparsable_settings_do_not_raise():
-    with _Sandbox() as box:
-        (box.user_dir / "settings.json").write_text("{not json", encoding="utf-8")
-        assert _default_permission_mode(str(box.project)) == "default"
-
-
-def test_a_mode_claude_code_does_not_offer_is_ignored():
-    with _Sandbox() as box:
-        _write_settings(box.user_dir / "settings.json", "somethingElse")
-        assert _default_permission_mode(str(box.project)) == "default"
-
-
-def test_a_byte_order_mark_does_not_break_parsing():
-    with _Sandbox() as box:
-        (box.user_dir / "settings.json").write_text(
-            json.dumps({"permissions": {"defaultMode": "plan"}}), encoding="utf-8-sig"
-        )
-        assert _default_permission_mode(str(box.project)) == "plan"
-
-
-def test_your_saved_choice_beats_the_claude_code_config():
+def test_your_saved_choice_wins():
     with _Sandbox(saved="plan") as box:
-        _write_settings(box.user_dir / "settings.json", "acceptEdits")
         assert _default_permission_mode(str(box.project)) == "plan"
 
 
 def test_a_stale_saved_choice_is_ignored():
     with _Sandbox(saved="noSuchMode") as box:
-        _write_settings(box.user_dir / "settings.json", "acceptEdits")
-        assert _default_permission_mode(str(box.project)) == "acceptEdits"
+        assert _default_permission_mode(str(box.project)) == "bypassPermissions"
 
 
 def test_changing_the_mode_is_written_to_config():
     with _Sandbox() as box:
-        _remember_permission_mode("bypassPermissions")
-        assert box.writes == [{"permission_mode": "bypassPermissions"}]
+        _remember_permission_mode("plan")
+        assert box.writes == [{"permission_mode": "plan"}]
 
 
 def test_an_unchanged_mode_is_not_rewritten():
@@ -159,6 +101,28 @@ def test_a_bogus_mode_is_never_saved():
     with _Sandbox() as box:
         _remember_permission_mode("noSuchMode")
         assert box.writes == []
+
+
+def test_an_old_config_is_moved_onto_full_auto():
+    cfg = {"permission_mode": "default", "backend": "codex"}
+    assert adopt_full_auto_default(cfg) is True
+    assert cfg["permission_mode"] == "bypassPermissions"
+    # Everything else in the config is left alone.
+    assert cfg["backend"] == "codex"
+
+
+def test_a_config_with_no_mode_at_all_is_moved_too():
+    cfg = {}
+    assert adopt_full_auto_default(cfg) is True
+    assert cfg["permission_mode"] == "bypassPermissions"
+
+
+def test_the_move_happens_once_and_then_leaves_your_choice_alone():
+    cfg = {}
+    adopt_full_auto_default(cfg)
+    cfg["permission_mode"] = "plan"  # chosen in the picker afterwards
+    assert adopt_full_auto_default(cfg) is False
+    assert cfg["permission_mode"] == "plan"
 
 
 if __name__ == "__main__":

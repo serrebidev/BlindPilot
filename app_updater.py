@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,10 @@ _ALLOWED_DOWNLOAD_HOSTS = ("github.com", "githubusercontent.com")
 
 class UpdateError(RuntimeError):
     """An update could not be checked, verified, or scheduled safely."""
+
+
+class UpdateCancelled(UpdateError):
+    """The person cancelled an update download before it completed."""
 
 
 @dataclass(frozen=True)
@@ -242,6 +247,7 @@ def download_update(
     current_version: str,
     *,
     progress: Optional[Callable[[int, int], None]] = None,
+    cancel: Optional[threading.Event] = None,
     opener: Opener = urlopen,
 ) -> Path:
     """Download a release archive and reject it unless SHA-256 matches."""
@@ -262,6 +268,8 @@ def download_update(
                 raise UpdateError("GitHub redirected the update to an untrusted host.")
             with temporary.open("wb") as handle:
                 while True:
+                    if cancel is not None and cancel.is_set():
+                        raise UpdateCancelled("The update download was cancelled.")
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
@@ -272,6 +280,8 @@ def download_update(
                     handle.write(chunk)
                     if progress:
                         progress(received, release.asset_size)
+        if cancel is not None and cancel.is_set():
+            raise UpdateCancelled("The update download was cancelled.")
         if received != release.asset_size:
             raise UpdateError("The update download was incomplete.")
         if digest.hexdigest().casefold() != expected:
@@ -702,47 +712,218 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
 
 _MACOS_HELPER = r"""#!/bin/sh
-set -eu
+# BlindPilot's macOS update helper.
+#
+# It runs after BlindPilot has closed, so it follows the same rules as the
+# Windows helpers above: write down what happened, be sure nothing is still
+# running before touching the bundle, put the previous version back when the
+# swap fails, and never leave the user without an application to reopen. A Mac
+# update used to do none of that -- it closed BlindPilot, and on any failure at
+# all simply never came back and never said why.
+set -u
+
 parent_pid="$1"
 archive="$2"
 app_path="$3"
+log_file="$4"
+status_file="$5"
+
+executable="$app_path/Contents/MacOS/BlindPilot"
+stage=""
+backup=""
+lock=""
+moved_aside=0
+replaced=0
+
+log() {
+    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$log_file" 2>/dev/null || true
+}
+
+save_failure() {
+    # BlindPilot is not running to be told, so the reason is left where its next
+    # start will find it. This is the file report_failed_update reads.
+    printf '%s\n%s\n' "$1" "$log_file" >"$status_file" 2>/dev/null || true
+}
+
+discard() {
+    if [ -n "$stage" ]; then rm -rf "$stage"; fi
+    if [ -n "$lock" ]; then rm -rf "$lock"; fi
+    rm -f "$archive"
+    rm -f "$0"
+    return 0
+}
+
+start_blindpilot() {
+    if [ ! -x "$executable" ]; then
+        log "Cannot restart: $executable is missing."
+        return 1
+    fi
+    # "open" is what puts BlindPilot back as a real application, with a Dock
+    # icon and VoiceOver treating it as the frontmost app. It can still refuse a
+    # bundle Launch Services holds stale information about, and being left with
+    # no application at all is far worse than being left without a Dock icon.
+    if open -n "$app_path" >/dev/null 2>&1; then
+        return 0
+    fi
+    log "open refused the bundle; starting its executable instead."
+    "$executable" >/dev/null 2>&1 &
+    return 0
+}
+
+clear_quarantine() {
+    target="$1"
+    # A missing quarantine attribute makes xattr -d return an error, so the
+    # delete itself cannot decide success. Remove what is present, then inspect
+    # the whole bundle. If even one nested executable is still quarantined, an
+    # unsigned update can install cleanly and still be refused at relaunch.
+    xattr -dr com.apple.quarantine "$target" >>"$log_file" 2>&1 || true
+    if xattr -lr "$target" 2>>"$log_file" | grep -q 'com\.apple\.quarantine:'; then
+        return 1
+    fi
+    return 0
+}
+
+restore() {
+    if [ "$moved_aside" -ne 1 ] || [ ! -d "$backup" ]; then
+        return 0
+    fi
+    log "Putting the previous version back."
+    if [ "$replaced" -eq 1 ]; then rm -rf "$app_path"; fi
+    # Copy the backup back rather than moving it. Whatever caused the failure
+    # must not be able to consume the only remaining copy of the version that
+    # was working a minute ago.
+    if ditto "$backup" "$app_path" >>"$log_file" 2>&1; then
+        log "Previous version restored; its backup is kept at $backup"
+    else
+        log "Restore failed; the backup is kept at $backup"
+    fi
+    return 0
+}
+
+fail() {
+    log "Update failed: $1"
+    restore
+    save_failure "$1"
+    start_blindpilot
+    discard
+    exit 1
+}
+
+# Two BlindPilot windows check for updates independently, and two updaters over
+# the same bundle are guaranteed to meet in the middle. Whoever gets here first
+# does the update; the other steps aside. A lock left behind by an updater that
+# died would block every update after it, so one nobody has touched for half an
+# hour is taken over rather than obeyed.
+lock_candidate="${TMPDIR:-/tmp}/BlindPilot-update-lock"
+if mkdir "$lock_candidate" 2>/dev/null; then
+    lock="$lock_candidate"
+elif [ -z "$(find "$lock_candidate" -maxdepth 0 -mmin -30 2>/dev/null)" ]; then
+    rm -rf "$lock_candidate"
+    if mkdir "$lock_candidate" 2>/dev/null; then lock="$lock_candidate"; fi
+fi
+if [ -z "$lock" ]; then
+    log "Another update is already running; leaving it to finish."
+    rm -f "$archive"
+    rm -f "$0"
+    exit 0
+fi
+
+log "Updating $app_path"
+
 waited=0
 while kill -0 "$parent_pid" 2>/dev/null; do
     if [ "$waited" -ge 30 ]; then
+        log "BlindPilot has not closed after 30 seconds; asking it to quit."
         kill -TERM "$parent_pid" 2>/dev/null || true
         sleep 2
         kill -KILL "$parent_pid" 2>/dev/null || true
-        forced_wait=0
-        while kill -0 "$parent_pid" 2>/dev/null && [ "$forced_wait" -lt 10 ]; do
+        forced=0
+        while kill -0 "$parent_pid" 2>/dev/null && [ "$forced" -lt 10 ]; do
             sleep 1
-            forced_wait=$((forced_wait + 1))
+            forced=$((forced + 1))
         done
         if kill -0 "$parent_pid" 2>/dev/null; then
-            exit 1
+            fail "BlindPilot is still running, so its files could not be replaced."
         fi
         break
     fi
     sleep 1
     waited=$((waited + 1))
 done
-stage="$(mktemp -d "${TMPDIR:-/tmp}/BlindPilot-stage.XXXXXX")"
-backup="${app_path}.update-backup"
-cleanup() { rm -rf "$stage" "$archive" "$0"; }
-trap cleanup EXIT
-ditto -x -k "$archive" "$stage"
-new_app="$stage/BlindPilot.app"
-test -x "$new_app/Contents/MacOS/BlindPilot"
-rm -rf "$backup"
-mv "$app_path" "$backup"
-if ditto "$new_app" "$app_path"; then
-    rm -rf "$backup"
-    open "$app_path"
-else
-    rm -rf "$app_path"
-    mv "$backup" "$app_path"
-    exit 1
+
+stage="$(mktemp -d "${TMPDIR:-/tmp}/BlindPilot-stage.XXXXXX" 2>/dev/null)" || stage=""
+if [ -z "$stage" ]; then
+    fail "A temporary folder for the update could not be created."
 fi
+if ! ditto -x -k "$archive" "$stage" >>"$log_file" 2>&1; then
+    fail "The update archive could not be expanded."
+fi
+new_app="$stage/BlindPilot.app"
+if [ ! -x "$new_app/Contents/MacOS/BlindPilot" ]; then
+    fail "The update archive does not contain BlindPilot.app."
+fi
+# Anything that arrives in a downloaded archive can be quarantined, and
+# Gatekeeper refuses to open a quarantined build that Apple has not notarised:
+# the update would install and then die on "BlindPilot is damaged". The archive
+# was checked against the release's published SHA-256 before this script was
+# ever written, so its provenance is already settled by that verification.
+if ! clear_quarantine "$new_app"; then
+    fail "macOS would not allow the update to be prepared for automatic launch."
+fi
+
+backup="${app_path}.update-backup-$$"
+rm -rf "$backup"
+if ! mv "$app_path" "$backup" 2>>"$log_file"; then
+    fail "The current version could not be moved aside."
+fi
+moved_aside=1
+if ! ditto "$new_app" "$app_path" >>"$log_file" 2>&1; then
+    fail "The new version could not be put in place."
+fi
+replaced=1
+if [ ! -x "$executable" ]; then
+    fail "The installed application has no BlindPilot in it after the update."
+fi
+if ! clear_quarantine "$app_path"; then
+    fail "macOS would not allow the updated application to launch automatically."
+fi
+
+log "Update applied. Restarting BlindPilot."
+start_blindpilot
+rm -rf "$backup"
+log "Done."
+rm -f "$log_file"
+discard
+exit 0
 """
+
+
+def macos_install_problem(app_path: Path) -> str:
+    """Why this bundle cannot be replaced where it stands, or "" when it can.
+
+    Both answers here are things no amount of retrying fixes, and both used to
+    end the same way: BlindPilot closed to install an update and never came
+    back. Saying so while there is still a window to say it in is the whole
+    point of asking before the application quits.
+    """
+    if "/AppTranslocation/" in str(app_path):
+        # Gatekeeper runs a quarantined application from a read-only copy it
+        # makes somewhere in /private/var/folders. Replacing that copy updates
+        # nothing: it is thrown away when the application quits, and the real
+        # BlindPilot -- still sitting wherever it was unzipped -- stays old.
+        return (
+            "BlindPilot is running from a read-only copy macOS made because the "
+            "application is still where it was unzipped. Drag BlindPilot to your "
+            "Applications folder, open it from there, and check for updates again."
+        )
+    parent = app_path.parent
+    if not os.access(parent, os.W_OK | os.X_OK) or not os.access(app_path, os.W_OK):
+        return (
+            f"This account is not allowed to change {app_path}. Move BlindPilot to a "
+            "folder you can write to, such as the Applications folder inside your "
+            "home folder, and check for updates again."
+        )
+    return ""
 
 
 TEMPORARY_PREFIX = "BlindPilot-update-"
@@ -815,16 +996,26 @@ def _windows_helper_flags() -> int:
     )
 
 
-def _spawn_detached(command: list[str], flags: int) -> None:
+def _spawn_detached(command: list[str], flags: int = 0) -> None:
+    """Start a helper that has to outlive the BlindPilot starting it.
+
+    ``creationflags`` is the Windows half and ``start_new_session`` the POSIX
+    one: without a session of its own the helper is in BlindPilot's process
+    group, and anything that signals that group on the way out takes the
+    updater with it.
+    """
+    extra: dict[str, object] = (
+        {"creationflags": flags} if platform.system() == "Windows" else {"start_new_session": True}
+    )
     subprocess.Popen(
         command,
-        creationflags=flags,
         # The helper outlives BlindPilot, so it is left holding nothing of it.
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
         cwd=tempfile.gettempdir(),
+        **extra,  # type: ignore[arg-type]
     )
 
 
@@ -907,18 +1098,33 @@ def schedule_install(archive: Path) -> None:
         )
         if app_path is None:
             raise UpdateError("BlindPilot is not running from an application bundle.")
-        helper = None
+        # Asked here, while there is still a window to answer into. Both of the
+        # things this catches make the swap impossible, and finding that out in
+        # the helper means finding it out after BlindPilot has already closed.
+        problem = macos_install_problem(app_path)
+        if problem:
+            raise UpdateError(problem)
+        log = Path(tempfile.gettempdir()) / f"{TEMPORARY_PREFIX}{os.getpid()}.log"
+        # A stale reason from a previous attempt must not be reported as this
+        # one's outcome.
+        clear_pending_failure()
+        helper: Optional[Path] = None
         try:
-            fd, helper_name = tempfile.mkstemp(prefix="BlindPilot-update-", suffix=".sh")
+            fd, helper_name = tempfile.mkstemp(prefix=TEMPORARY_PREFIX, suffix=".sh")
             os.close(fd)
             helper = Path(helper_name)
             helper.write_text(_MACOS_HELPER, encoding="utf-8")
             helper.chmod(0o700)
-            subprocess.Popen(
-                ["/bin/sh", str(helper), str(os.getpid()), str(archive), str(app_path)],
-                start_new_session=True,
-                close_fds=True,
-                cwd=tempfile.gettempdir(),
+            _spawn_detached(
+                [
+                    "/bin/sh",
+                    str(helper),
+                    str(os.getpid()),
+                    str(archive),
+                    str(app_path),
+                    str(log),
+                    str(_status_path()),
+                ]
             )
         except (OSError, ValueError) as exc:
             if helper is not None:

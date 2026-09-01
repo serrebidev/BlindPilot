@@ -3,11 +3,11 @@
 Every backend BlindPilot drives already keeps its own transcript of each
 conversation, and every one of them can be resumed by id — Claude Code with
 ``--resume``, Codex with the app-server's ``thread/resume``, FreeBuff with
-``--continue``, Hermes with its gateway's ``session.resume``. What was missing
-was a way to *find* one again, which is what this module provides: one list of
-past conversations across the backends, each titled by its first message, plus
-a reader that turns any of them back into prompt-and-response turns the GUI can
-put in its rows.
+``--continue``, opencode by asking its server for the session again, Hermes with
+its gateway's ``session.resume``. What was missing was a way to *find* one
+again, which is what this module provides: one list of past conversations across
+every backend, each titled by its first message, plus a reader that turns any of
+them back into prompt-and-response turns the GUI can put in its rows.
 
 Where each backend keeps its history:
 
@@ -20,10 +20,12 @@ Where each backend keeps its history:
 * FreeBuff — ``~/.config/manicode/projects/<project>/chats/<chat-id>/``, a
   directory per conversation holding ``chat-messages.json`` and a
   ``chat-meta.json`` that already stores the first prompt.
+* opencode — ``~/.local/share/opencode/opencode.db``, one SQLite database for
+  every conversation, with a row per session, message, and message part.
 * Hermes — ``~/.hermes/state.db``, one SQLite database holding every session it
-  has ever run, opened read-only. It is the odd one out: there is no file per
-  conversation, and Hermes titles its own, so nothing has to be scanned to
-  build the list.
+  has ever run, opened read-only. It is the odd one out even among these: there
+  is no file per conversation, and Hermes titles its own, so nothing has to be
+  scanned to build the list.
 
 Listing is deliberately cheap: it reads only as far into a transcript as it
 takes to find the first real user message, because the newest conversations
@@ -44,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +58,7 @@ from agent_backends import (
     BACKEND_FREEBUFF,
     BACKEND_HERMES,
     BACKEND_IDS,
+    BACKEND_OPENCODE,
     normalize_backend,
 )
 from markdown_rows import strip_noise
@@ -72,6 +76,17 @@ _MAX_HEAD_LINES = 400
 # Transcripts this large are not read back into rows. Nothing legitimate comes
 # close; the guard is against a corrupt or runaway file freezing the GUI.
 _MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+
+# The same guard for a backend that keeps every conversation in one store: how
+# many message parts of one conversation are read back before stopping. A
+# shared database's size says nothing about the size of any one conversation
+# in it, so it is counted in rows rather than in bytes.
+_MAX_TRANSCRIPT_PARTS = 20_000
+
+# How many conversations one backend contributes to the picker. Comfortably
+# more than :func:`list_history` returns, so the cap that decides what is shown
+# stays that one rather than this.
+_MAX_HISTORY_ENTRIES = 1_000
 
 
 @dataclass(frozen=True)
@@ -326,7 +341,8 @@ def _claude_entries(cwd: Optional[str]) -> List[HistoryEntry]:
     return entries
 
 
-def _claude_turns(path: Path) -> List[HistoryTurn]:
+def _claude_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    path = Path(entry.path)
     turns: List[HistoryTurn] = []
     for record in _iter_jsonl(path):
         prompt = _claude_user_text(record)
@@ -408,7 +424,8 @@ def _codex_entries(cwd: Optional[str]) -> List[HistoryEntry]:
     return entries
 
 
-def _codex_turns(path: Path) -> List[HistoryTurn]:
+def _codex_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    path = Path(entry.path)
     turns: List[HistoryTurn] = []
     for record in _iter_jsonl(path):
         role, text = _codex_message(record)
@@ -604,13 +621,13 @@ def _hermes_turns_for(session_id: str) -> List[HistoryTurn]:
     return turns
 
 
-def _hermes_turns(path: Path) -> List[HistoryTurn]:
+def _hermes_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     """Reader signature the public API uses. See :func:`load_turns`.
 
     Hermes' entries all share one store, so the session id has to come from the
-    entry rather than the path; ``load_turns`` passes it through.
+    entry rather than the path -- the same shape opencode needs.
     """
-    return _hermes_turns_for("")
+    return _hermes_turns_for(entry.session_id)
 
 
 # ----- FreeBuff -----
@@ -715,7 +732,8 @@ def _freebuff_entries(cwd: Optional[str]) -> List[HistoryEntry]:
     return entries
 
 
-def _freebuff_turns(chat: Path) -> List[HistoryTurn]:
+def _freebuff_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    chat = Path(entry.path)
     turns: List[HistoryTurn] = []
     for message in _freebuff_messages(chat):
         variant = message.get("variant")
@@ -747,19 +765,196 @@ def _freebuff_turns(chat: Path) -> List[HistoryTurn]:
     return turns
 
 
+# ----- opencode -----
+
+
+def _opencode_db() -> Path:
+    """opencode's database file.
+
+    opencode keeps every conversation in one SQLite database rather than in a
+    file per conversation, so this is both the listing and the transcript.
+    """
+    override = os.environ.get("OPENCODE_DATA")
+    if override:
+        return Path(override) / "opencode.db"
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else _home() / ".local" / "share"
+    return root / "opencode" / "opencode.db"
+
+
+def _opencode_connect() -> Optional["sqlite3.Connection"]:
+    """A read-only connection, or None when there is no database to read.
+
+    Opened by URI so that opening it can never create one, and so a database
+    the running opencode is writing to is never written to from here.
+    """
+    path = _opencode_db()
+    if not path.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    return connection
+
+
+# The name opencode gives a conversation nobody has titled yet. It is a
+# timestamp, which tells the user nothing the age column does not already say,
+# so the first message is used instead.
+_OPENCODE_UNTITLED = re.compile(r"^(?:new session\b|untitled\b)", re.IGNORECASE)
+
+
+def _opencode_first_prompt(connection: "sqlite3.Connection", session_id: str) -> str:
+    """The first thing typed into a conversation, for titling it.
+
+    Whose message a part belongs to is decided from the message record rather
+    than by matching on the JSON it is stored as: a role is a field, not a
+    substring, and reading it as one is what survives opencode reformatting
+    what it writes.
+    """
+    try:
+        rows = connection.execute(
+            "SELECT m.data, p.data FROM part p JOIN message m ON m.id = p.message_id "
+            "WHERE p.session_id = ? ORDER BY p.time_created LIMIT 20",
+            (session_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return ""
+    for message_data, part_data in rows:
+        try:
+            message = json.loads(message_data)
+            part = json.loads(part_data)
+        except ValueError:
+            continue
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if isinstance(part, dict) and part.get("type") == "text":
+            text = clean_user_text(str(part.get("text") or ""))
+            if text:
+                return text
+    return ""
+
+
+def _opencode_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    connection = _opencode_connect()
+    if connection is None:
+        return []
+    entries: List[HistoryEntry] = []
+    try:
+        # Subagents get sessions of their own, hung off the one that started
+        # them. Only the conversations a person actually had belong in the
+        # picker, which is what a null parent means here.
+        #
+        # Read one row at a time, newest first, and stop once there are enough
+        # to fill the picker. A limit in the query would be a limit on rows
+        # *scanned*, and the conversations for one directory can sit anywhere
+        # in a database shared by every directory — so asking for the newest
+        # few hundred rows would quietly hide older ones from this project.
+        rows = connection.execute(
+            "SELECT id, title, directory, time_updated FROM session "
+            "WHERE parent_id IS NULL AND time_archived IS NULL "
+            "ORDER BY time_updated DESC"
+        )
+        for session_id, title, directory, updated in rows:
+            if len(entries) >= _MAX_HISTORY_ENTRIES:
+                break
+            directory = str(directory or "")
+            if cwd and not _same_dir(directory, cwd):
+                continue
+            title = str(title or "").strip()
+            if not title or _OPENCODE_UNTITLED.match(title):
+                title = _opencode_first_prompt(connection, str(session_id))
+            if not title:
+                continue
+            entries.append(
+                HistoryEntry(
+                    backend=BACKEND_OPENCODE,
+                    session_id=str(session_id),
+                    title=make_title(title),
+                    # opencode's transcript is a row set, not a file, so the
+                    # session id is what identifies it and the path is only
+                    # here so the picker has something to show.
+                    path=str(_opencode_db()),
+                    modified=float(updated or 0) / 1000.0,
+                    cwd=directory,
+                    folder=_folder_name(directory),
+                )
+            )
+    except sqlite3.Error:
+        return entries
+    finally:
+        connection.close()
+    return entries
+
+
+def _opencode_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    connection = _opencode_connect()
+    if connection is None:
+        return []
+    turns: List[HistoryTurn] = []
+    try:
+        roles = {}
+        for message_id, data in connection.execute(
+            "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created",
+            (entry.session_id,),
+        ):
+            try:
+                record = json.loads(data)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                roles[str(message_id)] = str(record.get("role") or "")
+        for message_id, data in connection.execute(
+            "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created LIMIT ?",
+            (entry.session_id, _MAX_TRANSCRIPT_PARTS),
+        ):
+            role = roles.get(str(message_id))
+            if role not in ("user", "assistant"):
+                continue
+            try:
+                part = json.loads(data)
+            except ValueError:
+                continue
+            # Reasoning is opencode thinking aloud, and tool calls are its
+            # working; neither is part of the conversation being replayed.
+            if not isinstance(part, dict) or part.get("type") != "text":
+                continue
+            text = str(part.get("text") or "").strip()
+            if not text:
+                continue
+            if role == "user":
+                cleaned = clean_user_text(text)
+                if cleaned:
+                    turns.append(HistoryTurn(prompt=cleaned))
+                continue
+            if not turns:
+                turns.append(HistoryTurn())
+            turns[-1].response = _append(turns[-1].response, text)
+    except sqlite3.Error:
+        return turns
+    finally:
+        connection.close()
+    return turns
+
+
 # ----- Public API -----
 
 _LISTERS = {
     BACKEND_CLAUDE: _claude_entries,
     BACKEND_CODEX: _codex_entries,
     BACKEND_FREEBUFF: _freebuff_entries,
+    BACKEND_OPENCODE: _opencode_entries,
     BACKEND_HERMES: _hermes_entries,
 }
 
+# Readers are given the whole entry rather than its path, because opencode and
+# Hermes each keep every conversation in one database: what identifies their
+# transcript is the session id, not a file of its own.
 _READERS = {
     BACKEND_CLAUDE: _claude_turns,
     BACKEND_CODEX: _codex_turns,
     BACKEND_FREEBUFF: _freebuff_turns,
+    BACKEND_OPENCODE: _opencode_turns,
     BACKEND_HERMES: _hermes_turns,
 }
 
@@ -771,7 +966,7 @@ def list_history(
 ) -> List[HistoryEntry]:
     """Past conversations, newest first.
 
-    ``backend`` limits the list to one provider; ``None`` returns all three.
+    ``backend`` limits the list to one provider; ``None`` returns them all.
     ``cwd`` limits it to conversations that ran in that directory; ``None``
     returns every directory. ``limit`` caps how many are returned, after
     sorting, so a machine with years of history still opens the picker fast.
@@ -801,31 +996,22 @@ def load_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     does not leave an empty response in the list.
     """
     backend = normalize_backend(entry.backend)
-    path = Path(entry.path)
-    if backend == BACKEND_HERMES:
-        # Hermes keeps every conversation in one store, so which one to read
-        # comes from the entry, and the per-transcript size guard below cannot
-        # apply: the shared store passes that limit on any machine that has
-        # used Hermes for a while, and applying it would hide all of them. The
-        # row limit inside the reader is what bounds the work instead.
-        try:
-            return [
-                turn
-                for turn in _hermes_turns_for(entry.session_id)
-                if turn.prompt.strip() or turn.response.strip()
-            ]
-        except OSError:
-            return []
     reader = _READERS.get(backend)
     if reader is None:
         return []
-    try:
-        if path.is_file() and path.stat().st_size > _MAX_TRANSCRIPT_BYTES:
+    # opencode's and Hermes' path is the database every conversation shares, so
+    # its size is no measure of this one -- and on a machine that has used
+    # Hermes for a while the shared store passes this limit, which would hide
+    # every conversation at once. Both cap themselves, in rows, while reading.
+    if backend not in (BACKEND_OPENCODE, BACKEND_HERMES):
+        try:
+            path = Path(entry.path)
+            if path.is_file() and path.stat().st_size > _MAX_TRANSCRIPT_BYTES:
+                return []
+        except OSError:
             return []
-    except OSError:
-        return []
     try:
-        turns = reader(path)
+        turns = reader(entry)
     except OSError:
         return []
     return [turn for turn in turns if turn.prompt.strip() or turn.response.strip()]

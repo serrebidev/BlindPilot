@@ -8,6 +8,36 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def test_linux_announcements_are_sent_to_orca_without_moving_focus(monkeypatch):
+    import blindpilot_app
+
+    spoken: list[str] = []
+    monkeypatch.setattr(blindpilot_app.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(blindpilot_app, "_SPEAKER", None)
+    monkeypatch.setattr(blindpilot_app, "_linux_announce", lambda text: spoken.append(text) is None)
+
+    blindpilot_app.announce("Agent response received")
+
+    assert spoken == ["Agent response received"]
+
+
+def test_linux_announcement_from_worker_is_queued_on_the_gui_thread(monkeypatch):
+    import blindpilot_app
+
+    queued: list[tuple] = []
+    monkeypatch.setattr(blindpilot_app.wx, "GetApp", lambda: object())
+    monkeypatch.setattr(blindpilot_app.wx, "IsMainThread", lambda: False)
+    monkeypatch.setattr(blindpilot_app.wx, "CallAfter", lambda *args: queued.append(args))
+    monkeypatch.setattr(
+        blindpilot_app,
+        "_linux_native_announce",
+        lambda _text: (_ for _ in ()).throw(AssertionError("called off the GUI thread")),
+    )
+
+    assert blindpilot_app._linux_announce("Finished") is True
+    assert queued == [(blindpilot_app._linux_announce, "Finished")]
+
+
 def test_gui_startup_smoke_skips_first_run_wizard(monkeypatch):
     import blindpilot_app
 
@@ -33,8 +63,12 @@ def test_gui_startup_smoke_skips_first_run_wizard(monkeypatch):
     def fail_if_wizard_opens(*_args, **_kwargs):
         raise AssertionError("the first-run wizard opened during a GUI smoke test")
 
+    saved: list[dict] = []
     monkeypatch.setattr(blindpilot_app.sys, "argv", ["blind_pilot.py", "--startup-gui-smoke"])
     monkeypatch.setattr(blindpilot_app, "_load_config", lambda: {})
+    # Startup moves an old config onto full auto, and that writes. Without this
+    # the test would write to the config of whoever ran it.
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda cfg: saved.append(dict(cfg)))
     monkeypatch.setattr(blindpilot_app, "SetupWizard", fail_if_wizard_opens)
     monkeypatch.setattr(blindpilot_app, "MainFrame", FakeFrame)
     monkeypatch.setattr(blindpilot_app, "_bring_to_front", lambda: events.append("front"))
@@ -50,6 +84,8 @@ def test_gui_startup_smoke_skips_first_run_wizard(monkeypatch):
     assert ("later", 1500) in events
     assert "close" in events
     assert "main-loop" in events
+    # Every backend starts fully automatic, including on an upgrade.
+    assert saved and saved[0]["permission_mode"] == "bypassPermissions"
 
 
 def test_nothing_started_inherits_a_path_into_the_install_folder(monkeypatch, tmp_path):

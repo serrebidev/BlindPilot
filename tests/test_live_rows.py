@@ -453,7 +453,9 @@ def _stub_panel(app, **overrides):
     panel._session_backend = app.BACKEND_FREEBUFF
     panel.announced = []
     panel.status = []
-    panel._announce = lambda text: panel.announced.append(text)
+    # The real `_announce` speaks and mirrors to the status bar; a stub that
+    # only recorded one of the two would hide which of them a caller used.
+    panel._announce = lambda text: (panel.announced.append(text), panel.status.append(text))
     panel._set_status = lambda text: panel.status.append(text)
     panel._refresh_list = lambda: None
     panel._say = lambda _text: False
@@ -500,6 +502,7 @@ def test_stop_without_a_running_task_says_so_and_does_nothing():
 
     app.SessionPanel._on_stop(panel)
 
+    assert panel.announced == ["Error: Nothing is running to stop"]
     assert panel.status == ["Error: Nothing is running to stop"]
     assert panel._stopping is False
 
@@ -738,3 +741,153 @@ def test_there_is_nothing_to_compact_before_the_first_message():
 
     assert calls["sent"] == []
     assert calls["announced"] == ["Error: There is no conversation to compact yet"]
+
+
+# ----- AskUserQuestion -----
+#
+# Claude Code asks a multiple-choice question by asking permission to run its
+# AskUserQuestion tool, and takes the answers back as part of that tool's own
+# input. These check both halves: that the prompt tool is switched on at all
+# (without it the tool is not even offered in headless mode), and that what the
+# person chose reaches the CLI in the shape the tool reads.
+
+
+def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
+    """Drive ClaudeWorker over `events`, answering any question it asks."""
+    import json
+    import subprocess
+
+    import claude_reader
+
+    lines = [json.dumps(event) + "\n" for event in events]
+    asked: list[tuple] = []
+    activity: list[tuple[str, str]] = []
+    procs: list[_FakeProc] = []
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd, *_a, **_k):
+        commands.append(list(cmd))
+        proc = _FakeProc(lines)
+        procs.append(proc)
+        return proc
+
+    def on_question(questions):
+        asked.append(tuple(questions))
+        return answer
+
+    real_popen, real_find = subprocess.Popen, claude_reader._find_claude
+    subprocess.Popen = fake_popen  # type: ignore[assignment]
+    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
+    try:
+        worker = claude_reader.ClaudeWorker(
+            "hi",
+            None,
+            os.getcwd(),
+            mode,
+            on_session=lambda _sid: None,
+            on_started=lambda: None,
+            on_activity=lambda kind, text: activity.append((kind, text)),
+            on_complete=lambda _text: None,
+            on_failed=lambda _msg: None,
+            on_done=lambda: None,
+            on_question=on_question,
+        )
+        worker.run()
+    finally:
+        subprocess.Popen = real_popen  # type: ignore[assignment]
+        claude_reader._find_claude = real_find  # type: ignore[assignment]
+    written = [json.loads(line) for line in procs[0].stdin.written]
+    return asked, written, activity, commands[0]
+
+
+ASK_REQUEST = {
+    "type": "control_request",
+    "request_id": "req-1",
+    "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "AskUserQuestion",
+        "input": {
+            "questions": [
+                {
+                    "question": "Tabs or spaces?",
+                    "header": "Indent",
+                    "multiSelect": False,
+                    "options": [
+                        {"label": "Tabs", "description": "Tab characters."},
+                        {"label": "Spaces", "description": "Space characters."},
+                    ],
+                }
+            ]
+        },
+        "tool_use_id": "toolu_1",
+        "requires_user_interaction": True,
+    },
+}
+
+
+def test_headless_claude_is_told_it_can_show_a_permission_prompt():
+    _asked, _written, _activity, command = _run_worker_with_questions([], None)
+
+    # Without this the CLI leaves AskUserQuestion out of the tool set entirely,
+    # so Claude has no way to ask anything.
+    assert "--permission-prompt-tool" in command
+    assert command[command.index("--permission-prompt-tool") + 1] == "stdio"
+
+
+def test_askuserquestion_answers_go_back_as_the_tools_own_input():
+    asked, written, activity, _command = _run_worker_with_questions([ASK_REQUEST], [["Spaces"]])
+
+    (questions,) = asked
+    assert [question.question for question in questions] == ["Tabs or spaces?"]
+    assert [option.label for option in questions[0].options] == ["Tabs", "Spaces"]
+
+    reply = written[-1]
+    assert reply["type"] == "control_response"
+    assert reply["response"]["subtype"] == "success"
+    assert reply["response"]["request_id"] == "req-1"
+    assert reply["response"]["response"]["behavior"] == "allow"
+    # Claude Code keys the answers by each question's own text, and reads them
+    # off the input it was allowed to run with.
+    assert reply["response"]["response"]["updatedInput"]["answers"] == {"Tabs or spaces?": "Spaces"}
+    # The transcript keeps the question as well as the answer: read back later,
+    # a bare "Spaces" says nothing about what it decided.
+    assert ("tool", 'You answered "Tabs or spaces?" with "Spaces".') in activity
+
+
+def test_several_answers_to_one_question_are_joined_the_way_the_tool_reads_them():
+    import json
+
+    multi = json.loads(json.dumps(ASK_REQUEST))
+    multi["request"]["input"]["questions"][0]["multiSelect"] = True
+    _asked, written, _activity, _command = _run_worker_with_questions([multi], [["Tabs", "Spaces"]])
+
+    assert written[-1]["response"]["response"]["updatedInput"]["answers"] == {
+        "Tabs or spaces?": "Tabs, Spaces"
+    }
+
+
+def test_a_question_nobody_answered_is_denied_rather_than_left_hanging():
+    _asked, written, _activity, _command = _run_worker_with_questions([ASK_REQUEST], None)
+
+    # An unanswered control request holds the turn open for good, which sounds
+    # exactly like a model that has stopped thinking.
+    assert written[-1]["response"]["response"]["behavior"] == "deny"
+
+
+def test_every_other_tool_still_answers_to_the_permission_mode():
+    request = {
+        "type": "control_request",
+        "request_id": "req-2",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "input": {"command": "rm -rf /"},
+            "tool_use_id": "toolu_2",
+        },
+    }
+    asked, written, _activity, _command = _run_worker_with_questions([request], [["yes"]])
+
+    # The prompt tool must not turn BlindPilot into an approval dialog: the
+    # permission mode decided this before, and it still does.
+    assert asked == []
+    assert written[-1]["response"]["response"]["behavior"] == "deny"
