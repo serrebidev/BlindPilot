@@ -1,41 +1,49 @@
-# BlindPilot 0.9.2
+# BlindPilot 0.10.0
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release makes the three sound cues independently switchable. It follows 0.9.1, which
-stopped a turn from starting on top of the last one's unfinished bookkeeping and moved the
-checks that would have caught it onto every commit, and 0.9.0, which gave `/status` an
-answer on every backend and gave chat mode the tools OpenRouter runs on its own servers.
+This release is about the menu bar: everything the application can do is now listed in it,
+including the model picker, which until now could only be reached by typing `/model` into
+the prompt. It follows 0.9.2, which made the three sound cues independently switchable,
+0.9.1, which stopped a turn from starting on top of the last one, and 0.9.0, which gave
+`/status` an answer on every backend and gave chat mode OpenRouter's server tools.
 
-If you are coming from 0.8.1, read the 0.9.0 and 0.9.1 notes as well — everything in them
-is in this release.
+If you are coming from 0.8.1, read the 0.9.x notes as well — everything in them is in this
+release. Nothing here removes a button or changes a chord, so existing muscle memory is
+untouched.
 
-## Each sound cue can be turned off on its own
+## The model picker has a way in from the menu bar
 
-**Play sound cues** turns all three off together. That is the right master switch and it
-is unchanged. What one switch cannot express is that the three cues are not
-interchangeable.
+The picker already existed and already worked. Typing `/model` into the prompt was the only
+way to reach it, and nothing in the menu bar said the word "model" at all — which is where
+a command is discovered, and where the shortcut for it is printed.
 
-Sent and Answer received are one-shots: they confirm that something happened, and then
-they are over. Working is a loop that runs for the whole turn, which makes it both the one
-most likely to wear thin over a long fan-out and the only one that says a turn is still
-alive without being asked. Wanting the loop gone is not the same wish as wanting silence —
-but with a single switch, stopping it cost both confirmations too.
+A **Model** menu now carries the backend, **Model and Effort…** on Ctrl+M, the permission
+mode, **Manage Backends** and **Connect a Provider**. Backend and Manage Backends move
+there out of File, where they had less to do with the rest of that menu than with each
+other.
 
-Options now carries a **Sounds** submenu underneath the master switch, with one check item
-per cue. A cue sounds when the master switch is on and its own is, so the master still
-wins, and the three are greyed out while it is off — three live switches beneath something
-that mutes all three would be describing a choice that is not there.
+The permission mode belongs to the conversation, not to the window, so the mark in the menu
+follows whichever tab is visible — arrowing along the tab strip moves it, because that is
+exactly when the answer changes. The modes are radio items rather than check items, because
+they are exclusive and that is what a screen reader says about them when they are built
+that way. **Connect a Provider** is greyed out with a reason on a backend that has no
+providers to connect, rather than being offered and then refused, which is how Compact
+already treats a backend that cannot compact.
 
-Two behaviours are deliberately unchanged. The progress loop still stops the moment an
-answer arrives, whatever any of these switches say, because it has to end when the turn
-does or it outlives the turn with nothing left to stop it. And switching the working cue
-off stops a loop that is already playing rather than waiting for the turn to end: somebody
-reaching for that switch means now.
+## File is split into File and Conversation
 
-A configuration written by an earlier release has no per-cue setting, so it reads exactly
-as it always did, with all three on. A setting this version does not recognise is dropped
-rather than carried, so a configuration written by a later one cannot mute or break this
-one.
+File had grown into everything: sessions, tabs, compaction, stop, find, the projects folder
+and the desktop shortcut. It is now **File** for sessions, tabs and the application itself,
+and **Conversation** for what happens inside one.
+
+Every item is appended and bound through a single helper, so neither half can be added
+without the other. A menu item that does nothing is worse than no menu item, and that is
+the failure this shape makes impossible rather than merely unlikely.
+
+One detail worth recording, because it looks like an inconsistency and is not: a chord
+written in brackets rather than after a tab is one the frame's own accelerator table
+already carries. A tab there would register a second menu accelerator for the same key, and
+Windows will not fire a menu accelerator whose key is Tab at all.
