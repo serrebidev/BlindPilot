@@ -4163,6 +4163,23 @@ class SessionPanel(wx.Panel):
             wx.CallAfter(self._drain_worker_events)
 
     # ----- Send flow -----
+    def _run_in_progress(self) -> bool:
+        """Whether a turn is still going, as far as this window is concerned.
+
+        Deliberately not `is_alive()`. A worker thread dies the moment it has
+        *queued* its last event, not when anything has acted on it, and the
+        mailbox above hands the native queue a turn between batches - so a
+        waiting Enter is dispatched inside that gap by design. For the whole
+        of it `is_alive()` says False while the turn's own `complete` and
+        `done` are still sitting in the queue.
+
+        `_worker` is cleared by `_on_worker_finished`, which runs on this
+        thread when the queue reaches it. It is therefore the only answer that
+        is true at the same moment as the rest of the state these handlers
+        read, which is what makes it safe to start a new turn against.
+        """
+        return self._worker is not None
+
     def send_now(self) -> None:
         """Public entry point so the frame can fire a seeded side-chat prompt."""
         self._on_send()
@@ -4228,7 +4245,7 @@ class SessionPanel(wx.Panel):
             self._on_steer()
             return
 
-        if self._worker is not None and self._worker.is_alive():
+        if self._run_in_progress():
             self._announce("Error: The current backend is still finishing the previous turn")
             return
 
@@ -4289,7 +4306,17 @@ class SessionPanel(wx.Panel):
             on_question=self._ask_questions,
             **(worker_extra or {}),
         )
-        self._worker.start()
+        try:
+            self._worker.start()
+        except RuntimeError as exc:
+            # A thread that never started will never queue `done`, and `done`
+            # is what says the turn is over. Clearing this by hand is what
+            # keeps a failure here from leaving Send refused for good.
+            self._worker = None
+            self._earcons.stop_progress()
+            self.send_btn.Enable()
+            self._announce(f"Error: The turn could not be started: {exc}")
+            return
         self.steer_btn.Enable()
         self.stop_btn.Enable()
 
@@ -4384,7 +4411,9 @@ class SessionPanel(wx.Panel):
         the next message the first of a new conversation. The old conversation
         is still on disk, and Recent Conversations can bring it back.
         """
-        if self._worker is not None and self._worker.is_alive():
+        if self._run_in_progress():
+            # Emptying `_turns` here while the last turn's `complete` is still
+            # queued leaves that event writing into a list with nothing in it.
             self._announce("Error: Stop the running task before starting a new conversation")
             return
         self._session_id = None
@@ -4416,7 +4445,7 @@ class SessionPanel(wx.Panel):
                 "Start a new conversation instead"
             )
             return
-        if self._worker is not None and self._worker.is_alive():
+        if self._run_in_progress():
             self._announce("Error: Wait for the running task to finish before compacting")
             return
         if not self._session_id or backend != self._session_backend:
