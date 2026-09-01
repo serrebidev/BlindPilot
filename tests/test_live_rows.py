@@ -24,7 +24,7 @@ from markdown_rows import Row, reassemble, reassemble_all  # noqa: E402
 def test_live_narration_is_enabled_for_a_fresh_configuration(monkeypatch):
     import claude_reader
 
-    monkeypatch.setattr(claude_reader, "_load_config", lambda: {})
+    monkeypatch.setattr(claude_reader, "_load_config", dict)
     settings = claude_reader._Settings()
 
     assert settings.live_rows is True

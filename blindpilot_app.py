@@ -4691,7 +4691,7 @@ class SessionPanel(wx.Panel):
         if not text:
             self._announce("Error: Type a message first, then steer")
             return
-        if not getattr(worker, "steer")(text):
+        if not worker.steer(text):
             # The turn finished between typing and pressing. Leave the text in
             # place so it can just be sent as the next prompt.
             self._announce("Error: The run already finished. Press Send to ask it now.")
@@ -4971,24 +4971,23 @@ class SessionPanel(wx.Panel):
                 f"Response {self._response_count} received, {len(new_rows) - 1} segments"
             )
             return
-        else:
-            # Fill the header payload so 'copy whole response' yields Claude's
-            # full answer text (the streamed rows are already in the list).
-            for row in self._rows:
-                if row.response_number == self._stream_response and row.kind == "header":
-                    row.payload = _strip_noise(text)
-                    break
-            # Streaming is best-effort: a backend can finish with text that
-            # never arrived as activity. Without this the answer would exist
-            # only in the header payload, and the list would end on whatever
-            # the last streamed row happened to be.
-            if text.strip() and _flatten(text) not in _flatten(self._streamed_assistant):
-                speaker = backend_label(self._session_backend)
-                segments = parse_response(text, self._stream_response)[1:]
-                for i, row in enumerate(segments):
-                    if i == 0 and row.kind != "code":
-                        row.label = f"{speaker}: {row.label}"
-                    self._rows.append(row)
+        # Fill the header payload so 'copy whole response' yields Claude's
+        # full answer text (the streamed rows are already in the list).
+        for row in self._rows:
+            if row.response_number == self._stream_response and row.kind == "header":
+                row.payload = _strip_noise(text)
+                break
+        # Streaming is best-effort: a backend can finish with text that
+        # never arrived as activity. Without this the answer would exist
+        # only in the header payload, and the list would end on whatever
+        # the last streamed row happened to be.
+        if text.strip() and _flatten(text) not in _flatten(self._streamed_assistant):
+            speaker = backend_label(self._session_backend)
+            segments = parse_response(text, self._stream_response)[1:]
+            for i, row in enumerate(segments):
+                if i == 0 and row.kind != "code":
+                    row.label = f"{speaker}: {row.label}"
+                self._rows.append(row)
         n = self._response_count
         self._stream_response = None
         self._refresh_list()

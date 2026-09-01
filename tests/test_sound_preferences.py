@@ -6,7 +6,7 @@ import blindpilot_app as app
 
 
 def test_sound_cues_are_enabled_for_a_fresh_configuration(monkeypatch):
-    monkeypatch.setattr(app, "_load_config", lambda: {})
+    monkeypatch.setattr(app, "_load_config", dict)
 
     settings = app._Settings()
 

@@ -1,0 +1,106 @@
+name: Tests
+
+# The release workflow runs these same checks, but only on a `v*` tag. That
+# finds a broken commit on release day, with the build half made. This runs
+# them on the commit instead.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A branch pushed twice in quick succession only needs its newest commit
+# tested; the older run is answering a question nobody is asking any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.label }}
+    strategy:
+      # Every platform's result is wanted. A Windows failure says nothing
+      # about whether Linux is also broken, and cancelling the others hides it.
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows
+            runner: windows-2025
+          - label: macOS
+            runner: macos-15
+          # Linux ships — linux_accessibility.py, the pexpect pseudo-terminal,
+          # the POSIX process groups — and several tests skip themselves on
+          # Windows and macOS, so without this runner they execute nowhere.
+          - label: Linux
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        # Linux uses the distribution's own Python, because that is the one
+        # Ubuntu's prebuilt wxPython is built against. Ubuntu 24.04 ships
+        # 3.12, so all three runners are on the same version regardless.
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install wxPython and a virtual display
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-wxgtk4.0 xvfb
+          # PyPI has no Linux wheel for wxPython, only a source archive that
+          # needs the GTK development headers and the better part of an hour.
+          # Ubuntu ships one already built; the environment is given sight of
+          # it rather than building a second one.
+          python3 -m venv --system-site-packages .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # Never silently fall back to compiling wxPython: that turns a
+          # missing wheel into a forty-minute job that fails anyway.
+          python -m pip install --only-binary=wxPython -r requirements-build.txt
+          python -c "import wx; print('wxPython', wx.version())"
+
+      - name: Run the tests
+        shell: bash
+        # -W error for the same reason the release build uses it: a warning
+        # nobody reads is how an invalid escape sequence or a deprecated call
+        # reaches a release. xvfb-run gives wxPython a display to open into.
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python -m pytest -q -W error
+          else
+            python -m pytest -q -W error
+          fi
+
+      - name: Check the application still starts
+        shell: bash
+        # Every menu, control and binding is created in the frame's __init__,
+        # and the tests drive handlers on stubs. A stub always has whatever it
+        # is handed, so it cannot notice a menu built before the thing it
+        # describes exists. This can, and did.
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python blind_pilot.py --startup-smoke
+            xvfb-run -a python blind_pilot.py --startup-gui-smoke
+          else
+            python blind_pilot.py --startup-smoke
+            python blind_pilot.py --startup-gui-smoke
+          fi
+
+      - name: Run static checks
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
