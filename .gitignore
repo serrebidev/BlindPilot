@@ -15,3 +15,4 @@ artifacts/
 .release-setup/
 .freebuff/
 .ruff_cache/
+.claude/settings.local.json
