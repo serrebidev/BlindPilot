@@ -6309,71 +6309,8 @@ class MainFrame(wx.Frame):
 
         # ----- Menu bar (gives us standard Cmd+T / Cmd+W on Mac) -----
         menubar = wx.MenuBar()
-        file_menu = wx.Menu()
-        new_item = file_menu.Append(
-            wx.ID_NEW,
-            "&New Session…\tCtrl+T",
-            "Type or browse to a folder and open a session in it",
-        )
-        history_item = file_menu.Append(
-            wx.ID_ANY,
-            "&Recent Conversations…\tCtrl+H",
-            "Reopen a past conversation and carry on with it",
-        )
-        set_pf_item = file_menu.Append(
-            wx.ID_ANY,
-            "Set &Projects Folder…",
-            "Choose the folder that contains your projects",
-        )
-        desktop_item = file_menu.Append(
-            wx.ID_ANY,
-            "Create &Desktop Shortcut",
-            "Put a BlindPilot shortcut on the desktop",
-        )
-        file_menu.AppendSeparator()
-        self._compact_item = file_menu.Append(
-            wx.ID_ANY,
-            "Co&mpact Conversation\tCtrl+Shift+K",
-            "Summarise this conversation so the backend has room to keep going",
-        )
-        new_convo_item = file_menu.Append(
-            wx.ID_ANY,
-            "Start N&ew Conversation\tCtrl+Shift+N",
-            "Forget this conversation and start a fresh one in this tab",
-        )
-        file_menu.AppendSeparator()
-        stop_item = file_menu.Append(
-            wx.ID_STOP,
-            "S&top Task\tCtrl+.",
-            "Stop the task running in this session",
-        )
-        file_menu.AppendSeparator()
-        find_item = file_menu.Append(
-            wx.ID_FIND,
-            "&Find in Responses…\tCtrl+F",
-            "Search the responses in this session",
-        )
-        file_menu.AppendSeparator()
-        # No "\t" in these two labels on purpose: that would register a menu
-        # accelerator, and Windows will not fire one whose key is Tab. The
-        # accelerator table below carries the chord; the label just says it.
-        next_tab_item = file_menu.Append(
-            wx.ID_ANY,
-            "Ne&xt Session (Ctrl+Tab)",
-            "Move to the next conversation tab",
-        )
-        prev_tab_item = file_menu.Append(
-            wx.ID_ANY,
-            "Previo&us Session (Ctrl+Shift+Tab)",
-            "Move to the previous conversation tab",
-        )
-        file_menu.AppendSeparator()
-        close_item = file_menu.Append(
-            wx.ID_CLOSE, "&Close Session\tCtrl+W", "Close the current session tab"
-        )
-        file_menu.AppendSeparator()
-        quit_item = file_menu.Append(wx.ID_EXIT, "&Quit\tCtrl+Q")
-        menubar.Append(file_menu, "&File")
+        menubar.Append(self._build_file_menu(), "&File")
+        menubar.Append(self._build_conversation_menu(), "&Conversation")
 
         # ----- Model: what answers you, and what it may do -----
         #
@@ -6564,19 +6501,7 @@ class MainFrame(wx.Frame):
             lambda _e: self._show_chat_diagnostics(),
             self._chat_diagnostics_item,
         )
-        self.Bind(wx.EVT_MENU, lambda _e: self._new_session(), new_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._open_history(), history_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._compact_active(), self._compact_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._new_conversation_active(), new_convo_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._manage_backends(), manage_backends_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._set_projects_folder(), set_pf_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._create_desktop_shortcut(), desktop_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._stop_active(), stop_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._find_active(), find_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(+1), next_tab_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(-1), prev_tab_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._close_current_session(), close_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self.Close(), quit_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
         self.Bind(
@@ -7144,6 +7069,143 @@ class MainFrame(wx.Frame):
             self.notebook.SetSelection(sel)
 
     # ----- Options menu -----
+    def _menu_item(self, menu, label, help_text, action, item_id=wx.ID_ANY):
+        """Append one item and bind it, so neither can be added without the other."""
+        item = menu.Append(item_id, label, help_text)
+        self.Bind(wx.EVT_MENU, lambda _event: action(), item)
+        return item
+
+    def _build_file_menu(self) -> wx.Menu:
+        """Sessions, tabs, and the application itself.
+
+        A chord written in brackets rather than after a tab is one the frame's
+        own accelerator table already carries: a tab here would register a
+        second menu accelerator for the same key, and Windows will not fire a
+        menu accelerator whose key is Tab at all.
+        """
+        menu = wx.Menu()
+        add = self._menu_item
+        add(
+            menu,
+            "&New Session…	Ctrl+T",
+            "Type or browse to a folder and open a session in it",
+            self._new_session,
+            wx.ID_NEW,
+        )
+        add(
+            menu,
+            "&Recent Conversations…	Ctrl+H",
+            "Reopen a past conversation and carry on with it",
+            self._open_history,
+        )
+        add(
+            menu,
+            "&Side Chat in This Folder",
+            "Open a second conversation in the same folder, without disturbing this one",
+            self._side_chat_active,
+        )
+        menu.AppendSeparator()
+        add(
+            menu,
+            "Ne&xt Session (Ctrl+Tab)",
+            "Move to the next conversation tab",
+            lambda: self._cycle_tab(+1),
+        )
+        add(
+            menu,
+            "Previo&us Session (Ctrl+Shift+Tab)",
+            "Move to the previous conversation tab",
+            lambda: self._cycle_tab(-1),
+        )
+        menu.AppendSeparator()
+        add(
+            menu,
+            "Set &Projects Folder…",
+            "Choose the folder that contains your projects",
+            self._set_projects_folder,
+        )
+        add(
+            menu,
+            "Create &Desktop Shortcut",
+            "Put a BlindPilot shortcut on the desktop",
+            self._create_desktop_shortcut,
+        )
+        menu.AppendSeparator()
+        add(
+            menu,
+            "&Close Session	Ctrl+W",
+            "Close the current session tab",
+            self._close_current_session,
+            wx.ID_CLOSE,
+        )
+        add(menu, "&Quit	Ctrl+Q", "Leave BlindPilot", self.Close, wx.ID_EXIT)
+        return menu
+
+    def _build_conversation_menu(self) -> wx.Menu:
+        """This conversation, and the message about to be added to it.
+
+        Attach, Slash Command and Jump to Latest Response were reachable by
+        chord alone. Two of them have a button beside the prompt as well, which
+        is how a sighted application is meant to work - the menu is the
+        complete list, the button is the shortcut to a frequent one, and the
+        menu item is where the chord is learnt.
+        """
+        menu = wx.Menu()
+        add = self._menu_item
+        add(
+            menu,
+            "S&top Task	Ctrl+.",
+            "Stop the task running in this session",
+            self._stop_active,
+            wx.ID_STOP,
+        )
+        add(
+            menu,
+            "&Attach Files… (Ctrl+Shift+A)",
+            "Attach files to the next message",
+            self._attach_active,
+        )
+        add(
+            menu,
+            "S&lash Command… (Ctrl+/)",
+            "Pick one of this backend's slash commands from a list",
+            self._slash_active,
+        )
+        menu.AppendSeparator()
+        self._compact_item = add(
+            menu,
+            "Co&mpact Conversation	Ctrl+Shift+K",
+            "Summarise this conversation so the backend has room to keep going",
+            self._compact_active,
+        )
+        add(
+            menu,
+            "Start N&ew Conversation	Ctrl+Shift+N",
+            "Forget this conversation and start a fresh one in this tab",
+            self._new_conversation_active,
+        )
+        menu.AppendSeparator()
+        add(
+            menu,
+            "&Find in Responses…	Ctrl+F",
+            "Search the responses in this session",
+            self._find_active,
+            wx.ID_FIND,
+        )
+        add(
+            menu,
+            "&Jump to Latest Response (Ctrl+R)",
+            "Move to the newest response, then back through the ones before it",
+            self._jump_to_latest_response,
+        )
+        return menu
+
+    def _side_chat_active(self) -> None:
+        """A second conversation in the same folder as the visible tab."""
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            self._open_side_chat(page.cwd, "")
+
     def _build_backend_menu(self) -> wx.Menu:
         """The Backend submenu: one radio item per coding-agent CLI."""
         menu = wx.Menu()
