@@ -1933,6 +1933,15 @@ def _save_config(cfg: dict) -> None:
         pass
 
 
+# The three cues, in the order the menu offers them. The key is what the
+# configuration stores, so it must not change; the rest is only wording.
+SOUND_CUES: tuple[tuple[str, str, str], ...] = (
+    ("send", "Message &sent", "Play a sound when a message is sent"),
+    ("working", "&Working", "Play a sound for as long as a turn is running"),
+    ("received", "&Answer received", "Play a sound when the answer arrives"),
+)
+
+
 class _Settings:
     """User preferences that change how a run is presented, saved to config.
 
@@ -1948,6 +1957,17 @@ class _Settings:
         self.live_rows = bool(cfg.get("live_rows", True))
         self.speak_live = bool(cfg.get("speak_live", True))
         self.sounds_enabled = bool(cfg.get("sounds_enabled", True))
+        # `sounds_enabled` above is the master switch and keeps its meaning.
+        # These say which cues it turns on, because the three are not
+        # interchangeable: "working" is a loop that runs for the whole turn,
+        # so wanting it gone is not the same wish as wanting silence.
+        #
+        # Missing keys default to on, so a configuration written before this
+        # existed reads as it always did; unknown ones are dropped, so one
+        # written by a newer version cannot mute or break this one.
+        stored = cfg.get("sound_cues")
+        stored = stored if isinstance(stored, dict) else {}
+        self.sound_cues = {cue: bool(stored.get(cue, True)) for cue, _label, _help in SOUND_CUES}
         self.text_view = bool(cfg.get("text_view", False))
         self.show_thinking = bool(cfg.get("show_thinking", False))
 
@@ -1956,6 +1976,7 @@ class _Settings:
         cfg["live_rows"] = self.live_rows
         cfg["speak_live"] = self.speak_live
         cfg["sounds_enabled"] = self.sounds_enabled
+        cfg["sound_cues"] = self.sound_cues
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
         _save_config(cfg)
@@ -1984,10 +2005,13 @@ class Earcons:
     by re-spawning in a daemon thread). Missing files are silently ignored.
     """
 
-    def __init__(self, folder: str, enabled: bool = True):
+    def __init__(self, folder: str, enabled: bool = True, cues: Optional[dict] = None):
         self._folder = folder
         self._system = platform.system()
         self.enabled = bool(enabled)
+        # Which cues the master switch turns on. Absent means on, so an
+        # Earcons built without them behaves exactly as it did before.
+        self.cues = dict(cues or {})
         self.send = self._resolve("send")
         self.received = self._resolve("received", "Recieved")
         self.in_progress = self._resolve("in-progress", "in_progress")
@@ -2031,18 +2055,24 @@ class Earcons:
         except Exception:
             pass
 
+    def _wanted(self, cue: str) -> bool:
+        """Whether this cue sounds: the master switch, and then its own."""
+        return self.enabled and self.cues.get(cue, True)
+
     def play_send(self) -> None:
-        if self.enabled:
+        if self._wanted("send"):
             self._play_once(self.send)
 
     def play_received(self) -> None:
+        # Stopping the loop stays unconditional: it has to end when the turn
+        # does, whatever any of these are set to.
         self.stop_progress()
-        if self.enabled:
+        if self._wanted("received"):
             self._play_once(self.received)
 
     def start_progress(self) -> None:
         self.stop_progress()
-        if not self.enabled or not self.in_progress:
+        if not self._wanted("working") or not self.in_progress:
             return
         if self._system == "Windows":
             try:
@@ -2112,6 +2142,16 @@ class Earcons:
         """Enable or mute cues, stopping the progress loop when muted."""
         self.enabled = bool(enabled)
         if not self.enabled:
+            self.stop_progress()
+
+    def set_cues(self, cues: dict) -> None:
+        """Switch individual cues on or off.
+
+        The progress loop stops the moment its own cue goes, rather than at
+        the end of the turn: somebody reaching for that switch means now.
+        """
+        self.cues.update({key: bool(value) for key, value in cues.items()})
+        if not self._wanted("working"):
             self.stop_progress()
 
 
@@ -6323,6 +6363,7 @@ class MainFrame(wx.Frame):
         self.earcons = Earcons(
             os.path.join(_resource_dir(), "EarCons"),
             enabled=SETTINGS.sounds_enabled,
+            cues=SETTINGS.sound_cues,
         )
         self._update_checking = False
 
@@ -6446,6 +6487,11 @@ class MainFrame(wx.Frame):
             wx.ID_ANY,
             "Play &sound cues",
             "Play sounds when a message is sent, while it is working, and when a response arrives",
+        )
+        options_menu.AppendSubMenu(
+            self._build_sound_cue_menu(),
+            "So&unds",
+            "Choose which of the three sounds are played",
         )
         options_menu.AppendSeparator()
         self._text_view_item = options_menu.AppendCheckItem(
@@ -7172,10 +7218,40 @@ class MainFrame(wx.Frame):
         state = "shown" if SETTINGS.show_thinking else "hidden"
         self._announce_setting(f"The backend's reasoning is {state}")
 
+    def _build_sound_cue_menu(self) -> wx.Menu:
+        """One check item per cue, under the master switch that governs them.
+
+        Greyed out while the master switch is off, because three live
+        switches beneath something that mutes all three would be describing
+        a choice that is not there.
+        """
+        menu = wx.Menu()
+        self._sound_cue_items: dict[str, wx.MenuItem] = {}
+        for cue, label, help_text in SOUND_CUES:
+            item = menu.AppendCheckItem(wx.ID_ANY, label, help_text)
+            item.Check(SETTINGS.sound_cues.get(cue, True))
+            item.Enable(SETTINGS.sounds_enabled)
+            self._sound_cue_items[cue] = item
+            self.Bind(wx.EVT_MENU, lambda _e, key=cue: self._toggle_sound_cue(key), item)
+        return menu
+
+    def _toggle_sound_cue(self, cue: str) -> None:
+        item = self._sound_cue_items[cue]
+        SETTINGS.sound_cues[cue] = item.IsChecked()
+        SETTINGS.save()
+        self.earcons.set_cues(SETTINGS.sound_cues)
+        label = next(text for key, text, _help in SOUND_CUES if key == cue).replace("&", "")
+        state = "on" if SETTINGS.sound_cues[cue] else "off"
+        self._announce_setting(f"{label} sound {state}")
+
     def _toggle_sounds(self) -> None:
         SETTINGS.sounds_enabled = self._sounds_item.IsChecked()
         SETTINGS.save()
         self.earcons.set_enabled(SETTINGS.sounds_enabled)
+        # The cues below it describe a choice that is not available while
+        # everything is muted.
+        for item in getattr(self, "_sound_cue_items", {}).values():
+            item.Enable(SETTINGS.sounds_enabled)
         state = "on" if SETTINGS.sounds_enabled else "off"
         self._announce_setting(f"Sound cues {state}")
 
