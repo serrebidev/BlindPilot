@@ -3948,6 +3948,13 @@ class SessionPanel(wx.Panel):
 
     # ----- Focus helpers -----
     def focus_prompt(self) -> None:
+        if _STARTUP_CHECK:
+            # A startup check shows no window. Asking for focus anyway takes
+            # it from whoever is running the check, and Windows has to show a
+            # window to give it focus - which drags the hidden one onto their
+            # screen. Guarded here rather than at the four call sites, because
+            # a fifth would not know to guard itself.
+            return
         self.prompt.SetFocus()
 
     def focus_first_control(self) -> None:
@@ -6820,7 +6827,11 @@ class MainFrame(wx.Frame):
         cfg = _load_config()
         cfg["app_mode"] = mode
         _save_config(cfg)
-        if show_agent:
+        if _STARTUP_CHECK:
+            # A check shows no window, so there is nothing here to focus into,
+            # and asking for focus would take it from whoever is running it.
+            pass
+        elif show_agent:
             page = self.notebook.GetCurrentPage()
             if isinstance(page, SessionPanel):
                 page.focus_prompt()
@@ -7096,8 +7107,9 @@ class MainFrame(wx.Frame):
             panel.prompt.SetValue(initial_prompt)
             # Defer so the page is shown before the request fires.
             wx.CallAfter(panel.send_now)
-        else:
+        elif not _STARTUP_CHECK:
             # Defer initial focus so VoiceOver picks it up after the page is shown.
+            # Skipped during a startup check, which shows no window to focus into.
             wx.CallAfter(panel.focus_prompt)
         return panel
 
@@ -7730,6 +7742,12 @@ def _bring_to_front() -> None:
         pass
 
 
+# True for the length of a packaged startup check. Nothing a check does may
+# take the focus of whoever is running it: they are working in another window,
+# and on this application's users that means moving their screen reader too.
+_STARTUP_CHECK = False
+
+
 def main() -> int:
     if "--startup-smoke" in sys.argv:
         # Importing this module has already loaded wxPython, every backend,
@@ -7757,7 +7775,13 @@ def main() -> int:
     # Claim the console before anything can create one on screen. Doing it here,
     # rather than when a terminal is first needed, keeps it out of the way of
     # the first message as well as every later one.
-    reserve_hidden_console()
+    #
+    # Not during a startup check. AllocConsole hands back a console that is
+    # already visible, and hiding it is the next thing that happens - which is
+    # a window appearing and vanishing on the screen of whoever is running the
+    # checks. A check creates no pseudo-terminal, so it needs no console.
+    if not gui_startup_smoke:
+        reserve_hidden_console()
     app = wx.App(False)
 
     cfg = _load_config()
@@ -7790,13 +7814,22 @@ def main() -> int:
         wizard.Destroy()
         # Even if cancelled, open the app — user may know what they're doing.
 
+    global _STARTUP_CHECK
+    _STARTUP_CHECK = gui_startup_smoke
     frame = MainFrame(initial_cwd=os.getcwd())
-    frame.Show()
-    frame.Raise()
-    _bring_to_front()
     if gui_startup_smoke:
+        # Never shown. What this checks is that the window can be *built* -
+        # every menu, control and binding made, and the sizers able to lay
+        # them out - and none of that needs it on screen. Showing it put a
+        # window in front of whoever was running the checks for a second and
+        # a half, and for somebody who navigates by ear that is not a
+        # harmless flicker.
+        frame.Layout()
         wx.CallLater(1500, frame.Close)
     else:
+        frame.Show()
+        frame.Raise()
+        _bring_to_front()
         # An update that failed did so with no window to report to, so its
         # reason is read out here, before anything else competes for attention.
         wx.CallLater(1200, frame.report_failed_update)
