@@ -2104,11 +2104,11 @@ def test_stopping_a_task_does_not_block_the_window(monkeypatch):
 
 
 def _status_lines(report: str) -> dict[str, str]:
-    return dict(
-        (caption.strip(), value.strip())
+    return {
+        caption.strip(): value.strip()
         for caption, _sep, value in (line.partition(":") for line in report.splitlines())
         if caption.strip()
-    )
+    }
 
 
 def test_status_says_so_when_the_backend_is_not_installed(monkeypatch):
