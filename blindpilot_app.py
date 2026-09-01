@@ -2183,6 +2183,105 @@ class ClaudeWorker(threading.Thread):
         # not there yet (or is already gone).
         self._accepting_input = threading.Event()
         self._write_lock = threading.Lock()
+        # stderr is read on its own thread from the moment the process starts.
+        # Waiting until it exited meant a child that wrote more than the pipe
+        # holds blocked on its own diagnostics, and a turn that fans out
+        # subagents is the loudest one there is.
+        self._stderr_lines: list[str] = []
+        self._stderr_thread: Optional[threading.Thread] = None
+        # A failure is reported once, so a crash late in the turn cannot talk
+        # over the explanation the turn already gave.
+        self._failed = False
+
+    def _fail(self, message: str) -> None:
+        """Report why the turn ended, once."""
+        if self._failed:
+            return
+        self._failed = True
+        self._on_failed(message)
+
+    def _drain_stderr(self) -> None:
+        """Keep stderr empty for as long as the process is running.
+
+        Whatever it says is kept: when the CLI exits without finishing a turn,
+        its stderr is usually the only account of why.
+        """
+        proc = self._proc
+        stream = proc.stderr if proc is not None else None
+        if stream is None:
+            return
+        try:
+            for line in stream:
+                self._stderr_lines.append(line)
+                # A runaway child must not become a runaway list. The tail is
+                # the part that says how it ended.
+                if len(self._stderr_lines) > 4000:
+                    del self._stderr_lines[:2000]
+        except Exception:
+            # The pipe closed under us, which is what exiting looks like.
+            pass
+
+    def _stderr_text(self) -> str:
+        """Everything stderr said, once the draining thread has caught up."""
+        thread = self._stderr_thread
+        if thread is not None:
+            thread.join(timeout=2)
+        return "".join(self._stderr_lines).strip()
+
+    @staticmethod
+    def _background_agents_running(event: dict) -> int:
+        """How many agents this run started in the background are still going.
+
+        A turn that launches background agents finishes while they are still
+        working: the CLI stays up, and what each one finds arrives as a further
+        turn on this same stream. Treating that first result as the end of the
+        run closed the CLI's stdin, and stopping the CLI stops every agent it
+        had running — which is a whole fan-out of work lost at once.
+        """
+        stats = event.get("subagent_stats")
+        if not isinstance(stats, dict):
+            return 0
+        started = stats.get("started_in_background")
+        started = started if isinstance(started, int) else 0
+        settled = 0
+        for field in ("completed", "failed"):
+            value = stats.get(field)
+            settled += value if isinstance(value, int) else 0
+        killed = stats.get("killed")
+        if isinstance(killed, dict):
+            settled += sum(value for value in killed.values() if isinstance(value, int))
+        return max(0, started - settled)
+
+    @staticmethod
+    def _diagnostic_path() -> Path:
+        """Where a turn that ended badly leaves its account of itself."""
+        return blindpilot_config_dir() / "claude-worker.log"
+
+    def _log_unfinished_turn(self, rc: object, complete: bool, stderr_text: str) -> None:
+        """Record a turn the CLI did not finish.
+
+        A turn that dies mid-run is the hardest thing here to look into after
+        the fact: the window is gone, and an exit code says nothing about what
+        the run was doing. This is what is left behind to answer that.
+        """
+        try:
+            path = self._diagnostic_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(path, "a", encoding="utf-8", errors="replace") as fh:
+                fh.write(
+                    f"\n=== {stamp} claude turn ended early ===\n"
+                    f"exit code: {rc}\n"
+                    f"result event seen: {complete}\n"
+                    f"session: {self._session_id or '(new)'}\n"
+                    f"permission mode: {self._permission_mode}\n"
+                    f"model: {self._model or '(default)'}\n"
+                    f"cancelled: {self._cancelled}\n"
+                    f"stderr ({len(stderr_text)} chars):\n{stderr_text or '(nothing)'}\n"
+                )
+        except OSError:
+            # A missing log is not worth losing the failure message over.
+            pass
 
     def accepting_input(self) -> bool:
         """Whether the active Claude turn can accept a steering message."""
@@ -2244,6 +2343,12 @@ class ClaudeWorker(threading.Thread):
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # Anything thrown here used to end the turn without a word: the
+            # `finally` closed stdin, the CLI saw EOF in the middle of its work
+            # and exited, and the exit code was the whole explanation. Say what
+            # actually happened instead.
+            self._fail(f"BlindPilot stopped reading Claude Code: {exc}")
         finally:
             self._close_stdin()
             self._on_done()
@@ -2412,6 +2517,10 @@ class ClaudeWorker(threading.Thread):
                 text=True,
                 bufsize=1,
                 encoding="utf-8",
+                # One malformed byte anywhere in a long run used to raise
+                # mid-stream and take the turn with it. A replacement character
+                # in a row of output costs nothing by comparison.
+                errors="replace",
                 env=env,
                 # `claude` may be a launcher with the real agent as its child;
                 # stopping a task has to stop that too.
@@ -2419,17 +2528,31 @@ class ClaudeWorker(threading.Thread):
                 **_no_window_kwargs(),
             )
         except OSError as exc:
-            self._on_failed(f"Failed to launch Claude Code: {exc}")
+            self._fail(f"Failed to launch Claude Code: {exc}")
             return
 
+        # Started before anything is sent, so the child never waits on a pipe
+        # nobody is emptying. The list is replaced rather than kept, so a retry
+        # does not inherit the first attempt's complaints.
+        self._stderr_lines = []
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            name="claude-stderr",
+            daemon=True,
+        )
+        self._stderr_thread.start()
+
         if not self._write_message(self._prompt):
-            self._on_failed("Could not send the prompt to Claude Code")
+            self._fail("Could not send the prompt to Claude Code")
             return
         self._accepting_input.set()
 
         text_parts: list[str] = []
         first_assistant_seen = False
         complete = False
+        # How many background agents the last wait was announced for, so the
+        # count is only spoken when it changes rather than at every result.
+        announced_waiting = 0
 
         assert self._proc.stdout is not None
         for raw_line in self._proc.stdout:
@@ -2465,6 +2588,12 @@ class ClaudeWorker(threading.Thread):
                 if not first_assistant_seen:
                     first_assistant_seen = True
                     self._on_started()
+                # Work done by a subagent carries the id of the tool call that
+                # started it. It is shown live like everything else, but it is
+                # somebody else's running commentary rather than the answer to
+                # this turn — five agents' worth of it would otherwise be
+                # collected up and read out as the reply.
+                from_subagent = bool(event.get("parent_tool_use_id"))
                 message = event.get("message") or {}
                 for block in message.get("content") or []:
                     if not isinstance(block, dict):
@@ -2475,7 +2604,8 @@ class ClaudeWorker(threading.Thread):
                         # the list so the user reads the narration as it happens.
                         text = (block.get("text") or "").strip()
                         if text:
-                            text_parts.append(text)
+                            if not from_subagent:
+                                text_parts.append(text)
                             self._on_activity("assistant", text)
                     elif btype == "thinking":
                         # Extended-thinking blocks: Claude reasoning about what to
@@ -2513,12 +2643,27 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
+                still_working = self._background_agents_running(event)
+                if not event.get("is_error") and still_working:
+                    # The turn is over, the run is not: agents it started in
+                    # the background are still going, and what they find comes
+                    # back as further turns on this same stream. Ending here
+                    # stopped the CLI and took every one of them with it.
+                    if still_working != announced_waiting:
+                        announced_waiting = still_working
+                        self._on_activity(
+                            "tool",
+                            f"Waiting for {still_working} background "
+                            f"{'agent' if still_working == 1 else 'agents'} to finish. "
+                            "Stop Task ends the run now.",
+                        )
+                    continue
                 if event.get("is_error"):
                     detail = (event.get("result") or "").strip()
                     if _looks_like_auth_error(detail):
-                        self._on_failed(AUTH_HINT)
+                        self._fail(AUTH_HINT)
                     else:
-                        self._on_failed(detail or "Claude Code returned an error")
+                        self._fail(detail or "Claude Code returned an error")
                     return
                 # In streaming-input mode the process waits for more messages
                 # rather than ending at EOF, so the turn's own result event is
@@ -2538,14 +2683,9 @@ class ClaudeWorker(threading.Thread):
 
         rc = self._proc.returncode
         if rc != 0:
-            stderr_text = ""
-            if self._proc.stderr is not None:
-                try:
-                    stderr_text = self._proc.stderr.read().strip()
-                except Exception:
-                    pass
+            stderr_text = self._stderr_text()
             if _looks_like_auth_error(stderr_text):
-                self._on_failed(AUTH_HINT)
+                self._fail(AUTH_HINT)
                 return
             if self._retry_without_prompt_tool(stderr_text):
                 # The installed Claude Code is older than the flag. Turn it off
@@ -2553,12 +2693,27 @@ class ClaudeWorker(threading.Thread):
                 # missing question feature never costs somebody their turn.
                 self._do_run()
                 return
+            self._log_unfinished_turn(rc, complete, stderr_text)
             detail = f": {stderr_text}" if stderr_text else ""
-            self._on_failed(f"Claude Code exited with code {rc}{detail}")
-            return
+            if not detail and not complete:
+                # An exit code on its own explains nothing, and this is the
+                # shape a turn takes when the CLI dies in the middle of one.
+                detail = (
+                    " without finishing the turn, and without saying why. "
+                    f"BlindPilot kept a note of it in {self._diagnostic_path()}."
+                )
+            note = f"Claude Code exited with code {rc}{detail}"
+            if not complete and not text_parts:
+                self._fail(note)
+                return
+            # The turn answered before the process ended badly. How it ended is
+            # worth saying, but saying it instead of the answer threw away work
+            # that had already been done.
+            self._on_activity("result", note)
 
         if not complete and not text_parts:
-            self._on_failed("No response received")
+            self._log_unfinished_turn(rc, complete, self._stderr_text())
+            self._fail("No response received")
             return
 
         # Blank line between blocks: a turn now usually has several (the running
