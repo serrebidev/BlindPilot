@@ -34,7 +34,13 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 
 Choose **Chat** in the **Mode** combo box. Use **Chat → Accounts** to add a provider and API key, then choose **Chat → Refresh models** and select a model. **Chat → Conversation profiles** can supply a system prompt, default account and model, temperature, token limit, and streaming preference. **Chat → History view** switches between a native list and a read-only edit field; list items can be copied or edited from their context menu. Provider logs are under **Chat → Diagnostics**.
 
-OpenRouter accounts additionally support multiple file attachments, cache-aware regeneration, and model ids ending in `:batch`. Attachments are stored with the conversation. Chat configuration lives in `%APPDATA%\BlindPilot\chat.sqlite3` on Windows and alongside BlindPilot's other configuration elsewhere; API keys use the operating system credential store. The first time Chat mode opens, BlindPilot imports an existing AccessibleAI database and its saved keys when they are present, without modifying the original database.
+OpenRouter accounts additionally support multiple file attachments, cache-aware regeneration, and model ids ending in `:batch`. They also reach OpenRouter's own tools and its thinking, both set per conversation in **Chat → Conversation profiles**.
+
+**OpenRouter tools** lists every tool OpenRouter runs itself — web search, web fetch, date and time, image generation, apply patch, shell, bash, fusion, advisor, subagent, tool search and model search. Tick the ones a conversation may use. OpenRouter executes each one and hands the model the result, so nothing runs on your computer and nothing stops to ask permission. Each tool the model calls is spoken as it happens and left in History, and when an answer cites pages a numbered **Sources** list is added to the end of it.
+
+**Thinking effort** asks a reasoning model how long to think before it answers, from minimal to maximum, with an optional token budget; **Send the thinking back** decides whether the thinking comes back at all — off still lets the model think, it just does not return the words. The thinking arrives as its own History entry rather than mixed into the answer: BlindPilot says "Thinking" once when it starts and gives the entry a line saying how long it is, so arrowing past it does not read the whole thing. Ctrl+C copies it, and the text view holds it in full. **Read attached PDFs with** turns an attached PDF into text any model can read, rather than only the models that read one themselves.
+
+Attachments are stored with the conversation. Chat configuration lives in `%APPDATA%\BlindPilot\chat.sqlite3` on Windows and alongside BlindPilot's other configuration elsewhere; API keys use the operating system credential store. The first time Chat mode opens, BlindPilot imports an existing AccessibleAI database and its saved keys when they are present, without modifying the original database.
 
 ## Backends
 
@@ -97,6 +103,8 @@ opencode providers login
 **Sign In** does the same thing from inside BlindPilot, with no terminal. It runs the backend's own sign-in, reads the address out of its output, speaks it, and makes sure it reaches your default browser — the CLI opens it where it can, BlindPilot opens it where it will not, and **Open Sign-in Page** opens it again if the browser was closed or never arrived. When a provider hands the page back a code instead of finishing on its own, BlindPilot asks for the code and gives it to the CLI; that dialog closes by itself if the browser completes the sign-in first.
 
 opencode reaches a model through a provider you connect to it, so BlindPilot carries opencode's `/connect` as a dialog of its own: type `/connect` in the prompt (or use **Connect a Provider** in the wizard) to pick from every provider opencode knows, give it an API key, or sign in through your browser. Nothing about that flow needs a terminal.
+
+Type `/status` in the prompt to hear what the tab is about to do and whose account it will do it on: the backend, the model and effort, the permission mode, the folder, whether the next message continues this conversation or starts one, and who that backend is signed in as. Every backend answers it. Claude Code has a `/status` of its own but only inside its interactive terminal — sent as a message it replies that the command is not available here — and Codex, FreeBuff and opencode have no status command at all, so BlindPilot asks each one the way it can answer and reports all four the same way.
 
 ## Keyboard
 
