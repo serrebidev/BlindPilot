@@ -6389,27 +6389,6 @@ class MainFrame(wx.Frame):
             "&Recent Conversations…\tCtrl+H",
             "Reopen a past conversation and carry on with it",
         )
-        backend_menu = wx.Menu()
-        self._backend_items: dict[str, wx.MenuItem] = {}
-        for backend in BACKEND_IDS:
-            item = backend_menu.AppendRadioItem(wx.ID_ANY, BACKEND_LABELS[backend])
-            item.Check(backend == self._backend)
-            self._backend_items[backend] = item
-            self.Bind(
-                wx.EVT_MENU,
-                lambda _e, chosen=backend: self._set_backend(chosen),
-                item,
-            )
-        file_menu.AppendSubMenu(
-            backend_menu,
-            "&Backend",
-            "Choose which coding-agent CLI BlindPilot uses",
-        )
-        manage_backends_item = file_menu.Append(
-            wx.ID_ANY,
-            "&Manage Backends...",
-            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
-        )
         set_pf_item = file_menu.Append(
             wx.ID_ANY,
             "Set &Projects Folder…",
@@ -6464,6 +6443,40 @@ class MainFrame(wx.Frame):
         file_menu.AppendSeparator()
         quit_item = file_menu.Append(wx.ID_EXIT, "&Quit\tCtrl+Q")
         menubar.Append(file_menu, "&File")
+
+        # ----- Model: what answers you, and what it may do -----
+        #
+        # The picker below already existed and worked, but `/model` typed into
+        # the prompt was the only way to reach it, and nothing in the menu bar
+        # said the word "model" at all.
+        model_menu = wx.Menu()
+        model_menu.AppendSubMenu(
+            self._build_backend_menu(),
+            "&Backend",
+            "Choose which coding-agent CLI BlindPilot uses",
+        )
+        model_item = model_menu.Append(
+            wx.ID_ANY,
+            "&Model and Effort…	Ctrl+M",
+            "Choose the model and effort level this conversation runs at",
+        )
+        model_menu.AppendSubMenu(
+            self._build_permission_mode_menu(),
+            "&Permission Mode",
+            "Choose what the backend may do without asking, for this conversation",
+        )
+        model_menu.AppendSeparator()
+        manage_backends_item = model_menu.Append(
+            wx.ID_ANY,
+            "Ma&nage Backends...",
+            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
+        )
+        self._connect_item = model_menu.Append(
+            wx.ID_ANY,
+            "&Connect a Provider…",
+            "Connect a provider to opencode, or disconnect one",
+        )
+        menubar.Append(model_menu, "&Model")
 
         # ----- Options: how much of a run is narrated -----
         options_menu = wx.Menu()
@@ -6581,6 +6594,10 @@ class MainFrame(wx.Frame):
 
         self.SetMenuBar(menubar)
         self._refresh_compact_item()
+        self._refresh_connect_item()
+        self._refresh_mode_items()
+        self.Bind(wx.EVT_MENU, lambda _e: self._model_active(), model_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._connect_active(), self._connect_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_live_rows(), self._rows_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_speak_live(), self._speak_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_show_thinking(), self._thinking_item)
@@ -6925,6 +6942,7 @@ class MainFrame(wx.Frame):
             if isinstance(page, SessionPanel):
                 page.backend_changed()
         self._refresh_compact_item()
+        self._refresh_connect_item()
         message = (
             f"Backend changed to {backend_label(backend)}. It will be used for the next new turn."
         )
@@ -7200,6 +7218,86 @@ class MainFrame(wx.Frame):
             self.notebook.SetSelection(sel)
 
     # ----- Options menu -----
+    def _build_backend_menu(self) -> wx.Menu:
+        """The Backend submenu: one radio item per coding-agent CLI."""
+        menu = wx.Menu()
+        self._backend_items: dict[str, wx.MenuItem] = {}
+        for backend in BACKEND_IDS:
+            item = menu.AppendRadioItem(wx.ID_ANY, BACKEND_LABELS[backend])
+            item.Check(backend == self._backend)
+            self._backend_items[backend] = item
+            self.Bind(wx.EVT_MENU, lambda _e, chosen=backend: self._set_backend(chosen), item)
+        return menu
+
+    def _build_permission_mode_menu(self) -> wx.Menu:
+        """The Permission Mode submenu: one radio item per mode.
+
+        Radio rather than check, because the modes are exclusive and that is
+        what a screen reader says about them when they are built this way.
+        """
+        menu = wx.Menu()
+        self._mode_items: dict[str, wx.MenuItem] = {}
+        for value, label, description in PERMISSION_MODES:
+            item = menu.AppendRadioItem(wx.ID_ANY, label, description)
+            self._mode_items[value] = item
+            self.Bind(wx.EVT_MENU, lambda _e, mode=value: self._set_mode_active(mode), item)
+        return menu
+
+    def _refresh_mode_items(self) -> None:
+        """Point the menu at the visible tab's mode.
+
+        The mode belongs to the conversation, not to the window, so switching
+        tabs has to move the mark with it or the menu describes another tab.
+        """
+        items = getattr(self, "_mode_items", None)
+        notebook = getattr(self, "notebook", None)
+        if not items or notebook is None:
+            # The menu bar is built before the notebook it describes, so this
+            # runs once with nothing to point at. Adding the first tab fires a
+            # page change, which brings it straight back.
+            return
+        page = notebook.GetCurrentPage()
+        if not isinstance(page, SessionPanel):
+            return
+        item = items.get(page.mode)
+        if item is not None and not item.IsChecked():
+            item.Check(True)
+
+    def _refresh_connect_item(self) -> None:
+        """Grey out Connect for a backend that has no providers to connect.
+
+        Greyed with a reason rather than offered and then refused, which is how
+        Compact already treats a backend that cannot compact.
+        """
+        item = getattr(self, "_connect_item", None)
+        if item is None:
+            return
+        supported = self._backend == BACKEND_OPENCODE
+        item.Enable(supported)
+        if supported:
+            item.SetHelp("Connect a provider to opencode, or disconnect one")
+        else:
+            item.SetHelp(
+                f"{backend_label(self._backend)} has no providers to connect — "
+                "this one belongs to opencode"
+            )
+
+    def _model_active(self) -> None:
+        """Pick the model and effort for the active tab (Ctrl+M)."""
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.open_model_dialog()
+
+    def _connect_active(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.open_connect_dialog()
+
+    def _set_mode_active(self, value: str) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page._set_mode(value)
+
     def _toggle_live_rows(self) -> None:
         SETTINGS.live_rows = self._rows_item.IsChecked()
         SETTINGS.save()
@@ -7418,6 +7516,9 @@ class MainFrame(wx.Frame):
         if not isinstance(page, SessionPanel) or sel == wx.NOT_FOUND:
             return
         self._set_status_text(page.last_status)
+        # Before the early return below: arrowing the tab strip is exactly
+        # when the tab changes, and the mode belongs to the tab.
+        self._refresh_mode_items()
         # Arrowing along the tab strip changes the page on every keypress. The
         # strip has to keep focus through that, or the second arrow press never
         # reaches it, and the native tab control has already said which tab is
