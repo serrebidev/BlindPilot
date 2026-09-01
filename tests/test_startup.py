@@ -65,7 +65,7 @@ def test_gui_startup_smoke_skips_first_run_wizard(monkeypatch):
 
     saved: list[dict] = []
     monkeypatch.setattr(blindpilot_app.sys, "argv", ["blind_pilot.py", "--startup-gui-smoke"])
-    monkeypatch.setattr(blindpilot_app, "_load_config", lambda: {})
+    monkeypatch.setattr(blindpilot_app, "_load_config", dict)
     # Startup moves an old config onto full auto, and that writes. Without this
     # the test would write to the config of whoever ran it.
     monkeypatch.setattr(blindpilot_app, "_save_config", lambda cfg: saved.append(dict(cfg)))

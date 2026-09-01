@@ -295,7 +295,7 @@ def test_login_shell_path_split_keeps_entries_containing_spaces():
 
 def test_posix_check_stays_quiet_without_a_usable_login_shell():
     """No shell to ask means no evidence of a problem — don't invent one."""
-    with _Patch(platform=_FakePlatform("Darwin"), _posix_persistent_path_dirs=lambda: []):
+    with _Patch(platform=_FakePlatform("Darwin"), _posix_persistent_path_dirs=list):
         assert _is_on_persistent_path(Path("/anywhere"))
 
 

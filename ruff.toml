@@ -2,4 +2,23 @@ target-version = "py310"
 line-length = 100
 
 [lint]
-select = ["E4", "E7", "E9", "F"]
+# W is here because of a real escape: an invalid escape sequence reached this
+# repository, compiled to a SyntaxWarning nobody reads, and would have failed
+# the release build (`pytest -W error`) with no earlier warning at all.
+#
+# B, C4, A and RET cost nothing today and guard things this codebase is
+# genuinely exposed to - B012 in particular, a `return` inside a `finally`,
+# given how much of the worker teardown is written as `try`/`finally`.
+#
+# Deliberately absent, having been measured rather than assumed:
+#   BLE001, S110, S112 - 57 sites, every one read, not one a real defect. They
+#     are best-effort cleanup, cross-platform probes, and announcements that
+#     must never crash an accessibility app; nearly all carry a comment saying
+#     so. Turning them on would need blanket per-file ignores on the two files
+#     holding 51 of them, which leaves the rule switched on and blind. Worse,
+#     BLE001 flags the three `except Exception` handlers added to report a
+#     crashed turn - the fix for the very bug this list was widened over.
+#   UP - 233 hits, all mechanical (Optional[X] -> X | None). Worth doing, but
+#     as a change of its own rather than buried in a lint config.
+#   T20 - 15 hits, 14 of them `print` in a test file's own __main__ harness.
+select = ["E4", "E7", "E9", "F", "W", "B", "C4", "A", "RET", "PIE"]
