@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,10 @@ _ALLOWED_DOWNLOAD_HOSTS = ("github.com", "githubusercontent.com")
 
 class UpdateError(RuntimeError):
     """An update could not be checked, verified, or scheduled safely."""
+
+
+class UpdateCancelled(UpdateError):
+    """The person cancelled an update download before it completed."""
 
 
 @dataclass(frozen=True)
@@ -242,6 +247,7 @@ def download_update(
     current_version: str,
     *,
     progress: Optional[Callable[[int, int], None]] = None,
+    cancel: Optional[threading.Event] = None,
     opener: Opener = urlopen,
 ) -> Path:
     """Download a release archive and reject it unless SHA-256 matches."""
@@ -262,6 +268,8 @@ def download_update(
                 raise UpdateError("GitHub redirected the update to an untrusted host.")
             with temporary.open("wb") as handle:
                 while True:
+                    if cancel is not None and cancel.is_set():
+                        raise UpdateCancelled("The update download was cancelled.")
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
@@ -272,6 +280,8 @@ def download_update(
                     handle.write(chunk)
                     if progress:
                         progress(received, release.asset_size)
+        if cancel is not None and cancel.is_set():
+            raise UpdateCancelled("The update download was cancelled.")
         if received != release.asset_size:
             raise UpdateError("The update download was incomplete.")
         if digest.hexdigest().casefold() != expected:

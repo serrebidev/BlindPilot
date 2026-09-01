@@ -19,7 +19,8 @@ the prompt box; arrowing Up from the prompt enters the newest row, while arrow
 keys at either end of the list stay in the list. Tab is the only navigation key
 that moves from the responses into the prompt.
 
-Multi-session: the main window hosts a notebook with one tab per conversation.
+Multi-session: a tab strip across the top selects one of the window's
+switchable conversation pages.
 Each tab owns its own conversation (session_id, prompt, rows) and its subprocess
 runs with that directory as cwd, mirroring how a user would open multiple
 terminal sessions in different project folders.
@@ -215,7 +216,10 @@ def announce(text: str) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.7.2"
+APP_VERSION = "0.8.0"
+APP_MODE_AGENT = "agent"
+APP_MODE_CHAT = "chat"
+APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
 
 # Streamed coding-agent output can arrive much faster than a native list and a
 # screen reader can consume it. Process a bounded number of events per GUI turn
@@ -3654,6 +3658,8 @@ class SessionPanel(wx.Panel):
         earcons: "Earcons",
         on_side_chat: Callable[[str, str], None],
         get_backend: Callable[[], str],
+        focus_before: Callable[[], None],
+        focus_after: Callable[[], None],
     ):
         super().__init__(parent)
         self.cwd = cwd
@@ -3662,6 +3668,8 @@ class SessionPanel(wx.Panel):
         self._earcons = earcons
         self._on_side_chat = on_side_chat
         self._get_backend = get_backend
+        self._focus_before = focus_before
+        self._focus_after = focus_after
         self.last_status = "Ready"
 
         self._turns: List[Turn] = []
@@ -3731,7 +3739,10 @@ class SessionPanel(wx.Panel):
         self.responses_text.Bind(wx.EVT_SET_FOCUS, self._on_text_view_focus)
 
         prompt_label = wx.StaticText(self, label="Prompt:")
-        self.prompt = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER)
+        self.prompt = wx.TextCtrl(
+            self,
+            style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_RICH2,
+        )
         self.prompt.SetName("Prompt")
         self.prompt.SetHint(
             "Type your prompt. Enter to send, Shift+Enter for newline, Up to enter responses; "
@@ -3780,7 +3791,7 @@ class SessionPanel(wx.Panel):
         self.mode_picker.SetName("Permission mode")
         self.mode_picker.SetSelection(_MODE_VALUES.index(self.mode))
         self.mode_picker.Bind(wx.EVT_CHOICE, self._on_mode_choice)
-        self.mode_picker.Bind(wx.EVT_SET_FOCUS, self._on_mode_picker_focus)
+        self.mode_picker.Bind(wx.EVT_KEY_DOWN, self._on_mode_key)
 
         bottom_row = wx.BoxSizer(wx.HORIZONTAL)
         bottom_row.Add(self.send_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
@@ -3862,6 +3873,57 @@ class SessionPanel(wx.Panel):
     def focus_prompt(self) -> None:
         self.prompt.SetFocus()
 
+    def focus_first_control(self) -> None:
+        if self._row_count() == 0:
+            self.prompt.SetFocus()
+            return
+        control = self._responses_ctrl()
+        control.SetFocus()
+        if (
+            control is self.responses
+            and control.GetCount()
+            and control.GetSelection() == wx.NOT_FOUND
+        ):
+            control.SetSelection(0)
+
+    def focus_last_control(self) -> None:
+        for control in (
+            self.mode_picker,
+            self.slash_btn,
+            self.attach_btn,
+            self.stop_btn,
+            self.steer_btn,
+            self.send_btn,
+            self.prompt,
+            self._responses_ctrl(),
+        ):
+            if control.IsShown() and control.IsEnabled():
+                control.SetFocus()
+                return
+
+    def focus_first_action(self) -> None:
+        """Focus the first available control after Prompt."""
+        for control in (
+            self.send_btn,
+            self.steer_btn,
+            self.stop_btn,
+            self.attach_btn,
+            self.slash_btn,
+            self.mode_picker,
+        ):
+            if control.IsShown() and control.IsEnabled():
+                control.SetFocus()
+                return
+
+    def focus_first_action_delayed(self) -> None:
+        """Let NVDA finish its edit-field inspection before leaving Prompt."""
+
+        def move() -> None:
+            if self and self.prompt.HasFocus():
+                self.focus_first_action()
+
+        wx.CallLater(75, move)
+
     def _focus_row(self, index: int) -> None:
         if self._row_count() == 0:
             return
@@ -3870,7 +3932,8 @@ class SessionPanel(wx.Panel):
 
     def _on_text_view_focus(self, event: wx.FocusEvent) -> None:
         event.Skip()
-        wx.CallAfter(announce, "Responses, read only edit")
+        if _MAC_ANNOUNCE:
+            wx.CallAfter(announce, "Responses, read only edit")
 
     # ----- Permission mode -----
     def _set_mode(self, value: str, speak: bool = True) -> None:
@@ -3886,10 +3949,11 @@ class SessionPanel(wx.Panel):
     def _on_mode_choice(self, event: wx.CommandEvent) -> None:
         self._set_mode(_MODE_VALUES[self.mode_picker.GetSelection()])
 
-    def _on_mode_picker_focus(self, event: wx.FocusEvent) -> None:
+    def _on_mode_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() == wx.WXK_TAB and not event.ShiftDown():
+            self._focus_after()
+            return
         event.Skip()
-        label = _MODE_LABELS[_MODE_VALUES.index(self.mode)]
-        wx.CallAfter(announce, f"Permission mode: {label}")
 
     # ----- Backend -----
     def selected_backend(self) -> str:
@@ -4149,7 +4213,8 @@ class SessionPanel(wx.Panel):
     # ----- Prompt focus / key handling -----
     def _on_prompt_focus(self, event: wx.FocusEvent) -> None:
         event.Skip()
-        wx.CallAfter(announce, "Prompt, edit text")
+        if _MAC_ANNOUNCE:
+            wx.CallAfter(announce, "Prompt, edit text")
 
     def _on_prompt_text_changed(self, event: wx.CommandEvent) -> None:
         event.Skip()
@@ -4165,6 +4230,13 @@ class SessionPanel(wx.Panel):
 
     def _on_prompt_key(self, event: wx.KeyEvent) -> None:
         key = event.GetKeyCode()
+        if key == wx.WXK_TAB and event.ShiftDown() and self._row_count() == 0:
+            # An empty native ListBox exposes transient invalid accessibility
+            # children on Windows. There is nothing to visit, so cross the
+            # page boundary directly instead of making NVDA announce
+            # "Responses, list, unknown" and log accRole failures.
+            self._focus_before()
+            return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             if event.ShiftDown():
                 event.Skip()  # default: insert newline
@@ -4865,6 +4937,11 @@ class SessionPanel(wx.Panel):
         """Row keys for both responses controls — the list box and the
         read-only edit field, where a line is a row."""
         key = event.GetKeyCode()
+
+        if key == wx.WXK_TAB and event.ShiftDown():
+            self._focus_before()
+            return
+
         sel = self._selected_row()
 
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
@@ -6120,6 +6197,8 @@ class MainFrame(wx.Frame):
         # user's project directories. New Session browses from there.
         cfg = _load_config()
         self._backend = normalize_backend(cfg.get("backend"))
+        self._app_mode = APP_MODE_CHAT if cfg.get("app_mode") == APP_MODE_CHAT else APP_MODE_AGENT
+        self.chat_panel = None
         pf = cfg.get("projects_folder")
         self._projects_folder: Optional[str] = pf if pf and os.path.isdir(pf) else None
 
@@ -6255,12 +6334,64 @@ class MainFrame(wx.Frame):
         self._text_view_item.Check(SETTINGS.text_view)
         menubar.Append(options_menu, "&Options")
 
+        chat_menu = wx.Menu()
+        self._chat_accounts_item = chat_menu.Append(
+            wx.ID_ANY,
+            "&Accounts...",
+            "Add, edit, test, or remove Chat provider accounts",
+        )
+        self._chat_profiles_item = chat_menu.Append(
+            wx.ID_ANY,
+            "Conversation &profiles...",
+            "Manage Chat system prompts and generation defaults",
+        )
+        chat_menu.AppendSeparator()
+        self._chat_refresh_item = chat_menu.Append(
+            wx.ID_ANY,
+            "&Refresh models",
+            "Refresh the model list for the selected Chat account",
+        )
+        chat_history_menu = wx.Menu()
+        self._chat_history_list_item = chat_history_menu.AppendRadioItem(wx.ID_ANY, "&List")
+        self._chat_history_text_item = chat_history_menu.AppendRadioItem(
+            wx.ID_ANY, "&Read-only text"
+        )
+        self._chat_history_list_item.Check(True)
+        chat_menu.AppendSubMenu(
+            chat_history_menu,
+            "&History view",
+            "Choose how Chat conversation history is presented",
+        )
+        chat_menu.AppendSeparator()
+        self._chat_diagnostics_item = chat_menu.Append(
+            wx.ID_ANY,
+            "&Diagnostics...",
+            "Review the Chat provider diagnostic log",
+        )
+        self._chat_menu_items = [
+            self._chat_accounts_item,
+            self._chat_profiles_item,
+            self._chat_refresh_item,
+            self._chat_history_list_item,
+            self._chat_history_text_item,
+            self._chat_diagnostics_item,
+        ]
+        for item in self._chat_menu_items:
+            item.Enable(False)
+        menubar.Append(chat_menu, "&Chat")
+
         help_menu = wx.Menu()
         update_item = help_menu.Append(
             wx.ID_ANY,
             "Check for &Updates...",
             "Check GitHub for a newer BlindPilot release",
         )
+        self._automatic_updates_item = help_menu.AppendCheckItem(
+            wx.ID_ANY,
+            "Check for updates at &startup",
+            "Quietly check at startup and report only when a new version is available",
+        )
+        self._automatic_updates_item.Check(bool(cfg.get("check_for_updates_at_startup", True)))
         help_menu.AppendSeparator()
         about_item = help_menu.Append(
             wx.ID_ABOUT,
@@ -6281,6 +6412,36 @@ class MainFrame(wx.Frame):
             lambda _e: self._use_silent_until_response_mode(),
             silent_response_item,
         )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._show_chat_accounts(),
+            self._chat_accounts_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._show_chat_profiles(),
+            self._chat_profiles_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._refresh_chat_models(),
+            self._chat_refresh_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._set_chat_history_view("list"),
+            self._chat_history_list_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._set_chat_history_view("text"),
+            self._chat_history_text_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._show_chat_diagnostics(),
+            self._chat_diagnostics_item,
+        )
         self.Bind(wx.EVT_MENU, lambda _e: self._new_session(), new_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._open_history(), history_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._compact_active(), self._compact_item)
@@ -6295,31 +6456,54 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda _e: self._close_current_session(), close_item)
         self.Bind(wx.EVT_MENU, lambda _e: self.Close(), quit_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._check_for_updates(), update_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._toggle_automatic_updates(),
+            self._automatic_updates_item,
+        )
 
-        # ----- Top-level layout: session picker + notebook -----
+        # ----- Top-level layout: mode picker + active experience -----
         root = wx.Panel(self)
         root_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._root = root
+        self._root_sizer = root_sizer
 
         picker_row = wx.BoxSizer(wx.HORIZONTAL)
-        session_label = wx.StaticText(root, label="Session:")
-        self.session_picker = wx.Choice(root, choices=[])
-        self.session_picker.SetName("Session")
-        self.session_picker.Bind(wx.EVT_CHOICE, self._on_picker_change)
-        self.session_picker.Bind(wx.EVT_SET_FOCUS, self._on_picker_focus)
-        picker_row.Add(session_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
-        picker_row.Add(self.session_picker, 1, wx.ALIGN_CENTER_VERTICAL)
+        mode_label = wx.StaticText(root, label="Mode:")
+        self.mode_combo = wx.ComboBox(
+            root,
+            choices=[APP_MODE_LABELS[APP_MODE_AGENT], APP_MODE_LABELS[APP_MODE_CHAT]],
+            style=wx.CB_READONLY,
+        )
+        self.mode_combo.SetName("Mode")
+        self.mode_combo.SetSelection(1 if self._app_mode == APP_MODE_CHAT else 0)
+        self.mode_combo.SetToolTip("Choose coding-agent sessions or provider chat")
+        self.mode_combo.Bind(wx.EVT_COMBOBOX, self._on_app_mode_changed)
+        self.mode_combo.Bind(wx.EVT_KEY_DOWN, self._on_mode_combo_key)
+        picker_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        picker_row.Add(self.mode_combo, 0, wx.ALIGN_CENTER_VERTICAL)
 
-        # A real notebook, so the tab strip is a native tab control: NVDA and
-        # VoiceOver both announce "tab 2 of 4" and the name of the conversation
-        # in it, and Ctrl+Tab moves between them the way it does everywhere
-        # else. The dropdown above stays as the way to reach tab 9 of 12
-        # without stepping through the eight in between.
-        self.notebook = wx.Notebook(root, style=wx.NB_TOP)
-        self.notebook.SetName("Sessions")
+        # This is an intentional, keyboard-focusable native tab strip. Its
+        # pages are empty because the real session content lives in the
+        # Simplebook below; separating the two prevents Windows from announcing
+        # "tab control" merely because focus entered a conversation page.
+        self.tab_switcher = wx.Notebook(root, style=wx.NB_TOP)
+        self.tab_switcher.SetName("Session tabs")
+        self.tab_switcher.SetMinSize(wx.Size(-1, root.FromDIP(38)))
+        self.tab_switcher.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_tab_switcher_changed)
+        self._syncing_tab_switcher = False
+
+        # Session and Ctrl+Tab provide all session navigation. Simplebook has
+        # the same page-management API without a native tab strip. A native
+        # Notebook announces "tab control" whenever focus enters or leaves one
+        # of its pages, even when the strip itself rejects keyboard focus.
+        self.notebook = wx.Simplebook(root)
+        self.notebook.SetName("Session pages")
         self.notebook.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_tab_changed)
 
         root_sizer.Add(picker_row, 0, wx.EXPAND | wx.ALL, 8)
+        root_sizer.Add(self.tab_switcher, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
         root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 4)
         root.SetSizer(root_sizer)
 
@@ -6368,12 +6552,182 @@ class MainFrame(wx.Frame):
             accel_entries.append(wx.AcceleratorEntry(wx.ACCEL_CMD, ord(str(n)), tid))
 
         self.SetAcceleratorTable(wx.AcceleratorTable(accel_entries))
+        # EVT_KEY_DOWN is too late for Tab on native Windows Choice controls:
+        # wxWidgets has already performed dialog navigation. A frame-level
+        # character hook sees it first and routes only the page boundaries.
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_agent_char_hook)
 
         self._add_session(initial_cwd)
+        self._set_app_mode(self._app_mode, announce_change=False)
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
 
     # ----- Tab management -----
+    def _on_app_mode_changed(self, event: wx.CommandEvent) -> None:
+        mode = APP_MODE_CHAT if self.mode_combo.GetSelection() == 1 else APP_MODE_AGENT
+        self._set_app_mode(mode)
+        event.Skip()
+
+    @staticmethod
+    def _focus_is_within(focus: Optional[wx.Window], control: wx.Window) -> bool:
+        """Include native child windows used internally by combo controls."""
+        current = focus
+        while current is not None:
+            if current is control:
+                return True
+            current = current.GetParent()
+        return False
+
+    def _route_agent_tab(self, focus: Optional[wx.Window], shift: bool) -> bool:
+        """Route focus across Agent-page boundaries before native traversal."""
+        if self._app_mode != APP_MODE_AGENT:
+            return False
+        page = self.notebook.GetCurrentPage()
+        if not isinstance(page, SessionPanel):
+            return False
+
+        if self._focus_is_within(focus, self.mode_combo):
+            if shift:
+                page.focus_last_control()
+            else:
+                self.tab_switcher.SetFocus()
+            return True
+
+        if self._focus_is_within(focus, self.tab_switcher):
+            if shift:
+                self.mode_combo.SetFocus()
+            else:
+                page.focus_first_control()
+            return True
+
+        if self._focus_is_within(focus, page.mode_picker) and not shift:
+            self.mode_combo.SetFocus()
+            return True
+
+        responses = page._responses_ctrl()
+        if shift and self._focus_is_within(focus, responses):
+            self.tab_switcher.SetFocus()
+            return True
+
+        if shift and page._row_count() == 0 and self._focus_is_within(focus, page.prompt):
+            self.tab_switcher.SetFocus()
+            return True
+        if not shift and self._focus_is_within(focus, page.prompt):
+            # NVDA schedules a formatting query 50 ms after receiving Tab in
+            # an edit field. Keep the Prompt alive and focused until that query
+            # finishes instead of leaving it with a stale native text range.
+            page.focus_first_action_delayed()
+            return True
+        return False
+
+    def _on_agent_char_hook(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() != wx.WXK_TAB:
+            event.Skip()
+            return
+        if event.ControlDown() or event.CmdDown():
+            # Ctrl+Tab is session navigation from anywhere in the window,
+            # including from inside the tab strip, whose own native Ctrl+Tab
+            # would otherwise move the strip without moving the page. Handling
+            # it here rather than leaving it to the accelerator table keeps the
+            # hook from swallowing it as a plain Tab.
+            if self._app_mode == APP_MODE_AGENT:
+                self._cycle_tab(-1 if event.ShiftDown() else +1)
+                return
+            event.Skip()
+            return
+        if self._route_agent_tab(wx.Window.FindFocus(), event.ShiftDown()):
+            return
+        event.Skip()
+
+    def _on_mode_combo_key(self, event: wx.KeyEvent) -> None:
+        """Move backward into the end of the active Agent page."""
+        if (
+            self._app_mode == APP_MODE_AGENT
+            and event.GetKeyCode() == wx.WXK_TAB
+            and event.ShiftDown()
+        ):
+            page = self.notebook.GetCurrentPage()
+            if isinstance(page, SessionPanel):
+                page.focus_last_control()
+                return
+        event.Skip()
+
+    def _ensure_chat_panel(self):
+        if self.chat_panel is not None:
+            return self.chat_panel
+        from chat_integration import create_chat_panel
+
+        self.chat_panel = create_chat_panel(
+            self._root,
+            self._set_status_text,
+            announce,
+        )
+        self.chat_panel.refresh_models_item = self._chat_refresh_item
+        self.chat_panel.history_list_view_item = self._chat_history_list_item
+        self.chat_panel.history_text_view_item = self._chat_history_text_item
+        self._root_sizer.Add(self.chat_panel, 1, wx.EXPAND | wx.ALL, 4)
+        self.chat_panel.Hide()
+        return self.chat_panel
+
+    def _set_app_mode(self, mode: str, announce_change: bool = True) -> None:
+        mode = APP_MODE_CHAT if mode == APP_MODE_CHAT else APP_MODE_AGENT
+        if mode == APP_MODE_CHAT:
+            try:
+                chat_panel = self._ensure_chat_panel()
+            except Exception as exc:
+                self._app_mode = APP_MODE_AGENT
+                self.mode_combo.SetSelection(0)
+                message = f"Chat mode could not be opened: {exc}"
+                self._set_status_text(message)
+                wx.MessageBox(message, "Chat Mode", wx.OK | wx.ICON_ERROR, self)
+                return
+        else:
+            chat_panel = self.chat_panel
+
+        self._app_mode = mode
+        show_agent = mode == APP_MODE_AGENT
+        self.tab_switcher.Show(show_agent)
+        self.notebook.Show(show_agent)
+        if chat_panel is not None:
+            chat_panel.Show(not show_agent)
+        for item in self._chat_menu_items:
+            item.Enable(not show_agent)
+        self.mode_combo.SetSelection(0 if show_agent else 1)
+        self._refresh_compact_item()
+        self._root.Layout()
+
+        cfg = _load_config()
+        cfg["app_mode"] = mode
+        _save_config(cfg)
+        if show_agent:
+            page = self.notebook.GetCurrentPage()
+            if isinstance(page, SessionPanel):
+                page.focus_prompt()
+        else:
+            chat_panel.message_input.SetFocus()
+        if announce_change:
+            self._announce_setting(f"{APP_MODE_LABELS[mode]} mode")
+
+    def _refresh_chat_models(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_refresh_models(wx.CommandEvent())
+
+    def _show_chat_accounts(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_accounts(wx.CommandEvent())
+
+    def _show_chat_profiles(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_profiles(wx.CommandEvent())
+
+    def _set_chat_history_view(self, view: str) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel._set_history_view(view)
+
+    def _show_chat_diagnostics(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_diagnostics(wx.CommandEvent())
+
     def current_backend(self) -> str:
         return self._backend
 
@@ -6451,6 +6805,32 @@ class MainFrame(wx.Frame):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def automatic_update_check_enabled(self) -> bool:
+        return bool(_load_config().get("check_for_updates_at_startup", True))
+
+    def _toggle_automatic_updates(self) -> None:
+        enabled = self._automatic_updates_item.IsChecked()
+        cfg = _load_config()
+        cfg["check_for_updates_at_startup"] = enabled
+        _save_config(cfg)
+        self._announce_setting(
+            "BlindPilot will check for updates at startup"
+            if enabled
+            else "BlindPilot will not check for updates at startup"
+        )
+
+    def _show_update_dialog(self) -> None:
+        from update_dialog import UpdateDialog
+
+        dialog = UpdateDialog(self, APP_VERSION, announce)
+        try:
+            dialog.ShowModal()
+            restart = dialog.restart_pending
+        finally:
+            dialog.Destroy()
+        if restart:
+            self.Close(force=True)
+
     def check_for_updates_silently(self) -> None:
         """Startup entry point: report only an available update, never network noise."""
         self._check_for_updates(silent=True)
@@ -6485,6 +6865,14 @@ class MainFrame(wx.Frame):
         if release is None or not release.is_newer_than(APP_VERSION):
             if not silent:
                 self._announce_setting(f"BlindPilot {APP_VERSION} is the newest available version")
+            return
+        if silent:
+            message = (
+                f"BlindPilot {release.version} is available. "
+                "Open Help, Check for Updates to review and install it."
+            )
+            self._set_status_text(message)
+            announce(message)
             return
         notes = release.notes[:1500]
         message = (
@@ -6573,9 +6961,11 @@ class MainFrame(wx.Frame):
             earcons=self.earcons,
             on_side_chat=self._open_side_chat,
             get_backend=self.current_backend,
+            focus_before=lambda: self.tab_switcher.SetFocus(),
+            focus_after=lambda: self.mode_combo.SetFocus(),
         )
         self.notebook.AddPage(panel, _tab_label("", cwd), select=True)
-        self._refresh_picker()
+        self._sync_tab_switcher()
         # Model catalogs are intentionally lazy. FreeBuff's installed catalog
         # is embedded in a large executable, and scanning it here caused a
         # noticeable CPU spike every time BlindPilot started or opened a tab.
@@ -6594,23 +6984,41 @@ class MainFrame(wx.Frame):
         self._add_session(cwd, initial_prompt=message)
         wx.CallAfter(announce, f"Side chat opened in {_short_label(cwd)}")
 
-    def _refresh_picker(self) -> None:
-        labels: list[str] = []
-        for i in range(self.notebook.GetPageCount()):
-            labels.append(f"{i + 1}. {self.notebook.GetPageText(i)}")
-        self.session_picker.Set(labels)
-        sel = self.notebook.GetSelection()
-        if sel != wx.NOT_FOUND:
-            self.session_picker.SetSelection(sel)
+    def _sync_tab_switcher(self) -> None:
+        """Mirror the Simplebook's pages onto the visible tab strip.
 
-    def _on_picker_change(self, event: wx.CommandEvent) -> None:
-        sel = self.session_picker.GetSelection()
-        if sel != wx.NOT_FOUND and sel != self.notebook.GetSelection():
-            self.notebook.SetSelection(sel)
+        The strip's own pages stay empty placeholders: the conversation lives
+        in the Simplebook below, so a placeholder holds no focusable child and
+        Tab traversal walks straight past it into the real page.
+        """
+        self._syncing_tab_switcher = True
+        try:
+            count = self.notebook.GetPageCount()
+            while self.tab_switcher.GetPageCount() > count:
+                self.tab_switcher.DeletePage(self.tab_switcher.GetPageCount() - 1)
+            while self.tab_switcher.GetPageCount() < count:
+                self.tab_switcher.AddPage(wx.Panel(self.tab_switcher), "")
+            for index in range(count):
+                label = self.notebook.GetPageText(index)
+                if self.tab_switcher.GetPageText(index) != label:
+                    self.tab_switcher.SetPageText(index, label)
+            sel = self.notebook.GetSelection()
+            if 0 <= sel < count and self.tab_switcher.GetSelection() != sel:
+                # ChangeSelection, not SetSelection: this is the strip catching
+                # up with the book, and must not be reported back as a request
+                # to change the book.
+                self.tab_switcher.ChangeSelection(sel)
+        finally:
+            self._syncing_tab_switcher = False
 
-    def _on_picker_focus(self, event: wx.FocusEvent) -> None:
+    def _on_tab_switcher_changed(self, event: wx.BookCtrlEvent) -> None:
+        """Arrowing along the strip, or clicking a tab, switches the session."""
         event.Skip()
-        wx.CallAfter(announce, "Session picker, pop up button")
+        if self._syncing_tab_switcher:
+            return
+        sel = event.GetSelection()
+        if 0 <= sel < self.notebook.GetPageCount() and sel != self.notebook.GetSelection():
+            self.notebook.SetSelection(sel)
 
     # ----- Options menu -----
     def _toggle_live_rows(self) -> None:
@@ -6740,6 +7148,9 @@ class MainFrame(wx.Frame):
 
     def _new_conversation_active(self) -> None:
         """Start a fresh conversation in the active tab (Ctrl+Shift+N)."""
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_new_conversation(None)
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.clear_conversation()
@@ -6749,7 +7160,7 @@ class MainFrame(wx.Frame):
         item = getattr(self, "_compact_item", None)
         if item is None:
             return
-        supported = BACKENDS[self._backend].supports_compaction
+        supported = self._app_mode == APP_MODE_AGENT and BACKENDS[self._backend].supports_compaction
         item.Enable(supported)
         if supported:
             item.SetHelp("Summarise this conversation so the backend has room to keep going")
@@ -6788,21 +7199,22 @@ class MainFrame(wx.Frame):
         if isinstance(page, SessionPanel):
             page.cancel_worker()
         self.notebook.DeletePage(sel)
-        self._refresh_picker()
+        self._sync_tab_switcher()
 
     def _on_tab_changed(self, event: wx.BookCtrlEvent) -> None:
         event.Skip()
-        # Keep the picker selection mirroring the notebook. Adding a page
-        # selects it, and that fires this before the picker has been rebuilt,
-        # so the new tab's index is one the picker does not have a row for yet
-        # — _refresh_picker sets it a moment later.
+        self._sync_tab_switcher()
         sel = self.notebook.GetSelection()
-        if 0 <= sel < self.session_picker.GetCount() and self.session_picker.GetSelection() != sel:
-            self.session_picker.SetSelection(sel)
         page = self.notebook.GetCurrentPage()
         if not isinstance(page, SessionPanel) or sel == wx.NOT_FOUND:
             return
         self._set_status_text(page.last_status)
+        # Arrowing along the tab strip changes the page on every keypress. The
+        # strip has to keep focus through that, or the second arrow press never
+        # reaches it, and the native tab control has already said which tab is
+        # selected — repeating it here would say everything twice.
+        if self._focus_is_within(wx.Window.FindFocus(), self.tab_switcher):
+            return
         # The tab's own name first — it is the conversation, and that is what
         # tells two tabs in the same folder apart — then which tab of how many,
         # then the folder it runs in.
@@ -6813,12 +7225,7 @@ class MainFrame(wx.Frame):
             announce,
             f"Session {sel + 1} of {self.notebook.GetPageCount()}: {spoken}, in {folder}",
         )
-        # Arrowing along the tab strip changes the page on every keypress. The
-        # strip has to keep focus through that, or the second arrow press never
-        # reaches it; focus follows the page only when the change came from
-        # somewhere else — a chord, the dropdown, a tab opening or closing.
-        if wx.Window.FindFocus() is not self.notebook:
-            wx.CallAfter(page.focus_prompt)
+        wx.CallAfter(page.focus_prompt)
 
     # ----- Status routing -----
     def _set_status_text(self, text: str) -> None:
@@ -6843,11 +7250,15 @@ class MainFrame(wx.Frame):
                 continue
             if self.notebook.GetPageText(index) != label:
                 self.notebook.SetPageText(index, label)
-                self._refresh_picker()
+                self._sync_tab_switcher()
             return
 
     # ----- Focus delegation -----
     def _focus_active(self, which: str) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            if which == "prompt":
+                self.chat_panel.message_input.SetFocus()
+            return
         page = self.notebook.GetCurrentPage()
         if not isinstance(page, SessionPanel):
             return
@@ -6855,6 +7266,9 @@ class MainFrame(wx.Frame):
             page.focus_prompt()
 
     def _cycle_mode_active(self) -> None:
+        if self._app_mode == APP_MODE_CHAT:
+            self.mode_combo.SetFocus()
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.cycle_mode()
@@ -6873,16 +7287,34 @@ class MainFrame(wx.Frame):
         self._announce_setting(f"Desktop shortcut created at {link}")
 
     def _stop_active(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_stop(None)
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page._on_stop()
 
     def _attach_active(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_add_files(wx.CommandEvent())
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.attach_files()
 
     def _jump_to_latest_response(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            history = (
+                self.chat_panel.history_list
+                if self.chat_panel.history_view == "list"
+                else self.chat_panel.transcript
+            )
+            history.SetFocus()
+            if history is self.chat_panel.history_list and history.GetCount():
+                history.SetSelection(history.GetCount() - 1)
+            elif history is self.chat_panel.transcript:
+                history.SetInsertionPointEnd()
+            return
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.jump_to_latest_response()
@@ -6894,6 +7326,8 @@ class MainFrame(wx.Frame):
 
     # ----- Cleanup -----
     def _on_close(self, event: wx.CloseEvent) -> None:
+        if self.chat_panel is not None:
+            self.chat_panel.shutdown()
         for i in range(self.notebook.GetPageCount()):
             page = self.notebook.GetPage(i)
             if isinstance(page, SessionPanel):
@@ -6941,7 +7375,8 @@ def main() -> int:
         if platform.system() == "Darwin" and not _MAC_ANNOUNCE:
             return 4
         return 0
-    gui_startup_smoke = "--startup-gui-smoke" in sys.argv
+    chat_gui_startup_smoke = "--startup-chat-gui-smoke" in sys.argv
+    gui_startup_smoke = "--startup-gui-smoke" in sys.argv or chat_gui_startup_smoke
     # Before anything is started: nothing BlindPilot launches may inherit a
     # PATH that points back into its own install folder, or the files there
     # stay open long after BlindPilot has closed and cannot be updated.
@@ -6959,6 +7394,8 @@ def main() -> int:
     # ask" true of an upgrade as well as of a fresh install.
     if adopt_full_auto_default(cfg):
         _save_config(cfg)
+    if chat_gui_startup_smoke:
+        cfg["app_mode"] = APP_MODE_CHAT
     # A packaged GUI smoke test runs with a clean temporary profile in CI. It
     # must exercise the real main window without waiting in the interactive
     # first-run wizard.
@@ -6991,7 +7428,8 @@ def main() -> int:
         # An update that failed did so with no window to report to, so its
         # reason is read out here, before anything else competes for attention.
         wx.CallLater(1200, frame.report_failed_update)
-        wx.CallLater(5000, frame.check_for_updates_silently)
+        if frame.automatic_update_check_enabled():
+            wx.CallLater(5000, frame.check_for_updates_silently)
         # Abandoned downloads are tens of megabytes each.
         wx.CallLater(8000, sweep_temporary_files)
     app.MainLoop()

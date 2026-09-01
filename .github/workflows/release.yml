@@ -62,11 +62,13 @@ jobs:
           # runs the child inside OpenConsole.exe, and a hidden import collects
           # only the module and its DLLs. Without that executable no process can
           # start under a pseudo-terminal, so FreeBuff never runs.
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --add-data "EarCons;EarCons" --collect-submodules accessible_output2 --collect-all winpty blind_pilot.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --add-data "EarCons;EarCons" --additional-hooks-dir hooks --collect-submodules accessible_output2 --collect-all winpty blind_pilot.py
           $startupSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-smoke" -PassThru -Wait
           if ($startupSmoke.ExitCode -ne 0) { throw "Packaged startup smoke test failed: $($startupSmoke.ExitCode)" }
           $guiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-gui-smoke" -PassThru -Wait
           if ($guiSmoke.ExitCode -ne 0) { throw "Packaged GUI startup smoke test failed: $($guiSmoke.ExitCode)" }
+          $chatGuiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-chat-gui-smoke" -PassThru -Wait
+          if ($chatGuiSmoke.ExitCode -ne 0) { throw "Packaged Chat GUI startup smoke test failed: $($chatGuiSmoke.ExitCode)" }
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           Compress-Archive -Path dist\BlindPilot -DestinationPath "artifacts\${{ matrix.asset }}" -CompressionLevel Optimal
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "artifacts\${{ matrix.asset }}").Hash.ToLowerInvariant()

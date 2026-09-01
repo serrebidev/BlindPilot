@@ -12,6 +12,8 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 ## Features
 
 - Native wxPython controls throughout, so NVDA, JAWS, and VoiceOver read the app rather than interpreting a terminal.
+- Switches between Agent and Chat from a named Mode combo box at the top of the same window.
+- Chats directly through OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, OpenCode Go, or a custom OpenAI-compatible service, with secure API-key storage, model discovery, profiles, streaming history, attachments, editing, and response regeneration.
 - Runs Claude Code, Codex, FreeBuff, and opencode, switchable from the File menu and remembered between launches.
 - Segments every answer into navigable rows: one per heading, paragraph, list item, quote, code block, thought, tool action, and tool result.
 - Reads answers aloud as they arrive, or stays quiet until the whole answer is ready.
@@ -27,6 +29,12 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 - Marks sent, working, and received with optional earcons, which can be turned off from the Options menu.
 - Installs, updates, adds to PATH, and signs into any of the four backends from an accessible wizard.
 - Updates itself from GitHub Releases after verifying the published SHA-256.
+
+## Chat mode
+
+Choose **Chat** in the **Mode** combo box. Use **Chat → Accounts** to add a provider and API key, then choose **Chat → Refresh models** and select a model. **Chat → Conversation profiles** can supply a system prompt, default account and model, temperature, token limit, and streaming preference. **Chat → History view** switches between a native list and a read-only edit field; list items can be copied or edited from their context menu. Provider logs are under **Chat → Diagnostics**.
+
+OpenRouter accounts additionally support multiple file attachments, cache-aware regeneration, and model ids ending in `:batch`. Attachments are stored with the conversation. Chat configuration lives in `%APPDATA%\BlindPilot\chat.sqlite3` on Windows and alongside BlindPilot's other configuration elsewhere; API keys use the operating system credential store. The first time Chat mode opens, BlindPilot imports an existing AccessibleAI database and its saved keys when they are present, without modifying the original database.
 
 ## Backends
 
@@ -62,7 +70,7 @@ For a version-by-version history, see the [changelog](CHANGELOG.md).
 
 Download `BlindPilot-macOS-arm64.zip` for Apple Silicon or `BlindPilot-macOS-x64.zip` for Intel. The macOS builds are ad-hoc signed but not notarized, so first launch may need approval in System Settings under Privacy & Security.
 
-Settings live in `%APPDATA%\BlindPilot\config.json` on Windows and `~/.config/blindpilot/config.json` elsewhere. An existing Claude Code Reader configuration is imported once and never modified.
+Settings live in `%APPDATA%\BlindPilot\config.json` on Windows and `~/.config/blindpilot/config.json` elsewhere. Chat data is stored in `chat.sqlite3` in the same folder. An existing Claude Code Reader configuration is imported once and never modified.
 
 ## Set up a backend
 
@@ -117,7 +125,7 @@ On macOS the same accelerators map to Command where appropriate.
 
 ```powershell
 python -m pip install -r requirements-build.txt
-pyinstaller --onedir --windowed --name BlindPilot --add-data "EarCons;EarCons" blind_pilot.py
+pyinstaller --onedir --windowed --name BlindPilot --add-data "EarCons;EarCons" --additional-hooks-dir hooks blind_pilot.py
 ```
 
 The one-directory layout is what lets the verified updater replace the application after it exits. The Windows installer is built from [`installer/BlindPilot.iss`](installer/BlindPilot.iss). Pushing a `v*` tag runs [.github/workflows/release.yml](.github/workflows/release.yml), which tests startup and the full suite, then publishes the Windows installer, the Windows x64 archive, and both macOS archives with SHA-256 files.

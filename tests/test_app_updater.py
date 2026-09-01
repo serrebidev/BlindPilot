@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,7 @@ import pytest
 import app_updater
 from app_updater import (
     ReleaseInfo,
+    UpdateCancelled,
     UpdateError,
     _WINDOWS_HELPER,
     asset_name_for_platform,
@@ -127,6 +129,36 @@ def test_download_accepts_the_published_hash():
         assert downloaded.read_bytes() == archive
     finally:
         downloaded.unlink(missing_ok=True)
+
+
+def test_cancelled_download_is_removed_before_any_bytes_are_kept(tmp_path, monkeypatch):
+    archive = b"verified"
+    release = ReleaseInfo(
+        version="0.4.0",
+        tag="v0.4.0",
+        title="Update",
+        notes="",
+        page_url="https://github.com/release",
+        asset_name="BlindPilot-Windows-x64.zip",
+        asset_url="https://github.com/download/update.zip",
+        asset_size=len(archive),
+        sha256=hashlib.sha256(archive).hexdigest(),
+    )
+    temporary = tmp_path / "cancelled.zip"
+    descriptor = os.open(temporary, os.O_CREAT | os.O_RDWR)
+    monkeypatch.setattr(tempfile, "mkstemp", lambda **_kwargs: (descriptor, str(temporary)))
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(UpdateCancelled, match="cancelled"):
+        download_update(
+            release,
+            "0.3.0",
+            cancel=cancel,
+            opener=lambda *_args, **_kwargs: _Response(archive),
+        )
+
+    assert not temporary.exists()
 
 
 def test_schedule_install_rejects_source_runs(monkeypatch, tmp_path):

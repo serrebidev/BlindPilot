@@ -4,6 +4,16 @@ Readable release history for BlindPilot. When adjacent releases were part of the
 same fix stream, they are combined with a version range such as
 `v0.3.6-v0.3.7`.
 
+## v0.8.0 - 2026-09-01
+
+- Added a screen-reader-named Mode combo box that switches the main window between the existing multi-session Agent experience and a new provider Chat experience.
+- Removed Chat mode's crowded management row. Accounts, Conversation profiles, Refresh models, History view, and Diagnostics now live together in the Chat menu.
+- Removed the Session combo box. Sessions are now navigated from a real tab strip: **Ctrl+Tab** and **Ctrl+Shift+Tab** move between them from anywhere in the window, Shift+Tab from the responses lands on the strip, and the arrow keys walk it. The strip is a native tab control, so NVDA announces the conversation name and "tab 2 of 4" itself instead of BlindPilot speaking a second, redundant description over it.
+- Removed the same redundant custom focus speech from Permission mode. Prompt and read-only Responses focus hints are now VoiceOver-only, preserving their macOS workaround without duplicating NVDA's native Windows announcements.
+- Separated the session tab strip from the pages it selects, and added pre-navigation boundary routing. The conversation pages live in a plain page container, so entering one no longer makes Windows announce "tab control"; the strip above stays a focusable native tab control. Agent mode now moves Mode → Session tabs → Responses → Prompt → actions → Permission mode → Mode (and the exact reverse with Shift+Tab), without transient "tab control" or "unknown" announcements. Empty Responses are skipped because they contain nothing to navigate. Prompt focus departure is briefly deferred so NVDA can finish its delayed formatting query while the native edit range is still valid.
+- Integrated AccessibleAI's chat stack: OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, OpenCode Go, and generic OpenAI-compatible accounts; securely stored API keys; account testing and model refresh; conversation profiles; streaming; editable history; file attachments; regeneration; OpenRouter cache controls and asynchronous batch models; and chat diagnostics. An existing AccessibleAI database and Credential Manager keys are imported once when Chat mode is first opened.
+- Replaced the updater's sequence of prompts with one accessible, resizable dialog containing readable release notes, a named progress gauge, 10-percent progress announcements, cancellation with partial-file cleanup, checksum verification, and an explicit restart step. Startup checks can now be disabled and report an available update without stealing focus.
+
 ## v0.7.2 - 2026-09-01
 
 - Claude Code runs stay open until every background agent started by the turn has finished. BlindPilot previously treated the parent turn's first result as the end of the whole run, closed Claude's input, and killed the CLI five seconds later, taking every helper agent and its unfinished work with it. The live view now announces how many agents remain and reminds the person that Stop Task can end the run immediately; helper narration remains visible while only Claude's own reply is collected as the final answer.
