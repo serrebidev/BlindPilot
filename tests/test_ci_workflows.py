@@ -64,6 +64,16 @@ def test_the_static_checks_run_wherever_the_tests_do():
         assert "ruff format --check" in text, f"{name} runs the tests but not ruff format"
 
 
+def test_something_checks_that_the_window_still_builds():
+    """Unit tests drive the frame's handlers on stubs, and a stub has whatever
+    it is handed — so none of them can see a menu built before the notebook it
+    describes exists. Only starting the real thing catches that."""
+    testing = [text for text in _workflow_text().values() if "pytest" in text]
+    assert any("--startup-gui-smoke" in text for text in testing), (
+        "nothing that runs the tests also checks the window can be built"
+    )
+
+
 @pytest.mark.parametrize("platform", ["windows", "macos", "ubuntu"])
 def test_the_tests_run_on_every_platform_that_ships(platform):
     """Linux code ships — `linux_accessibility.py`, pexpect, the POSIX process
