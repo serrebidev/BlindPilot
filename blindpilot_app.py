@@ -2786,6 +2786,10 @@ class QuestionDialog(wx.Dialog):
             style = wx.TE_PROCESS_ENTER | (wx.TE_PASSWORD if question.secret else 0)
             entry = wx.TextCtrl(self, style=style)
             entry.SetName(f"Your own answer to {question.question}")
+            # TE_PROCESS_ENTER takes Enter away from the dialog's default
+            # button and gives it to the box, so without this the key does
+            # nothing whatsoever in the one place a turn waits to be let go.
+            entry.Bind(wx.EVT_TEXT_ENTER, self._on_text_enter)
             label.Hide()
             entry.Hide()
             sizer.Add(label, 0, wx.LEFT | wx.RIGHT, 24)
@@ -2854,18 +2858,32 @@ class QuestionDialog(wx.Dialog):
             return
         event.Skip()
 
-    def _on_ok(self, event: wx.CommandEvent) -> None:
-        """Refuse a half-filled answer rather than send the backend a blank."""
+    def _answered(self) -> bool:
+        """Whether every question has an answer, saying what is missing if not.
+
+        Focus lands on the question that is short, so the next keystroke goes
+        somewhere useful rather than leaving the person to find it.
+        """
         for index, question in enumerate(self._questions):
             if self._wants_custom(index) and not self._texts[index].GetValue().strip():
                 announce("Error: type your own answer, or pick one of the choices")
                 self._texts[index].SetFocus()
-                return
+                return False
             if not self._chosen(index):
                 announce(f"Error: {question.question} has no answer yet")
                 self._pickers[index].SetFocus()
-                return
-        event.Skip()
+                return False
+        return True
+
+    def _on_ok(self, event: wx.CommandEvent) -> None:
+        """Refuse a half-filled answer rather than send the backend a blank."""
+        if self._answered():
+            event.Skip()
+
+    def _on_text_enter(self, _event: wx.CommandEvent) -> None:
+        """Enter in the answer box sends it, the way it does in the prompt."""
+        if self._answered():
+            self.EndModal(wx.ID_OK)
 
     def _chosen(self, index: int) -> list[str]:
         """The answers picked for one question, with "Other" resolved to text."""
