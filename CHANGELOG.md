@@ -4,6 +4,14 @@ Readable release history for BlindPilot. When adjacent releases were part of the
 same fix stream, they are combined with a version range such as
 `v0.3.6-v0.3.7`.
 
+## v0.8.1 - 2026-09-01
+
+- A Codex, FreeBuff, or opencode turn that crashes now says so. Their run loops caught nothing, and the `finally` that re-enables Send and stops the progress earcon ran either way, so a crashed turn was indistinguishable from a finished one except that the answer never arrived; the traceback went to a standard error the packaged windowed build does not have. Codex and FreeBuff also gained the once-guard opencode already had, so a turn that already explained itself and then failed on the way out does not speak a second error over the first.
+- Every FreeBuff turn gave its pseudo-terminal back. Teardown was written as a fallback chain — terminate, and close only if terminate raised — so the close never ran and the handle FreeBuff was reached through, a ConPTY on Windows and pexpect's master file descriptor elsewhere, stayed open. Because this runs at the end of every turn, the handles accumulated for as long as the session lasted.
+- Ten error messages are spoken instead of only written. They went to the status bar, which neither NVDA nor JAWS reads on its own, so a copy that failed was silent while a copy that worked announced itself — the only difference being a clipboard that still held what was there before. Steering with nothing running, stopping with nothing running, clipboard failures, and a failed code save all speak now, and still appear in the status bar.
+- Enter sends the answer in the question dialog. The "type your own answer" box is built with `TE_PROCESS_ENTER`, which takes Enter from the dialog's default button and gives it to the box, where nothing was listening. This is the dialog that opens mid-run and holds the turn until it is answered, and the box is where focus lands after choosing "Other". Enter now applies the same validation the button does.
+- A sign-in address is checked before it is opened. opencode hands back an address for the client to open, and it comes from a provider catalogue describing close to two hundred providers rather than from opencode itself. On Windows the platform opener is the default protocol handler, so `file:` would open whatever is at that path including one on a network share, and `search-ms:` or `ms-msdt:` would be handed to a separate program. Both sign-in paths now go through one opener that accepts only `http` and `https`, and an address that is refused is still spoken and shown so it can be opened by hand.
+
 ## v0.8.0 - 2026-09-01
 
 - Added a screen-reader-named Mode combo box that switches the main window between the existing multi-session Agent experience and a new provider Chat experience.

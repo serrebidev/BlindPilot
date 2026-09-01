@@ -1,63 +1,60 @@
-# BlindPilot 0.8.0
+# BlindPilot 0.8.1
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-## Chat mode
+This release fixes five failures that happened in silence. It follows 0.8.0, which added
+Chat mode, replaced the session combo box with a real tab strip, and rebuilt the updater
+as a single accessible dialog.
 
-The main window now has a **Mode** combo box at the top that switches between the
-multi-session Agent experience and a new Chat experience, without opening a second
-window or restarting.
+## A crashed turn says what happened
 
-Chat talks directly to OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi,
-DeepSeek, OpenCode Go, or any OpenAI-compatible service. API keys are held in the
-operating system credential store. **Chat → Accounts** adds and tests a provider,
-**Chat → Refresh models** discovers what it offers, and **Chat → Conversation profiles**
-supplies a system prompt, default account and model, temperature, token limit, and
-streaming preference.
+The Codex, FreeBuff, and opencode run loops caught nothing. Their cleanup ran either way,
+turning Send back on and stopping the progress earcon, so a turn that crashed looked
+exactly like a turn that finished — apart from the answer never arriving. The explanation
+went to a standard error the packaged windowed build does not have.
 
-Replies stream in. History can be a native list or a read-only edit field, chosen from
-**Chat → History view**, and individual messages can be copied, edited, or regenerated
-from their context menu. OpenRouter accounts additionally support file attachments,
-cache-aware regeneration, and model ids ending in `:batch`. Provider logs are under
-**Chat → Diagnostics**.
+All three now report the failure in a row you can read and hear. Codex and FreeBuff also
+gained the guard opencode already had, so a turn that already said why it stopped and then
+failed while cleaning up does not speak a second error over the top of the first.
 
-Chat data lives in `chat.sqlite3` beside BlindPilot's other configuration. The first
-time Chat mode opens, an existing AccessibleAI database and its saved keys are imported
-when present, without modifying the original.
+## FreeBuff gives its terminal back
 
-## Sessions are tabs again, and only tabs
+Teardown was written as a fallback chain: terminate, and close only if terminate raised.
+Terminate works, so the close never ran, and the handle FreeBuff was reached through — a
+ConPTY on Windows, pexpect's master file descriptor elsewhere — was left open. This runs
+at the end of every single turn, so the handles built up for as long as the session
+lasted. Both calls are now made, because both are wanted.
 
-The Session combo box is gone. Sessions are navigated from a real tab strip below the
-Mode combo box: **Ctrl+Tab** and **Ctrl+Shift+Tab** move between them from anywhere in
-the window, Shift+Tab from the responses lands on the strip, and the arrow keys walk it.
+## Errors are spoken, not just displayed
 
-Because the strip is a native tab control, NVDA announces the conversation name and
-"tab 2 of 4" by itself. BlindPilot no longer speaks a second description over the top of
-that. The conversation pages sit in a separate container, so moving into a response list
-no longer makes Windows announce "tab control" for a strip you did not enter.
+Ten error messages went to the status bar and stopped there, and neither NVDA nor JAWS
+reads a status-bar change on its own. A copy that succeeded announced itself; a copy that
+failed said nothing at all, leaving silence and a clipboard still holding whatever was in
+it before.
 
-## Tab order that goes somewhere
+Steering with nothing running, stopping with nothing running, steering a run that just
+finished, every clipboard failure, a code save that could not write, and copying an empty
+conversation are all spoken now. They still appear in the status bar, so nothing is lost
+from the display.
 
-Agent mode now moves Mode → Session tabs → Responses → Prompt → Send and the other
-actions → Permission mode → Mode, and the exact reverse with Shift+Tab. Empty responses
-are skipped, because there is nothing in them to navigate. Leaving the prompt is briefly
-deferred so NVDA can finish the formatting query it schedules on Tab while the edit field
-is still valid, which removes the "unknown" announcements that followed it.
+## Enter sends the answer in the question dialog
 
-The custom focus speech on the prompt, the responses, and Permission mode was removed on
-Windows. NVDA already announces each control's name, role, and state; the extra sentence
-only talked over it. The announcements remain on macOS, where they work around a real
-VoiceOver gap.
+The "type your own answer" box uses `TE_PROCESS_ENTER`, which takes Enter away from the
+dialog's default button and hands it to the box — where nothing was listening, so the key
+did nothing. This is the dialog that opens unannounced in the middle of a run and holds
+the turn until it is answered, and the box is exactly where focus lands after choosing
+"Other". Enter now sends, applying the same validation the button does.
 
-## One dialog for updates
+## Sign-in addresses are checked before they are opened
 
-**Help → Check for Updates** now opens a single resizable dialog instead of a sequence of
-message boxes. It contains readable release notes, a named progress gauge that announces
-every ten percent, cancellation that cleans up the partial download, checksum
-verification, and an explicit restart step.
+opencode hands back an address and expects the client to open it. That address comes from
+the provider catalogue behind opencode, describing close to two hundred providers, not
+from opencode itself. On Windows the platform opener is the default protocol handler, so
+`file:` would open whatever sits at that path, including one on a network share, and
+`search-ms:` or `ms-msdt:` would be handed to a program of its own.
 
-Startup checks can be turned off from **Help → Check for updates at startup**. When they
-are on, an available update is reported in the status bar and spoken without stealing
-focus from whatever you were doing.
+Both sign-in paths now go through one opener that accepts only `http` and `https`. An
+address that is refused is still spoken and shown, so a machine with no default browser
+is not left with nothing to go on.
