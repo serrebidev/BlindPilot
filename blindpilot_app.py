@@ -1907,6 +1907,15 @@ def _save_config(cfg: dict) -> None:
         pass
 
 
+# The three earcons, in the order the menu offers them. The key is what the
+# configuration stores, so it must not change; the rest is only wording.
+_SOUND_CUES: tuple[tuple[str, str, str], ...] = (
+    ("send", "Message &sent", "Play a sound when a message is sent"),
+    ("working", "&Working", "Play a sound for as long as a turn is running"),
+    ("received", "&Answer received", "Play a sound when the answer arrives"),
+)
+
+
 class _Settings:
     """User preferences that change how a run is presented, saved to config.
 
@@ -1923,6 +1932,16 @@ class _Settings:
         self.speak_live = bool(cfg.get("speak_live", True))
         self.text_view = bool(cfg.get("text_view", False))
         self.show_thinking = bool(cfg.get("show_thinking", False))
+        # One switch per earcon rather than one for all three. "Working" is a
+        # loop that runs for the whole turn, and it is the only cue that says a
+        # long turn is still alive without being asked, so it is not
+        # interchangeable with the two one-shots either way round.
+        #
+        # Unknown keys are dropped and missing ones default to on, so a config
+        # written by a different version can neither mute this one nor break it.
+        stored = cfg.get("sounds")
+        stored = stored if isinstance(stored, dict) else {}
+        self.sounds = {cue: bool(stored.get(cue, True)) for cue, _label, _help in _SOUND_CUES}
 
     def save(self) -> None:
         cfg = _load_config()
@@ -1930,6 +1949,7 @@ class _Settings:
         cfg["speak_live"] = self.speak_live
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
+        cfg["sounds"] = self.sounds
         _save_config(cfg)
 
 
@@ -2002,16 +2022,29 @@ class Earcons:
         except Exception:
             pass
 
+    def _wanted(self, cue: str) -> bool:
+        """Whether this cue is switched on, read at the moment it would sound.
+
+        Read live rather than captured, so unchecking something in the menu
+        takes effect on the next sound instead of the next run.
+        """
+        return bool(SETTINGS.sounds.get(cue, True))
+
     def play_send(self) -> None:
-        self._play_once(self.send)
+        if self._wanted("send"):
+            self._play_once(self.send)
 
     def play_received(self) -> None:
+        # Stopping the loop is unconditional. It has to end when the turn does
+        # whatever the answer cue is set to, or it outlives the turn it belongs
+        # to and nothing is left to stop it.
         self.stop_progress()
-        self._play_once(self.received)
+        if self._wanted("received"):
+            self._play_once(self.received)
 
     def start_progress(self) -> None:
         self.stop_progress()
-        if not self.in_progress:
+        if not self.in_progress or not self._wanted("working"):
             return
         if self._system == "Windows":
             try:
@@ -6069,6 +6102,12 @@ class MainFrame(wx.Frame):
             "so NVDA can review and select across them",
         )
         options_menu.AppendSeparator()
+        options_menu.AppendSubMenu(
+            self._build_sounds_menu(),
+            "&Sounds",
+            "Choose which of BlindPilot's three sounds are played",
+        )
+        options_menu.AppendSeparator()
         silent_response_item = options_menu.Append(
             wx.ID_ANY,
             "&Silent until the response mode",
@@ -6437,6 +6476,29 @@ class MainFrame(wx.Frame):
         wx.CallAfter(announce, "Session picker, pop up button")
 
     # ----- Options menu -----
+    def _build_sounds_menu(self) -> wx.Menu:
+        """The Sounds submenu: one check item per earcon, in cue order."""
+        menu = wx.Menu()
+        self._sound_items: dict[str, wx.MenuItem] = {}
+        for cue, label, help_text in _SOUND_CUES:
+            item = menu.AppendCheckItem(wx.ID_ANY, label, help_text)
+            item.Check(SETTINGS.sounds.get(cue, True))
+            self._sound_items[cue] = item
+            self.Bind(wx.EVT_MENU, lambda _e, key=cue: self._toggle_sound(key), item)
+        return menu
+
+    def _toggle_sound(self, cue: str) -> None:
+        item = self._sound_items[cue]
+        SETTINGS.sounds[cue] = item.IsChecked()
+        SETTINGS.save()
+        if cue == "working" and not SETTINGS.sounds[cue]:
+            # Somebody reaching for this switch wants the loop to stop now,
+            # not whenever the turn it is part of happens to end.
+            self.earcons.stop_progress()
+        label = next(text for key, text, _help in _SOUND_CUES if key == cue).replace("&", "")
+        state = "on" if SETTINGS.sounds[cue] else "off"
+        self._announce_setting(f"{label} sound {state}")
+
     def _toggle_live_rows(self) -> None:
         SETTINGS.live_rows = self._rows_item.IsChecked()
         SETTINGS.save()
