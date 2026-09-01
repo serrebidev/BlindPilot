@@ -85,6 +85,21 @@ jobs:
             python -m pytest -q -W error
           fi
 
+      - name: Check the application still starts
+        shell: bash
+        # Every menu, control and binding is created in the frame's __init__,
+        # and the tests drive handlers on stubs. A stub always has whatever it
+        # is handed, so it cannot notice a menu built before the thing it
+        # describes exists. This can, and did.
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python blind_pilot.py --startup-smoke
+            xvfb-run -a python blind_pilot.py --startup-gui-smoke
+          else
+            python blind_pilot.py --startup-smoke
+            python blind_pilot.py --startup-gui-smoke
+          fi
+
       - name: Run static checks
         run: |
           python -m ruff check .
