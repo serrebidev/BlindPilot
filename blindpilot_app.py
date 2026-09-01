@@ -343,6 +343,26 @@ def _no_window_kwargs() -> dict:
     return {"creationflags": _NO_WINDOW} if _NO_WINDOW else {}
 
 
+def _open_web_page(url: str) -> bool:
+    """Open a web address, and nothing but a web address.
+
+    Everything else handed to the platform opener is a protocol handler being
+    invoked rather than a page being shown: `file:` opens whatever is at that
+    path, and Windows gives `ms-msdt:` and its relatives to programs of their
+    own. Sign-in addresses arrive over a provider catalog BlindPilot neither
+    controls nor inspects, so the scheme is checked rather than trusted.
+
+    False means nothing was opened, for any reason. Every caller says the
+    address out loud in that case, so there is still a way through by hand.
+    """
+    if urllib.parse.urlsplit(url).scheme.casefold() not in ("http", "https"):
+        return False
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
+
+
 def _same_dir(a: str, b: str) -> bool:
     """Compare two directory strings the way the platform resolves them.
 
@@ -3164,10 +3184,7 @@ class ConnectDialog(wx.Dialog):
             # opencode hands back the address and expects whoever asked to open
             # it. The address is spoken and shown either way, so a machine with
             # no default browser is not left with nothing to go on.
-            try:
-                opened = bool(webbrowser.open(url))
-            except Exception:
-                opened = False
+            opened = _open_web_page(url)
             if not opened:
                 announce(f"Could not open a browser. The sign-in address is {url}")
         if str(authorization.get("method")) == "code":
@@ -5006,7 +5023,10 @@ class BackendLogin:
         self.failure = ""
         self._info = BACKENDS[self.backend]
         self._timeout = timeout
-        self._opener = opener or webbrowser.open
+        # Same checked door as the opencode sign-in uses: a CLI's address is
+        # already constrained to http or https by the pattern it is read out
+        # of, and this leaves one place in the file that opens anything.
+        self._opener = opener or _open_web_page
         self._popen = popen or subprocess.Popen
         self._proc: Optional[subprocess.Popen] = None
         self._writing = threading.Lock()
