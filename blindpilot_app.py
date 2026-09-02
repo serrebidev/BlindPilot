@@ -1943,6 +1943,14 @@ def _flatten(text: str) -> str:
     return "".join(character.casefold() for character in text if character.isalnum())
 
 
+def _one_line(label: str) -> str:
+    """A row's label on a single line, for the text view where a line is a row.
+
+    Labels are already flattened; a stray newline would break that mapping.
+    """
+    return " ".join(label.split())
+
+
 def _result_label(text: str) -> str:
     """Short, screen-reader-friendly preview line for a result row."""
     first = next((ln for ln in text.splitlines() if ln.strip()), "")
@@ -5385,9 +5393,17 @@ class SessionPanel(wx.Panel):
 
     # ----- List + find -----
     def _refresh_list(self) -> None:
-        # Replacing a native ListBox's contents clears its selection. Preserve
-        # the row first so incoming output never disrupts someone who is
-        # reading older rows with NVDA.
+        # Rebuilding either control throws its contents away, which loses the
+        # selection, so the row being read has to be put back afterwards - and
+        # putting it back is what speaks. Setting a native list box's selection
+        # fires the accessibility event NVDA reads the row from, and moving the
+        # text view's insertion point is a caret move it reads the line from.
+        # This runs once per drained batch, so during a turn it announced
+        # somebody's own row back to them every few hundredths of a second.
+        #
+        # Output is only ever appended, so the usual case appends too: no
+        # rebuild, no selection to restore, and nothing that speaks.
+        previous = [row.label for row in self._displayed]
         keep = self._selected_row()
         term = self._search_term.lower()
         labels: List[str] = []
@@ -5397,15 +5413,35 @@ class SessionPanel(wx.Panel):
                 continue
             labels.append(row.label)
             self._displayed.append(row)
+
+        if labels[: len(previous)] == previous:
+            added = labels[len(previous) :]
+            if added:
+                self._append_rows(added)
+            return
+
+        # The rows really did change shape - a search, a new turn, a response
+        # replaced by its parsed form - so there is no way around a rebuild,
+        # and restoring the selection afterwards is right rather than wrong.
         if SETTINGS.text_view:
-            # One row per line, so a line number is a row number. Labels are
-            # already flattened, but a stray newline would break that mapping.
-            text = "\n".join(" ".join(label.split()) for label in labels)
-            self.responses_text.ChangeValue(text)
+            self.responses_text.ChangeValue("\n".join(_one_line(label) for label in labels))
         else:
             self.responses.Set(labels)
         if keep != wx.NOT_FOUND and labels:
             self._select_row(keep)
+
+    def _append_rows(self, labels: List[str]) -> None:
+        """Add rows to the end, leaving the reader exactly where they are."""
+        if not SETTINGS.text_view:
+            self.responses.AppendItems(list(labels))
+            return
+        text = "\n".join(_one_line(label) for label in labels)
+        was_at = self.responses_text.GetInsertionPoint()
+        lead = "\n" if self.responses_text.GetLastPosition() else ""
+        # Appending moves the caret to the end, which is itself a move worth
+        # announcing, so it goes straight back to the line being read.
+        self.responses_text.AppendText(lead + text)
+        self.responses_text.SetInsertionPoint(was_at)
 
     def open_find(self) -> None:
         """Find-in-responses popup (File menu / Cmd-Ctrl+F). Blank clears it."""

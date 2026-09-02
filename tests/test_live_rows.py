@@ -656,9 +656,11 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
     import blindpilot_app as app
 
     class Responses:
-        def __init__(self):
+        def __init__(self, labels=()):
             self.selection = 1
-            self.labels = []
+            # What the control is already showing. It cannot be empty while
+            # rows are displayed, and the append path reads it.
+            self.labels = list(labels)
 
         def GetSelection(self):
             return self.selection
@@ -666,6 +668,11 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
         def Set(self, labels):
             self.labels = list(labels)
             self.selection = app.wx.NOT_FOUND
+
+        def AppendItems(self, labels):
+            # Appending is how new output arrives now: it leaves the selection
+            # alone, which is the whole point - restoring one speaks.
+            self.labels.extend(labels)
 
         def SetSelection(self, index):
             self.selection = index
@@ -680,9 +687,10 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
     ]
     panel._displayed = list(old_rows)
     panel._search_term = ""
-    panel.responses = Responses()
+    panel.responses = Responses([row.label for row in old_rows])
     panel._selected_row = lambda: app.SessionPanel._selected_row(panel)
     panel._select_row = lambda index: app.SessionPanel._select_row(panel, index)
+    panel._append_rows = lambda labels: app.SessionPanel._append_rows(panel, labels)
     panel._row_count = lambda: len(panel._displayed)
     monkeypatch.setattr(app.SETTINGS, "text_view", False)
 
