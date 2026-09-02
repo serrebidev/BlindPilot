@@ -270,7 +270,7 @@ def announce(text: str, urgent: bool = False) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.19.1"
+APP_VERSION = "0.19.2"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -4531,10 +4531,14 @@ class SessionPanel(wx.Panel):
         self.prompt.SetFocus()
 
     def focus_first_control(self) -> None:
-        if self._row_count() == 0:
+        control = self._responses_ctrl() if self._row_count() else None
+        # The view the settings ask for is the one that is shown, but a
+        # hidden or disabled control accepts SetFocus by doing nothing at
+        # all — which would leave the Tab that asked for this move with
+        # nowhere to have gone. Fall through to the Prompt instead.
+        if control is None or not (control.IsShown() and control.IsEnabled()):
             self.prompt.SetFocus()
             return
-        control = self._responses_ctrl()
         control.SetFocus()
         if (
             control is self.responses
@@ -7326,6 +7330,7 @@ class MainFrame(wx.Frame):
         self.tab_switcher.SetMinSize(wx.Size(-1, root.FromDIP(38)))
         self.tab_switcher.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_tab_switcher_changed)
         self._syncing_tab_switcher = False
+        self._strip_keeps_focus = False
 
         # Session and Ctrl+Tab provide all session navigation. Simplebook has
         # the same page-management API without a native tab strip. A native
@@ -7411,6 +7416,18 @@ class MainFrame(wx.Frame):
             current = current.GetParent()
         return False
 
+    @staticmethod
+    def _moved_focus(focus: Optional[wx.Window], move: Callable[[], None]) -> bool:
+        """Perform a boundary move, and report whether focus really left.
+
+        Routing that claims a Tab it did not act on is a keyboard trap: the
+        key is swallowed, native traversal never runs, and the control the
+        user is on is the control they stay on however many times they press
+        it. Answering honestly hands the key back to wxWidgets instead.
+        """
+        move()
+        return wx.Window.FindFocus() is not focus
+
     def _route_agent_tab(self, focus: Optional[wx.Window], shift: bool) -> bool:
         """Route focus across Agent-page boundaries before native traversal."""
         if self._app_mode != APP_MODE_AGENT:
@@ -7421,30 +7438,23 @@ class MainFrame(wx.Frame):
 
         if self._focus_is_within(focus, self.mode_combo):
             if shift:
-                page.focus_last_control()
-            else:
-                self.tab_switcher.SetFocus()
-            return True
+                return self._moved_focus(focus, page.focus_last_control)
+            return self._moved_focus(focus, self.tab_switcher.SetFocus)
 
         if self._focus_is_within(focus, self.tab_switcher):
             if shift:
-                self.mode_combo.SetFocus()
-            else:
-                page.focus_first_control()
-            return True
+                return self._moved_focus(focus, self.mode_combo.SetFocus)
+            return self._moved_focus(focus, page.focus_first_control)
 
         if self._focus_is_within(focus, page.mode_picker) and not shift:
-            self.mode_combo.SetFocus()
-            return True
+            return self._moved_focus(focus, self.mode_combo.SetFocus)
 
         responses = page._responses_ctrl()
         if shift and self._focus_is_within(focus, responses):
-            self.tab_switcher.SetFocus()
-            return True
+            return self._moved_focus(focus, self.tab_switcher.SetFocus)
 
         if shift and page._row_count() == 0 and self._focus_is_within(focus, page.prompt):
-            self.tab_switcher.SetFocus()
-            return True
+            return self._moved_focus(focus, self.tab_switcher.SetFocus)
         if not shift and self._focus_is_within(focus, page.prompt):
             # NVDA schedules a formatting query 50 ms after receiving Tab in
             # an edit field. Keep the Prompt alive and focused until that query
@@ -7857,9 +7867,7 @@ class MainFrame(wx.Frame):
         event.Skip()
         if self._syncing_tab_switcher:
             return
-        sel = event.GetSelection()
-        if 0 <= sel < self.notebook.GetPageCount() and sel != self.notebook.GetSelection():
-            self.notebook.SetSelection(sel)
+        self._select_session(event.GetSelection())
 
     # ----- Options menu -----
     def _menu_item(self, menu, label, help_text, action, item_id=wx.ID_ANY):
@@ -8261,17 +8269,51 @@ class MainFrame(wx.Frame):
         announce(text)
         self._set_status_text(text)
 
+    def _select_session(self, index: int) -> None:
+        """Show session ``index``, leaving focus on the tab strip if it is there.
+
+        Showing a page focuses it. wxSimplebook does that from C++ on every
+        selection change, unconditionally, so neither the page nor the book
+        can decline it — putting focus back afterwards is the only way to
+        refuse. Without that, the first arrow press along the strip drops the
+        user into the prompt and the second never reaches the strip at all,
+        which makes a tab strip you can enter and cannot use.
+        """
+        if not 0 <= index < self.notebook.GetPageCount():
+            return
+        if index == self.notebook.GetSelection():
+            return
+        keep = self._focus_is_within(wx.Window.FindFocus(), self.tab_switcher)
+        # Read by `_on_tab_changed`, which runs inside SetSelection below and
+        # by then can no longer see where focus started out.
+        self._strip_keeps_focus = keep
+        page = self.notebook.GetPage(index)
+        # A disabled window cannot be given focus, which is the only way to
+        # decline the book's offer. Windows answers the refused SetFocus with
+        # an error wxWidgets would otherwise log, hence LogNull. Enable()
+        # restores each child's own state, so a button that was disabled on
+        # its own account stays that way.
+        if keep:
+            page.Disable()
+        try:
+            with wx.LogNull():
+                self.notebook.SetSelection(index)
+        finally:
+            if keep:
+                page.Enable()
+            self._strip_keeps_focus = False
+        if keep:
+            self.tab_switcher.SetFocus()
+
     def _cycle_tab(self, direction: int) -> None:
         count = self.notebook.GetPageCount()
         if count <= 1:
             return
         cur = self.notebook.GetSelection()
-        nxt = (cur + direction) % count
-        self.notebook.SetSelection(nxt)
+        self._select_session((cur + direction) % count)
 
     def _jump_to_tab(self, idx: int) -> None:
-        if 0 <= idx < self.notebook.GetPageCount():
-            self.notebook.SetSelection(idx)
+        self._select_session(idx)
 
     def _new_session(self) -> None:
         """Open a session in a folder that is typed in or browsed to."""
@@ -8405,8 +8447,12 @@ class MainFrame(wx.Frame):
         # Arrowing along the tab strip changes the page on every keypress. The
         # strip has to keep focus through that, or the second arrow press never
         # reaches it, and the native tab control has already said which tab is
-        # selected — repeating it here would say everything twice.
-        if self._focus_is_within(wx.Window.FindFocus(), self.tab_switcher):
+        # selected — repeating it here would say everything twice. Focus has
+        # already been taken off the strip by the time this runs, so the flag
+        # `_select_session` sets is what says where the keypress came from.
+        if self._strip_keeps_focus or self._focus_is_within(
+            wx.Window.FindFocus(), self.tab_switcher
+        ):
             return
         # The tab's own name first — it is the conversation, and that is what
         # tells two tabs in the same folder apart — then which tab of how many,
