@@ -52,14 +52,19 @@ def test_it_is_not_set_where_it_means_nothing(monkeypatch):
     assert "NoDefaultCurrentDirectoryInExePath" not in env
 
 
-def test_the_cli_can_still_find_its_own_siblings(monkeypatch):
+def test_the_cli_can_still_find_its_own_siblings():
     """The reason this environment exists in the first place: an npm shim has
-    to find the `node` next to it. Hardening must not break that."""
-    _windows(monkeypatch)
+    to find the `node` next to it. Hardening must not break that.
 
-    env = agent_backends.subprocess_env(r"C:\tools\npm\claude.cmd")
+    Built with `os.path.join` rather than written out: `os.path.dirname` uses
+    the running platform's separator, so a path written with backslashes is
+    not a directory at all on the two runners that are not Windows.
+    """
+    directory = os.path.join(os.sep + "tools", "npm")
 
-    assert env["PATH"].split(os.pathsep)[0] == r"C:\tools\npm"
+    env = agent_backends.subprocess_env(os.path.join(directory, "claude.cmd"))
+
+    assert env["PATH"].split(os.pathsep)[0] == directory
 
 
 def test_the_rest_of_the_environment_is_still_inherited(monkeypatch):
