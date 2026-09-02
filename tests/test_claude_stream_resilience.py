@@ -264,7 +264,10 @@ def test_subagent_narration_stays_out_of_the_final_answer():
     assert finished
     assert completed == ["the answer"], f"subagent text leaked into the answer: {completed}"
     # It still deserves to be shown live; it just is not the answer.
-    assert ("assistant", "subagent chatter") in activity
+    # Shown live, but on its own channel: "subagent" is what lets Keep up
+    # leave five agents' commentary in the list instead of reading it out.
+    assert ("subagent", "subagent chatter") in activity
+    assert ("assistant", "the answer") in activity
 
 
 def test_a_nonzero_exit_still_reports_what_stderr_said():
