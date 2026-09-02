@@ -5744,7 +5744,18 @@ class SessionPanel(wx.Panel):
 
     # ----- Cleanup hook -----
     def cancel_worker(self) -> None:
+        """Give up this panel's turn, for a tab closing or the app quitting.
+
+        `_on_worker_finished` calls itself the safety net that keeps the
+        progress loop from being left running, but it arrives through the
+        worker mailbox and `_drain_worker_events` discards everything once the
+        panel is gone. A tab closed mid-turn therefore threw away the one event
+        that stops the sound - and the sound is not the panel's to lose: every
+        tab shares the frame's `Earcons`, and on Windows the loop is
+        process-wide. It played on with nothing left alive to stop it.
+        """
         self._close_question_dialog()
+        self._earcons.stop_progress()
         if self._worker is not None and self._worker.is_alive():
             self._worker.cancel()
             self._worker.join(timeout=3)
