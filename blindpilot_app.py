@@ -5499,12 +5499,19 @@ class SessionPanel(wx.Panel):
                 return
             self._on_send()
             return
-        if key == wx.WXK_UP:
-            # Enter the newest row, but only when the caret is on the first line
-            # so ordinary multi-line cursor movement still works.
-            ip = self.prompt.GetInsertionPoint()
-            on_first_line = "\n" not in self.prompt.GetRange(0, ip)
-            if on_first_line and self._row_count() > 0:
+        if key == wx.WXK_UP and (event.CmdDown() or event.AltDown()):
+            # Deliberately a modifier, not a bare Up. Up used to enter the
+            # newest response whenever the caret was on the first line, which
+            # made a multi-line prompt unreadable: reviewing what you had just
+            # typed, or moving back up through a dictated paragraph, threw focus
+            # out of the field the moment the caret reached the top line. In a
+            # screen reader that is worse than a missing shortcut, because the
+            # text is still there and the caret is not.
+            #
+            # Nothing is lost: the responses are reachable by Ctrl+R (which has
+            # its own menu entry saying so) and by Shift+Tab, and Up/Down inside
+            # the prompt now do only what every other multi-line field does.
+            if self._row_count() > 0:
                 self._focus_row(self._row_count() - 1)
                 return
         if key == ord("V") and (event.CmdDown() or event.ControlDown()) and not event.AltDown():
@@ -8235,6 +8242,7 @@ class MainFrame(wx.Frame):
         self.SetMenuBar(menubar)
         self._refresh_compact_item()
         self._refresh_connect_item()
+        self._refresh_hermes_sessions_item()
         self._refresh_mode_items()
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_live_rows(), self._rows_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_speak_live(), self._speak_item)
@@ -8525,6 +8533,9 @@ class MainFrame(wx.Frame):
             item.Enable(not show_agent)
         self.mode_combo.SetSelection(0 if show_agent else 1)
         self._refresh_compact_item()
+        # Chat mode has no backend conversation to reopen, so the Hermes list
+        # goes with it rather than sitting in File doing nothing.
+        self._refresh_hermes_sessions_item()
         self._root.Layout()
 
         cfg = _load_config()
@@ -8585,6 +8596,7 @@ class MainFrame(wx.Frame):
                 page.backend_changed()
         self._refresh_compact_item()
         self._refresh_connect_item()
+        self._refresh_hermes_sessions_item()
         message = (
             f"Backend changed to {backend_label(backend)}. It will be used for the next new turn."
         )
@@ -8933,6 +8945,9 @@ class MainFrame(wx.Frame):
         menu accelerator whose key is Tab at all.
         """
         menu = wx.Menu()
+        # Kept so the Hermes conversation list can be taken out of this menu and
+        # put back as the backend changes.
+        self._file_menu = menu
         add = self._menu_item
         add(
             menu,
@@ -8947,7 +8962,7 @@ class MainFrame(wx.Frame):
             "Reopen a past conversation and carry on with it",
             self._open_history,
         )
-        add(
+        self._hermes_sessions_item = add(
             menu,
             "Hermes &Conversations…	Ctrl+G",
             "List every conversation Hermes knows, including the ones running right now",
@@ -9105,6 +9120,51 @@ class MainFrame(wx.Frame):
         item = items.get(page.mode)
         if item is not None and not item.IsChecked():
             item.Check(True)
+
+    def _refresh_hermes_sessions_item(self) -> None:
+        """Offer Hermes' conversation list only while Hermes is the backend.
+
+        Greying it out, the way Compact and Connect are treated, is the wrong
+        answer here. Those two are commands for THIS conversation that the
+        current backend cannot perform, so a disabled item with a reason tells
+        you something worth knowing. This one asks a Hermes for its own
+        conversations: with another backend selected there is no Hermes in the
+        picture at all, so the item is not "unavailable", it is irrelevant --
+        and an irrelevant item still costs an arrow press to read past. The
+        File menu is at the ten-item ceiling upstream set for exactly that
+        reason, so the item is REMOVED rather than disabled, and File is nine
+        items long for everybody who does not use Hermes.
+
+        Removing keeps the accelerator too: Ctrl+G is registered by this menu
+        item, so with the item gone the chord does nothing rather than opening a
+        dialog that would immediately report there is no Hermes to ask.
+        """
+        item = getattr(self, "_hermes_sessions_item", None)
+        menu = item.GetMenu() if item is not None else None
+        wanted = self._app_mode == APP_MODE_AGENT and self._backend == BACKEND_HERMES
+        if wanted:
+            if item is not None and menu is None:
+                # Put it back where it was: immediately after Recent
+                # Conversations, so its place in the menu does not depend on
+                # how many times the backend has been switched.
+                self._insert_hermes_sessions_item()
+            return
+        if item is not None and menu is not None:
+            menu.Remove(item)
+
+    def _insert_hermes_sessions_item(self) -> None:
+        """Re-insert the Hermes list after Recent Conversations."""
+        menu = getattr(self, "_file_menu", None)
+        item = getattr(self, "_hermes_sessions_item", None)
+        if menu is None or item is None:
+            return
+        position = 0
+        for index, existing in enumerate(menu.GetMenuItems()):
+            if "Recent Conversations" in existing.GetItemLabelText():
+                position = index + 1
+                break
+        menu.Insert(position, item)
+        self.Bind(wx.EVT_MENU, lambda _event: self._open_hermes_sessions(), item)
 
     def _refresh_connect_item(self) -> None:
         """Grey out Connect for a backend that has no providers to connect.
