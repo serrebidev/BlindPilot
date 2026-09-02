@@ -2021,8 +2021,15 @@ def _keyed(text: str, letters_only: bool = False) -> tuple[str, list[int]]:
     for index, character in enumerate(text):
         if character.isspace() or (letters_only and not character.isalnum()):
             continue
-        kept.append(character.casefold() if letters_only else character)
-        positions.append(index)
+        folded = character.casefold() if letters_only else character
+        kept.append(folded)
+        # One position per character of the *key*, not per character of the
+        # text. `casefold` is not length-preserving - German "ss" comes from a
+        # single letter, Turkish and the ligatures do the same - and a map with
+        # one entry per input character then runs short, so the index used to
+        # cut the answer pointed at the wrong letter or off the end entirely.
+        positions.extend([index] * len(folded))
+    # The sentinel, so an answer that was read out in full is still indexable.
     positions.append(len(text))
     return "".join(kept), positions
 

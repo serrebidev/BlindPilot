@@ -10,3 +10,6 @@ mypy==2.3.1
 # another having run first - which has already happened here twice.
 pytest-timeout>=2.4,<3
 pytest-randomly>=5,<6
+# Earns its place: it found the casefold length bug in _keyed in seconds,
+# on ordinary German text no example test had thought to use.
+hypothesis>=6,<7
