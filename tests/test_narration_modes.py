@@ -188,3 +188,60 @@ def test_the_menu_opens_on_the_mode_actually_in_use(frame, monkeypatch):
         assert chosen == [app.NARRATION_KEEP_UP]
     finally:
         menu.Destroy()
+
+
+# ----- what a fan-out actually sounds like -----
+def _fan_out(panel, agents=5, steps_each=8):
+    """A turn that starts several agents, each working through some steps.
+
+    Shaped like the real thing: every agent narrates its own prose, and every
+    step is a tool call and a result, all arriving on one stream.
+    """
+    for agent in range(agents):
+        panel_activity = app.SessionPanel._on_activity
+        panel_activity(panel, "subagent", f"Agent {agent} looking into the third thing")
+        for step in range(steps_each):
+            panel_activity(panel, "tool", f"Reading module_{agent}_{step}.py")
+            panel_activity(panel, "result", f"about forty lines of module {agent} {step}")
+    app.SessionPanel._on_activity(panel, "assistant", "Here is what all of that found.")
+
+
+def test_a_fan_out_is_dramatically_quieter_when_keeping_up(monkeypatch, _capture):
+    """The whole point of the mode, measured rather than asserted by hand.
+
+    Five agents at eight steps each is 85 spoken lines in Follow everything.
+    At a couple of seconds apiece that is minutes of backlog in a queue
+    BlindPilot cannot see into, let alone shorten.
+    """
+    everything = _panel(monkeypatch, app.NARRATION_EVERYTHING)
+    _fan_out(everything)
+    loud = len(_capture)
+
+    _capture.clear()
+    keeping_up = _panel(monkeypatch, app.NARRATION_KEEP_UP)
+    _fan_out(keeping_up)
+    quiet = len(_capture)
+
+    assert loud > 80, f"the fan-out did not produce a flood to begin with: {loud}"
+    assert quiet == 1, f"Keep up spoke {quiet} lines, not just the answer"
+    assert loud > quiet * 20, f"{loud} lines became {quiet}: not a meaningful reduction"
+
+
+def test_keeping_up_still_says_the_thing_the_run_was_for(monkeypatch, _capture):
+    """Quieter is only good if the answer survives it."""
+    panel = _panel(monkeypatch, app.NARRATION_KEEP_UP)
+
+    _fan_out(panel)
+
+    assert any("Here is what all of that found." in line for line in _capture), _capture
+
+
+def test_every_step_of_the_fan_out_is_still_readable(monkeypatch, _capture):
+    """Nothing is lost, only unspoken: the rows are all still there."""
+    panel = _panel(monkeypatch, app.NARRATION_KEEP_UP)
+
+    _fan_out(panel, agents=3, steps_each=4)
+
+    kinds = [row.kind for row in panel._rows]
+    assert kinds.count("tool") == 12
+    assert kinds.count("result") == 12
