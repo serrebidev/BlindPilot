@@ -356,7 +356,12 @@ def test_an_approval_is_answered_so_the_turn_cannot_hang():
     """An unanswered approval leaves Hermes waiting forever."""
     for mode, expected in (("auto", "approve"), ("default", "deny")):
         rows = []
-        worker = _worker(on_activity=lambda kind, value: rows.append((kind, value)))
+        # `rows=rows` binds this iteration's list. Without it the closure reads
+        # whatever `rows` names when it is finally called, which in a loop is
+        # the LAST iteration's list — so an assertion about the first would be
+        # checking the wrong object. ruff's B023 catches it; the older version
+        # pinned here did not have the rule switched on.
+        worker = _worker(on_activity=lambda kind, value, rows=rows: rows.append((kind, value)))
         worker._permission_mode = mode
         transport = _FakeTransport([])
         worker._transport = transport

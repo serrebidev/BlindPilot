@@ -74,9 +74,7 @@ def test_every_worker_accepts_the_same_window_callbacks() -> None:
     """
     reference = agent_backends.CodexWorker
     expected = {
-        name
-        for name in inspect.signature(reference.__init__).parameters
-        if name.startswith("on_")
+        name for name in inspect.signature(reference.__init__).parameters if name.startswith("on_")
     }
     accepted = set(inspect.signature(HermesWorker.__init__).parameters)
     missing = sorted(expected - accepted)

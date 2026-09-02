@@ -232,8 +232,14 @@ class _ScriptedTransport:
     dead at a chosen read so a mid-turn drop can be timed.
     """
 
-    def __init__(self, *, empty_reads: int, frame_at: int | None = None,
-                 dead_at: int | None = None, end_after: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        empty_reads: int,
+        frame_at: int | None = None,
+        dead_at: int | None = None,
+        end_after: bool = True,
+    ) -> None:
         self.empty_reads = empty_reads
         self.frame_at = frame_at
         self.dead_at = dead_at
@@ -254,16 +260,22 @@ class _ScriptedTransport:
             return {
                 "jsonrpc": "2.0",
                 "method": "event",
-                "params": {"type": "tool.start", "session_id": "s",
-                           "payload": {"name": "terminal", "tool_id": "t1"}},
+                "params": {
+                    "type": "tool.start",
+                    "session_id": "s",
+                    "payload": {"name": "terminal", "tool_id": "t1"},
+                },
             }
         if self.reads >= self.empty_reads and self.end_after:
             # End the turn so the test cannot run forever.
             return {
                 "jsonrpc": "2.0",
                 "method": "event",
-                "params": {"type": "message.complete", "session_id": "s",
-                           "payload": {"status": "complete", "text": "done"}},
+                "params": {
+                    "type": "message.complete",
+                    "session_id": "s",
+                    "payload": {"status": "complete", "text": "done"},
+                },
             }
         return None
 
@@ -277,8 +289,9 @@ class _ScriptedTransport:
         return "Lost the connection to Hermes at ws://example: reset"
 
 
-def _run_loop(transport, monkeypatch, *, notice: float = 5.0, check: float = 2.0,
-              idle_limit: float = 1000.0) -> tuple[HermesWorker, list, list]:
+def _run_loop(
+    transport, monkeypatch, *, notice: float = 5.0, check: float = 2.0, idle_limit: float = 1000.0
+) -> tuple[HermesWorker, list, list]:
     """Drive the real loop with the clock scaled down, not with real waiting.
 
     The loop measures quiet against a clock (it used to count empty reads,
@@ -355,18 +368,31 @@ def test_a_frame_resets_the_quiet_clock(monkeypatch):
     number of reads with no frames at all. Without the reset both are equal.
     """
     with_frames = _ScriptedTransport(empty_reads=60, frame_at=None)
+
     # Ten frames spread through the run, each one resetting the count.
     class _Interrupted(_ScriptedTransport):
         def receive(self, timeout: float):  # noqa: ARG002 - interface
             self.reads += 1
             if self.reads >= self.empty_reads:
-                return {"jsonrpc": "2.0", "method": "event",
-                        "params": {"type": "message.complete", "session_id": "s",
-                                   "payload": {"status": "complete", "text": "done"}}}
+                return {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "message.complete",
+                        "session_id": "s",
+                        "payload": {"status": "complete", "text": "done"},
+                    },
+                }
             if self.reads % 8 == 0:
-                return {"jsonrpc": "2.0", "method": "event",
-                        "params": {"type": "tool.start", "session_id": "s",
-                                   "payload": {"name": "terminal", "tool_id": "t1"}}}
+                return {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "tool.start",
+                        "session_id": "s",
+                        "payload": {"name": "terminal", "tool_id": "t1"},
+                    },
+                }
             return None
 
     _w1, rows_quiet, _f1 = _run_loop(with_frames, monkeypatch, notice=5.0)
@@ -392,18 +418,31 @@ def test_notices_keep_their_cadence_after_a_burst_of_activity(monkeypatch):
     seconds) -- Michal's original complaint, returning after the first tool
     call in a long turn.
     """
+
     class _QuietBurstQuiet(_ScriptedTransport):
         def receive(self, timeout: float):  # noqa: ARG002 - interface
             self.reads += 1
             # Long quiet first, so several notices fire and the threshold rises.
             if self.reads == 61:
-                return {"jsonrpc": "2.0", "method": "event",
-                        "params": {"type": "tool.start", "session_id": "s",
-                                   "payload": {"name": "terminal", "tool_id": "t1"}}}
+                return {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "tool.start",
+                        "session_id": "s",
+                        "payload": {"name": "terminal", "tool_id": "t1"},
+                    },
+                }
             if self.reads >= 91:
-                return {"jsonrpc": "2.0", "method": "event",
-                        "params": {"type": "message.complete", "session_id": "s",
-                                   "payload": {"status": "complete", "text": "done"}}}
+                return {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "message.complete",
+                        "session_id": "s",
+                        "payload": {"status": "complete", "text": "done"},
+                    },
+                }
             return None
 
     rows: list[tuple[str, str]] = []
@@ -434,7 +473,7 @@ def test_notices_keep_their_cadence_after_a_burst_of_activity(monkeypatch):
     # differ. Before it they are identical, which is why an overall count
     # cannot tell them apart.
     frame_index = next(i for i, (k, t) in enumerate(rows) if t == "terminal")
-    after = [t for k, t in rows[frame_index + 1:] if "still working" in t.lower()]
+    after = [t for k, t in rows[frame_index + 1 :] if "still working" in t.lower()]
 
     assert after, (
         "the quiet stretch after a tool call was never narrated -- the notice "
@@ -446,9 +485,7 @@ def test_a_connection_that_drops_mid_wait_is_reported_within_seconds(monkeypatch
     """Not after the idle limit. Fifteen minutes of silence after a drop is
     exactly the "did anything happen?" problem being fixed."""
     transport = _ScriptedTransport(empty_reads=10_000, dead_at=6, end_after=False)
-    _worker, _rows, failed = _run_loop(
-        transport, monkeypatch, check=2.0, idle_limit=1000.0
-    )
+    _worker, _rows, failed = _run_loop(transport, monkeypatch, check=2.0, idle_limit=1000.0)
 
     assert failed == ["Lost the connection to Hermes at ws://example: reset"]
     # The property: noticed in a handful of reads, nowhere near the idle limit.
@@ -458,6 +495,7 @@ def test_a_connection_that_drops_mid_wait_is_reported_within_seconds(monkeypatch
 
 def test_a_turn_that_never_goes_quiet_gets_no_notices(monkeypatch):
     """Notices are for silence. A chatty turn must read exactly as before."""
+
     class _Chatty:
         def __init__(self) -> None:
             self.reads = 0
@@ -470,12 +508,24 @@ def test_a_turn_that_never_goes_quiet_gets_no_notices(monkeypatch):
         def receive(self, timeout: float):  # noqa: ARG002 - interface
             self.reads += 1
             if self.reads > 30:
-                return {"jsonrpc": "2.0", "method": "event",
-                        "params": {"type": "message.complete", "session_id": "s",
-                                   "payload": {"status": "complete", "text": "ok"}}}
-            return {"jsonrpc": "2.0", "method": "event",
-                    "params": {"type": "message.delta", "session_id": "s",
-                               "payload": {"text": "word. "}}}
+                return {
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {
+                        "type": "message.complete",
+                        "session_id": "s",
+                        "payload": {"status": "complete", "text": "ok"},
+                    },
+                }
+            return {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "message.delta",
+                    "session_id": "s",
+                    "payload": {"text": "word. "},
+                },
+            }
 
         def close(self) -> None:
             pass
@@ -515,7 +565,7 @@ def test_a_quiet_turn_says_it_is_still_working():
 
 
 def test_the_notice_names_what_the_turn_is_waiting_on():
-    """"Still working on terminal" is worth far more than "still working"."""
+    """ "Still working on terminal" is worth far more than "still working"."""
     worker, rows = _worker_with_rows()
     worker._tool_start({"name": "terminal", "tool_id": "t1"})
     rows.clear()

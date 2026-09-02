@@ -83,9 +83,7 @@ class _CatalogTransport:
     def send(self, message: dict) -> bool:
         self.sent.append(message)
         if message.get("method") == "model.options":
-            self._frames.append(
-                {"jsonrpc": "2.0", "id": message.get("id"), "result": self.payload}
-            )
+            self._frames.append({"jsonrpc": "2.0", "id": message.get("id"), "result": self.payload})
         return True
 
     def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
@@ -138,9 +136,7 @@ def test_a_picker_row_is_not_joined_with_a_colon() -> None:
 
 
 def test_a_row_splits_back_into_provider_and_model() -> None:
-    provider, model = split_model_row(
-        f"{_PROVIDER}{MODEL_ROW_SEPARATOR}{_QUALIFIED_MODEL}"
-    )
+    provider, model = split_model_row(f"{_PROVIDER}{MODEL_ROW_SEPARATOR}{_QUALIFIED_MODEL}")
     assert (provider, model) == (_PROVIDER, _QUALIFIED_MODEL)
 
 
@@ -222,9 +218,7 @@ def test_the_catalog_is_read_over_the_network_too(monkeypatch) -> None:
     made: dict = {}
 
     def fake_ws(url, token, credential, username):
-        made.update(
-            url=url, token=token, credential=credential, username=username
-        )
+        made.update(url=url, token=token, credential=credential, username=username)
         return _CatalogTransport(_CATALOG)
 
     monkeypatch.setattr(hermes_backend, "WebSocketTransport", fake_ws)
@@ -253,14 +247,13 @@ def test_a_local_catalog_still_uses_the_pipe(monkeypatch) -> None:
     Without this, a mistake that always took the network path would pass the
     remote test and go unnoticed on the zero-configuration local path.
     """
+
     def exploding_ws(*_args, **_kwargs):
         raise AssertionError("the local path must not open a network connection")
 
     monkeypatch.setattr(hermes_backend, "WebSocketTransport", exploding_ws)
     monkeypatch.setattr(hermes_backend, "hermes_installed", lambda: True)
-    monkeypatch.setattr(
-        hermes_backend, "StdioTransport", lambda _cwd: _CatalogTransport(_CATALOG)
-    )
+    monkeypatch.setattr(hermes_backend, "StdioTransport", lambda _cwd: _CatalogTransport(_CATALOG))
 
     models, efforts, _current, _effort, error = hermes_model_options(".")
     assert error == ""
@@ -402,6 +395,7 @@ def test_a_frame_that_produces_a_row_does_reset_the_timer(monkeypatch) -> None:
     heard: list[str] = []
     worker = _worker(on_activity=lambda _kind, text: heard.append(text))
     worker._transport = _WorkingTransport()
+
     # Real steps keep the clock at zero, so nothing here will ever end the
     # loop on its own -- which is the point. Stop it from outside.
     def stop_soon() -> None:

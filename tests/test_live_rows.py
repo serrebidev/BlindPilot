@@ -24,7 +24,7 @@ from markdown_rows import Row, reassemble, reassemble_all  # noqa: E402
 def test_live_narration_is_enabled_for_a_fresh_configuration(monkeypatch):
     import claude_reader
 
-    monkeypatch.setattr(claude_reader, "_load_config", lambda: {})
+    monkeypatch.setattr(claude_reader, "_load_config", dict)
     settings = claude_reader._Settings()
 
     assert settings.live_rows is True
@@ -215,9 +215,14 @@ def _run_worker(events, on_activity=None):
     completed: list[str] = []
     procs: list[_FakeProc] = []
 
-    def fake_popen(*_a, **_k):
+    def fake_popen(cmd, *_a, **_k):
         proc = _FakeProc(lines)
-        procs.append(proc)
+        # On macOS the worker's first act is to ask a login shell for its
+        # PATH, via subprocess.run -> subprocess.Popen — which this patch has
+        # intercepted too. That probe is none of this test's business: it must
+        # not become `procs[0]` and push the worker's real process to [1].
+        if cmd and cmd[0] == "claude":
+            procs.append(proc)
         return proc
 
     def record(kind, text):
@@ -343,9 +348,12 @@ def test_steer_writes_a_second_message_into_the_running_process():
     lines = [_json.dumps(e) + "\n" for e in events]
     procs = []
 
-    def fake_popen(*_a, **_k):
+    def fake_popen(cmd, *_a, **_k):
         proc = _FakeProc(lines)
-        procs.append(proc)
+        # The macOS login-shell PATH probe also goes through Popen; it is not
+        # the process under test and must not become `procs[0]`.
+        if cmd and cmd[0] == "claude":
+            procs.append(proc)
         return proc
 
     real_popen, real_find = subprocess.Popen, claude_reader._find_claude
@@ -458,7 +466,11 @@ def _stub_panel(app, **overrides):
     panel._announce = lambda text: (panel.announced.append(text), panel.status.append(text))
     panel._set_status = lambda text: panel.status.append(text)
     panel._refresh_list = lambda: None
-    panel._say = lambda _text: False
+    panel._say = lambda _text, _kind="assistant": False
+    # Whether a turn is still going is asked through the real method, so a stub
+    # cannot quietly disagree with the window about it.
+    panel._worker = None
+    panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
     panel.send_btn = _Button()
     panel.steer_btn = _Button()
     panel.stop_btn = _Button()
@@ -644,16 +656,28 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
     import blindpilot_app as app
 
     class Responses:
-        def __init__(self):
+        def __init__(self, labels=()):
             self.selection = 1
-            self.labels = []
+            # What the control is already showing. It cannot be empty while
+            # rows are displayed, and the append path reads it.
+            self.labels = list(labels)
 
         def GetSelection(self):
             return self.selection
 
+        def GetCount(self):
+            # The append path asks the control what it is showing before it
+            # trusts the model's record of that.
+            return len(self.labels)
+
         def Set(self, labels):
             self.labels = list(labels)
             self.selection = app.wx.NOT_FOUND
+
+        def AppendItems(self, labels):
+            # Appending is how new output arrives now: it leaves the selection
+            # alone, which is the whole point - restoring one speaks.
+            self.labels.extend(labels)
 
         def SetSelection(self, index):
             self.selection = index
@@ -668,9 +692,10 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
     ]
     panel._displayed = list(old_rows)
     panel._search_term = ""
-    panel.responses = Responses()
+    panel.responses = Responses([row.label for row in old_rows])
     panel._selected_row = lambda: app.SessionPanel._selected_row(panel)
     panel._select_row = lambda index: app.SessionPanel._select_row(panel, index)
+    panel._append_rows = lambda labels: app.SessionPanel._append_rows(panel, labels)
     panel._row_count = lambda: len(panel._displayed)
     monkeypatch.setattr(app.SETTINGS, "text_view", False)
 
@@ -691,6 +716,10 @@ def _compaction_panel(backend, session_id):
         (),
         {
             "_worker": None,
+            # The real one: compaction refuses while a turn is still being
+            # applied, and a stub must not be able to disagree about when
+            # that is.
+            "_run_in_progress": claude_reader.SessionPanel._run_in_progress,
             "_session_id": session_id,
             "_session_backend": backend,
             "selected_backend": lambda self: backend,
@@ -766,9 +795,13 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
     commands: list[list[str]] = []
 
     def fake_popen(cmd, *_a, **_k):
-        commands.append(list(cmd))
         proc = _FakeProc(lines)
-        procs.append(proc)
+        # The macOS login-shell PATH probe also goes through Popen; it is not
+        # the process under test and must not become `procs[0]` or
+        # `commands[0]`.
+        if cmd and cmd[0] == "claude":
+            commands.append(list(cmd))
+            procs.append(proc)
         return proc
 
     def on_question(questions):
@@ -851,7 +884,9 @@ def test_askuserquestion_answers_go_back_as_the_tools_own_input():
     assert reply["response"]["response"]["updatedInput"]["answers"] == {"Tabs or spaces?": "Spaces"}
     # The transcript keeps the question as well as the answer: read back later,
     # a bare "Spaces" says nothing about what it decided.
-    assert ("tool", 'You answered "Tabs or spaces?" with "Spaces".') in activity
+    # A "notice", not a "tool": this is BlindPilot reporting what it answered,
+    # not the backend narrating a step, and Keep up must not mute it.
+    assert ("notice", 'You answered "Tabs or spaces?" with "Spaces".') in activity
 
 
 def test_several_answers_to_one_question_are_joined_the_way_the_tool_reads_them():

@@ -1,11 +1,21 @@
-wxPython>=4.2
+# Upper bounds on everything, not half of it. A packaged desktop application
+# resolves these fresh on every release build, so a major version arriving
+# unannounced is a broken release rather than a broken development machine.
+#
+# That is not hypothetical: pywinpty crossed 2 -> 3 and markdown-it-py 3 -> 4
+# under floors that allowed it, and both are load-bearing - one drives
+# FreeBuff's pseudo-terminal, the other segments every answer into rows.
+#
+# Each bound is the next major above a version this has actually been run
+# against. Raising one is a deliberate act with the tests to back it.
+wxPython>=4.2,<5
 httpx>=0.28.1,<0.29
-markdown-it-py>=3
-pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
-accessible-output2>=0.17; sys_platform == "win32"
-pyte>=0.8
-pywinpty>=2.0; sys_platform == "win32"
-pexpect>=4.9; sys_platform != "win32"
+markdown-it-py>=3,<5
+pyobjc-framework-Cocoa>=10,<12; sys_platform == "darwin"
+accessible-output2>=0.17,<1; sys_platform == "win32"
+pyte>=0.8,<1
+pywinpty>=2.0,<4; sys_platform == "win32"
+pexpect>=4.9,<5; sys_platform != "win32"
 keyring>=25,<26; sys_platform != "win32"
 # Only needed to drive a Hermes running on another machine. The local Hermes
 # backend uses a pipe and does not need it, so a missing copy is reported as an

@@ -6,7 +6,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from accessible_ai.models import Account, Conversation, Message, MessageAttachment, Profile
+from accessible_ai.models import (
+    Account,
+    Conversation,
+    Message,
+    MessageAttachment,
+    OpenRouterFeatures,
+    Profile,
+)
 
 
 SCHEMA = """
@@ -37,7 +44,8 @@ CREATE TABLE IF NOT EXISTS profiles (
     default_model TEXT NOT NULL DEFAULT '',
     temperature REAL NULL,
     max_output_tokens INTEGER NULL,
-    streaming INTEGER NULL
+    streaming INTEGER NULL,
+    openrouter_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -81,11 +89,34 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 
 class Database:
+    # Columns added to a table after it shipped, as {table: {column: clause}}.
+    # CREATE TABLE IF NOT EXISTS leaves an existing table exactly as it is, so
+    # a database made by an older release needs the new column added to it or
+    # every read of that table fails.
+    ADDED_COLUMNS: dict[str, dict[str, str]] = {
+        "profiles": {"openrouter_json": "TEXT NOT NULL DEFAULT '{}'"},
+    }
+
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._add_missing_columns(conn)
+
+    @classmethod
+    def _add_missing_columns(cls, conn: sqlite3.Connection) -> None:
+        """Bring an older database up to the current schema.
+
+        Only ever adds a column, and only one that has a default, so it cannot
+        lose anything: a profile saved before OpenRouter's tools existed opens
+        with them all switched off, which is what it was doing anyway.
+        """
+        for table, columns in cls.ADDED_COLUMNS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for column, clause in columns.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {clause}")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -194,6 +225,7 @@ class Database:
             profile.temperature,
             profile.max_output_tokens,
             streaming_value,
+            json.dumps(profile.openrouter.as_dict(), ensure_ascii=False),
         )
         with self.connect() as conn:
             if profile.id is None:
@@ -201,8 +233,8 @@ class Database:
                     """
                     INSERT INTO profiles (
                         name, system_prompt, default_account_id, default_model,
-                        temperature, max_output_tokens, streaming
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        temperature, max_output_tokens, streaming, openrouter_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
@@ -212,7 +244,8 @@ class Database:
                     """
                     UPDATE profiles SET
                         name = ?, system_prompt = ?, default_account_id = ?,
-                        default_model = ?, temperature = ?, max_output_tokens = ?, streaming = ?
+                        default_model = ?, temperature = ?, max_output_tokens = ?, streaming = ?,
+                        openrouter_json = ?
                     WHERE id = ?
                     """,
                     values + (profile.id,),
@@ -235,7 +268,25 @@ class Database:
             temperature=row["temperature"],
             max_output_tokens=row["max_output_tokens"],
             streaming=streaming,
+            openrouter=OpenRouterFeatures.from_dict(self._json_column(row, "openrouter_json")),
         )
+
+    @staticmethod
+    def _json_column(row: sqlite3.Row, name: str) -> object:
+        """Read a JSON column, tolerating both an old row and a damaged one.
+
+        A row read back through an older connection may not carry the column at
+        all, and a hand-edited one may not hold JSON. Neither is a reason a
+        profile cannot be opened.
+        """
+        try:
+            raw = row[name]
+        except (IndexError, KeyError):
+            return {}
+        try:
+            return json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            return {}
 
     def create_conversation(self, conversation: Conversation) -> int:
         with self.connect() as conn:

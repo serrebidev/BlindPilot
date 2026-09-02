@@ -79,6 +79,10 @@ class ChatPanel(wx.Panel):
         self.generation_cancel: Event | None = None
         self.generating = False
         self.assistant_buffer = ""
+        # The thinking a reasoning model does, kept apart from its answer, and
+        # the History entry it is being written into for this turn.
+        self.assistant_reasoning = ""
+        self._reasoning_entry: Message | None = None
         self.last_generation_status = ""
         self.assistant_announcement_buffer = ""
         self.assistant_announcement_timer: wx.CallLater | None = None
@@ -233,6 +237,8 @@ class ChatPanel(wx.Panel):
             return "You"
         if role == "assistant":
             return "Assistant"
+        if role == "thinking":
+            return "Thinking"
         return role.title()
 
     def _history_entry_copy_text(self, entry: Message) -> str:
@@ -240,7 +246,15 @@ class ChatPanel(wx.Panel):
 
     def _history_list_label(self, entry: Message) -> str:
         label = self._history_role_label(entry.role)
-        text = " ".join(self._history_entry_copy_text(entry).split())
+        words = self._history_entry_copy_text(entry).split()
+        if entry.role == "thinking":
+            # The thinking runs longer than the answer it precedes, and this
+            # line is read out whenever the arrow keys pass over it. It says
+            # how much there is; the words themselves are in the text view, and
+            # Ctrl+C copies them.
+            count = len(words)
+            return f"{label}: {count} word{'' if count == 1 else 's'}, Ctrl+C to copy"
+        text = " ".join(words)
         if not text:
             text = "(waiting for response)" if entry.role == "assistant" else "(empty message)"
         return f"{label}: {text}"
@@ -274,13 +288,18 @@ class ChatPanel(wx.Panel):
             self.history_list.SetSelection(len(self.history_entries) - 1)
 
     def _record_history_status(self, text: str) -> None:
-        """Write a status line into History while a response is still coming.
+        """Write a status line into History while a response is still coming."""
+        self._insert_history_entry_before_response(Message(role="status", content=text))
+        self._append_history_text(f"[{text}]\r\n")
+
+    def _insert_history_entry_before_response(self, entry: Message) -> None:
+        """Put an entry into History ahead of the response being streamed.
 
         The unsaved assistant entry has to stay last, because that is the one
-        the streamed text is written into, so this goes in front of it rather
-        than on the end. Whatever was selected stays selected.
+        the streamed text is written into, so anything arriving alongside the
+        response goes in front of it rather than on the end. Whatever was
+        selected stays selected.
         """
-        entry = Message(role="status", content=text)
         index = len(self.history_entries)
         last = self.history_entries[-1] if self.history_entries else None
         if last is not None and last.role == "assistant" and last.id is None:
@@ -295,7 +314,13 @@ class ChatPanel(wx.Panel):
             wanted = selection + 1 if selection >= index else selection
             if self.history_list.GetSelection() != wanted:
                 self.history_list.SetSelection(wanted)
-        self._append_history_text(f"[{text}]\r\n")
+
+    def _refresh_history_entry(self, entry: Message) -> None:
+        """Redraw one entry's line after its content grew."""
+        for index, candidate in enumerate(self.history_entries):
+            if candidate is entry:
+                self.history_list.SetString(index, self._history_list_label(entry))
+                return
 
     def _update_streaming_history_entry(self) -> None:
         if not self.history_entries:
@@ -747,13 +772,21 @@ class ChatPanel(wx.Panel):
         streaming = (
             account.streaming if not profile or profile.streaming is None else profile.streaming
         )
-        return GenerationSettings(
+        settings = GenerationSettings(
             model=model,
             messages=messages,
             temperature=profile.temperature if profile else None,
             max_output_tokens=profile.max_output_tokens if profile else None,
             streaming=streaming,
         )
+        if profile is not None and account.provider == PROVIDER_OPENROUTER:
+            # Tools, thinking and the PDF reader are OpenRouter's own request
+            # keys. Another provider sent them would reject the whole request
+            # over a key it does not know, so they are only ever added here.
+            settings.tools = profile.openrouter.request_tools()
+            settings.reasoning = profile.openrouter.request_reasoning()
+            settings.plugins = profile.openrouter.request_plugins()
+        return settings
 
     def _last_assistant_message(self) -> Message | None:
         if self.current_conversation_id is None:
@@ -950,6 +983,8 @@ class ChatPanel(wx.Panel):
 
         self.generating = True
         self.assistant_buffer = ""
+        self.assistant_reasoning = ""
+        self._reasoning_entry = None
         self.last_generation_status = ""
         self._cancel_response_announcement_timer()
         self.assistant_announcement_buffer = ""
@@ -993,6 +1028,16 @@ class ChatPanel(wx.Panel):
                         )
                         if cache_status:
                             logger.info("OpenRouter cache status=%s", cache_status)
+                    elif stream_event.kind == "tool" and stream_event.text:
+                        # A tool the model called mid-answer. It goes down the
+                        # same path a batch's progress does: spoken once, and
+                        # left in History so the answer can be read back
+                        # knowing what was consulted to produce it.
+                        wx.CallAfter(self._report_generation_status, stream_event.text, True, False)
+                    elif stream_event.kind == "reasoning" and stream_event.text:
+                        wx.CallAfter(self._append_assistant_reasoning, stream_event.text)
+                    elif stream_event.kind == "sources" and stream_event.text:
+                        wx.CallAfter(self._append_assistant_sources, stream_event.text)
                     elif stream_event.kind == "text" and stream_event.text:
                         wx.CallAfter(self._append_assistant_text, stream_event.text)
             except Exception as exc:
@@ -1034,10 +1079,56 @@ class ChatPanel(wx.Panel):
     def _append_assistant_text(self, text: str) -> None:
         if self.closing:
             return
+        if self._reasoning_entry is not None and not self.assistant_buffer:
+            # The thinking was written under this turn's "Assistant:" heading,
+            # so the answer needs a heading of its own or the two run together
+            # in the text view as one paragraph.
+            self._append_history_text("\r\n\r\nAnswer:\r\n")
         self.assistant_buffer += text
         self._append_history_text(text)
         self._update_streaming_history_entry()
         self._queue_response_announcement(text)
+
+    def _append_assistant_reasoning(self, text: str) -> None:
+        """Collect the thinking that arrives ahead of, and between, the answer.
+
+        The thinking is kept apart from the answer rather than mixed into it.
+        It is usually longer than the answer and it is not the answer, so
+        reading it aloud as it streams would bury what was asked for; it goes
+        into its own History entry instead, where it can be arrowed to and read
+        deliberately, or skipped.
+
+        It is not saved with the conversation. Only the answer is a message,
+        and the thinking behind an old answer is not what History is for.
+        """
+        if self.closing:
+            return
+        self.assistant_reasoning += text
+        entry = self._reasoning_entry
+        if entry is None:
+            entry = Message(role="thinking", content="")
+            self._reasoning_entry = entry
+            self._insert_history_entry_before_response(entry)
+            self._append_history_text("Thinking:\r\n")
+            if self._response_announcements_allowed():
+                # Said once, when it starts. The words themselves are on the
+                # screen to be read; a running commentary on them is noise.
+                self._speak("Thinking")
+        entry.content = self.assistant_reasoning
+        self._append_history_text(text)
+        self._refresh_history_entry(entry)
+
+    def _append_assistant_sources(self, text: str) -> None:
+        """Add the pages a searching answer cited, at the end of the answer.
+
+        Written into the answer rather than beside it, because unlike the
+        thinking these are part of it: they are what it rests on, and they have
+        to still be there when the conversation is reopened.
+        """
+        if self.closing:
+            return
+        separator = "\n\n" if self.assistant_buffer.strip() else ""
+        self._append_assistant_text(f"{separator}{text}")
 
     def _response_announcements_allowed(self) -> bool:
         return (

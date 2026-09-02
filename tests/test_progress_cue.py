@@ -143,29 +143,42 @@ def test_off_plays_no_working_cue(config_dir: Path, monkeypatch) -> None:
     for system in ("Windows", "Darwin", "Linux"):
         cues = _Recording(system=system)
         started: list[object] = []
-        # The looping path calls the platform sound API directly, so that is
-        # watched too -- not only the one-shot player and the periodic timer.
+        # Every closure below takes `started` as a default argument so it binds
+        # THIS iteration's list. A closure that reads the loop variable instead
+        # would, by the time it runs, be appending to whichever list the name
+        # last pointed at — the assertions would then be made about the wrong
+        # platform's recording. ruff's B023 catches this; the version pinned
+        # before this merge did not have the rule enabled.
         monkeypatch.setattr(
-            blindpilot_app.Earcons, "_start_periodic",
-            lambda _self, seconds: started.append(("periodic", seconds)),
+            blindpilot_app.Earcons,
+            "_start_periodic",
+            lambda _self, seconds, started=started: started.append(("periodic", seconds)),
         )
-        def _play_sound(sound, flags):
+
+        def _play_sound(sound, flags, started=started):
             # PlaySound(None, SND_PURGE) is how a cue is SILENCED, which
             # start_progress does first. Only an actual sound counts as played.
             if sound is not None:
                 started.append(("winsound", sound))
 
         monkeypatch.setitem(
-            sys.modules, "winsound",
+            sys.modules,
+            "winsound",
             types.SimpleNamespace(
                 PlaySound=_play_sound,
-                SND_FILENAME=1, SND_ASYNC=2, SND_LOOP=8, SND_PURGE=0,
+                SND_FILENAME=1,
+                SND_ASYNC=2,
+                SND_LOOP=8,
+                SND_PURGE=0,
             ),
         )
         monkeypatch.setattr(cues, "_unix_player", lambda: ["would-play"])
         monkeypatch.setattr(
-            blindpilot_app.threading, "Thread",
-            lambda *a, **k: started.append(("thread", k.get("target"))) or _NullThread(),
+            blindpilot_app.threading,
+            "Thread",
+            lambda *a, started=started, **k: (
+                started.append(("thread", k.get("target"))) or _NullThread()
+            ),
         )
 
         cues.start_progress()
@@ -252,14 +265,19 @@ def test_the_send_and_received_cues_survive_switching_the_cue_off(
 
 def _purge_watching_winsound(monkeypatch, log: list) -> None:
     """Install a winsound whose every call is recorded, purges included."""
+
     def _play_sound(sound, flags):
         log.append(("purge",) if sound is None else ("play", sound))
 
     monkeypatch.setitem(
-        sys.modules, "winsound",
+        sys.modules,
+        "winsound",
         types.SimpleNamespace(
             PlaySound=_play_sound,
-            SND_FILENAME=1, SND_ASYNC=2, SND_LOOP=8, SND_PURGE=0,
+            SND_FILENAME=1,
+            SND_ASYNC=2,
+            SND_LOOP=8,
+            SND_PURGE=0,
         ),
     )
 
@@ -287,9 +305,9 @@ def test_ending_a_turn_does_not_purge_the_received_cue(config_dir: Path, monkeyp
     cues._system = "Windows"
     cues.received, cues.in_progress, cues.send = "received.wav", "in-progress.wav", "send.wav"
 
-    cues.start_progress()      # off: nothing to play, nothing to stop
-    cues.play_received()       # the answer arrived
-    cues.stop_progress()       # the worker finished, a moment later
+    cues.start_progress()  # off: nothing to play, nothing to stop
+    cues.play_received()  # the answer arrived
+    cues.stop_progress()  # the worker finished, a moment later
 
     assert ("play", "received.wav") in calls, calls
     # Nothing of ours is playing in this mode, so no purge is warranted at any
@@ -334,9 +352,7 @@ def test_a_working_cue_is_still_silenced_when_the_answer_arrives(
     assert calls == [], f"the finished turn purged again: {calls}"
 
 
-def test_a_periodic_cue_is_silenced_when_the_answer_arrives(
-    config_dir: Path, monkeypatch
-) -> None:
+def test_a_periodic_cue_is_silenced_when_the_answer_arrives(config_dir: Path, monkeypatch) -> None:
     """The periodic mode plays through the one-shot player, and still needs the
     purge: its cue may be sounding at the moment the answer arrives."""
     settings = blindpilot_app._Settings()
@@ -344,9 +360,7 @@ def test_a_periodic_cue_is_silenced_when_the_answer_arrives(
     monkeypatch.setattr(blindpilot_app, "SETTINGS", settings)
     calls: list = []
     _purge_watching_winsound(monkeypatch, calls)
-    monkeypatch.setattr(
-        blindpilot_app.threading, "Thread", lambda *a, **k: _NullThread()
-    )
+    monkeypatch.setattr(blindpilot_app.threading, "Thread", lambda *a, **k: _NullThread())
 
     cues = blindpilot_app.Earcons("/nonexistent")
     cues._system = "Windows"

@@ -134,6 +134,14 @@ class OpenRouterProvider(ProtocolMixin):
             request_body["temperature"] = settings.temperature
         if settings.max_output_tokens is not None:
             request_body["max_tokens"] = settings.max_output_tokens
+        # A batch request body is a chat completion body, so a conversation's
+        # thinking and tools carry into a batch model unchanged.
+        if settings.reasoning:
+            request_body["reasoning"] = settings.reasoning
+        if settings.tools:
+            request_body["tools"] = settings.tools
+        if settings.plugins:
+            request_body["plugins"] = settings.plugins
 
         # OpenRouter parses this body as it arrives and rejects it unless
         # "endpoint" and "model" are read before "requests", so the key order

@@ -100,7 +100,9 @@ def test_the_upload_carries_the_bare_name_not_the_client_path(tmp_path):
     worker = HermesWorker(
         "read it", None, ".", "default", attachments=[str(sample)], **_callbacks()
     )
-    worker._transport = _FakeTransport([_attach_reply(101, "/home/u/.hermes/attachments/stacje.xlsx")])
+    worker._transport = _FakeTransport(
+        [_attach_reply(101, "/home/u/.hermes/attachments/stacje.xlsx")]
+    )
     worker._request_id = 100
     worker._live_session = "live-1"
 
@@ -296,9 +298,7 @@ def test_a_missing_file_is_refused_by_name_before_the_turn_starts(tmp_path):
     callbacks = _callbacks()
     callbacks["on_failed"] = failed.append
     missing = tmp_path / "nie_ma.txt"
-    worker = HermesWorker(
-        "q", None, ".", "default", attachments=[str(missing)], **callbacks
-    )
+    worker = HermesWorker("q", None, ".", "default", attachments=[str(missing)], **callbacks)
     worker._transport = _FakeTransport()
     worker._request_id = 100
     worker._live_session = "live-1"
@@ -381,7 +381,9 @@ def test_an_accepted_upload_with_no_path_is_treated_as_a_failure(tmp_path):
     sample = tmp_path / "a.txt"
     sample.write_bytes(b"x")
     worker = HermesWorker("q", None, ".", "default", attachments=[str(sample)], **callbacks)
-    worker._transport = _FakeTransport([{"jsonrpc": "2.0", "id": 101, "result": {"attached": True}}])
+    worker._transport = _FakeTransport(
+        [{"jsonrpc": "2.0", "id": 101, "result": {"attached": True}}]
+    )
     worker._request_id = 100
     worker._live_session = "live-1"
 
@@ -517,4 +519,3 @@ def test_a_turn_with_no_files_is_given_no_attachments_argument():
 
     assert "attachments" not in extra
     assert "held" in extra
-

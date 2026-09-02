@@ -12,30 +12,78 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 ## Features
 
 - Native wxPython controls throughout, so NVDA, JAWS, and VoiceOver read the app rather than interpreting a terminal.
-- Switches between Agent and Chat from a named Mode combo box at the top of the same window.
-- Chats directly through OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, OpenCode Go, or a custom OpenAI-compatible service, with secure API-key storage, model discovery, profiles, streaming history, attachments, editing, and response regeneration.
-- Runs Claude Code, Codex, FreeBuff, opencode, and Hermes, switchable from the File menu and remembered between launches.
+- Runs Claude Code, Codex, FreeBuff, opencode, and Hermes, switchable from the Model menu and remembered between launches.
+- Switches between Agent and Chat from a named Mode combo box at the top of the window.
+- Chats directly through OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, OpenCode Go, or any OpenAI-compatible service, with keys in the OS credential store.
 - Drives a Hermes on another computer over the network, so a server elsewhere can be worked with from the desktop.
+- Reopens any conversation a Hermes knows, including one running right now, from Hermes Conversations (Ctrl+G) - and joins that running turn as it happens.
 - Segments every answer into navigable rows: one per heading, paragraph, list item, quote, code block, thought, tool action, and tool result.
 - Reads answers aloud as they arrive, or stays quiet until the whole answer is ready.
 - Reopens past conversations from any backend, titled by the message that started them, and carries on where they left off.
 - Compacts a long conversation in place so the backend has room to keep going.
-- Runs several project sessions at once, each in its own tab named after the conversation in it, with its own folder, model, and permission mode. **Ctrl+Tab** moves between them.
-- Runs every backend fully automatic by default: nothing stops mid-task to ask permission, because a question nobody is watching for is a task that never finishes.
-- Answers the questions a backend stops to ask. All four can pause a turn to put a multiple-choice question to you; BlindPilot opens a dialog with one radio button per answer, checkboxes where several are allowed, and an "Other" choice that opens a box to type your own answer in.
-- Steers a task while it is still running, or stops it outright and keeps what it produced.
+- Runs several project sessions at once, each in its own tab, with its own folder, model, and permission mode.
+- Runs every backend fully automatic by default. Nothing stops mid-task to ask permission.
+- Answers the questions a backend stops to ask, in one dialog: radio buttons per answer, checkboxes where several are allowed, and an Other box to type your own.
+- Steers a task while it is still running, or stops it and keeps what it produced.
 - Attaches files and pasted clipboard images as explicit prompt paths.
-- Searches responses, jumps between them, and copies a code block, a whole response, or the whole conversation.
+- Searches responses, jumps between them, and copies a code block, a response, or the whole conversation.
 - Picks the model and reasoning effort from whatever the installed CLI actually reports.
-- Marks sent, working, and received with optional earcons, which can be turned off from the Options menu. The working cue can be left continuous, played every few seconds, or switched off (**Options → Working sound**).
-- Installs, updates, adds to PATH, and signs into any of the backends from an accessible wizard.
+- Marks sent, working, received, and failed with optional earcons, switchable together or one at a time.
+- Speaks every step of a run, or just the message, the answer and anything important, with the steps still in the list.
+- Installs, updates, adds to PATH, and signs into any of the five backends from an accessible wizard.
+- Writes a rotating log of what it did, and a separate crash log, with no prompt or answer text in either.
 - Updates itself from GitHub Releases after verifying the published SHA-256.
+
+## Menus
+
+Every action is in the menu bar. Only moving focus is chord-only: **Ctrl+L** to the prompt, **Ctrl+1** to **Ctrl+9** to a tab.
+
+**File** — New Session (**Ctrl+T**), Recent Conversations (**Ctrl+H**), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (**Ctrl+W**), Quit (**Ctrl+Q**).
+
+**Conversation** — Stop Task (**Ctrl+.**), Attach Files (**Ctrl+Shift+A**), Slash Command (**Ctrl+/**), Compact Conversation (**Ctrl+Shift+K**), Start New Conversation (**Ctrl+Shift+N**), Find in Responses (**Ctrl+F**), Jump to Latest Response (**Ctrl+R**).
+
+**Model** — Backend (one radio item per CLI), Model and Effort (**Ctrl+M**), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Manage Backends, Connect a Provider.
+
+**Options** — Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Silent until the response mode.
+
+**Chat** — Accounts, Conversation profiles, Refresh models, History view, Diagnostics. Greyed out until you switch the Mode combo box to Chat.
+
+**Help** — Check for Updates, Check for updates at startup, Open Log Folder, About BlindPilot.
+
+Backend, Permission Mode and Narration are radio items because the choices are exclusive, and that is what a screen reader says about them. Compact Conversation and Connect a Provider grey out for a backend that has no equivalent, rather than being offered and then refused.
+
+**Narration** decides how much of a run is spoken. *Follow everything* is the default and speaks every tool call, result and subagent line in order. *Keep up* speaks your message, the answer, and anything BlindPilot says for itself — why a run is waiting, how it ended — and leaves the steps in the list, where the review cursor still reaches them. Nothing is lost in Keep up, only unspoken. The backlog a fan-out creates sits in the screen reader's own queue, which BlindPilot cannot measure or shorten, so this is a choice offered rather than a cleverness applied.
+
+## Keyboard
+
+- **Ctrl+L** focus the prompt, **Ctrl+T** open a session, **Ctrl+W** close it.
+- **Ctrl+H** reopen a past conversation.
+- **Ctrl+G** list the conversations Hermes knows, and join one that is running.
+- **Ctrl+Shift+K** compact this conversation, **Ctrl+Shift+N** start a fresh one.
+- **Ctrl+F** search responses, **Ctrl+R** jump to the latest.
+- **Ctrl+M** choose the model and reasoning effort for this conversation.
+- **Ctrl+/** slash commands, **Ctrl+.** stop the running task.
+- **Ctrl+Shift+A** attach files, **Ctrl+Shift+M** cycle permission modes.
+- **Ctrl+Tab** and **Ctrl+Shift+Tab** move between session tabs, as do **Ctrl+Shift+]** and
+  **Ctrl+Shift+[**; **Ctrl+1** to **Ctrl+9** jump straight to one.
+- **Up** from the prompt's first line enters the newest response. At either end,
+  arrow keys stay in the responses; press **Tab** to move to the prompt.
+
+On macOS the same accelerators map to Command where appropriate.
 
 ## Chat mode
 
-Choose **Chat** in the **Mode** combo box. Use **Chat → Accounts** to add a provider and API key, then choose **Chat → Refresh models** and select a model. **Chat → Conversation profiles** can supply a system prompt, default account and model, temperature, token limit, and streaming preference. **Chat → History view** switches between a native list and a read-only edit field; list items can be copied or edited from their context menu. Provider logs are under **Chat → Diagnostics**.
+Chat talks to a provider's API directly. No CLI, no agent, no file access.
 
-OpenRouter accounts additionally support multiple file attachments, cache-aware regeneration, and model ids ending in `:batch`. Attachments are stored with the conversation. Chat configuration lives in `%APPDATA%\BlindPilot\chat.sqlite3` on Windows and alongside BlindPilot's other configuration elsewhere; API keys use the operating system credential store. The first time Chat mode opens, BlindPilot imports an existing AccessibleAI database and its saved keys when they are present, without modifying the original database.
+Choose **Chat** in the Mode combo box, add a provider and key under **Chat → Accounts**, then **Chat → Refresh models** and pick one. **Conversation profiles** hold a system prompt, default account and model, temperature, token limit, and streaming preference. **History view** switches between a native list and a read-only edit field. Provider logs are under **Chat → Diagnostics**.
+
+OpenRouter accounts get more: multiple attachments, cache-aware regeneration, model ids ending in `:batch`, OpenRouter's own tools, and its thinking. Both of the last two are set per conversation in Conversation profiles.
+
+**OpenRouter tools** lists every tool OpenRouter runs itself — web search, web fetch, date and time, image generation, apply patch, shell, bash, fusion, advisor, subagent, tool search, model search. Tick the ones a conversation may use. OpenRouter executes them, so nothing runs on your computer and nothing stops to ask. Each call is spoken as it happens and left in History, and answers that cite pages get a numbered **Sources** list.
+
+**Thinking effort** sets how long a reasoning model thinks, from minimal to maximum, with an optional token budget. **Send the thinking back** decides whether the words come back at all; off still lets the model think. Thinking arrives as its own History entry with a line saying how long it is, so arrowing past it does not read the whole thing. **Read attached PDFs with** turns an attached PDF into text any model can read.
+
+Attachments are stored with the conversation. Chat data lives in `chat.sqlite3` beside the config; keys use the OS credential store. An existing AccessibleAI database and its keys are imported once, and the original is never modified.
 
 ## Backends
 
@@ -43,15 +91,15 @@ OpenRouter accounts additionally support multiple file attachments, cache-aware 
 |---|---|---|---|---|---|---|
 | Claude Code | Streaming JSON CLI | Yes | Yes | Yes | Yes | Yes |
 | Codex | Official app-server protocol | Yes | Yes, including reasoning effort | Yes | Yes | Yes |
-| FreeBuff | Pseudo-terminal adapter | Yes | Yes; DeepSeek V4 Pro by default | Managed by FreeBuff | No | Yes |
+| FreeBuff | Pseudo-terminal adapter | Yes | Yes; GLM 5.3 Flash by default | Managed by FreeBuff | No | Yes |
 | opencode | Its own headless HTTP server | Yes | Yes, including per-model reasoning variants | Yes | Yes | Yes |
 | Hermes | Gateway JSON-RPC, local pipe or network | Yes | Yes | Yes | Yes | No |
 
-Four of the backends can stop a turn to ask you a multiple-choice question, and each asks in its own way: Claude Code sends its AskUserQuestion tool through the permission channel of the stream it is already writing, Codex sends a `request_user_input` request over the app-server protocol, opencode publishes a `question.asked` event, and FreeBuff draws its `ask_user` tool onto its terminal. All four end up in the same dialog, and the answer goes back the way that backend expects it. A question left unanswered is declined rather than ignored, because a turn waiting on an answer that is never coming sounds exactly like a model that has stopped thinking. Hermes' gateway protocol has no such request, so it never pauses this way.
+Four of the five backends can stop a turn to ask a multiple-choice question, and each asks differently: Claude Code sends its AskUserQuestion tool through the permission channel, Codex sends `request_user_input` over the app-server protocol, opencode publishes a `question.asked` event, FreeBuff draws its `ask_user` prompt as a text menu. One accessible dialog answers all four. Hermes' gateway protocol has no such request, so its turns never pause to ask.
 
-FreeBuff ships no JSON or headless API, so BlindPilot runs its terminal interface in a hidden pseudo-terminal, reads the answer off its screen a finished sentence at a time, and captures its chat id so the conversation can be resumed. Terminal redraws and advertisements are filtered out before anything is spoken. Its permission picker and Compact Conversation are disabled because the FreeBuff CLI has no equivalent.
+FreeBuff ships no JSON or headless API, so BlindPilot runs its terminal interface in a hidden pseudo-terminal, reads the answer off its screen a sentence at a time, and captures its chat id to resume. Redraws and advertisements are filtered before anything is spoken. Its permission picker and Compact Conversation are disabled because the CLI has no equivalent. FreeBuff renames and drops models between releases, so the default is a preference: GLM 5.3 Flash when it is on offer, FreeBuff's own choice when it is not.
 
-opencode is driven through the same headless server its own terminal interface uses. BlindPilot starts one, shared by every tab, on the loopback interface behind a password generated for the run, and reads the turn off its event stream. That is what gives opencode every feature the other backends have — streaming answers, steering a running turn, stopping one, permission modes, compaction, resuming a past conversation — plus `/connect` and a model picker covering every provider it can reach. Past conversations come out of opencode's own SQLite database, read-only.
+opencode is driven through the same headless server its own terminal interface uses. BlindPilot starts one, shared by every tab, on loopback behind a password generated for the run. That is what gives opencode everything the others have, plus `/connect` and a model picker covering every provider it reaches. Past conversations come out of opencode's own SQLite database, read-only.
 
 Hermes speaks its gateway JSON-RPC, which runs over both a local pipe and a network socket — so a Hermes on another computer can be driven from the desktop without a terminal (**Options → Remote Hermes**). Its answers are streamed a finished sentence at a time, the way FreeBuff's are, so a long turn is read while it is still being written. One connection is kept for the whole conversation rather than opened per message, and it is read continuously: a Hermes bound to a public address pings every twenty seconds and closes a connection that does not answer. Its reasoning channel carries a terminal spinner rather than the model's reasoning, so that is filtered out and the real reasoning shown instead. Hermes exposes no per-turn reasoning effort on this protocol, so that picker stays empty.
 
@@ -74,11 +122,13 @@ For a version-by-version history, see the [changelog](CHANGELOG.md).
 
 Download `BlindPilot-macOS-arm64.zip` for Apple Silicon or `BlindPilot-macOS-x64.zip` for Intel. The macOS builds are ad-hoc signed but not notarized, so first launch may need approval in System Settings under Privacy & Security.
 
-Settings live in `%APPDATA%\BlindPilot\config.json` on Windows and `~/.config/blindpilot/config.json` elsewhere. Chat data is stored in `chat.sqlite3` in the same folder. An existing Claude Code Reader configuration is imported once and never modified.
+Settings live in `%APPDATA%\BlindPilot\config.json` on Windows and `~/.config/blindpilot/config.json` elsewhere. An existing Claude Code Reader configuration is imported once and never modified.
 
 ## Set up a backend
 
-BlindPilot's first-run wizard and **File → Manage Backends** can find, install, update, and sign into any of the four. Claude Code uses its official native installer. For Codex, FreeBuff, and opencode, BlindPilot installs a current Node.js LTS for the user automatically when npm is missing, installs the CLI into a writable per-user folder, adds it to PATH, and verifies that the CLI starts. FreeBuff's verification also downloads its native binary before setup continues. No administrator rights are required. A failed backend remains isolated from the others. To do it by hand:
+The first-run wizard and **Model → Manage Backends** find, install, update, and sign into any of the four. Claude Code uses its official native installer. For Codex, FreeBuff, and opencode, BlindPilot installs a current Node.js LTS when npm is missing, installs the CLI into a writable per-user folder, adds it to PATH, and verifies that it starts. No administrator rights are required, and a failed backend stays isolated from the others.
+
+To do it by hand:
 
 ```powershell
 # Claude Code
@@ -102,9 +152,11 @@ hermes status     # shows the provider and model it will use
 hermes model      # pick one, if none is set yet
 ```
 
-**Sign In** does the same thing from inside BlindPilot, with no terminal. It runs the backend's own sign-in, reads the address out of its output, speaks it, and makes sure it reaches your default browser — the CLI opens it where it can, BlindPilot opens it where it will not, and **Open Sign-in Page** opens it again if the browser was closed or never arrived. When a provider hands the page back a code instead of finishing on its own, BlindPilot asks for the code and gives it to the CLI; that dialog closes by itself if the browser completes the sign-in first.
+**Sign In** does the same from inside BlindPilot, with no terminal. It runs the backend's own sign-in, reads the address out of its output, speaks it, and gets it to your default browser. **Open Sign-in Page** opens it again if the browser was closed or never arrived. When a provider hands back a code instead of finishing on its own, BlindPilot asks for the code and passes it to the CLI; that dialog closes itself if the browser finishes first.
 
-opencode reaches a model through a provider you connect to it, so BlindPilot carries opencode's `/connect` as a dialog of its own: type `/connect` in the prompt (or use **Connect a Provider** in the wizard) to pick from every provider opencode knows, give it an API key, or sign in through your browser. Nothing about that flow needs a terminal.
+opencode needs a provider connected to it, so BlindPilot carries its `/connect` as a dialog. Use **Model → Connect a Provider**, type `/connect` in the prompt, or use the wizard. Pick from every provider opencode knows, give it a key, or sign in through the browser. None of it needs a terminal.
+
+Type `/status` in the prompt to hear what the tab will do and whose account it will do it on: backend, model and effort, permission mode, folder, whether the next message continues this conversation or starts one, and who that backend is signed in as. All four answer it, even though none of them has a status command that works this way.
 
 Hermes is the exception to that browser flow: its setup is an interactive picker that asks which provider and model to use, so there is no address to open and nothing to watch for. **Sign In** opens a real terminal window for it and says to come back and choose **Already Signed In** once its questions are answered — running it hidden would fail instantly for want of a keyboard, and reporting that as a failed sign-in would be a lie.
 
@@ -145,28 +197,21 @@ Note that `websocket-client` is only needed for this path. The local backend
 uses a pipe, and a missing copy is reported as an installable package rather
 than stopping the app.
 
-## Keyboard
+## Logs
 
-- **Ctrl+L** focus the prompt, **Ctrl+T** open a session, **Ctrl+W** close it.
-- **Ctrl+H** reopen a past conversation.
-- **Ctrl+Shift+K** compact this conversation, **Ctrl+Shift+N** start a fresh one.
-- **Ctrl+F** search responses, **Ctrl+R** jump to the latest.
-- **Ctrl+/** slash commands, **Ctrl+.** stop the running task.
-- **Ctrl+Shift+A** attach files, **Ctrl+Shift+M** cycle permission modes.
-- **Ctrl+Tab** and **Ctrl+Shift+Tab** move between session tabs, as do **Ctrl+Shift+]** and
-  **Ctrl+Shift+[**; **Ctrl+1** to **Ctrl+9** jump straight to one.
-- **Up** from the prompt's first line enters the newest response. At either end,
-  arrow keys stay in the responses; press **Tab** to move to the prompt.
+BlindPilot writes a rotating `blindpilot.log`, plus `blindpilot-crash.log` for native crashes. **Help → Open Log Folder** opens the folder. It is `%LOCALAPPDATA%\BlindPilot\Logs` on Windows, `~/Library/Logs/BlindPilot` on macOS, and `$XDG_STATE_HOME/blindpilot` elsewhere — logs, not settings, so they do not roam between machines. Four files of a megabyte is the most they can occupy.
 
-On macOS the same accelerators map to Command where appropriate.
+INFO by default. Set `BLINDPILOT_LOG_LEVEL=DEBUG` for a bug report.
+
+Prompts, answers, file contents, and credentials are never written to either file, at any level, for any reason. What BlindPilot did is recorded; what you said is not. On Windows the crash log also collects first-chance COM exceptions from screen-reader interop, which are noise rather than crashes.
 
 ## Run from source (any OS)
 
-1. Install Python 3.10 or newer.
+1. Install Python 3.10 or newer. The release builds use 3.12.
 2. Install dependencies: `pip install -r requirements.txt`
 3. Launch it: `python blind_pilot.py`
 
-`blind_pilot.py` is the stable entry point and the implementation lives in `blindpilot_app.py`. `claude_reader.py` is a compatibility alias for anything written against the original application.
+`blind_pilot.py` is the stable entry point; the implementation is in `blindpilot_app.py`. `claude_reader.py` is a compatibility alias for anything written against the original application.
 
 ## Building
 

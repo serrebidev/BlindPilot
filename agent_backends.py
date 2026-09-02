@@ -28,7 +28,9 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Protocol, Sequence, cast
+from typing import Callable, NamedTuple, Optional, Protocol, Sequence, cast
+
+import diagnostics
 
 from markdown_rows import _SENTENCE_END_RE as _markdown_sentence_end_re
 from markdown_rows import complete_sentences
@@ -79,8 +81,11 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
     pid = getattr(proc, "pid", None)
     if platform.system() != "Windows" and isinstance(pid, int) and pid > 0:
         try:
-            if os.getpgid(pid) == pid:
-                os.killpg(pid, signal.SIGKILL)
+            # POSIX only, and the platform test above is a runtime condition
+            # the checker cannot read, so against a Windows target it reports
+            # all three of these as missing.
+            if os.getpgid(pid) == pid:  # type: ignore[attr-defined]
+                os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
         except OSError:
             pass
     kill = getattr(proc, "kill", None)
@@ -681,6 +686,146 @@ def _opencode_auth_ok() -> bool:
     return bool(os.environ.get("OPENCODE_API_KEY", "").strip())
 
 
+def _probe_backend(binary: str, args: list[str], timeout: int) -> tuple[Optional[int], str]:
+    """Run a short provider command. Returns (exit code, what it printed).
+
+    The exit code is ``None`` when the command could not be run at all, which
+    is a different answer from "it ran and said no" and is reported as such.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=subprocess_env(binary),
+            **no_window_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None, ""
+    # These CLIs draw their own output, so what comes back is wrapped in the
+    # escape sequences that would otherwise be spelled out letter by letter.
+    return proc.returncode, _strip_terminal_noise(proc.stdout) or _strip_terminal_noise(proc.stderr)
+
+
+def _claude_account_lines(code: Optional[int], text: str) -> list[str]:
+    """Read `claude auth status`, which answers in JSON."""
+    if code is None:
+        return ["Signed in: could not ask Claude Code"]
+    payload: object = None
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            payload = json.loads(text[start : end + 1])
+        except ValueError:
+            payload = None
+    if not isinstance(payload, dict):
+        # A future release that stops answering in JSON still has something to
+        # say, and its own words are better than a shrug.
+        return [f"Signed in: {'yes' if code == 0 else 'no'}"] + ([text] if text else [])
+    lines = [f"Signed in: {'yes' if payload.get('loggedIn') else 'no'}"]
+    for field, caption in (
+        ("email", "Account"),
+        ("subscriptionType", "Subscription"),
+        ("authMethod", "Signed in with"),
+        ("orgName", "Organisation"),
+    ):
+        value = str(payload.get(field) or "").strip()
+        if value:
+            lines.append(f"{caption}: {value}")
+    return lines
+
+
+def _codex_account_lines(code: Optional[int], text: str) -> list[str]:
+    """Read `codex login status`, which answers in one sentence."""
+    if code is None:
+        return ["Signed in: could not ask Codex"]
+    lines = [f"Signed in: {'yes' if code == 0 else 'no'}"]
+    if text:
+        lines.append(f"Account: {' '.join(text.split())}")
+    return lines
+
+
+def _freebuff_account_lines() -> list[str]:
+    """FreeBuff has no status command; its stored credentials are the answer."""
+    credential = Path.home() / ".config" / "manicode" / "credentials.json"
+    try:
+        payload = json.loads(credential.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["Signed in: no"]
+    account = payload.get("default") if isinstance(payload, dict) else None
+    if not isinstance(account, dict):
+        return ["Signed in: no"]
+    signed_in = all(
+        isinstance(account.get(field), str) and account[field].strip()
+        for field in ("authToken", "fingerprintId", "fingerprintHash")
+    )
+    lines = [f"Signed in: {'yes' if signed_in else 'no'}"]
+    for field, caption in (("name", "Account"), ("email", "Email")):
+        value = str(account.get(field) or "").strip()
+        if value:
+            lines.append(f"{caption}: {value}")
+    return lines
+
+
+def _opencode_account_lines() -> list[str]:
+    """opencode has no status command either; its stored credentials answer.
+
+    Read off disk rather than asked of its server, because /status should not
+    be the thing that starts one — a report on what is already set up has no
+    business spending ten seconds bringing a server to life to say so.
+    """
+    providers: list[str] = []
+    try:
+        payload = json.loads((_opencode_data_dir() / "auth.json").read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            providers = sorted(str(name) for name in payload)
+    except (OSError, ValueError):
+        providers = []
+    if os.environ.get("OPENCODE_API_KEY", "").strip():
+        providers.append("OPENCODE_API_KEY in the environment")
+    if not providers:
+        return ["Signed in: no", "Connected providers: none"]
+    return ["Signed in: yes", f"Connected providers: {', '.join(providers)}"]
+
+
+def backend_status(backend: str, timeout: int = 20) -> str:
+    """What the chosen backend can say about itself, as lines of plain text.
+
+    This is what ``/status`` reports, and every backend answers it. None of
+    them answers it themselves in the headless mode BlindPilot drives them in:
+    Claude Code's own ``/status`` is interactive-only and replies "/status
+    isn't available in this environment" when it is sent as a message, and
+    Codex, FreeBuff and opencode have no status command at all. So each one is
+    asked in the way it can actually answer — a CLI subcommand where there is
+    one, the credentials it stored where there is not — and the answers are
+    written the same way, so the report reads the same whichever backend is
+    selected.
+    """
+    backend = normalize_backend(backend)
+    lines = [f"Backend: {backend_label(backend)}"]
+    binary = find_backend_cli(backend)
+    if not binary:
+        lines.append("Command line: not installed")
+        return "\n".join(lines)
+    lines.append(f"Command line: {binary}")
+    _code, version = _probe_backend(binary, ["--version"], min(timeout, 20))
+    if version:
+        lines.append(f"Version: {version.splitlines()[0].strip()}")
+    if backend == BACKEND_CLAUDE:
+        lines.extend(_claude_account_lines(*_probe_backend(binary, ["auth", "status"], timeout)))
+    elif backend == BACKEND_CODEX:
+        lines.extend(_codex_account_lines(*_probe_backend(binary, ["login", "status"], timeout)))
+    elif backend == BACKEND_FREEBUFF:
+        lines.extend(_freebuff_account_lines())
+    else:
+        lines.extend(_opencode_account_lines())
+    return "\n".join(lines)
+
+
 # A macOS application launched from Finder or the Dock inherits launchd's PATH
 # — /usr/bin:/bin:/usr/sbin:/sbin — and nothing else. Every provider CLI
 # installed by npm or Homebrew is a `#!/usr/bin/env node` shim, so a child
@@ -722,6 +867,114 @@ def login_shell_path_dirs() -> list[str]:
         return list(dirs)
 
 
+class SettingsFile(NamedTuple):
+    """One file that configures one backend, and how to describe it.
+
+    `scope` and `note` are both spoken. They are not decoration: the two
+    project-level Claude Code files differ only in whether the repository
+    carries them, and opening the wrong one silently is how somebody's personal
+    settings end up committed to a repository that is not theirs.
+    """
+
+    backend: str
+    scope: str
+    path: Path
+    note: str
+
+    @property
+    def exists(self) -> bool:
+        try:
+            return self.path.is_file()
+        except OSError:
+            return False
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+def _hermes_home() -> Path:
+    """Where Hermes keeps its configuration, honouring its own override.
+
+    `HERMES_HOME` is how one machine runs several Hermes profiles side by side,
+    so reading it is the difference between naming the file somebody is actually
+    using and naming a default they abandoned.
+    """
+    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+
+
+def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
+    """Every settings file BlindPilot knows how to point somebody at.
+
+    Listing them creates nothing. These belong to the CLIs, which write their
+    own on first run, and a file invented at a path BlindPilot guessed would
+    be worse than no file: it would do nothing while looking like it did.
+
+    Locations are the ones each CLI documents. opencode also reads
+    `.opencode/opencode.json` inside a project, and Claude Code reads an
+    enterprise policy file above all of these that is not an individual's to
+    edit, so neither is offered here.
+    """
+    home = Path.home()
+    project = Path(cwd).expanduser() if cwd else None
+    entries = [
+        SettingsFile(
+            BACKEND_CLAUDE,
+            "global",
+            home / ".claude" / "settings.json",
+            "Applies to every project on this machine.",
+        ),
+        SettingsFile(
+            BACKEND_CODEX,
+            "global",
+            _codex_home() / "config.toml",
+            "Applies to every project. TOML rather than JSON.",
+        ),
+        SettingsFile(
+            BACKEND_FREEBUFF,
+            "global",
+            home / ".config" / "manicode" / "settings.json",
+            "Applies to every project. BlindPilot keeps your model choice here.",
+        ),
+        SettingsFile(
+            BACKEND_OPENCODE,
+            "global",
+            home / ".config" / "opencode" / "opencode.json",
+            "Applies to every project.",
+        ),
+        SettingsFile(
+            BACKEND_HERMES,
+            "global",
+            _hermes_home() / "config.yaml",
+            "Applies to every project. YAML rather than JSON, and it belongs to "
+            "the Hermes this backend talks to: a Hermes reached over the network "
+            "reads the file on that machine, not this one.",
+        ),
+    ]
+    if project is not None:
+        entries += [
+            SettingsFile(
+                BACKEND_CLAUDE,
+                "this folder",
+                project / ".claude" / "settings.json",
+                "Shared: committed to this repository, so anyone who has it gets these.",
+            ),
+            SettingsFile(
+                BACKEND_CLAUDE,
+                "this folder, personal",
+                project / ".claude" / "settings.local.json",
+                "Yours alone: normally ignored by git, so it stays on this machine.",
+            ),
+            SettingsFile(
+                BACKEND_OPENCODE,
+                "this folder",
+                project / "opencode.json",
+                "Applies in this folder, and can pin a model or turn providers off.",
+            ),
+        ]
+    return entries
+
+
 def subprocess_env(binary: str) -> dict[str, str]:
     """The environment every provider CLI must be started with.
 
@@ -743,6 +996,18 @@ def subprocess_env(binary: str) -> dict[str, str]:
             entries.append(entry)
             known.add(entry)
     env["PATH"] = os.pathsep.join(entries)
+    if platform.system() == "Windows":
+        # Every CLI is started with `cwd` set to the user's project folder, and
+        # CLIs shell out constantly - git, node, npm, sh. Windows has
+        # historically searched the current directory for those, and the
+        # project folder is usually a repository somebody cloned in order to
+        # ask an agent about it, not code they wrote. A `git.exe` committed to
+        # it should not be what runs when the agent asks for git.
+        #
+        # This is the documented way off that search path, read by
+        # NeedCurrentDirectoryForExePathW, and it is inherited - so it covers
+        # the CLI and everything the CLI goes on to start.
+        env["NoDefaultCurrentDirectoryInExePath"] = "1"
     return env
 
 
@@ -840,8 +1105,8 @@ def blindpilot_data_dir() -> Path:
     if platform.system() == "Windows":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "BlindPilot"
-    base = os.environ.get("XDG_DATA_HOME")
-    return (Path(base) if base else Path.home() / ".local" / "share") / "blindpilot"
+    data = os.environ.get("XDG_DATA_HOME")
+    return (Path(data) if data else Path.home() / ".local" / "share") / "blindpilot"
 
 
 def _freebuff_choice_path() -> Path:
@@ -1223,6 +1488,12 @@ def _codex_questions(raw: object) -> tuple[Question, ...]:
     return tuple(questions)
 
 
+# How long a failing Codex turn waits for the last line of stderr, which is
+# the one that says why. Long enough for a line already written to arrive,
+# short enough that a pipe which never closes cannot hold the turn open.
+_CODEX_LAST_WORDS_SECONDS = 1.0
+
+
 class CodexWorker(threading.Thread):
     """Run one Codex turn through the official app-server JSONL protocol."""
 
@@ -1274,6 +1545,7 @@ class CodexWorker(threading.Thread):
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
         self._stderr: list[str] = []
+        self._stderr_reader: Optional[threading.Thread] = None
         self._failed = False
 
     def accepting_input(self) -> bool:
@@ -1335,6 +1607,14 @@ class CodexWorker(threading.Thread):
         if self._failed:
             return
         self._failed = True
+        diagnostics.log_unfinished_turn(
+            "codex",
+            session_id=self._session_id or "(new)",
+            permission_mode=self._permission_mode,
+            model=self._model or "(default)",
+            cancelled=self._cancelled,
+            detail=message,
+        )
         self._on_failed(message)
 
     def run(self) -> None:
@@ -1395,7 +1675,10 @@ class CodexWorker(threading.Thread):
             return
 
         if self._proc.stderr:
-            threading.Thread(target=self._read_stderr, daemon=True).start()
+            self._stderr_reader = threading.Thread(
+                target=self._read_stderr, name="codex-stderr", daemon=True
+            )
+            self._stderr_reader.start()
 
         init_id = self._next_id()
         self._send(
@@ -1579,8 +1862,25 @@ class CodexWorker(threading.Thread):
                 return
 
         if not self._cancelled:
+            self._await_last_words()
             detail = "\n".join(self._stderr[-10:]).strip()
             self._fail(detail or "Codex app server closed before the turn completed")
+
+    def _await_last_words(self) -> None:
+        """Let the final line of stderr land before reporting why Codex died.
+
+        Reaching here means stdout hit EOF. stderr is a different pipe read by
+        a different thread, and the line worth having - the panic, the
+        unauthorized, the out of memory - is the last one written, which is
+        exactly the one still in flight. Everything earlier is already in the
+        list, so the race did not lose noise, it lost the reason, and it lost
+        it differently each time.
+
+        Bounded, because a pipe that never closes must not hold the turn open.
+        """
+        reader = self._stderr_reader
+        if reader is not None:
+            reader.join(timeout=_CODEX_LAST_WORDS_SECONDS)
 
     def _read_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:
@@ -1884,6 +2184,10 @@ _FREEBUFF_MAX_LAG_SECONDS = 0.4
 # message and an hour of silence with it. Two minutes because a first launch
 # downloads a 125MB FreeBuff and then unpacks it, and only the download half
 # draws a progress bar.
+# The longest a single FreeBuff turn is listened to. Reaching it is not the
+# turn finishing, and is reported as what it is - see the end of `_do_run`.
+_FREEBUFF_TURN_SECONDS = 60 * 60
+
 _FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
 
 # Sentence-ending punctuation, or the end of a paragraph, either of which is a
@@ -1937,8 +2241,15 @@ def _keyed(text: str, letters_only: bool = False) -> tuple[str, list[int]]:
     for index, character in enumerate(text):
         if character.isspace() or (letters_only and not character.isalnum()):
             continue
-        kept.append(character.casefold() if letters_only else character)
-        positions.append(index)
+        folded = character.casefold() if letters_only else character
+        kept.append(folded)
+        # One position per character of the *key*, not per character of the
+        # text. `casefold` is not length-preserving - German "ss" comes from a
+        # single letter, Turkish and the ligatures do the same - and a map with
+        # one entry per input character then runs short, so the index used to
+        # cut the answer pointed at the wrong letter or off the end entirely.
+        positions.extend([index] * len(folded))
+    # The sentinel, so an answer that was read out in full is still indexable.
     positions.append(len(text))
     return "".join(kept), positions
 
@@ -2513,6 +2824,14 @@ class FreebuffWorker(threading.Thread):
         if self._failed:
             return
         self._failed = True
+        diagnostics.log_unfinished_turn(
+            "freebuff",
+            session_id=self._session_id or "(new)",
+            permission_mode="n/a",
+            model=self._model or "(default)",
+            cancelled=self._cancelled,
+            detail=message,
+        )
         self._on_failed(message)
 
     def run(self) -> None:
@@ -2619,7 +2938,7 @@ class FreebuffWorker(threading.Thread):
         turn_started_at: Optional[float] = None
         next_heartbeat = float("inf")
         completion_seen_at: Optional[float] = None
-        deadline = time.monotonic() + 60 * 60
+        deadline = time.monotonic() + _FREEBUFF_TURN_SECONDS
 
         def refresh(wait: float) -> str:
             """Feed whatever the terminal has produced and re-read the screen.
@@ -2872,7 +3191,7 @@ class FreebuffWorker(threading.Thread):
 
             if sent and now >= next_heartbeat:
                 elapsed = max(1, int(now - (turn_started_at or now)))
-                self._on_activity("tool", f"FreeBuff is still working; {elapsed} seconds elapsed")
+                self._on_activity("notice", f"FreeBuff is still working; {elapsed} seconds elapsed")
                 next_heartbeat = now + 30
             # The screen is the only place the answer appears as it is written:
             # the chat file is not saved until the reply is finished. So the
@@ -2910,6 +3229,13 @@ class FreebuffWorker(threading.Thread):
         self._emit_screen_delta("assistant", spoken_answer, screen_response, whole=True)
         # The saved chat is the answer as FreeBuff wrote it, rather than as the
         # terminal laid it out, so it is what the transcript keeps.
+        # The loop ends either because FreeBuff finished - which breaks out of
+        # it - or because the hour ran out underneath a turn that was still
+        # going. Those were indistinguishable from here, so a turn cut off
+        # mid-sentence was delivered through the same `_on_complete` a finished
+        # one uses: announced as the answer, kept in the transcript as the
+        # answer, with nothing to suggest it was not the whole of it.
+        timed_out = not self._cancelled and time.monotonic() >= deadline
         response = structured_answer or _unwrap_screen_text(screen_response)
         if response:
             # An answer taller than the terminal scrolls its own beginning off
@@ -2918,7 +3244,20 @@ class FreebuffWorker(threading.Thread):
             tail = _unspoken_tail(self._narrated.get("assistant", ""), response)
             if tail:
                 self._on_activity("assistant", tail)
+            if timed_out:
+                # Kept, not discarded: an hour of work is worth having. Said
+                # first, so it is not mistaken for the end of the answer.
+                self._on_activity(
+                    "notice",
+                    "BlindPilot stopped listening to FreeBuff an hour after the message "
+                    "was sent. What follows is as far as it had got, not a finished answer.",
+                )
             self._on_complete(response)
+        elif timed_out:
+            self._fail(
+                "FreeBuff was still working an hour after the message was sent and had "
+                "produced no answer, so BlindPilot stopped waiting for it."
+            )
         else:
             self._fail("No response received from FreeBuff")
             return
@@ -3761,6 +4100,18 @@ _POISON_HISTORY_RE = re.compile(
 )
 
 
+def _opencode_entry_info(entry: dict) -> dict:
+    """The `info` block of a history entry, or the entry itself.
+
+    opencode nests message metadata under `info` in some shapes and inlines it
+    in others. Written inline as a conditional this called `.get` twice, so the
+    guard tested one value and the code then used another - harmless in
+    practice, and exactly the shape that stops being harmless after an edit.
+    """
+    found = entry.get("info")
+    return found if isinstance(found, dict) else entry
+
+
 def _poison_history_error(text: str) -> bool:
     """Whether a backend error says the stored history itself was refused."""
     return bool(_POISON_HISTORY_RE.search(text or ""))
@@ -3946,6 +4297,14 @@ class OpencodeWorker(threading.Thread):
     def _fail(self, message: str) -> None:
         if not self._settled.is_set():
             self._settled.set()
+            diagnostics.log_unfinished_turn(
+                "opencode",
+                session_id=self._session_id or "(new)",
+                permission_mode=self._permission_mode,
+                model=self._model or "(default)",
+                cancelled=self._cancelled,
+                detail=message,
+            )
             self._on_failed(message)
 
     def _on_session_error(self, properties: dict) -> bool:
@@ -4010,8 +4369,9 @@ class OpencodeWorker(threading.Thread):
         ]
 
         def stamp(entry: dict) -> float:
-            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
-            time = info.get("time") if isinstance(info.get("time"), dict) else {}
+            info = _opencode_entry_info(entry)
+            stamped = info.get("time")
+            time = stamped if isinstance(stamped, dict) else {}
             try:
                 return float(time.get("created") or info.get("time_created") or 0)
             except (TypeError, ValueError):
@@ -4020,17 +4380,19 @@ class OpencodeWorker(threading.Thread):
         cutoff_id = ""
         cutoff_stamp = -1.0
         for entry in entries:
-            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
+            info = _opencode_entry_info(entry)
             if str(info.get("role") or "") != "assistant":
                 continue
             message_id = str(info.get("id") or "")
             if not message_id:
                 continue
-            parts = entry.get("parts") if isinstance(entry.get("parts"), list) else []
+            listed = entry.get("parts")
+            parts = listed if isinstance(listed, list) else []
             for part in parts:
                 if not isinstance(part, dict) or str(part.get("tool") or "") != "question":
                     continue
-                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                reported = part.get("state")
+                state = reported if isinstance(reported, dict) else {}
                 if str(state.get("status") or "") != "completed":
                     continue
                 when = stamp(entry)
@@ -4046,8 +4408,7 @@ class OpencodeWorker(threading.Thread):
             index = next(
                 position
                 for position, entry in enumerate(entries)
-                if (entry.get("info") if isinstance(entry.get("info"), dict) else entry).get("id")
-                == cutoff_id
+                if _opencode_entry_info(entry).get("id") == cutoff_id
             )
         except StopIteration:
             return False
@@ -4058,7 +4419,7 @@ class OpencodeWorker(threading.Thread):
         ]
         removed = False
         for entry in doomed:
-            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
+            info = _opencode_entry_info(entry)
             message_id = str(info.get("id") or "")
             if not message_id:
                 continue
@@ -4410,7 +4771,7 @@ class OpencodeWorker(threading.Thread):
                 problem = opencode_error_text(exc, f"opencode would not accept {what}")
         # Saying so matters: unanswered, the turn waits for an answer that is
         # never coming, and silence would look like the model thinking.
-        self._on_activity("tool", f"Could not answer {what}: {problem}")
+        self._on_activity("notice", f"Could not answer {what}: {problem}")
         return False
 
     def _answer_permission(self, properties: dict) -> None:
@@ -4490,7 +4851,7 @@ class OpencodeWorker(threading.Thread):
 class AgentWorker(Protocol):
     """The part of a backend's worker that the window actually drives.
 
-    All three workers are threads, but a thread is not what the window wants
+    All four workers are threads, but a thread is not what the window wants
     from them: it wants to start a turn, ask whether it is still running, stop
     it, and wait for it to let go. Saying that here is what lets the window
     hold whichever worker the backend chose without knowing which one it is —
@@ -4501,6 +4862,8 @@ class AgentWorker(Protocol):
     def start(self) -> None: ...
 
     def is_alive(self) -> bool: ...
+
+    def steer(self, text: str) -> bool: ...
 
     def join(self, timeout: Optional[float] = None) -> None: ...
 

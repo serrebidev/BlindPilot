@@ -23,6 +23,7 @@ from agent_backends import (
     OpencodeWorker,
     backend_auth_ok,
     backend_label,
+    backend_status,
     codex_model_options,
     freebuff_model_options,
     normalize_backend,
@@ -538,6 +539,67 @@ def test_freebuff_structured_chat_reports_progress_and_authoritative_completion(
     assert agents == [("tool-1", "basher", "complete")]
     assert agent_backends._freebuff_run_status(chat, offset) == "complete"
     assert agent_backends._freebuff_run_status(chat, log.stat().st_size) == ""
+
+
+def test_freebuff_finished_turn_can_still_hold_an_agent_marked_running(monkeypatch, tmp_path):
+    """A completed FreeBuff turn can carry an agent block that says "running".
+
+    FreeBuff writes an agent block the moment the spawn tool is called, keyed
+    `<spawnToolCallId>-<index>` and carrying no blocks of its own, and replaces
+    it once the agent actually reports. A spawn that never produced anything
+    leaves that placeholder behind at "running" for good, in the newest answer
+    message - which is the one `_freebuff_chat_snapshot` reads and the one
+    `agent_states` is built from.
+
+    This is taken from a real chat on disk, not imagined: the turn finished, the
+    answer was written, "Main prompt finished" was the last line of the log, and
+    the placeholder still said running. So the end of a FreeBuff turn must not
+    be made conditional on every agent reaching "complete" - the run status is
+    the authority, and waiting on the agents would hang this turn until the
+    hour-long deadline rather than ending it early.
+    """
+    chat = tmp_path / ".config" / "manicode" / "projects" / "project" / "chats" / "session-id"
+    chat.mkdir(parents=True)
+    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda cls: tmp_path))
+    messages = [
+        {
+            "id": "ai-1",
+            "variant": "ai",
+            "blocks": [
+                {
+                    "type": "agent",
+                    "agentId": "7ObcZKxPdBw",
+                    "agentName": "basher",
+                    "spawnToolCallId": "7OZig1YvntU",
+                    "status": "complete",
+                    "blocks": [{"type": "text", "content": "done"}],
+                },
+                {
+                    # Spawned, never reported, never replaced.
+                    "type": "agent",
+                    "agentId": "7ObcAqmVj38-0",
+                    "agentName": "basher",
+                    "spawnToolCallId": "7ObcAqmVj38",
+                    "status": "running",
+                    "blocks": [],
+                },
+                {"type": "text", "textType": "text", "content": "Both numbers are 15 and 56."},
+            ],
+        },
+    ]
+    (chat / "chat-messages.json").write_text(json.dumps(messages), encoding="utf-8")
+    (chat / "log.jsonl").write_text(
+        '{"msg":"End agent basher step 4"}\n{"msg":"Main prompt finished"}\n',
+        encoding="utf-8",
+    )
+
+    _answer_id, _thinking, answer, agents = agent_backends._freebuff_chat_snapshot(chat)
+
+    assert answer == "Both numbers are 15 and 56."
+    assert ("7ObcAqmVj38-0", "basher", "running") in agents
+    # The two coexist. The run is over and an agent still says it is going.
+    assert agent_backends._freebuff_run_status(chat) == "complete"
+    assert [agent for agent in agents if agent[2] not in ("complete", "completed")]
 
 
 def test_freebuff_structured_chat_reports_interruption(tmp_path):
@@ -2091,3 +2153,193 @@ def test_stopping_a_task_does_not_block_the_window(monkeypatch):
 
     agent_backends.end_process_group(Child(), timeout=2)
     assert waited == [2]
+
+
+# ----- /status -----
+#
+# The status command is offered for every backend, because not one of them
+# answers it in the headless mode BlindPilot drives them in: Claude Code's own
+# /status is interactive-only, and Codex, FreeBuff and opencode have no status
+# command at all. Each is asked in the way it can answer, and the answers are
+# written the same way, so the report reads the same whichever is selected.
+
+
+def _status_lines(report: str) -> dict[str, str]:
+    return {
+        caption.strip(): value.strip()
+        for caption, _sep, value in (line.partition(":") for line in report.splitlines())
+        if caption.strip()
+    }
+
+
+def test_status_says_so_when_the_backend_is_not_installed(monkeypatch):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: None)
+    for backend in agent_backends.BACKEND_IDS:
+        fields = _status_lines(backend_status(backend))
+        assert fields["Backend"] == backend_label(backend)
+        assert fields["Command line"] == "not installed"
+
+
+def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path):
+    """Whichever backend is selected, the report answers the same question."""
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "cli")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda _binary, args, _timeout: (
+            (0, "9.9.9")
+            if args == ["--version"]
+            else (0, '{"loggedIn": true}' if args[0] == "auth" else "Logged in using ChatGPT")
+        ),
+    )
+    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
+    credential = tmp_path / ".config" / "manicode" / "credentials.json"
+    credential.parent.mkdir(parents=True)
+    credential.write_text(
+        json.dumps({"default": {"authToken": "t", "fingerprintId": "i", "fingerprintHash": "h"}}),
+        encoding="utf-8",
+    )
+    data = tmp_path / "opencode-data"
+    data.mkdir()
+    (data / "auth.json").write_text(json.dumps({"anthropic": {"type": "api"}}), encoding="utf-8")
+    monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: data)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+
+    for backend in agent_backends.BACKEND_IDS:
+        fields = _status_lines(backend_status(backend))
+        assert fields["Backend"] == backend_label(backend)
+        assert fields["Command line"] == "cli"
+        assert fields["Version"] == "9.9.9"
+        assert fields["Signed in"] == "yes", backend
+
+
+def test_status_reads_the_account_out_of_claude_auth_status(monkeypatch):
+    """Claude Code's auth status answers in JSON, which is where the account is."""
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "claude")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda _binary, args, _timeout: (
+            (0, "2.1.257 (Claude Code)")
+            if args == ["--version"]
+            # Its own output arrives wrapped in the escape sequences it draws
+            # with, which a screen reader would otherwise spell out.
+            else (
+                0,
+                "\x1b[G"
+                + json.dumps(
+                    {
+                        "loggedIn": True,
+                        "authMethod": "claude.ai",
+                        "email": "person@example.com",
+                        "orgName": "Example",
+                        "subscriptionType": "pro",
+                    }
+                )
+                + "\x1b[2G",
+            )
+        ),
+    )
+    fields = _status_lines(backend_status(BACKEND_CLAUDE))
+    assert fields["Signed in"] == "yes"
+    assert fields["Account"] == "person@example.com"
+    assert fields["Subscription"] == "pro"
+    assert fields["Signed in with"] == "claude.ai"
+    assert fields["Organisation"] == "Example"
+
+
+def test_status_reports_a_signed_out_backend_rather_than_guessing(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "cli")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda _binary, args, _timeout: (
+            (0, "9.9.9") if args == ["--version"] else (1, '{"loggedIn": false}')
+        ),
+    )
+    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
+    empty = tmp_path / "opencode-empty"
+    empty.mkdir()
+    monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: empty)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+
+    for backend in agent_backends.BACKEND_IDS:
+        fields = _status_lines(backend_status(backend))
+        assert fields["Signed in"] == "no", backend
+    assert _status_lines(backend_status(BACKEND_OPENCODE))["Connected providers"] == "none"
+
+
+def test_status_keeps_a_providers_own_words_when_it_stops_answering_in_json(monkeypatch):
+    """A future Claude Code that drops the JSON still has something to say."""
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "claude")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda _binary, args, _timeout: (
+            (0, "9.9.9") if args == ["--version"] else (0, "Logged in as person@example.com")
+        ),
+    )
+    report = backend_status(BACKEND_CLAUDE)
+    assert "Signed in: yes" in report
+    assert "Logged in as person@example.com" in report
+
+
+def test_status_separates_a_no_from_a_provider_that_could_not_be_asked(monkeypatch):
+    """A CLI that will not run at all is a different answer from signed out."""
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "cli")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda _binary, args, _timeout: (0, "9.9.9") if args == ["--version"] else (None, ""),
+    )
+    assert "Signed in: could not ask Claude Code" in backend_status(BACKEND_CLAUDE)
+    assert "Signed in: could not ask Codex" in backend_status(BACKEND_CODEX)
+
+
+def test_status_names_the_opencode_providers_that_are_connected(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "opencode")
+    monkeypatch.setattr(
+        agent_backends, "_probe_backend", lambda _binary, _args, _timeout: (0, "1.18.25")
+    )
+    data = tmp_path / "opencode-data"
+    data.mkdir()
+    (data / "auth.json").write_text(
+        json.dumps({"opencode-go": {"type": "api"}, "anthropic": {"type": "oauth"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: data)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    fields = _status_lines(backend_status(BACKEND_OPENCODE))
+    assert fields["Connected providers"] == "anthropic, opencode-go"
+
+
+def test_status_reports_the_freebuff_account_from_its_stored_credentials(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
+    monkeypatch.setattr(
+        agent_backends, "_probe_backend", lambda _binary, _args, _timeout: (0, "0.0.163")
+    )
+    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
+    credential = tmp_path / ".config" / "manicode" / "credentials.json"
+    credential.parent.mkdir(parents=True)
+    credential.write_text(
+        json.dumps(
+            {
+                "default": {
+                    "name": "A Person",
+                    "email": "person@example.com",
+                    "authToken": "secret-token",
+                    "fingerprintId": "secret-id",
+                    "fingerprintHash": "secret-hash",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = backend_status(BACKEND_FREEBUFF)
+    fields = _status_lines(report)
+    assert fields["Signed in"] == "yes"
+    assert fields["Account"] == "A Person"
+    assert fields["Email"] == "person@example.com"
+    # The stored token is what the account is reached with. A report opened on
+    # a shared screen, or read out loud in a room, must not carry it.
+    assert "secret" not in report

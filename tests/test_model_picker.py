@@ -233,6 +233,11 @@ def _worker_command(**kwargs) -> list[str]:
     captured: list[list[str]] = []
 
     def fake_popen(cmd, **_k):
+        # The macOS login-shell PATH probe also goes through Popen; it is not
+        # the command line under test. It fails on its own, which is fine —
+        # the probe is best-effort.
+        if cmd and cmd[0] != "claude":
+            return
         captured.append(list(cmd))
         raise OSError("stop here — the command line is all we need")
 

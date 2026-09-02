@@ -785,6 +785,27 @@ class StdioTransport:
                     proc.kill()
                 except OSError:
                     pass
+        # Close the read pipes too, and only after the child is gone so the
+        # reader threads are not left reading a closed handle. Leaving them to
+        # the garbage collector raises ResourceWarning: unclosed file, which
+        # CI's `pytest -W error` turns into a failed build - and, being
+        # unraisable, it is reported against whichever test happened to be
+        # running when the collector ran, not the one that opened the pipe.
+        # (The same class of defect upstream fixed for its one-shot sound
+        # players by keeping them referenced until reaped.)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+        # The child is finished with; dropping the reference lets Popen's own
+        # finalizer see an already-waited process rather than a live one.
+        self._proc = None
+        with self._frames_ready:
+            self._closed = True
+            self._frames_ready.notify_all()
 
     def connected(self) -> bool:
         """Whether the local Hermes is still running and usable.

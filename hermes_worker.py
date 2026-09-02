@@ -45,6 +45,7 @@ _IDLE_LIMIT = 900.0
 # waiting for.
 _PROGRESS_NOTICE_SECONDS = 60.0
 
+
 # The clock the turn loop measures quiet against, as a module attribute so a
 # test can substitute one that advances without waiting. A wait of minutes has
 # to be exercised in milliseconds, and the loop reads real elapsed time rather
@@ -52,6 +53,7 @@ _PROGRESS_NOTICE_SECONDS = 60.0
 # there is nothing left to scale down except the clock itself.
 def _now() -> float:
     return time.monotonic()
+
 
 # How often the connection itself is checked while a turn waits. A held
 # connection can die between frames (a server restart, a laptop lid, a network
@@ -964,9 +966,7 @@ class HermesWorker(threading.Thread):
                 return None
             error = reply.get("error")
             if error:
-                self._on_failed(
-                    self._error_text(error, f"Hermes could not accept {display}")
-                )
+                self._on_failed(self._error_text(error, f"Hermes could not accept {display}"))
                 return None
             result = reply.get("result") or {}
             stored = str(result.get("path") or "")
