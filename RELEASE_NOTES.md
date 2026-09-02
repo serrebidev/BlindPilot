@@ -1,51 +1,42 @@
-# BlindPilot 0.14.0
+# BlindPilot 0.15.0
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-Nothing you hear changes in this release. What changed is the ground underneath the
-code: the types are now checked, and the checker found a contract that was wrong.
+Nothing you hear changes in this release. What changed is the test infrastructure
+underneath it: a hung test now fails in a minute instead of running out the clock, and the
+order is shuffled so one test cannot quietly depend on another having run first.
 
-## The types are checked, and the checker found a real defect
+## A hung test fails in a minute, not in six hours
 
-The type annotations were already in the code — the scattered `# type: ignore` comments
-said somebody once meant to run a checker, but nobody was, so nothing held them to it.
-Mypy now runs in CI, pinned like ruff. One runner is enough: `mypy.ini` pins
-`platform = win32` because this code carries both halves of every platform split behind
-runtime checks no checker can read, so unpinned the same tree reports 21 errors on
-Windows and 52 on Linux.
+There was no timeout of any kind, anywhere. GitHub's default job timeout is 360 minutes,
+so a deadlocked wait or a subprocess that never exits cost six hours of runner time and
+reported nothing useful at the end. That is not theoretical for this suite: it drives
+real subprocesses, pseudo-terminals and worker threads, and the code under test now
+includes a thirty-second shutdown wait and an hour-long FreeBuff deadline.
 
-There were 21 errors across 15,855 lines. One was a real defect:
+Two timeouts at two scales:
 
-**Steer was not part of the worker contract.** The window holds whichever backend's
-worker was chosen through a shared Protocol, so it can drive it without knowing which
-one it is. That Protocol promised `start`, `is_alive`, `join` and `cancel` — but not
-`steer`, which is called directly when you press Steer. All four workers happened to
-implement it, so nothing ever broke. A fifth that did not would have type-checked clean
-and failed the first time somebody pressed Steer. The call site used to reach for it
-with `getattr(worker, "steer")`, which is what hid the gap: written that way, neither a
-reader nor a checker could see the Protocol was short. That indirection is gone, `steer`
-is in the Protocol, and a test now holds every worker to the whole contract — it fails
-without the fix.
+- 60 seconds per test, against a suite whose slowest test takes about three.
+- 20 minutes per CI job, against one that finishes green in one to three.
 
-Two more errors were latent rather than broken — safe today, and both stopping being
-safe after an edit:
+The release workflow gets them too — it runs the same tests, takes about fifteen minutes
+with PyInstaller and Inno Setup, and could hang identically. A test now asserts that
+anything running pytest has a job timeout, and that test is how the release workflow's
+absence was noticed.
 
-- An npm install guarded on the argument list rather than on npm itself, so nothing
-  established the value it then passed on. Installing a backend that needs npm now says
-  so plainly when npm cannot be installed.
-- An opencode history helper called `entry.get("info")` twice, so the guard tested one
-  value and the code used another. That shape appeared five times; it is now one named
-  helper.
+## Shuffled ordering
 
-The rest were platform splits behind runtime checks no checker can read, variables
-reused for two different lookups, and one pre-existing `# type: ignore` that carried the
-wrong error code. Three ignored lines remain, each with the reason written beside it.
-82% of expressions are precisely typed even with wxPython untyped, because the third
-parties that ship no stubs are covered narrowly rather than by loosening anything else.
+Test-order coupling has already happened here twice in one day: a module-level flag
+left set between tests, and a test calling `main()` which started real logging for every
+test that ran after it, writing into the installed application's own log folder. The
+second only appeared in a full run, never in isolation — exactly the failure shuffling
+makes immediate. The seed is printed on every run, and `-p no:randomly` restores fixed
+order for bisecting.
 
-Not proposed and worth saying why: `--strict` is 161 errors, 77 of them bare
-`dict`/`list`, and pyright — the stronger checker — would need real checks suppressed to
-reach zero, because wxPython's bundled stubs declare `wx.GetApp()` non-Optional and
-several runtime `is None` guards are genuinely needed.
+## ruff 0.15.10 → 0.16.5
+
+Checked before changing: no new violations, nothing reformatted. The pin itself is right
+and stays — a linter that gains rules on its own schedule would otherwise turn somebody
+else's release into a red build here.
