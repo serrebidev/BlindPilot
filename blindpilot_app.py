@@ -4091,6 +4091,12 @@ class HistoryDialog(wx.Dialog):
         event.Skip()
 
 
+# How long the application waits, in total, for the turns still running when it
+# quits. They are cancelled at the same time and share this, rather than each
+# being given the whole of it.
+_CANCEL_JOIN_SECONDS = 3.0
+
+
 # How long the prompt has to stop changing before dictated or pasted text is
 # read back. Long enough that the pauses inside one utterance do not split
 # it, short enough to be a read-back rather than an interruption.
@@ -4781,6 +4787,11 @@ class SessionPanel(wx.Panel):
         self._dictation_timer = wx.CallLater(_DICTATION_PAUSE_MS, self._read_prompt_text)
 
     def _read_prompt_text(self) -> None:
+        if not self:
+            # A deferred callback outliving its panel. `wx.CallLater` holds a
+            # reference, so this still runs after the tab is gone, and reading
+            # a destroyed control raises rather than returning nothing.
+            return
         self._dictation_timer = None
         # What arrived, not the whole prompt: dictating a second sentence onto
         # a long one should not replay the first.
@@ -5804,11 +5815,50 @@ class SessionPanel(wx.Panel):
                 return
 
     # ----- Cleanup hook -----
-    def cancel_worker(self) -> None:
+    def cancel_worker(self, wait: bool = True) -> Optional[threading.Thread]:
+        """Give up this panel's turn, for a tab closing or the app quitting.
+
+        `_on_stop` already states the rule it follows - "cancel() waits on the
+        process, so it must not run on the UI thread" - and this did not.
+        Cancelling an opencode turn POSTs an abort to its server, where the
+        thirty-second timeout is per socket operation rather than a budget, and
+        every backend then joined for three seconds more. Run from the Close Tab
+        handler that stopped the window pumping messages, which for a screen
+        reader means silence: nothing can be announced by a thread that is
+        parked.
+
+        `wait=False` hands the cancelling to a daemon thread and returns. A tab
+        being destroyed has nothing to wait for; its worker's callbacks are
+        already dropped by `_drain_worker_events` once the panel is gone.
+        Quitting still waits, because the CLI subprocesses have to actually be
+        killed or they outlive the application - but see `_on_close`, which
+        spends one budget on all of them rather than three seconds on each.
+
+        `_on_worker_finished` calls itself the safety net that keeps the
+        progress loop from being left running, but it arrives through the
+        worker mailbox and `_drain_worker_events` discards everything once the
+        panel is gone. A tab closed mid-turn therefore threw away the one event
+        that stops the sound - and the sound is not the panel's to lose: every
+        tab shares the frame's `Earcons`, and on Windows the loop is
+        process-wide. It played on with nothing left alive to stop it.
+        """
         self._close_question_dialog()
-        if self._worker is not None and self._worker.is_alive():
-            self._worker.cancel()
-            self._worker.join(timeout=3)
+        self._earcons.stop_progress()
+        if self._dictation_timer is not None:
+            # It fires a second and a half after the text landed, by which
+            # time this panel's widgets may not exist.
+            self._dictation_timer.Stop()
+            self._dictation_timer = None
+        worker = self._worker
+        if worker is None or not worker.is_alive():
+            return None
+        if not wait:
+            thread = threading.Thread(target=worker.cancel, name="cancel-worker", daemon=True)
+            thread.start()
+            return thread
+        worker.cancel()
+        worker.join(timeout=_CANCEL_JOIN_SECONDS)
+        return None
 
 
 _LOGIN_URL_RE = re.compile(r"https?://[^\s\x1b<>]+", re.IGNORECASE)
@@ -6392,6 +6442,10 @@ class SetupWizard(wx.Dialog):
     # ---- CLI step ----
 
     def _check_cli(self) -> None:
+        if not self:
+            # `_show_step` queues these, so one can land an event-loop
+            # iteration after the wizard was closed.
+            return
         if self.backend != BACKEND_CLAUDE:
             self._check_npm_backend_cli()
             return
@@ -6540,6 +6594,11 @@ class SetupWizard(wx.Dialog):
 
     def _cli_log_line(self, text: str) -> None:
         """Append a line of installer output and speak it."""
+        if not self:
+            # Installing takes a minute, Cancel and Escape stay live
+            # throughout, and nothing tells the install thread to stop.
+            # So this can arrive against a dialog that is already gone.
+            return
         if not self._cli_log.IsShown():
             self._cli_log.Show()
             self._pages[1].Layout()
@@ -6592,6 +6651,11 @@ class SetupWizard(wx.Dialog):
         wx.CallAfter(self._on_install_done, binary)
 
     def _on_install_done(self, binary: Optional[str]) -> None:
+        if not self:
+            # Installing takes a minute, Cancel and Escape stay live
+            # throughout, and nothing tells the install thread to stop.
+            # So this can arrive against a dialog that is already gone.
+            return
         label = backend_label(self.backend)
         self._cli_install_btn.Enable()
         self._cli_update_btn.Enable()
@@ -6638,6 +6702,11 @@ class SetupWizard(wx.Dialog):
         wx.CallAfter(self._on_update_done, updated)
 
     def _on_update_done(self, updated: bool) -> None:
+        if not self:
+            # Installing takes a minute, Cancel and Escape stay live
+            # throughout, and nothing tells the install thread to stop.
+            # So this can arrive against a dialog that is already gone.
+            return
         label = backend_label(self.backend)
         self._cli_install_btn.Enable()
         self._cli_update_btn.Enable()
@@ -6655,6 +6724,10 @@ class SetupWizard(wx.Dialog):
     # ---- Sign-in step ----
 
     def _check_signin(self) -> None:
+        if not self:
+            # `_show_step` queues these, so one can land an event-loop
+            # iteration after the wizard was closed.
+            return
         label = backend_label(self.backend)
         self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
         self._backend_path = self._find_selected_cli()
@@ -8116,7 +8189,9 @@ class MainFrame(wx.Frame):
             return
         page = self.notebook.GetPage(sel)
         if isinstance(page, SessionPanel):
-            page.cancel_worker()
+            # Not waited on: this is a menu handler, and the panel is about to
+            # be destroyed, so there is nothing its worker can still tell us.
+            page.cancel_worker(wait=False)
         self.notebook.DeletePage(sel)
         self._sync_tab_switcher()
 
@@ -8250,10 +8325,21 @@ class MainFrame(wx.Frame):
     def _on_close(self, event: wx.CloseEvent) -> None:
         if self.chat_panel is not None:
             self.chat_panel.shutdown()
+        # Started together, then waited on together. One after another meant
+        # up to three seconds per tab - longer for opencode - of a window that
+        # has stopped responding and cannot say why.
+        cancelling = []
         for i in range(self.notebook.GetPageCount()):
             page = self.notebook.GetPage(i)
             if isinstance(page, SessionPanel):
-                page.cancel_worker()
+                thread = page.cancel_worker(wait=False)
+                if thread is not None:
+                    cancelling.append(thread)
+        # Quitting does wait, unlike closing a tab: a CLI that is not killed
+        # here outlives the application that started it.
+        deadline = time.monotonic() + _CANCEL_JOIN_SECONDS
+        for thread in cancelling:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
         event.Skip()
 
 
