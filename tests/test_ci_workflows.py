@@ -110,3 +110,28 @@ def test_a_job_cannot_run_for_six_hours():
         if "pytest" not in text:
             continue
         assert "timeout-minutes:" in text, f"{name} runs the tests with no job timeout"
+
+
+def test_no_workflow_hands_every_job_a_write_token():
+    """`permissions:` at the top of a file applies to every job in it.
+
+    The release build installs `requirements-build.txt` and runs PyInstaller,
+    which is a great deal of third-party code executing on a runner. Whether it
+    also holds a token that can write to the repository is a choice, and the
+    job that needs one is the small one at the end that only downloads
+    artifacts, checks their sums, and calls `gh release create`.
+    """
+    for name, text in _workflow_text().items():
+        assert "\npermissions:\n  contents: write" not in text, (
+            f"{name} grants write to every job in the file, including the ones "
+            "that install dependencies"
+        )
+
+
+def test_the_job_that_publishes_still_has_what_it_needs():
+    """Least privilege that removes the privilege the release needs is just a
+    broken release."""
+    publishing = [text for text in _workflow_text().values() if "gh release create" in text]
+    assert publishing, "nothing publishes a release any more"
+    for text in publishing:
+        assert "contents: write" in text, "the publishing workflow cannot write a release"
