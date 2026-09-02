@@ -6381,6 +6381,10 @@ class SetupWizard(wx.Dialog):
     # ---- CLI step ----
 
     def _check_cli(self) -> None:
+        if not self:
+            # `_show_step` queues these, so one can land an event-loop
+            # iteration after the wizard was closed.
+            return
         if self.backend != BACKEND_CLAUDE:
             self._check_npm_backend_cli()
             return
@@ -6529,6 +6533,11 @@ class SetupWizard(wx.Dialog):
 
     def _cli_log_line(self, text: str) -> None:
         """Append a line of installer output and speak it."""
+        if not self:
+            # Installing takes a minute, Cancel and Escape stay live
+            # throughout, and nothing tells the install thread to stop.
+            # So this can arrive against a dialog that is already gone.
+            return
         if not self._cli_log.IsShown():
             self._cli_log.Show()
             self._pages[1].Layout()
@@ -6581,6 +6590,11 @@ class SetupWizard(wx.Dialog):
         wx.CallAfter(self._on_install_done, binary)
 
     def _on_install_done(self, binary: Optional[str]) -> None:
+        if not self:
+            # Installing takes a minute, Cancel and Escape stay live
+            # throughout, and nothing tells the install thread to stop.
+            # So this can arrive against a dialog that is already gone.
+            return
         label = backend_label(self.backend)
         self._cli_install_btn.Enable()
         self._cli_update_btn.Enable()
@@ -6627,6 +6641,11 @@ class SetupWizard(wx.Dialog):
         wx.CallAfter(self._on_update_done, updated)
 
     def _on_update_done(self, updated: bool) -> None:
+        if not self:
+            # Installing takes a minute, Cancel and Escape stay live
+            # throughout, and nothing tells the install thread to stop.
+            # So this can arrive against a dialog that is already gone.
+            return
         label = backend_label(self.backend)
         self._cli_install_btn.Enable()
         self._cli_update_btn.Enable()
@@ -6644,6 +6663,10 @@ class SetupWizard(wx.Dialog):
     # ---- Sign-in step ----
 
     def _check_signin(self) -> None:
+        if not self:
+            # `_show_step` queues these, so one can land an event-loop
+            # iteration after the wizard was closed.
+            return
         label = backend_label(self.backend)
         self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
         self._backend_path = self._find_selected_cli()
