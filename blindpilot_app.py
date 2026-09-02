@@ -2371,13 +2371,22 @@ def _claude_questions(raw: list) -> tuple[Question, ...]:
     return tuple(questions)
 
 
-# How long the CLI may say nothing at all, after its input has closed, before
-# BlindPilot stops waiting for it. Shutting down is not instant: a session is
-# written to disk and MCP servers are torn down, and a run that has just kept a
-# fan-out of agents alive has the most to put away. The old limit was five
-# seconds flat, which on Windows produced the exit code it then complained
-# about - `Popen.kill` is `TerminateProcess(handle, 1)`.
+# How long a CLI that did *not* finish its turn may say nothing before
+# BlindPilot stops waiting for it. Only that case waits: a turn that produced
+# an answer is not waited on at all (see `_reap_in_background`), because the
+# exit code of a process that has already said what it came to say changes
+# nothing anybody hears.
+#
+# Here the wait earns its keep. A CLI that died mid-turn is usually writing the
+# reason to stderr, and that reason is the only thing BlindPilot can offer, so
+# the clock restarts while it is still arriving.
 _SHUTDOWN_QUIET_SECONDS = 30.0
+
+# A process that answered, and then never exited at all. Long enough that no
+# real shutdown is cut short, short enough that a long session does not collect
+# one of these per turn. Nothing is said when it fires: the turn it belonged to
+# ended correctly minutes earlier.
+_REAP_SECONDS = 300.0
 
 
 class ClaudeWorker(threading.Thread):
@@ -2472,13 +2481,19 @@ class ClaudeWorker(threading.Thread):
         return "".join(self._stderr_lines).strip()
 
     def _wait_for_shutdown(self) -> bool:
-        """Wait for the CLI to exit once its input has closed.
+        """Wait for a CLI that did not finish its turn, once its input closed.
 
         True if it exited by itself, False if it has gone quiet and should be
-        stopped. Time is not the measure: a CLI that is still writing is still
-        working, so the clock restarts whenever it says anything, and only a
-        process that has said nothing for a while is given up on. Still
-        bounded, because a genuinely stuck one must not hang the turn.
+        stopped. The clock restarts whenever it writes to stderr, because a CLI
+        failing mid-turn is usually explaining itself there and that
+        explanation is all BlindPilot has to report.
+
+        Only for that case. This was once used at the end of *every* turn, on
+        the reasoning that a CLI still writing is still working - but a healthy
+        CLI shutting down writes nothing to stderr, since stderr is for errors
+        and it has none. The clock therefore never restarted, and a wait that
+        described itself as patient was a flat thirty-second timeout that
+        killed a working process mid-tidy.
         """
         proc = self._proc
         if proc is None:
@@ -2497,6 +2512,36 @@ class ClaudeWorker(threading.Thread):
                 last_heard = time.monotonic()
             if time.monotonic() - last_heard >= _SHUTDOWN_QUIET_SECONDS:
                 return False
+
+    def _reap_in_background(self) -> None:
+        """Let a CLI that has answered shut down in its own time, off the turn.
+
+        Shutting down means writing the session file the next resume reads and
+        stopping MCP servers rather than cutting them off, and on a turn that
+        fanned out agents there is the most of it to do. None of that is
+        BlindPilot's business once the answer is in, so the turn ends now and
+        the process is left to finish. It is still waited on, on a thread
+        nobody is listening to, so a session of many turns does not accumulate
+        one of these per turn.
+        """
+        proc = self._proc
+        if proc is None:
+            return
+        threading.Thread(
+            target=self._reap, args=(proc,), name="claude-shutdown", daemon=True
+        ).start()
+
+    @staticmethod
+    def _reap(proc: subprocess.Popen) -> None:
+        try:
+            proc.wait(timeout=_REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            # Stuck rather than slow. Worth not leaking, not worth telling
+            # anybody: the turn this belonged to ended correctly long ago.
+            try:
+                proc.kill()
+            except (OSError, ValueError):
+                pass
 
     def _ending_note(self, rc: object, detail: str) -> str:
         """How the run ended, saying who ended it.
@@ -2985,6 +3030,26 @@ class ClaudeWorker(threading.Thread):
                 break
 
         self._close_stdin()
+        if complete and text_parts and not self._cancelled:
+            # The turn answered, so how this process ends cannot change what is
+            # said. It is never waited for and never killed: shutting down means
+            # writing the session file the next resume reads and stopping MCP
+            # servers rather than cutting them off, and interrupting that to
+            # announce an exit code nobody needs cost a good turn its ending.
+            #
+            # Asking whether it has already gone costs nothing, though, and a
+            # bad code it reached on its own is still worth a word - that being
+            # the difference this never used to draw.
+            rc = self._proc.poll()
+            if rc:
+                stderr_text = self._stderr_text()
+                detail = f": {stderr_text}" if stderr_text else ""
+                self._on_activity("notice", self._ending_note(rc, detail))
+            elif rc is None:
+                self._reap_in_background()
+            self._on_complete("\n\n".join(text_parts).strip())
+            return
+
         if not self._wait_for_shutdown():
             self._stopped_by_us = True
             self._proc.kill()
