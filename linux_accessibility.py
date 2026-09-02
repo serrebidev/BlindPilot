@@ -7,7 +7,9 @@ import ctypes.util
 import platform
 
 
-_ANNOUNCER: object = None
+# None until the first announcement, False once GTK has been found
+# wanting and there is no point asking again, otherwise the handles.
+_ANNOUNCER: object | tuple = None
 
 
 def announce(text: str) -> bool:
@@ -57,6 +59,7 @@ def announce(text: str) -> bool:
                 raise RuntimeError("GTK did not expose the announcement source to ATK")
             _ANNOUNCER = (gtk, gobject, window, label, source)
 
+        assert isinstance(_ANNOUNCER, tuple)  # set just above, or on a past call
         _gtk, gobject, _window, _label, source = _ANNOUNCER
         gobject.g_signal_emit_by_name(
             source,

@@ -92,3 +92,11 @@ def test_the_tests_run_on_every_platform_that_ships(platform):
     assert testing, "nothing tests a pull request, so no platform is covered"
     covered = any(platform in text for text in testing)
     assert covered, f"pull requests are tested, but never on a {platform} runner"
+
+
+def test_the_types_are_checked_somewhere():
+    """A checker nobody runs is a config file, not a check."""
+    testing = [text for text in _workflow_text().values() if "pytest" in text]
+    assert any("mypy" in text for text in testing), (
+        "nothing that runs the tests also checks the types"
+    )
