@@ -57,6 +57,7 @@ from linux_accessibility import announce as _linux_native_announce
 
 import wx
 
+import diagnostics
 from app_updater import (
     ReleaseInfo,
     UpdateError,
@@ -2365,7 +2366,7 @@ class ClaudeWorker(threading.Thread):
     @staticmethod
     def _diagnostic_path() -> Path:
         """Where a turn that ended badly leaves its account of itself."""
-        return blindpilot_config_dir() / "claude-worker.log"
+        return diagnostics.log_path()
 
     def _log_unfinished_turn(self, rc: object, complete: bool, stderr_text: str) -> None:
         """Record a turn the CLI did not finish.
@@ -2373,25 +2374,22 @@ class ClaudeWorker(threading.Thread):
         A turn that dies mid-run is the hardest thing here to look into after
         the fact: the window is gone, and an exit code says nothing about what
         the run was doing. This is what is left behind to answer that.
+
+        It used to write its own file by hand, in the roaming settings folder,
+        with no size limit. The fields are the same ones; where they go and how
+        much of them is kept is now shared, and the other three backends leave
+        the same account of themselves through it.
         """
-        try:
-            path = self._diagnostic_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            with open(path, "a", encoding="utf-8", errors="replace") as fh:
-                fh.write(
-                    f"\n=== {stamp} claude turn ended early ===\n"
-                    f"exit code: {rc}\n"
-                    f"result event seen: {complete}\n"
-                    f"session: {self._session_id or '(new)'}\n"
-                    f"permission mode: {self._permission_mode}\n"
-                    f"model: {self._model or '(default)'}\n"
-                    f"cancelled: {self._cancelled}\n"
-                    f"stderr ({len(stderr_text)} chars):\n{stderr_text or '(nothing)'}\n"
-                )
-        except OSError:
-            # A missing log is not worth losing the failure message over.
-            pass
+        diagnostics.log_unfinished_turn(
+            "claude",
+            exit_code=rc,
+            completed=complete,
+            session_id=self._session_id or "(new)",
+            permission_mode=self._permission_mode,
+            model=self._model or "(default)",
+            cancelled=self._cancelled,
+            detail=stderr_text or "(nothing on stderr)",
+        )
 
     def accepting_input(self) -> bool:
         """Whether the active Claude turn can accept a steering message."""
@@ -6562,6 +6560,12 @@ class MainFrame(wx.Frame):
         )
         self._automatic_updates_item.Check(bool(cfg.get("check_for_updates_at_startup", True)))
         help_menu.AppendSeparator()
+        logs_item = help_menu.Append(
+            wx.ID_ANY,
+            "Open &Log Folder",
+            "Show the folder BlindPilot writes its diagnostics to",
+        )
+        help_menu.AppendSeparator()
         about_item = help_menu.Append(
             wx.ID_ABOUT,
             "&About BlindPilot",
@@ -6617,6 +6621,7 @@ class MainFrame(wx.Frame):
         )
         self.Bind(wx.EVT_MENU, lambda _e: self._manage_backends(), manage_backends_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._open_log_folder(), logs_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
         self.Bind(
             wx.EVT_MENU,
@@ -7425,6 +7430,13 @@ class MainFrame(wx.Frame):
         state = "shown" if SETTINGS.show_thinking else "hidden"
         self._announce_setting(f"The backend's reasoning is {state}")
 
+    def _open_log_folder(self) -> None:
+        """Show where the diagnostics go, rather than reading out a path."""
+        if diagnostics.open_log_folder():
+            self._announce_setting("Log folder opened")
+            return
+        self._announce_setting(f"Error: could not open {diagnostics.log_dir()}")
+
     def _build_sound_cue_menu(self) -> wx.Menu:
         """One check item per cue, under the master switch that governs them.
 
@@ -7828,11 +7840,15 @@ def main() -> int:
     # Before anything is started: nothing BlindPilot launches may inherit a
     # PATH that points back into its own install folder, or the files there
     # stay open long after BlindPilot has closed and cannot be updated.
+    # First, so that anything below which goes wrong leaves a trace behind.
+    # The packaged build is windowed and has no stderr to fall back on.
+    diagnostics.start_logging()
     if _SPEAKER is None and platform.system() == "Windows":
         # Worth saying plainly: with no output, every announcement on Windows
         # goes nowhere and the application runs in total silence while its
         # menus still say narration is on. accessible-output2 is in
-        # requirements.txt, so this means an incomplete install.
+        # requirements.txt, so this means an incomplete install. Said after
+        # logging starts, so there is somewhere for it to be said.
         logging.getLogger("blindpilot").warning(
             "no screen reader output is available: accessible-output2 is not "
             "installed, so nothing will be spoken on Windows"

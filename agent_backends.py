@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Protocol, Sequence, cast
 
+import diagnostics
+
 
 # A windowed app owns no console, so every child process Windows considers a
 # console program is given a brand new one - a terminal that pops up on screen,
@@ -1407,6 +1409,14 @@ class CodexWorker(threading.Thread):
         if self._failed:
             return
         self._failed = True
+        diagnostics.log_unfinished_turn(
+            "codex",
+            session_id=self._session_id or "(new)",
+            permission_mode=self._permission_mode,
+            model=self._model or "(default)",
+            cancelled=self._cancelled,
+            detail=message,
+        )
         self._on_failed(message)
 
     def run(self) -> None:
@@ -2584,6 +2594,14 @@ class FreebuffWorker(threading.Thread):
         if self._failed:
             return
         self._failed = True
+        diagnostics.log_unfinished_turn(
+            "freebuff",
+            session_id=self._session_id or "(new)",
+            permission_mode="n/a",
+            model=self._model or "(default)",
+            cancelled=self._cancelled,
+            detail=message,
+        )
         self._on_failed(message)
 
     def run(self) -> None:
@@ -4017,6 +4035,14 @@ class OpencodeWorker(threading.Thread):
     def _fail(self, message: str) -> None:
         if not self._settled.is_set():
             self._settled.set()
+            diagnostics.log_unfinished_turn(
+                "opencode",
+                session_id=self._session_id or "(new)",
+                permission_mode=self._permission_mode,
+                model=self._model or "(default)",
+                cancelled=self._cancelled,
+                detail=message,
+            )
             self._on_failed(message)
 
     def _on_session_error(self, properties: dict) -> bool:
