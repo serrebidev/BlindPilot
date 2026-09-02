@@ -4010,6 +4010,15 @@ class HistoryDialog(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
             return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self._shown:
+            # CHAR_HOOK fires before the focused control sees the key, so this
+            # has to hand Enter back when a button is focused. Otherwise Enter
+            # on Cancel - the ordinary way to leave a dialog, and the only way
+            # for somebody who cannot see that focus has moved - opened a
+            # conversation instead. The dialog closed either way, which is what
+            # made it hard to notice.
+            if isinstance(self.FindFocus(), wx.Button):
+                event.Skip()
+                return
             self._accept()
             return
         # Down from the filter box drops straight into the list, so a filter
