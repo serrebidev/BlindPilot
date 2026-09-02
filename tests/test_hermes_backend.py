@@ -132,9 +132,11 @@ def test_declared_capabilities_match_what_the_worker_implements():
     assert info.supports_steering is True
     assert info.supports_compaction is True
     assert info.supports_permissions is True
-    # Hermes exposes no per-turn reasoning effort on this protocol. Claiming it
-    # would put a control in the UI that silently does nothing.
-    assert info.supports_effort is False
+    # Hermes takes a reasoning level as a per-session override on
+    # session.create. This asserted False for a while, freezing a wrong belief
+    # about the protocol: the picker hid the control and the setup wizard told
+    # the user Hermes "does not expose a reasoning effort level".
+    assert info.supports_effort is True
     # A backend that says it compacts must have a request to compact with.
     assert compaction_request(BACKEND_HERMES) is not None
 
@@ -709,9 +711,13 @@ def test_wsl_is_not_consulted_on_other_systems(monkeypatch):
 def test_the_model_catalog_qualifies_every_model_with_its_provider():
     """Hermes groups models under providers and repeats names across them.
 
-    The qualified form is also what its /model command accepts, so a picked
-    row can go back unchanged.
+    The row is NOT joined with a colon, even though that is the form Hermes'
+    own /model command documents: it only reads a colon prefix as a provider
+    when the left side is a provider it ships with, so a user-defined entry
+    came back as part of the model name. The two halves are split apart again
+    before the turn is sent (see test_hermes_model_selection.py).
     """
+    sep = hermes_backend.MODEL_ROW_SEPARATOR
     models, current = hermes_backend._model_rows(
         {
             "providers": [
@@ -721,8 +727,12 @@ def test_the_model_catalog_qualifies_every_model_with_its_provider():
         }
     )
 
-    assert models == ["openai:gpt-5", "openai:gpt-5-mini", "anthropic:gpt-5"]
-    assert current == "anthropic:gpt-5"
+    assert models == [
+        f"openai{sep}gpt-5",
+        f"openai{sep}gpt-5-mini",
+        f"anthropic{sep}gpt-5",
+    ]
+    assert current == f"anthropic{sep}gpt-5"
 
 
 def test_providers_without_credentials_are_left_out_of_the_picker():
@@ -736,7 +746,7 @@ def test_providers_without_credentials_are_left_out_of_the_picker():
         }
     )
 
-    assert models == ["ready:a"]
+    assert models == [f"ready{hermes_backend.MODEL_ROW_SEPARATOR}a"]
 
 
 def test_a_malformed_catalog_produces_no_rows_rather_than_raising():

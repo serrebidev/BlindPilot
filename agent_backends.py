@@ -467,9 +467,14 @@ BACKENDS = {
         "See https://hermes-agent.nousresearch.com/docs",
         ("model",),
         True,
-        # Hermes has no per-turn reasoning-effort control on the protocol this
-        # adapter speaks; effort is a profile setting rather than a turn flag.
-        False,
+        # Hermes takes a reasoning level as a per-session override on
+        # session.create. This said False at first, with a comment claiming the
+        # protocol had no such control; it has one, and the effect is
+        # measurable -- a session created with "low" reads back "low" while one
+        # created without it reads the profile's own level. Saying False here
+        # hid the control in the picker AND told the setup wizard to announce
+        # that Hermes "does not expose a reasoning effort level".
+        True,
         True,
         True,
         supports_compaction=True,

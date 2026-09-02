@@ -1493,18 +1493,10 @@ def probe_model_options(
     """
     backend = normalize_backend(backend)
     binary = _find_claude() if backend == BACKEND_CLAUDE else find_backend_cli(backend)
-    if backend == BACKEND_HERMES and REMOTE_HERMES.url() and binary is None:
-        # A remote Hermes needs no local copy at all, so "not found" here is
-        # not a problem to report - there is simply nothing local to ask.
-        return ModelOptions(
-            [],
-            [],
-            error=(
-                "Remote Hermes chooses its model on the machine it runs on. "
-                "Use its own /model command there."
-            ),
-        )
-    if binary is None:
+    # A Hermes reached over the network is the one backend that needs no local
+    # copy: the catalog comes from the server itself.
+    remote_hermes_url = REMOTE_HERMES.url() if backend == BACKEND_HERMES else ""
+    if binary is None and not remote_hermes_url:
         label = backend_label(backend)
         return ModelOptions(
             list(_FALLBACK_MODELS) if backend == BACKEND_CLAUDE else [],
@@ -1519,27 +1511,37 @@ def probe_model_options(
         return fresh
 
     if backend == BACKEND_HERMES:
-        # A remote Hermes owns its own model list, and the local copy may not
-        # even be installed, so asking here would report the wrong catalog or
-        # none at all. The model is chosen on the machine Hermes runs on.
-        if REMOTE_HERMES.url():
-            return ModelOptions(
-                [],
-                [],
-                error=(
-                    "Remote Hermes chooses its model on the machine it runs on. "
-                    "Use its own /model command there."
-                ),
-            )
-        models, efforts, current_model, current_effort, error = hermes_model_options(cwd)
+        # A Hermes reached over the network answers the same model request as
+        # one on this machine: `hermes serve` dispatches its WebSocket through
+        # the identical JSON-RPC handlers. This used to return an error telling
+        # the user to pick the model "on the machine it runs on", which for a
+        # headless server (the whole point of the remote mode) meant there was
+        # nowhere to pick it at all.
+        models, efforts, current_model, current_effort, error = hermes_model_options(
+            cwd,
+            remote_url=remote_hermes_url,
+            remote_token=REMOTE_HERMES.key if remote_hermes_url else "",
+            remote_credential=(
+                REMOTE_HERMES.credential if remote_hermes_url else "token"
+            ),
+            remote_username=REMOTE_HERMES.username if remote_hermes_url else "",
+        )
         options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models:
+        if models and binary is not None:
+            # Only the local path has a binary to stamp the cache against; a
+            # remote catalog is re-read instead of being keyed on a file that
+            # does not exist here.
             with _probe_lock:
                 _probe_cache[(f"{backend}:{cwd or ''}", _cli_stamp(binary))] = (
                     time.time(),
                     options,
                 )
         return options
+
+    if binary is None:
+        # Only the remote-Hermes path above is allowed to get this far without
+        # a local CLI, and it has already returned.
+        return ModelOptions([], [], error=f"{backend_label(backend)} was not found.")
 
     if backend == BACKEND_CODEX:
         models, efforts, current_model, current_effort, error = codex_model_options(cwd)
@@ -3047,11 +3049,14 @@ class ReadView(wx.Dialog):
 class ModelDialog(wx.Dialog):
     """Model picker for /model: one combo box for the model, one for effort.
 
-    Both lists come from the CLI probe that ran just before this opened, so the
-    choices are whatever the installed Claude Code actually accepts. The first
-    entry in each box names what Claude Code is using right now — picking it
-    passes no flag at all, so it keeps that. The model box is editable so a
-    full model ID can be typed; the effort box is a fixed list. Esc cancels.
+    Both lists come from the probe that ran just before this opened, so the
+    choices are whatever the selected backend actually accepts. The first entry
+    in each box names what that backend is using right now -- picking it passes
+    nothing at all, so it keeps that. The model box is editable so a full model
+    ID can be typed; the effort box is a fixed list. Esc cancels.
+
+    A backend that takes no effort level gets an empty list for it, so the box
+    offers only "leave it alone" rather than a control the turn would ignore.
     """
 
     def __init__(
@@ -4381,9 +4386,24 @@ class SessionPanel(wx.Panel):
             # FreeBuff reads that at launch, so it cannot serve the new one.
             discard_freebuff_prewarm()
             prewarm_freebuff(self.cwd, None, model)
+        effort_changed = (
+            self.selected_backend() == BACKEND_HERMES and effort != self.effort
+        )
         self.model = model
         self.effort = effort
-        self._announce(f"Using {self._model_summary()} from your next message.")
+        note = ""
+        if effort_changed:
+            # Hermes fixes the reasoning level when the conversation is created
+            # and offers no way to move a live one onto another: its own
+            # /reasoning command runs in a separate worker process and does not
+            # reach the running agent (measured). Rather than accept the pick
+            # and quietly not apply it, the conversation is ended here, so the
+            # next message starts one that really does use the chosen level.
+            # The model needs none of this -- /model does reach a live session.
+            self._session_id = None
+            self._drop_held_hermes()
+            note = " Hermes fixes the reasoning level per conversation, so this starts a new one."
+        self._announce(f"Using {self._model_summary()} from your next message.{note}")
         self.prompt.SetFocus()
 
     def cycle_mode(self) -> None:

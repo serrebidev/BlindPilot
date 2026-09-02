@@ -993,6 +993,65 @@ class WebSocketTransport:
 # wait rather than being allowed to hang the dialog open.
 MODEL_QUERY_TIMEOUT = 60.0
 
+# What joins a provider to a model in one picker row.
+#
+# NOT a colon, which is what this used at first and is the form Hermes' own
+# ``/model`` command takes. Hermes reads a colon prefix as a provider only when
+# the left side is a provider name it ships with; a user-defined one -- every
+# `providers:` / `custom_providers:` entry, which is what a Foundry/Palantir
+# endpoint or any self-hosted gateway is -- is not on that list, so the whole
+# row came back as a model name with the provider left untouched. Measured:
+# ``parse_model_input("palantir-gpt:<model>")`` returns the previous provider
+# and ``"palantir-gpt:<model>"`` as the model. That matters because each entry
+# has its own endpoint and API mode (…/openai/v1 with chat_completions vs
+# …/anthropic with anthropic_messages), so a wrong provider is not a label
+# problem -- it is a turn sent to the wrong place.
+#
+# The two halves therefore travel as separate protocol fields, and this
+# separator only ever has to survive a round trip through BlindPilot's own UI
+# and settings. " · " is not a character any provider slug or model id uses,
+# and a screen reader reads the row as two parts rather than running them
+# together.
+MODEL_ROW_SEPARATOR = " · "
+
+# The reasoning levels Hermes accepts on ``session.create``.
+#
+# Taken from its own validator (``hermes_constants.VALID_REASONING_EFFORTS``)
+# plus "none", which that validator reads as "think as little as possible"
+# rather than as an unknown word. Hermes ignores a level it does not
+# recognise, so a saved value from an older list can never break a turn -- it
+# just leaves the profile's own setting in place.
+#
+# This is a fixed list rather than something read from the catalog because the
+# levels are not per-provider: the same set is offered for every model.
+HERMES_EFFORTS = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+
+
+def split_model_row(row: str) -> tuple[str, str]:
+    """Split a picker row into ``(provider, model)``.
+
+    A row typed by hand, or restored from a version that saved the old
+    colon-joined form, may have no separator at all: then there is no provider
+    to name and the whole string is the model, which is exactly what Hermes
+    does with a bare model name -- resolve it against the current provider.
+    """
+    text = (row or "").strip()
+    if not text:
+        return "", ""
+    if MODEL_ROW_SEPARATOR in text:
+        provider, _, model = text.partition(MODEL_ROW_SEPARATOR)
+        return provider.strip(), model.strip()
+    return "", text
+
 
 def _model_rows(payload: dict) -> tuple[list[str], str]:
     """Flatten Hermes' provider catalog into picker rows.
@@ -1024,7 +1083,7 @@ def _model_rows(payload: dict) -> tuple[list[str], str]:
             name = str(entry).strip()
             if not name:
                 continue
-            qualified = f"{slug}:{name}"
+            qualified = f"{slug}{MODEL_ROW_SEPARATOR}{name}"
             models.append(qualified)
             if provider.get("is_current") and not current:
                 current = qualified
@@ -1033,20 +1092,35 @@ def _model_rows(payload: dict) -> tuple[list[str], str]:
 
 def hermes_model_options(
     cwd: Optional[str] = None,
+    *,
+    remote_url: str = "",
+    remote_token: str = "",
+    remote_credential: str = "token",
+    remote_username: str = "",
 ) -> tuple[list[str], list[str], str, str, str]:
-    """Ask Hermes which models it can run, for BlindPilot's model picker.
+    """Ask Hermes which models and reasoning levels it can run.
 
-    Returns the same five-part shape the other backends' catalogs use:
-    models, effort levels, current model, current effort, error. Hermes exposes
-    no per-turn effort control on this protocol, so that list is always empty
-    rather than offering a setting the turn would ignore.
+    Returns the same five-part shape the other backends' catalogs use: models,
+    effort levels, current model, current effort, error.
+
+    Works for a Hermes on this machine and for one reached over the network.
+    That second case used to be refused outright, on the reasoning that a
+    remote Hermes "chooses its model on the machine it runs on" -- which was
+    wrong: ``hermes serve`` carries the SAME JSON-RPC surface over its
+    WebSocket as the local pipe does (its own ws module dispatches through the
+    identical handler table), so ``model.options`` answers either way. The only
+    real difference is that the local path may have to start a gateway first.
     """
-    if not hermes_installed():
-        return [], [], "", "", "Hermes Agent was not found on this computer."
-
-    transport = StdioTransport(cwd or str(Path.home()))
+    if remote_url:
+        transport: Transport = WebSocketTransport(
+            remote_url, remote_token, remote_credential, remote_username
+        )
+    else:
+        if not hermes_installed():
+            return [], [], "", "", "Hermes Agent was not found on this computer."
+        transport = StdioTransport(cwd or str(Path.home()))
     try:
-        transport.start()
+        transport.start()  # type: ignore[attr-defined]
     except OSError as exc:
         return [], [], "", "", str(exc)
 
@@ -1080,7 +1154,10 @@ def hermes_model_options(
             models, current = _model_rows(result)
             if not models:
                 return [], [], "", "", "Hermes reported no usable models."
-            return models, [], current, "", ""
+            # The catalog does not carry the reasoning levels, because they are
+            # not per-provider: Hermes accepts the same fixed set for every
+            # model and simply ignores one a model cannot use.
+            return models, list(HERMES_EFFORTS), current, "", ""
         return [], [], "", "", "Hermes did not answer the model request in time."
     finally:
         transport.close()

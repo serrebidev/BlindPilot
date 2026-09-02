@@ -15,12 +15,14 @@ import base64
 import mimetypes
 import os
 import threading
+import time
 from typing import Callable, Optional, Sequence
 
 from hermes_backend import (
     StdioTransport,
     Transport,
     WebSocketTransport,
+    split_model_row,
     hermes_installed,
 )
 from markdown_rows import complete_sentences as _complete_sentences
@@ -42,6 +44,14 @@ _IDLE_LIMIT = 900.0
 # the turn says how long it has been working and, when it knows, what it is
 # waiting for.
 _PROGRESS_NOTICE_SECONDS = 60.0
+
+# The clock the turn loop measures quiet against, as a module attribute so a
+# test can substitute one that advances without waiting. A wait of minutes has
+# to be exercised in milliseconds, and the loop reads real elapsed time rather
+# than counting reads -- see _consume_turn for why counting was wrong -- so
+# there is nothing left to scale down except the clock itself.
+def _now() -> float:
+    return time.monotonic()
 
 # How often the connection itself is checked while a turn waits. A held
 # connection can die between frames (a server restart, a laptop lid, a network
@@ -356,9 +366,13 @@ class HermesWorker(threading.Thread):
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._model = model
-        # Hermes exposes no per-turn reasoning-effort control on this protocol,
-        # so the value is accepted and ignored rather than silently changing
-        # something else. BackendInfo says so too (supports_effort=False).
+        # Hermes takes the reasoning effort as a per-session override on
+        # session.create, which it applies WITHOUT touching the profile's
+        # config -- so picking one here changes this conversation and nothing
+        # else. Measured: a session created with "low" reads back "low" while
+        # a session created in the same second without one reads the profile's
+        # "high". An earlier version of this adapter dropped the value on the
+        # grounds that the protocol had no such control; it does.
         self._effort = effort
         self._compact = compact
         self._remote_url = remote_url
@@ -381,8 +395,23 @@ class HermesWorker(threading.Thread):
         self._reused = False
         self._on_session = on_session
         self._on_started = on_started
-        self._on_activity = on_activity
-        self._on_complete = on_complete
+        # Counted, not just called: the turn loop needs to know whether a frame
+        # produced anything a listener would hear, so that housekeeping traffic
+        # cannot pass for progress. Wrapping the callbacks keeps that count in
+        # ONE place -- a new call site added later is counted automatically,
+        # where a hand-maintained flag would quietly stop being accurate.
+        self._rows_emitted = 0
+
+        def counted_activity(kind: str, text: str) -> None:
+            self._rows_emitted += 1
+            on_activity(kind, text)
+
+        def counted_complete(text: str) -> None:
+            self._rows_emitted += 1
+            on_complete(text)
+
+        self._on_activity = counted_activity
+        self._on_complete = counted_complete
         self._on_failed = on_failed
         self._on_done = on_done
         # Kept so the accessor below can answer honestly rather than by guess.
@@ -547,10 +576,64 @@ class HermesWorker(threading.Thread):
                 return
             if not self._ensure_session():
                 return
+        else:
+            # The model and reasoning level ride on session.create, so a
+            # conversation already under way would keep whatever it started
+            # with -- picking a new one mid-conversation would announce a
+            # change that never happened. session.resume takes neither, so the
+            # change is applied to the live session the way Hermes' own hosts
+            # do it: through its slash commands.
+            self._apply_live_selection()
         if self._compact:
             self._run_compaction()
             return
         self._run_turn()
+
+    def _apply_live_selection(self) -> None:
+        """Move a reused session onto the currently picked model.
+
+        The reasoning level is deliberately NOT sent here. Hermes takes it on
+        session.create only: session.resume has no such parameter, and its
+        ``/reasoning`` slash command runs in a worker process of its own whose
+        result is never mirrored onto the gateway's live agent -- measured, and
+        worth stating because that command answers with a tick either way. So
+        sending it would report a change that did not happen. A new level
+        therefore applies from the next conversation, which is what the window
+        says when the level is picked.
+
+        Best-effort by design: a refused switch must not lose the message the
+        user typed. The reply is reported as activity so a wrong model name is
+        heard rather than silently ignored.
+        """
+        transport = self._transport
+        if transport is None or not self._model:
+            return
+        provider, model = split_model_row(self._model)
+        command = f"/model {model}"
+        if provider:
+            command += f" --provider {provider}"
+        # --session: this conversation's choice, not a new profile default.
+        command += " --session"
+        request_id = self._next_id()
+        transport.send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "slash.exec",
+                # The parameter is "command"; a frame carrying "text" instead is
+                # answered with "empty command" (error 4004).
+                "params": {"session_id": self._live_session, "command": command},
+            }
+        )
+        reply = self._await_response(request_id, 60.0)
+        if reply is None:
+            return
+        error = reply.get("error")
+        if isinstance(error, dict):
+            self._on_activity(
+                "tool",
+                f"Hermes refused {command}: {error.get('message') or 'no reason given'}",
+            )
 
     def _wait_for_ready(self) -> bool:
         deadline = 60.0
@@ -628,7 +711,22 @@ class HermesWorker(threading.Thread):
     def _session_params(self) -> dict:
         params: dict = {}
         if self._model:
-            params["model"] = self._model
+            # The picker rows are "<provider>:<model>", which Hermes only reads
+            # as a provider prefix when the left side is a name it recognises.
+            # A user-defined provider (any `providers:` / `custom_providers:`
+            # entry -- every Palantir/Foundry endpoint is one) is NOT in that
+            # list, so the whole row was taken as a model name and the provider
+            # silently stayed whatever it was. Sending the two as separate
+            # fields removes the guessing: session.create takes a provider of
+            # its own, and Hermes resolves the endpoint and API mode from it.
+            provider, model = split_model_row(self._model)
+            params["model"] = model
+            if provider:
+                params["provider"] = provider
+        if self._effort:
+            # Hermes validates this itself and ignores a level it does not
+            # know, so a stale saved value cannot break a turn.
+            params["reasoning_effort"] = self._effort
         yolo = _MODE_TO_YOLO.get(self._permission_mode)
         if yolo is not None:
             params["yolo"] = yolo
@@ -790,8 +888,25 @@ class HermesWorker(threading.Thread):
         while it lasts, and the connection is checked as it goes, which is what
         turns "did anything happen?" into an answer the listener is given
         without having to ask.
+
+        "Quiet" means NOTHING WORTH SAYING ARRIVED, not "no bytes arrived". That
+        distinction is the whole of a measured defect: a turn stuck retrying a
+        rejected model produced a frame every few seconds -- ``sessions.changed``
+        housekeeping and ``thinking.delta`` frames whose text was empty -- and
+        every one of them reset this timer, so nothing was ever announced. The
+        turn sat there for five minutes with a screen reader saying nothing at
+        all, which is indistinguishable from a hang and is the worst thing this
+        loop can do. Frames that produce no row therefore leave the clock
+        running.
         """
-        idle = 0.0
+        # Timed against the clock rather than by counting read timeouts. The
+        # first attempt at this added up the timeouts of reads that returned
+        # nothing, which is only the same thing when nothing arrives at all: a
+        # steady trickle of content-free frames returned immediately every time,
+        # so the counter never advanced and the announcement never came. The
+        # question being answered is "how long since the listener last heard
+        # anything", and only a clock answers that.
+        last_row = _now()
         next_notice = _PROGRESS_NOTICE_SECONDS
         next_check = _CONNECTION_CHECK_SECONDS
         while not self._cancelled:
@@ -799,26 +914,28 @@ class HermesWorker(threading.Thread):
             if transport is None:
                 return
             frame = transport.receive(_READ_TIMEOUT)
-            if frame is None:
-                idle += _READ_TIMEOUT
-                if idle >= next_check:
-                    next_check = idle + _CONNECTION_CHECK_SECONDS
-                    # A connection that has gone away is reported now, with the
-                    # reason, instead of after the full idle limit.
-                    if not transport.connected():
-                        self._on_failed(transport.failure_detail())
-                        return
-                if idle >= next_notice:
-                    next_notice = idle + _PROGRESS_NOTICE_SECONDS
-                    self._announce_still_working(idle)
-                if idle >= _IDLE_LIMIT:
+            if frame is not None:
+                before = self._rows_emitted
+                if self._handle_event(frame) is True:
+                    return
+                if self._rows_emitted != before:
+                    last_row = _now()
+                    next_notice = _PROGRESS_NOTICE_SECONDS
+                    next_check = _CONNECTION_CHECK_SECONDS
+                    continue
+            quiet = _now() - last_row
+            if quiet >= next_check:
+                next_check = quiet + _CONNECTION_CHECK_SECONDS
+                # A connection that has gone away is reported now, with the
+                # reason, instead of after the full idle limit.
+                if not transport.connected():
                     self._on_failed(transport.failure_detail())
                     return
-                continue
-            idle = 0.0
-            next_notice = _PROGRESS_NOTICE_SECONDS
-            next_check = _CONNECTION_CHECK_SECONDS
-            if self._handle_event(frame) is True:
+            if quiet >= next_notice:
+                next_notice = quiet + _PROGRESS_NOTICE_SECONDS
+                self._announce_still_working(quiet)
+            if quiet >= _IDLE_LIMIT:
+                self._on_failed(transport.failure_detail())
                 return
 
     def _announce_still_working(self, waited: float) -> None:

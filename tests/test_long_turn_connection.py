@@ -281,14 +281,27 @@ def _run_loop(transport, monkeypatch, *, notice: float = 5.0, check: float = 2.0
               idle_limit: float = 1000.0) -> tuple[HermesWorker, list, list]:
     """Drive the real loop with the clock scaled down, not with real waiting.
 
-    Each empty read counts as ``_READ_TIMEOUT`` seconds of quiet, so shrinking
-    the thresholds is what makes a two-minute wait testable in milliseconds.
+    The loop measures quiet against a clock (it used to count empty reads,
+    which a trickle of content-free frames defeated entirely -- see
+    test_hermes_model_selection.py). So the clock is what gets substituted
+    here: each read advances it by ``_READ_TIMEOUT``, which is exactly what an
+    empty read costs in reality, and a two-minute wait runs in milliseconds.
     """
     import hermes_worker as hw
 
     monkeypatch.setattr(hw, "_PROGRESS_NOTICE_SECONDS", notice)
     monkeypatch.setattr(hw, "_CONNECTION_CHECK_SECONDS", check)
     monkeypatch.setattr(hw, "_IDLE_LIMIT", idle_limit)
+
+    fake_clock = {"t": 0.0}
+
+    def clock() -> float:
+        # Advances on every read of it, so the loop sees time passing at the
+        # rate its own reads would take.
+        fake_clock["t"] += hw._READ_TIMEOUT
+        return fake_clock["t"]
+
+    monkeypatch.setattr(hw, "_now", clock)
 
     rows: list[tuple[str, str]] = []
     failed: list[str] = []
@@ -403,6 +416,16 @@ def test_notices_keep_their_cadence_after_a_burst_of_activity(monkeypatch):
     monkeypatch.setattr(hw, "_PROGRESS_NOTICE_SECONDS", 5.0)
     monkeypatch.setattr(hw, "_CONNECTION_CHECK_SECONDS", 2.0)
     monkeypatch.setattr(hw, "_IDLE_LIMIT", 1000.0)
+    # Same substituted clock as _run_loop: the loop reads elapsed time, so a
+    # test left on the real clock finishes in milliseconds and never crosses a
+    # five-second threshold.
+    fake_clock = {"t": 0.0}
+
+    def clock() -> float:
+        fake_clock["t"] += hw._READ_TIMEOUT
+        return fake_clock["t"]
+
+    monkeypatch.setattr(hw, "_now", clock)
     worker = HermesWorker("q", None, ".", "default", **callbacks)
     worker._transport = _QuietBurstQuiet(empty_reads=91)
     worker._consume_turn()
