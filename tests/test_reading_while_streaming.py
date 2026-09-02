@@ -51,6 +51,9 @@ class _ListBox:
     def GetSelection(self):
         return self.selection
 
+    def GetCount(self):
+        return len(self.labels)
+
 
 class _TextView:
     """A read-only text control, likewise."""
@@ -80,6 +83,10 @@ class _TextView:
 
     def GetLastPosition(self):
         return len(self.text)
+
+    def GetNumberOfLines(self):
+        # A real TextCtrl reports one (empty) line before anything is written.
+        return len(self.text.split("\n"))
 
     def PositionToXY(self, pos):
         before = self.text[:pos]
@@ -217,3 +224,44 @@ def test_a_label_spanning_lines_still_maps_one_row_to_one_line(monkeypatch):
     app.SessionPanel._refresh_list(panel)
 
     assert "\n" not in control.text
+
+
+# ----- the assumption underneath the append path -----
+def test_clearing_the_conversation_empties_the_control(monkeypatch):
+    """clear_conversation empties _rows and _displayed while the control still
+    shows the old rows, and then refreshes. The model must not mistake a
+    control it has not cleared for one that is empty and up to date."""
+    rows = _rows("old answer")
+    control = _ListBox([row.label for row in rows])
+    panel = _panel(monkeypatch, text_view=False, displayed=rows, rows=[], control=control)
+    # clear_conversation's reset happens before the refresh it then calls:
+    panel._displayed = []
+
+    app.SessionPanel._refresh_list(panel)
+
+    assert control.labels == [], "the cleared conversation is still on screen"
+
+
+def test_clearing_the_conversation_empties_the_text_view(monkeypatch):
+    """The same reset through the other control."""
+    rows = _rows("old answer")
+    control = _TextView("old answer")
+    panel = _panel(monkeypatch, text_view=True, displayed=rows, rows=[], control=control)
+    panel._displayed = []
+
+    app.SessionPanel._refresh_list(panel)
+
+    assert control.text == "", "the cleared conversation is still on screen"
+
+
+def test_the_other_control_is_filled_when_it_becomes_the_visible_one(monkeypatch):
+    """apply_view_mode shows whichever control Options asks for — and only the
+    visible one is ever filled. A control holding nothing the model put there
+    has to be rebuilt, not appended to."""
+    rows = _rows("one", "two", "three")
+    control = _TextView("")  # never the visible control
+    panel = _panel(monkeypatch, text_view=True, displayed=rows, rows=rows, control=control)
+
+    app.SessionPanel._refresh_list(panel)
+
+    assert control.text.split("\n") == [row.label for row in rows]

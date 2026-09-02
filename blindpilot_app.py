@@ -5451,6 +5451,16 @@ class SessionPanel(wx.Panel):
         # Output is only ever appended, so the usual case appends too: no
         # rebuild, no selection to restore, and nothing that speaks.
         previous = [row.label for row in self._displayed]
+        # `previous` records what the model last displayed, not what the
+        # control shows. clear_conversation empties both lists while the
+        # control still holds the old transcript, and apply_view_mode shows a
+        # control only the visible one ever fills, so the append path asks
+        # the control what it is actually showing before trusting the record.
+        if SETTINGS.text_view:
+            shown = self.responses_text.GetNumberOfLines()
+        else:
+            shown = self.responses.GetCount()
+        trustworthy = shown == len(previous)
         keep = self._selected_row()
         term = self._search_term.lower()
         labels: List[str] = []
@@ -5461,7 +5471,7 @@ class SessionPanel(wx.Panel):
             labels.append(row.label)
             self._displayed.append(row)
 
-        if labels[: len(previous)] == previous:
+        if trustworthy and labels[: len(previous)] == previous:
             added = labels[len(previous) :]
             if added:
                 self._append_rows(added)

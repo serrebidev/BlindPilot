@@ -665,6 +665,11 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
         def GetSelection(self):
             return self.selection
 
+        def GetCount(self):
+            # The append path asks the control what it is showing before it
+            # trusts the model's record of that.
+            return len(self.labels)
+
         def Set(self, labels):
             self.labels = list(labels)
             self.selection = app.wx.NOT_FOUND
