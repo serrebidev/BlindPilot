@@ -15,7 +15,9 @@ import pytest
 
 import blindpilot_app as app
 
-CUES = ["send", "working", "received"]
+# "error" joined these when failure got a cue of its own; it is the one
+# without a shipped audio file, using the platform's own error sound.
+CUES = ["send", "working", "received", "error"]
 
 
 @pytest.fixture
@@ -58,7 +60,9 @@ def test_a_cue_this_version_does_not_know_is_dropped(monkeypatch):
 
     settings = app._Settings()
 
-    assert settings.sound_cues == {"send": False, "working": True, "received": True}
+    expected = dict.fromkeys(CUES, True)
+    expected["send"] = False
+    assert settings.sound_cues == expected
 
 
 def test_the_choice_is_saved_alongside_the_master_switch(monkeypatch):
@@ -70,7 +74,9 @@ def test_the_choice_is_saved_alongside_the_master_switch(monkeypatch):
 
     settings.save()
 
-    assert written[-1]["sound_cues"] == {"send": True, "working": False, "received": True}
+    expected = dict.fromkeys(CUES, True)
+    expected["working"] = False
+    assert written[-1]["sound_cues"] == expected
     assert written[-1]["sounds_enabled"] is True
     assert written[-1]["backend"] == "codex"
 
@@ -180,9 +186,9 @@ def test_the_submenu_offers_one_switch_per_cue(frame):
     menu = app.MainFrame._build_sound_cue_menu(frame)
     try:
         items = menu.GetMenuItems()
-        assert [item.GetKind() for item in items] == [wx.ITEM_CHECK] * 3
+        assert [item.GetKind() for item in items] == [wx.ITEM_CHECK] * len(CUES)
         labels = " ".join(item.GetItemLabelText().lower() for item in items)
-        for word in ("sent", "working", "received"):
+        for word in ("sent", "working", "received", "wrong"):
             assert word in labels
     finally:
         menu.Destroy()
