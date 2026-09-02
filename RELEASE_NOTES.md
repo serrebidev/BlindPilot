@@ -1,55 +1,94 @@
-# BlindPilot 0.17.0
+# BlindPilot 0.18.0
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release stops BlindPilot from alarming you about a process that was doing its job.
-A user reported it after a turn that had worked perfectly:
+This release is four things the screen reader said at the wrong moment — an
+accessibility audit by @blindndangerous, each fix verified against the code before
+anything was written, each with a failing test first (PR #23) — and one hole in the
+audit's own rewrite that the release caught before it shipped.
 
-> BlindPilot stopped Claude Code: it had not finished shutting down 30 seconds after it went quiet.
+## Stop re-announcing the row somebody is reading
 
-Nothing had gone wrong. That sentence was BlindPilot's own — and the bug was in the very
-fix that introduced it.
+`_refresh_list` rebuilt the whole control every time it ran. A rebuild throws the
+contents away, which loses the selection, so the row being read had to be put back
+afterwards — and putting it back is the part that speaks. Setting a native list box's
+selection fires the accessibility event NVDA reads the row from; moving the text
+view's insertion point is a caret move it reads the line from.
 
-## Stop waiting on a CLI whose turn is already over
+It ran once per drained batch, so during a turn that was up to every twenty
+milliseconds. The row somebody had navigated to was read back to them over and over,
+underneath the narration of the turn itself. The comment above it said it existed to
+stop incoming output disrupting somebody reading older rows, which is exactly what it
+did instead.
 
-A turn finishes and delivers its answer. BlindPilot closed the CLI's stdin, waited for
-it to exit, gave up, and killed it. On Windows, `Popen.kill` is
-`TerminateProcess(handle, 1)`, so it then read back the exit code it had just caused and
-reported it. A correct answer, a thirty-second pause, and an alarming sentence.
+Rows are only ever appended during a turn, so the usual case appends now: no rebuild,
+nothing to restore, nothing that speaks. A refresh that adds nothing touches nothing.
+When the rows genuinely change shape — a search, a new turn, a response replaced by
+its parsed form — it still rebuilds and still restores the selection, because there it
+really was lost.
 
-### Why the wait did not work
+### The append that trusted its own record
 
-The wait restarted its clock whenever the CLI wrote to stderr, reasoning that one still
-writing is still working. That reasoning is sound for a CLI dying mid-turn — it is
-writing the traceback there, and that traceback is the only thing BlindPilot can offer.
-It is worthless at the end of a healthy turn, because a CLI shutting down cleanly has no
-errors to write. The clock never restarted. What shipped was a flat thirty-second
-timeout describing itself as patient.
+The append decision compared the incoming labels against the model's record of what
+it had displayed. That record is not what the control shows, and two ordinary paths
+break the equality:
 
-### The change
+- `clear_conversation` empties the lists while the control still holds the old
+  transcript — Ctrl+Shift+N, the menu item, `/clear`, `/new`. The cleared conversation
+  stayed on screen, and the next turn appended underneath it.
+- `apply_view_mode` shows whichever responses control Options asks for, and only the
+  visible one is ever filled. Switching to the text view came up blank whenever
+  nothing new had arrived since the last refresh.
 
-The waiting was the mistake, not its duration. Once the answer is in, no exit code
-changes what anybody hears — so a turn that answered neither waits for its process nor
-kills it:
+Both rebuilt on 0.17.0, which is why the rebuild branch is still there. The append now
+happens only when the control's own count agrees with the record; anything else falls
+to the rebuild, which restores 0.17.0's behaviour everywhere the invariant does not
+hold. `restore_history` resets the record the same way and survives only because it
+always runs on a brand-new panel; the count check covers it anyway.
 
-- `poll()`, which is free, sees whether it has already gone.
-- A process still running is left to a daemon reaper thread that collects it, bounded at
-  five minutes and silent, because the turn it belonged to ended correctly long ago.
-- A bad exit code the CLI reached on its own is still reported; one BlindPilot caused no
-  longer exists to report.
+## Stop reading the prompt back at somebody who is typing it
 
-The thirty-second wait stays on the failure path, where its stderr signal is real, and
-both docstrings now say which path is which.
+Dictation puts text in the prompt with no keystrokes, so nothing speaks it. Hence a
+pause timer. But `EVT_TEXT` fires for typing too, so pausing to think mid-sentence
+read the entire prompt back over the top of the character echo the screen reader had
+been giving all along. The longer the prompt, the longer the interruption, and the
+only way to avoid it was to keep typing.
 
-### What this costs if left
+A keystroke adds one character and has already been spoken. Dictation and paste arrive
+in bulk and have not been. Only bulk schedules a read-back now, typing afterwards
+cancels a pending one, and it reads what arrived rather than the whole field — so
+dictating a second sentence onto a long prompt no longer replays the first.
 
-Every turn slower than thirty seconds to shut down was killed partway through writing
-the session file the next `--resume` reads, and partway through stopping its MCP servers
-rather than cutting them off. A run that fanned out background agents has the most to put
-away and is the most likely to be interrupted.
+## Say what a search did
 
-Four new tests drive a process that answers and then shuts down silently — which is what
-the old fake could not express. Before, they would have failed: killed, ~30 seconds, and
-the notice emitted. Now: instant, not killed, answer only.
+`open_find` reported its outcome with `_set_status`, which writes the status bar and
+nothing else. No screen reader reads a status bar it was not asked to.
+
+With hits there was at least a sign of life: focus moved to the first one. With no
+hits focus did not move either, so the list quietly emptied and nothing said so —
+indistinguishable from the application ignoring the keystroke, which makes searching
+again the natural next move. It is announced now, and still mirrored to the status
+bar.
+
+## Let Enter on Cancel cancel
+
+The past-conversations dialog binds `EVT_CHAR_HOOK`, which fires before the focused
+control sees the key, and treated Enter as "open the selected conversation" wherever
+it came from. Right in the filter box, right in the list, wrong on the two buttons.
+
+Tabbing to Cancel and pressing Enter — the ordinary way to leave a dialog, and the
+only way available to somebody who cannot see where focus has landed — opened a
+conversation. The dialog closed either way, so the only sign was what appeared
+afterwards. Enter is handed back when the focused control is a button; Escape is
+unchanged. The other five `EVT_CHAR_HOOK` dialogs were checked and none of them
+intercept Enter.
+
+## Verification
+
+Rebased on 0.17.0. pytest 664 passed, 2 skipped; ruff check, ruff format --check, mypy,
+`--startup-smoke` and `--startup-gui-smoke` all clean. The audit's own test needed its
+stub updated rather than its assertions: it held a list box that was empty while rows
+were displayed, which a real control cannot be, and the count check asks the control
+what it is showing.
