@@ -4720,6 +4720,11 @@ class SessionPanel(wx.Panel):
         self._dictation_timer = wx.CallLater(_DICTATION_PAUSE_MS, self._read_prompt_text)
 
     def _read_prompt_text(self) -> None:
+        if not self:
+            # A deferred callback outliving its panel. `wx.CallLater` holds a
+            # reference, so this still runs after the tab is gone, and reading
+            # a destroyed control raises rather than returning nothing.
+            return
         self._dictation_timer = None
         # What arrived, not the whole prompt: dictating a second sentence onto
         # a long one should not replay the first.
@@ -5756,6 +5761,11 @@ class SessionPanel(wx.Panel):
         """
         self._close_question_dialog()
         self._earcons.stop_progress()
+        if self._dictation_timer is not None:
+            # It fires a second and a half after the text landed, by which
+            # time this panel's widgets may not exist.
+            self._dictation_timer.Stop()
+            self._dictation_timer = None
         if self._worker is not None and self._worker.is_alive():
             self._worker.cancel()
             self._worker.join(timeout=3)

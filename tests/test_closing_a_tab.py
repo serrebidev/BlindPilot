@@ -89,3 +89,53 @@ def test_a_worker_that_already_finished_is_not_joined_again(panel):
     app.SessionPanel.cancel_worker(panel)
 
     assert panel._worker.cancelled == 0
+
+
+# ----- the pending read-back -----
+#
+# Dictated or pasted text schedules a read-back a second and a half later. A
+# tab can be closed inside that second and a half, and `wx.CallLater` keeps a
+# reference to the panel, so the callback still runs - against widgets whose
+# C++ objects have been destroyed, which raises rather than returns.
+
+
+class _Timer:
+    def __init__(self):
+        self.stopped = False
+
+    def Stop(self):
+        self.stopped = True
+
+
+class _DeadPrompt:
+    def GetValue(self):
+        raise RuntimeError("wrapped C/C++ object of type TextCtrl has been deleted")
+
+
+def test_closing_a_tab_cancels_a_pending_read_back(panel):
+    panel._dictation_timer = _Timer()
+
+    app.SessionPanel.cancel_worker(panel)
+
+    assert panel._dictation_timer is None, "the timer was left pending on a closing tab"
+
+
+def test_a_read_back_that_fires_on_a_destroyed_panel_does_nothing(monkeypatch):
+    """Belt and braces, and the idiom the rest of the file already uses: a
+    deferred callback checks that its panel is still there."""
+    said: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: said.append(text))
+
+    class _Destroyed:
+        # wxPython reports a destroyed window as falsey.
+        def __bool__(self):
+            return False
+
+    stub = _Destroyed()
+    stub._dictation_timer = None
+    stub._dictation_pending = "some dictated words"
+    stub.prompt = _DeadPrompt()
+
+    app.SessionPanel._read_prompt_text(stub)
+
+    assert said == []
