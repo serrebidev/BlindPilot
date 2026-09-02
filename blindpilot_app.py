@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import difflib
 import json
 import logging
 import os
@@ -1826,6 +1827,41 @@ def _tab_label(title: str, cwd: str) -> str:
     return _tab_title(title) or _short_label(cwd)
 
 
+def _line_change_counts(old: str, new: str) -> tuple[int, int]:
+    """Lines added and removed between two versions of a block.
+
+    A real diff rather than a count of the lines involved: replacing a
+    twenty-line function to change two of its lines is a two-line edit, and
+    "twenty added, twenty removed" would be a worse answer than none.
+    """
+    added = removed = 0
+    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += old_end - old_start
+        if tag in ("replace", "insert"):
+            added += new_end - new_start
+    return added, removed
+
+
+def _lines_phrase(added: int, removed: int) -> str:
+    """ ", 5 lines added, 3 removed" - or nothing at all.
+
+    Appended to the line the tool call already has rather than spoken as a
+    second one: this narration is long enough to fall behind on a fan-out
+    without adding an utterance per edit. Halves that are zero are left out,
+    because "0 removed" is a word said for no reason every time.
+    """
+    parts = []
+    if added:
+        parts.append(f"{added} line{'' if added == 1 else 's'} added")
+    if removed:
+        # "added" already carried the word "lines" when both are present.
+        word = "" if added else f" line{'' if removed == 1 else 's'}"
+        parts.append(f"{removed}{word} removed")
+    return ", " + ", ".join(parts) if parts else ""
+
+
 def _tool_use_label(name: str, params: dict) -> str:
     """One spoken line describing the tool Claude just invoked.
 
@@ -1845,12 +1881,37 @@ def _tool_use_label(name: str, params: dict) -> str:
     target = first("file_path", "path", "notebook_path")
     short = os.path.basename(target) if target else ""
 
+    def text(key: str) -> str:
+        value = params.get(key)
+        return value if isinstance(value, str) else ""
+
     if name == "Read":
         return f"Reading {short}" if short else "Reading a file"
-    if name in ("Edit", "NotebookEdit"):
-        return f"Editing {short}" if short else "Editing a file"
+    if name in ("Edit", "NotebookEdit", "MultiEdit"):
+        # How much it changed is the only sense of scale available to somebody
+        # who cannot see the diff, and "changed a line" and "rewrote the file"
+        # are the same sentence without it.
+        edits = params.get("edits")
+        if isinstance(edits, list):
+            added = removed = 0
+            for edit in edits:
+                if not isinstance(edit, dict):
+                    continue
+                one, two = edit.get("old_string"), edit.get("new_string")
+                if isinstance(one, str) and isinstance(two, str):
+                    more, fewer = _line_change_counts(one, two)
+                    added += more
+                    removed += fewer
+        else:
+            added, removed = _line_change_counts(text("old_string"), text("new_string"))
+        where = f"Editing {short}" if short else "Editing a file"
+        return where + _lines_phrase(added, removed)
     if name == "Write":
-        return f"Writing {short}" if short else "Writing a file"
+        where = f"Writing {short}" if short else "Writing a file"
+        written = len(text("content").splitlines())
+        if not written:
+            return where
+        return f"{where}, {written} line{'' if written == 1 else 's'}"
     if name in ("Bash", "PowerShell"):
         cmd = first("command")
         return f"Running: {cmd}" if cmd else f"Running a {name} command"
@@ -6803,39 +6864,7 @@ class MainFrame(wx.Frame):
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
 
-        # ----- Model: what answers you, and what it may do -----
-        #
-        # The picker below already existed and worked, but `/model` typed into
-        # the prompt was the only way to reach it, and nothing in the menu bar
-        # said the word "model" at all.
-        model_menu = wx.Menu()
-        model_menu.AppendSubMenu(
-            self._build_backend_menu(),
-            "&Backend",
-            "Choose which coding-agent CLI BlindPilot uses",
-        )
-        model_item = model_menu.Append(
-            wx.ID_ANY,
-            "&Model and Effort…	Ctrl+M",
-            "Choose the model and effort level this conversation runs at",
-        )
-        model_menu.AppendSubMenu(
-            self._build_permission_mode_menu(),
-            "&Permission Mode",
-            "Choose what the backend may do without asking, for this conversation",
-        )
-        model_menu.AppendSeparator()
-        manage_backends_item = model_menu.Append(
-            wx.ID_ANY,
-            "Ma&nage Backends...",
-            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
-        )
-        self._connect_item = model_menu.Append(
-            wx.ID_ANY,
-            "&Connect a Provider…",
-            "Connect a provider to opencode, or disconnect one",
-        )
-        menubar.Append(model_menu, "&Model")
+        menubar.Append(self._build_model_menu(), "&Model")
 
         # ----- Options: how much of a run is narrated -----
         options_menu = wx.Menu()
@@ -6967,8 +6996,6 @@ class MainFrame(wx.Frame):
         self._refresh_compact_item()
         self._refresh_connect_item()
         self._refresh_mode_items()
-        self.Bind(wx.EVT_MENU, lambda _e: self._model_active(), model_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._connect_active(), self._connect_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_live_rows(), self._rows_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_speak_live(), self._speak_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_show_thinking(), self._thinking_item)
@@ -7009,7 +7036,6 @@ class MainFrame(wx.Frame):
             lambda _e: self._show_chat_diagnostics(),
             self._chat_diagnostics_item,
         )
-        self.Bind(wx.EVT_MENU, lambda _e: self._manage_backends(), manage_backends_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._open_log_folder(), logs_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
@@ -7591,6 +7617,58 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda _event: action(), item)
         return item
 
+    def _build_model_menu(self) -> wx.Menu:
+        """What answers you, and what it may do.
+
+        The picker already existed and worked, but `/model` typed into the
+        prompt was the only way to reach it and nothing in the menu bar said
+        the word "model" at all. `/status` was in the same position for longer:
+        BlindPilot's own command, offered for every backend because none of
+        them answers it themselves, and findable only by being told the word.
+
+        Built here rather than inline in `_build_menubar` so that appending an
+        item and binding it stay together - they were a hundred and fifty lines
+        apart - and so the menu can be read by a test.
+        """
+        menu = wx.Menu()
+        add = self._menu_item
+        menu.AppendSubMenu(
+            self._build_backend_menu(),
+            "&Backend",
+            "Choose which coding-agent CLI BlindPilot uses",
+        )
+        add(
+            menu,
+            "&Model and Effort…	Ctrl+M",
+            "Choose the model and effort level this conversation runs at",
+            self._model_active,
+        )
+        menu.AppendSubMenu(
+            self._build_permission_mode_menu(),
+            "&Permission Mode",
+            "Choose what the backend may do without asking, for this conversation",
+        )
+        add(
+            menu,
+            "Session &Status…",
+            "Show the backend, model, and account this conversation is using",
+            self._status_active,
+        )
+        menu.AppendSeparator()
+        add(
+            menu,
+            "Ma&nage Backends...",
+            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
+            self._manage_backends,
+        )
+        self._connect_item = add(
+            menu,
+            "&Connect a Provider…",
+            "Connect a provider to opencode, or disconnect one",
+            self._connect_active,
+        )
+        return menu
+
     def _build_file_menu(self) -> wx.Menu:
         """Sessions, tabs, and the application itself.
 
@@ -7791,6 +7869,12 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_model_dialog()
+
+    def _status_active(self) -> None:
+        """What the active tab is set to (Model > Session Status, or /status)."""
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.open_status_dialog()
 
     def _connect_active(self) -> None:
         page = self.notebook.GetCurrentPage()

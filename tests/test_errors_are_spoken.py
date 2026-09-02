@@ -131,8 +131,10 @@ def test_copying_a_conversation_that_has_nothing_in_it_says_so():
 def test_no_error_is_left_going_to_the_status_bar_alone():
     """The status bar is a mirror for these, never the only place they land.
 
-    `_action_save_code` reports through a file dialog that cannot be opened
-    headlessly, so it is covered here rather than by driving it.
+    A scan rather than a drive, because it is asking about the whole file
+    rather than one path: an error added anywhere, in a handler no test has
+    thought of yet, still has to be spoken. The paths above are driven
+    individually - `_action_save_code` among them, further down.
     """
     source = (blindpilot_app.__file__ or "").replace(".pyc", ".py")
     with open(source, encoding="utf-8") as handle:
@@ -140,3 +142,114 @@ def test_no_error_is_left_going_to_the_status_bar_alone():
     silent = re.findall(r'_set_status\(\s*f?"Error[^"]*"', text)
 
     assert not silent, f"these errors are written down but never spoken: {silent}"
+
+
+# ----- saving a code row to a file -----
+#
+# This was the one error path covered only by the source scan above, on the
+# grounds that its file dialog cannot be opened headlessly. The dialog is a
+# context manager, so it can be stood in for exactly as `open_find`'s is, and
+# the action driven for real: the file it writes, the sentence it says, and
+# what it does when the write fails.
+
+
+class _FileDialog:
+    """`wx.FileDialog` as `_action_save_code` uses it."""
+
+    def __init__(self, path, accepted=True):
+        self._path = str(path)
+        self._accepted = accepted
+        self.defaults = {}
+
+    def __call__(self, _parent, _title, **kwargs):
+        self.defaults = kwargs
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def ShowModal(self):
+        return blindpilot_app.wx.ID_OK if self._accepted else blindpilot_app.wx.ID_CANCEL
+
+    def GetPath(self):
+        return self._path
+
+
+def _code_row(payload="print('hi')", language="Python"):
+    return Row(
+        kind="code",
+        label="Code, Python, 1 line",
+        payload=payload,
+        response_number=1,
+        language=language,
+        lang_token="python",
+    )
+
+
+def _save(monkeypatch, tmp_path, row=None, name="snippet.py", accepted=True):
+    dialog = _FileDialog(tmp_path / name, accepted=accepted)
+    monkeypatch.setattr(blindpilot_app.wx, "FileDialog", dialog)
+    panel = _Panel(cwd=str(tmp_path))
+
+    SessionPanel._action_save_code(panel, row or _code_row())
+    return panel, dialog
+
+
+def test_saving_a_snippet_writes_it_and_says_where(monkeypatch, tmp_path):
+    panel, _dialog = _save(monkeypatch, tmp_path)
+
+    assert (tmp_path / "snippet.py").read_text(encoding="utf-8") == "print('hi')"
+    assert panel.spoken == ["Saved code to snippet.py"]
+
+
+def test_the_file_holds_exactly_what_the_row_held(monkeypatch, tmp_path):
+    """A code row promises to be the code as written. This is where that
+    promise reaches a disk, and somebody who cannot see the file has no way to
+    check it against the original."""
+    code = "def go():\n\treturn 1  # trailing spaces:   \n"
+    _panel, _dialog = _save(monkeypatch, tmp_path, row=_code_row(payload=code))
+
+    assert (tmp_path / "snippet.py").read_text(encoding="utf-8") == code
+
+
+def test_cancelling_writes_nothing_and_says_nothing(monkeypatch, tmp_path):
+    panel, _dialog = _save(monkeypatch, tmp_path, accepted=False)
+
+    assert list(tmp_path.iterdir()) == []
+    assert panel.spoken == []
+
+
+def test_a_write_that_fails_is_spoken_not_just_written_down(monkeypatch, tmp_path):
+    """The reason this file exists: an error in the status bar reaches nobody.
+
+    The parent is a file rather than a directory, so `open` raises
+    `NotADirectoryError` on every platform without any permission tricks.
+    """
+    blocker = tmp_path / "in-the-way"
+    blocker.write_text("not a directory", encoding="utf-8")
+    dialog = _FileDialog(blocker / "snippet.py")
+    monkeypatch.setattr(blindpilot_app.wx, "FileDialog", dialog)
+    panel = _Panel(cwd=str(tmp_path))
+
+    SessionPanel._action_save_code(panel, _code_row())
+
+    assert panel.spoken, "a failed save said nothing at all"
+    assert panel.spoken[0].startswith("Error saving file")
+    assert panel.spoken == panel.status, "the error reached the status bar only"
+
+
+def test_the_offered_filename_matches_the_language(monkeypatch, tmp_path):
+    """Somebody who cannot see the dialog is relying on the name it opens with."""
+    _panel, dialog = _save(monkeypatch, tmp_path)
+
+    assert dialog.defaults.get("defaultFile") == "snippet.py"
+    assert dialog.defaults.get("defaultDir") == str(tmp_path)
+
+
+def test_an_unknown_language_still_offers_a_name(monkeypatch, tmp_path):
+    _panel, dialog = _save(monkeypatch, tmp_path, row=_code_row(language="Brainfuck"))
+
+    assert dialog.defaults.get("defaultFile") == "snippet.txt"
