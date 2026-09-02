@@ -130,3 +130,36 @@ def test_nothing_is_rebuilt_on_a_platform_that_has_no_speaker(monkeypatch):
     app.announce("said another way")
 
     assert builds == []
+
+
+def test_a_reader_that_never_speaks_again_is_not_rebuilt_on_every_line(monkeypatch):
+    """The rebuild has to be throttled too, not only the first look.
+
+    A connection can be built and still be unable to say anything - NVDA gone
+    while its controller client is still loadable is exactly that shape. Every
+    line then paid two failed `speak` calls and a full scan for a reader, on
+    the path added to stop a fan-out from being silent. That is the cost the
+    throttle above was written to avoid, arriving through the other door.
+    """
+    builds: list[int] = []
+    monkeypatch.setattr(app, "_SPEAKER", _Speaker(alive=False))
+    monkeypatch.setattr(app.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(app, "_speaker_retry_after", 0.0)
+    monkeypatch.setattr(app, "_make_speaker", lambda: builds.append(1) or _Speaker(alive=False))
+
+    for _ in range(20):
+        app.announce("a line nobody will hear")
+
+    assert len(builds) == 1, f"rebuilt {len(builds)} times for 20 lines"
+
+
+def test_a_connection_that_cannot_speak_is_let_go_of(monkeypatch):
+    """Held on to, it would be tried first on every later line for good."""
+    monkeypatch.setattr(app, "_SPEAKER", _Speaker(alive=False))
+    monkeypatch.setattr(app.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(app, "_speaker_retry_after", 0.0)
+    monkeypatch.setattr(app, "_make_speaker", lambda: _Speaker(alive=False))
+
+    app.announce("into the void")
+
+    assert app._SPEAKER is None

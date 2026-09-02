@@ -182,6 +182,9 @@ def test_the_level_can_be_raised_from_the_environment(tmp_path, monkeypatch):
 
     diagnostics.start_logging()
 
+    assert logging.getLogger("blindpilot").level == logging.DEBUG
+    # Asking for more than the default is asking for a bug report, so what the
+    # libraries have to say is wanted too.
     assert logging.getLogger().level == logging.DEBUG
 
 
@@ -191,7 +194,7 @@ def test_the_default_level_is_info(tmp_path, monkeypatch):
 
     diagnostics.start_logging()
 
-    assert logging.getLogger().level == logging.INFO
+    assert logging.getLogger("blindpilot").level == logging.INFO
 
 
 def test_a_nonsense_level_falls_back_rather_than_failing(tmp_path, monkeypatch):
@@ -200,7 +203,35 @@ def test_a_nonsense_level_falls_back_rather_than_failing(tmp_path, monkeypatch):
 
     diagnostics.start_logging()
 
-    assert logging.getLogger().level == logging.INFO
+    assert logging.getLogger("blindpilot").level == logging.INFO
+
+
+def test_a_chatty_library_cannot_push_out_what_the_log_is_for(tmp_path, monkeypatch):
+    """The file is capped on purpose, so what fills it matters.
+
+    A library that logs a line per HTTP request or per COM call would roll the
+    records this exists to keep straight out of the file, long before anybody
+    came looking for them. BlindPilot's own logger is set to the asked-for
+    level; nothing else drops below WARNING unless somebody asks for it.
+    """
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    monkeypatch.delenv("BLINDPILOT_LOG_LEVEL", raising=False)
+    diagnostics.start_logging()
+
+    chatty = logging.getLogger("some_http_library.connectionpool")
+    chatty.info("Starting new HTTPS connection")
+    logging.getLogger("some_com_library").debug("a COM call nobody asked about")
+    logging.getLogger("blindpilot.codex").info("the sort of line this log is for")
+    chatty.warning("connection pool is full")
+    logging.shutdown()
+    written = (tmp_path / diagnostics.LOG_NAME).read_text(encoding="utf-8")
+
+    assert "the sort of line this log is for" in written
+    assert "Starting new HTTPS connection" not in written
+    assert "a COM call nobody asked about" not in written
+    # Quieted, not silenced: a library with something wrong to report is still
+    # exactly what somebody reading this would want to see.
+    assert "connection pool is full" in written
 
 
 def test_the_path_is_reported_so_it_can_be_named_to_somebody(tmp_path, monkeypatch):

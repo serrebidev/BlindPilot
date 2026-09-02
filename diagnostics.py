@@ -116,8 +116,15 @@ def start_logging() -> Optional[Path]:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
+    level = _level()
     root = logging.getLogger()
-    root.setLevel(_level())
+    # BlindPilot's own records at whatever was asked for; everything else at
+    # WARNING. The file is deliberately capped, and a library that logs a line
+    # per HTTP request or per COM call would push out the records this exists
+    # to keep long before anybody came looking for them. Asking for more than
+    # the default is asking for a bug report, so that case widens both.
+    root.setLevel(logging.WARNING if level >= logging.INFO else level)
+    logging.getLogger("blindpilot").setLevel(level)
     root.addHandler(handler)
 
     sys.excepthook = log_uncaught
@@ -136,7 +143,7 @@ def start_logging() -> Optional[Path]:
         _crash_file = None
 
     _started = True
-    logging.getLogger("blindpilot").info("logging started at %s", logging.getLevelName(root.level))
+    logging.getLogger("blindpilot").info("logging started at %s", logging.getLevelName(level))
     return directory / LOG_NAME
 
 
@@ -155,6 +162,9 @@ def stop_logging() -> None:
         if isinstance(handler, logging.handlers.RotatingFileHandler):
             handler.close()
             root.removeHandler(handler)
+    # Back to inheriting, so a second start decides the level afresh rather
+    # than being overruled by what the first one asked for.
+    logging.getLogger("blindpilot").setLevel(logging.NOTSET)
     _started = False
 
 

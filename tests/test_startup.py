@@ -9,6 +9,20 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+@pytest.fixture(autouse=True)
+def _startup_check_flag_does_not_leak():
+    """`main()` sets `_STARTUP_CHECK` for the life of the process, which is
+    right for a check that then exits and wrong for a test file where the next
+    test is an ordinary launch. Put back whatever it was."""
+    import blindpilot_app
+
+    before = blindpilot_app._STARTUP_CHECK
+    try:
+        yield
+    finally:
+        blindpilot_app._STARTUP_CHECK = before
+
+
 def test_linux_announcements_are_sent_to_orca_without_moving_focus(monkeypatch):
     import blindpilot_app
 

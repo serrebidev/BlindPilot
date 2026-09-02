@@ -210,12 +210,23 @@ def announce(text: str) -> None:
             # to be kept anyway, so one drop meant silence for the rest of the
             # session while the menu still said narration was on. Rebuild it
             # and say this line again, rather than losing every later one too.
+            now = time.monotonic()
+            if now < _speaker_retry_after:
+                # One was built moments ago and this is what became of it.
+                # Scanning for a reader again per line is the cost the throttle
+                # exists to avoid, and a fan-out narrates far faster than a
+                # reader restarts.
+                return
+            _speaker_retry_after = now + _SPEAKER_RETRY_SECONDS
             _SPEAKER = _make_speaker()
             if _SPEAKER is not None:
                 try:
                     _SPEAKER.speak(text, interrupt=False)
                 except Exception:
-                    pass
+                    # Built, and no more able to speak than the one it replaced.
+                    # Let it go, so the branch above decides when to look again
+                    # instead of every later line paying two failures and a scan.
+                    _SPEAKER = None
         return
     if platform.system() == "Linux" and _linux_announce(text):
         return
@@ -251,7 +262,7 @@ def announce(text: str) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7795,7 +7806,7 @@ def _bring_to_front() -> None:
 _STARTUP_CHECK = False
 
 
-def reserve_console_if_needed(backend: object, startup_check: bool = False) -> bool:
+def reserve_console_if_needed(backend: object, startup_check: Optional[bool] = None) -> bool:
     """Claim a hidden console, but only for the backend that needs one.
 
     FreeBuff is driven through a pseudo-terminal, and creating one gives a
@@ -7812,7 +7823,14 @@ def reserve_console_if_needed(backend: object, startup_check: bool = False) -> b
     window on screen, which Windows offers no way to avoid. Paying it on
     every launch, for the three backends that will never use it, is the
     part worth not doing.
+
+    Whether this is a startup check is read from `_STARTUP_CHECK` unless a
+    caller says, for the same reason `focus_prompt` guards itself: `main` has
+    to be told because it calls this before the flag is set, but nothing else
+    should have to know to.
     """
+    if startup_check is None:
+        startup_check = _STARTUP_CHECK
     if startup_check or normalize_backend(backend) != BACKEND_FREEBUFF:
         return False
     return reserve_hidden_console()
