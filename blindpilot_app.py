@@ -1943,6 +1943,14 @@ def _flatten(text: str) -> str:
     return "".join(character.casefold() for character in text if character.isalnum())
 
 
+def _one_line(label: str) -> str:
+    """A row's label on a single line, for the text view where a line is a row.
+
+    Labels are already flattened; a stray newline would break that mapping.
+    """
+    return " ".join(label.split())
+
+
 def _result_label(text: str) -> str:
     """Short, screen-reader-friendly preview line for a result row."""
     first = next((ln for ln in text.splitlines() if ln.strip()), "")
@@ -4002,6 +4010,15 @@ class HistoryDialog(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
             return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self._shown:
+            # CHAR_HOOK fires before the focused control sees the key, so this
+            # has to hand Enter back when a button is focused. Otherwise Enter
+            # on Cancel - the ordinary way to leave a dialog, and the only way
+            # for somebody who cannot see that focus has moved - opened a
+            # conversation instead. The dialog closed either way, which is what
+            # made it hard to notice.
+            if isinstance(self.FindFocus(), wx.Button):
+                event.Skip()
+                return
             self._accept()
             return
         # Down from the filter box drops straight into the list, so a filter
@@ -4011,6 +4028,12 @@ class HistoryDialog(wx.Dialog):
             self.list_box.SetSelection(0)
             return
         event.Skip()
+
+
+# How long the prompt has to stop changing before dictated or pasted text is
+# read back. Long enough that the pauses inside one utterance do not split
+# it, short enough to be a read-back rather than an interruption.
+_DICTATION_PAUSE_MS = 1500
 
 
 class SessionPanel(wx.Panel):
@@ -4129,6 +4152,10 @@ class SessionPanel(wx.Panel):
         self.prompt.Bind(wx.EVT_SET_FOCUS, self._on_prompt_focus)
         self.prompt.Bind(wx.EVT_TEXT, self._on_prompt_text_changed)
         self._dictation_timer = None
+        # What the prompt held at the last change, so the next one can be
+        # told apart from a keystroke, and what is waiting to be read back.
+        self._prompt_text = ""
+        self._dictation_pending = ""
         char_h = self.prompt.GetCharHeight()
         self.prompt.SetMinSize(wx.Size(-1, char_h * 5 + 8))
 
@@ -4662,14 +4689,42 @@ class SessionPanel(wx.Panel):
             wx.CallAfter(announce, "Prompt, edit text")
 
     def _on_prompt_text_changed(self, event: wx.CommandEvent) -> None:
+        """Arrange to read back text that nothing else will have spoken.
+
+        Dictation puts words in the prompt with no keystrokes, so the screen
+        reader stays silent and there is no way to tell what landed. Typing is
+        the opposite: every character has already been echoed, and this used to
+        fire for that too, so pausing to think for a second and a half read the
+        whole prompt back over the top of it.
+
+        One more character is a keystroke. Bulk is dictation or a paste.
+        """
         event.Skip()
+        text = self.prompt.GetValue()
+        before, self._prompt_text = self._prompt_text, text
         if self._dictation_timer is not None:
             self._dictation_timer.Stop()
-        self._dictation_timer = wx.CallLater(1500, self._read_prompt_text)
+            self._dictation_timer = None
+        if len(text) - len(before) <= 1:
+            # Typed, or deleted. Either way it has been spoken already, and a
+            # pending read-back is now stale: carrying on by hand means the
+            # screen reader is echoing again.
+            self._dictation_pending = ""
+            return
+        # Successive chunks of one utterance land as separate events, so they
+        # accumulate and are read once when the dictating stops.
+        if text.startswith(before):
+            self._dictation_pending += text[len(before) :]
+        else:
+            self._dictation_pending = text
+        self._dictation_timer = wx.CallLater(_DICTATION_PAUSE_MS, self._read_prompt_text)
 
     def _read_prompt_text(self) -> None:
         self._dictation_timer = None
-        text = self.prompt.GetValue().strip()
+        # What arrived, not the whole prompt: dictating a second sentence onto
+        # a long one should not replay the first.
+        text = (self._dictation_pending or self.prompt.GetValue()).strip()
+        self._dictation_pending = ""
         if text:
             announce(text)
 
@@ -5385,9 +5440,17 @@ class SessionPanel(wx.Panel):
 
     # ----- List + find -----
     def _refresh_list(self) -> None:
-        # Replacing a native ListBox's contents clears its selection. Preserve
-        # the row first so incoming output never disrupts someone who is
-        # reading older rows with NVDA.
+        # Rebuilding either control throws its contents away, which loses the
+        # selection, so the row being read has to be put back afterwards - and
+        # putting it back is what speaks. Setting a native list box's selection
+        # fires the accessibility event NVDA reads the row from, and moving the
+        # text view's insertion point is a caret move it reads the line from.
+        # This runs once per drained batch, so during a turn it announced
+        # somebody's own row back to them every few hundredths of a second.
+        #
+        # Output is only ever appended, so the usual case appends too: no
+        # rebuild, no selection to restore, and nothing that speaks.
+        previous = [row.label for row in self._displayed]
         keep = self._selected_row()
         term = self._search_term.lower()
         labels: List[str] = []
@@ -5397,15 +5460,35 @@ class SessionPanel(wx.Panel):
                 continue
             labels.append(row.label)
             self._displayed.append(row)
+
+        if labels[: len(previous)] == previous:
+            added = labels[len(previous) :]
+            if added:
+                self._append_rows(added)
+            return
+
+        # The rows really did change shape - a search, a new turn, a response
+        # replaced by its parsed form - so there is no way around a rebuild,
+        # and restoring the selection afterwards is right rather than wrong.
         if SETTINGS.text_view:
-            # One row per line, so a line number is a row number. Labels are
-            # already flattened, but a stray newline would break that mapping.
-            text = "\n".join(" ".join(label.split()) for label in labels)
-            self.responses_text.ChangeValue(text)
+            self.responses_text.ChangeValue("\n".join(_one_line(label) for label in labels))
         else:
             self.responses.Set(labels)
         if keep != wx.NOT_FOUND and labels:
             self._select_row(keep)
+
+    def _append_rows(self, labels: List[str]) -> None:
+        """Add rows to the end, leaving the reader exactly where they are."""
+        if not SETTINGS.text_view:
+            self.responses.AppendItems(list(labels))
+            return
+        text = "\n".join(_one_line(label) for label in labels)
+        was_at = self.responses_text.GetInsertionPoint()
+        lead = "\n" if self.responses_text.GetLastPosition() else ""
+        # Appending moves the caret to the end, which is itself a move worth
+        # announcing, so it goes straight back to the line being read.
+        self.responses_text.AppendText(lead + text)
+        self.responses_text.SetInsertionPoint(was_at)
 
     def open_find(self) -> None:
         """Find-in-responses popup (File menu / Cmd-Ctrl+F). Blank clears it."""
@@ -5419,14 +5502,18 @@ class SessionPanel(wx.Panel):
                 return
             self._search_term = dlg.GetValue().strip()
         self._refresh_list()
+        # Spoken, not just written to the status bar. No screen reader reads a
+        # status bar it was not asked to, and a search that matched nothing
+        # does not move focus either - so the list quietly emptied and not one
+        # thing said so, which is indistinguishable from a dropped keystroke.
         if self._search_term:
-            self._set_status(
+            self._announce(
                 f"Showing {len(self._displayed)} of {len(self._rows)} rows for '{self._search_term}'"
             )
             if self._row_count() > 0:
                 self._focus_row(0)
         else:
-            self._set_status("Search cleared")
+            self._announce("Search cleared")
 
     def _on_list_key(self, event: wx.KeyEvent) -> None:
         """Row keys for both responses controls — the list box and the
