@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import platform
 import queue
@@ -147,14 +148,27 @@ else:
 # NVDA nor JAWS speaks a status-bar change on its own. accessible_output2 talks
 # to whichever reader is running (NVDA controller client, JAWS COM, SAPI as a
 # last resort), which is what makes live narration audible on Windows.
-_SPEAKER = None
-if platform.system() == "Windows":
+# How long to wait before looking for a reader again. Building the output
+# scans for one, which is far too expensive to do per narration line during a
+# fan-out, and a reader that is not there now is usually not there a moment
+# later either.
+_SPEAKER_RETRY_SECONDS = 5.0
+_speaker_retry_after = 0.0
+
+
+def _make_speaker():
+    """Open a connection to whichever screen reader is running, or None."""
+    if platform.system() != "Windows":
+        return None
     try:
         from accessible_output2.outputs.auto import Auto as _AutoOutput  # type: ignore
 
-        _SPEAKER = _AutoOutput()
+        return _AutoOutput()
     except Exception:  # library missing, or no usable output found
-        _SPEAKER = None
+        return None
+
+
+_SPEAKER = _make_speaker()
 
 
 def _linux_announce(text: str) -> bool:
@@ -175,13 +189,32 @@ def announce(text: str) -> None:
     also mirror the message to the status bar so there is a fallback the review
     cursor can reach.
     """
+    global _SPEAKER, _speaker_retry_after
+    if _SPEAKER is None and platform.system() == "Windows":
+        # No reader when BlindPilot started, or the last rebuild failed too.
+        # Looked for again occasionally, so a reader started afterwards is
+        # picked up instead of leaving the session silent for good.
+        now = time.monotonic()
+        if now >= _speaker_retry_after:
+            _speaker_retry_after = now + _SPEAKER_RETRY_SECONDS
+            _SPEAKER = _make_speaker()
     if _SPEAKER is not None:
         try:
             # interrupt=False so a long narration is queued behind whatever the
             # reader is already saying instead of chopping it off.
             _SPEAKER.speak(text, interrupt=False)
         except Exception:
-            pass
+            # The connection to the reader can drop - NVDA restarting, a JAWS
+            # COM object disconnecting - and the object never recovers. It used
+            # to be kept anyway, so one drop meant silence for the rest of the
+            # session while the menu still said narration was on. Rebuild it
+            # and say this line again, rather than losing every later one too.
+            _SPEAKER = _make_speaker()
+            if _SPEAKER is not None:
+                try:
+                    _SPEAKER.speak(text, interrupt=False)
+                except Exception:
+                    pass
         return
     if platform.system() == "Linux" and _linux_announce(text):
         return
@@ -7752,6 +7785,15 @@ def main() -> int:
     # Before anything is started: nothing BlindPilot launches may inherit a
     # PATH that points back into its own install folder, or the files there
     # stay open long after BlindPilot has closed and cannot be updated.
+    if _SPEAKER is None and platform.system() == "Windows":
+        # Worth saying plainly: with no output, every announcement on Windows
+        # goes nowhere and the application runs in total silence while its
+        # menus still say narration is on. accessible-output2 is in
+        # requirements.txt, so this means an incomplete install.
+        logging.getLogger("blindpilot").warning(
+            "no screen reader output is available: accessible-output2 is not "
+            "installed, so nothing will be spoken on Windows"
+        )
     keep_bundle_off_child_path()
     activate_managed_cli_paths()
     # Claim the console before anything can create one on screen. Doing it here,
