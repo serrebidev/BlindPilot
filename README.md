@@ -14,7 +14,7 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 - Native wxPython controls throughout, so NVDA, JAWS, and VoiceOver read the app rather than interpreting a terminal.
 - Switches between Agent and Chat from a named Mode combo box at the top of the same window.
 - Chats directly through OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, OpenCode Go, or a custom OpenAI-compatible service, with secure API-key storage, model discovery, profiles, streaming history, attachments, editing, and response regeneration.
-- Runs Claude Code, Codex, FreeBuff, and opencode, switchable from the File menu and remembered between launches.
+- Runs Claude Code, Codex, FreeBuff, and opencode, switchable from the Model menu and remembered between launches.
 - Segments every answer into navigable rows: one per heading, paragraph, list item, quote, code block, thought, tool action, and tool result.
 - Reads answers aloud as they arrive, or stays quiet until the whole answer is ready.
 - Reopens past conversations from any backend, titled by the message that started them, and carries on where they left off.
@@ -25,8 +25,8 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 - Steers a task while it is still running, or stops it outright and keeps what it produced.
 - Attaches files and pasted clipboard images as explicit prompt paths.
 - Searches responses, jumps between them, and copies a code block, a whole response, or the whole conversation.
-- Picks the model and reasoning effort from whatever the installed CLI actually reports.
-- Marks sent, working, and received with optional earcons, which can be turned off from the Options menu.
+- Picks the model and reasoning effort from whatever the installed CLI actually reports, from **Model → Model and Effort** (**Ctrl+M**).
+- Marks sent, working, and received with optional earcons, which can be turned off together or one at a time from **Options → Sounds**.
 - Installs, updates, adds to PATH, and signs into any of the four backends from an accessible wizard.
 - Updates itself from GitHub Releases after verifying the published SHA-256.
 
@@ -80,7 +80,7 @@ Settings live in `%APPDATA%\BlindPilot\config.json` on Windows and `~/.config/bl
 
 ## Set up a backend
 
-BlindPilot's first-run wizard and **File → Manage Backends** can find, install, update, and sign into any of the four. Claude Code uses its official native installer. For Codex, FreeBuff, and opencode, BlindPilot installs a current Node.js LTS for the user automatically when npm is missing, installs the CLI into a writable per-user folder, adds it to PATH, and verifies that the CLI starts. FreeBuff's verification also downloads its native binary before setup continues. No administrator rights are required. A failed backend remains isolated from the others. To do it by hand:
+BlindPilot's first-run wizard and **Model → Manage Backends** can find, install, update, and sign into any of the four. Claude Code uses its official native installer. For Codex, FreeBuff, and opencode, BlindPilot installs a current Node.js LTS for the user automatically when npm is missing, installs the CLI into a writable per-user folder, adds it to PATH, and verifies that the CLI starts. FreeBuff's verification also downloads its native binary before setup continues. No administrator rights are required. A failed backend remains isolated from the others. To do it by hand:
 
 ```powershell
 # Claude Code
@@ -102,7 +102,7 @@ opencode providers login
 
 **Sign In** does the same thing from inside BlindPilot, with no terminal. It runs the backend's own sign-in, reads the address out of its output, speaks it, and makes sure it reaches your default browser — the CLI opens it where it can, BlindPilot opens it where it will not, and **Open Sign-in Page** opens it again if the browser was closed or never arrived. When a provider hands the page back a code instead of finishing on its own, BlindPilot asks for the code and gives it to the CLI; that dialog closes by itself if the browser completes the sign-in first.
 
-opencode reaches a model through a provider you connect to it, so BlindPilot carries opencode's `/connect` as a dialog of its own: type `/connect` in the prompt (or use **Connect a Provider** in the wizard) to pick from every provider opencode knows, give it an API key, or sign in through your browser. Nothing about that flow needs a terminal.
+opencode reaches a model through a provider you connect to it, so BlindPilot carries opencode's `/connect` as a dialog of its own: choose **Model → Connect a Provider**, type `/connect` in the prompt, or use **Connect a Provider** in the wizard to pick from every provider opencode knows, give it an API key, or sign in through your browser. Nothing about that flow needs a terminal.
 
 Type `/status` in the prompt to hear what the tab is about to do and whose account it will do it on: the backend, the model and effort, the permission mode, the folder, whether the next message continues this conversation or starts one, and who that backend is signed in as. Every backend answers it. Claude Code has a `/status` of its own but only inside its interactive terminal — sent as a message it replies that the command is not available here — and Codex, FreeBuff and opencode have no status command at all, so BlindPilot asks each one the way it can answer and reports all four the same way.
 
@@ -112,6 +112,7 @@ Type `/status` in the prompt to hear what the tab is about to do and whose accou
 - **Ctrl+H** reopen a past conversation.
 - **Ctrl+Shift+K** compact this conversation, **Ctrl+Shift+N** start a fresh one.
 - **Ctrl+F** search responses, **Ctrl+R** jump to the latest.
+- **Ctrl+M** choose the model and reasoning effort for this conversation.
 - **Ctrl+/** slash commands, **Ctrl+.** stop the running task.
 - **Ctrl+Shift+A** attach files, **Ctrl+Shift+M** cycle permission modes.
 - **Ctrl+Tab** and **Ctrl+Shift+Tab** move between session tabs, as do **Ctrl+Shift+]** and
