@@ -125,17 +125,62 @@ def test_the_dialog_offers_one_row_per_settings_file(wx_app, tmp_path):
         dialog.Destroy()
 
 
-def test_enter_on_a_button_does_not_open_a_file(wx_app, tmp_path, opened):
+def _reached(monkeypatch):
+    """Which entry the dialog decided to reach, whatever came of it.
+
+    Watching the platform opener instead is not enough: on a machine where
+    none of the settings files exist, reaching one opens nothing, so the
+    opener stays silent whether or not the dialog acted.
+    """
+    calls = []
+    monkeypatch.setattr(app, "_reach_settings_file", lambda entry: calls.append(entry) or "")
+    return calls
+
+
+def test_enter_on_a_button_does_not_open_a_file(wx_app, tmp_path, monkeypatch):
     """The same bug as the past-conversations dialog: CHAR_HOOK fires before
     the focused control sees the key, so Enter on Close must close."""
+    reached = _reached(monkeypatch)
     dialog = app.SettingsFilesDialog(None, str(tmp_path))
     try:
-        dialog.FindWindowById(wx.ID_CANCEL).SetFocus()
+        # Focus is answered rather than assumed. A dialog that was never shown
+        # does not reliably hold it on every platform, and what is under test
+        # is this handler's decision, not wxPython's focus behaviour.
+        dialog.FindFocus = lambda: dialog.FindWindowById(wx.ID_CANCEL)
         event = _Key(wx.WXK_RETURN)
+
         dialog._on_key(event)
 
-        assert opened == [], "Enter on a button opened a settings file"
+        assert reached == [], "Enter on a button opened a settings file"
         assert event.skipped, "the button never got the key it was focused for"
+    finally:
+        dialog.Destroy()
+
+
+def test_enter_in_the_list_opens_the_chosen_file(wx_app, tmp_path, monkeypatch):
+    """The other half: handing Enter back must not cost the list its Enter."""
+    reached = _reached(monkeypatch)
+    dialog = app.SettingsFilesDialog(None, str(tmp_path))
+    try:
+        dialog.FindFocus = lambda: dialog.list_box
+        event = _Key(wx.WXK_RETURN)
+
+        dialog._on_key(event)
+
+        assert len(reached) == 1, "Enter in the list opened nothing"
+        assert not event.skipped
+    finally:
+        dialog.Destroy()
+
+
+def test_escape_closes_it(wx_app, tmp_path):
+    dialog = app.SettingsFilesDialog(None, str(tmp_path))
+    ended = []
+    dialog.EndModal = ended.append
+    try:
+        dialog._on_key(_Key(wx.WXK_ESCAPE))
+
+        assert ended == [wx.ID_CANCEL]
     finally:
         dialog.Destroy()
 
