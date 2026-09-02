@@ -21,12 +21,18 @@ import hermes_backend
 
 @pytest.fixture
 def fake_profile(monkeypatch, tmp_path):
-    """A Windows user profile the installer has written its layout into."""
+    """A Windows user profile the installer has written its layout into.
+
+    The layout under test is the Windows installer's, so the platform is
+    forced with it — these tests run in CI on macOS and Linux too, where the
+    unforced discovery code would rightly take its POSIX branch and find
+    nothing. (The same technique the installer-argv tests use.)"""
     home = tmp_path / "home"
     local = home / "AppData" / "Local"
     monkeypatch.setenv("LOCALAPPDATA", str(local))
     monkeypatch.setenv("HERMES_HOME", "")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(hermes_backend.platform, "system", lambda: "Windows")
     return home, local
 
 
@@ -71,10 +77,17 @@ def test_the_installer_bin_dir_goes_on_the_search_path(monkeypatch, tmp_path):
     process' PATH before searching, so `shutil.which` can see a launcher the
     installer put there after BlindPilot started."""
     added: list[Path] = []
-    monkeypatch.setattr(hermes_backend, "find_hermes_cli", lambda: "C:/l/hermes/bin/hermes.exe")
+    local = tmp_path / "local"
+    hermes_bin = local / "hermes" / "bin"
+    hermes_bin.mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.setattr(hermes_backend.platform, "system", lambda: "Windows")
     import blindpilot_app as app
 
+    monkeypatch.setattr(app.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(hermes_backend, "find_hermes_cli", lambda: "C:/l/hermes/bin/hermes.exe")
     monkeypatch.setattr(app, "_add_to_process_path", lambda p: added.append(Path(p)))
 
     assert app._hermes_binary_after_install() == "C:/l/hermes/bin/hermes.exe"
-    assert any("hermes" in str(p) and "bin" in str(p) for p in added)
+    assert hermes_bin in added
