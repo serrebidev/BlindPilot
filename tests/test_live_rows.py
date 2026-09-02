@@ -215,9 +215,14 @@ def _run_worker(events, on_activity=None):
     completed: list[str] = []
     procs: list[_FakeProc] = []
 
-    def fake_popen(*_a, **_k):
+    def fake_popen(cmd, *_a, **_k):
         proc = _FakeProc(lines)
-        procs.append(proc)
+        # On macOS the worker's first act is to ask a login shell for its
+        # PATH, via subprocess.run -> subprocess.Popen — which this patch has
+        # intercepted too. That probe is none of this test's business: it must
+        # not become `procs[0]` and push the worker's real process to [1].
+        if cmd and cmd[0] == "claude":
+            procs.append(proc)
         return proc
 
     def record(kind, text):
@@ -343,9 +348,12 @@ def test_steer_writes_a_second_message_into_the_running_process():
     lines = [_json.dumps(e) + "\n" for e in events]
     procs = []
 
-    def fake_popen(*_a, **_k):
+    def fake_popen(cmd, *_a, **_k):
         proc = _FakeProc(lines)
-        procs.append(proc)
+        # The macOS login-shell PATH probe also goes through Popen; it is not
+        # the process under test and must not become `procs[0]`.
+        if cmd and cmd[0] == "claude":
+            procs.append(proc)
         return proc
 
     real_popen, real_find = subprocess.Popen, claude_reader._find_claude
@@ -774,9 +782,13 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
     commands: list[list[str]] = []
 
     def fake_popen(cmd, *_a, **_k):
-        commands.append(list(cmd))
         proc = _FakeProc(lines)
-        procs.append(proc)
+        # The macOS login-shell PATH probe also goes through Popen; it is not
+        # the process under test and must not become `procs[0]` or
+        # `commands[0]`.
+        if cmd and cmd[0] == "claude":
+            commands.append(list(cmd))
+            procs.append(proc)
         return proc
 
     def on_question(questions):
