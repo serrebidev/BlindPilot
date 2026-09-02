@@ -2,3 +2,6 @@
 pyinstaller>=6.0,<7
 pytest>=8,<10
 ruff==0.15.10
+# Pinned for the same reason as ruff: a checker that gains a
+# rule on its own schedule turns somebody else's release into a red build here.
+mypy==2.3.1

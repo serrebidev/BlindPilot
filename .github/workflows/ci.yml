@@ -104,3 +104,11 @@ jobs:
         run: |
           python -m ruff check .
           python -m ruff format --check .
+
+      - name: Check types
+        # One runner is enough: mypy.ini pins `platform = win32`, because this
+        # code carries both halves of every platform split behind runtime
+        # checks no checker can read. Running it three times would report the
+        # same thing three times, or three different things for no reason.
+        if: runner.os == 'Windows'
+        run: python -m mypy

@@ -1007,7 +1007,9 @@ def _spawn_detached(command: list[str], flags: int = 0) -> None:
     extra: dict[str, object] = (
         {"creationflags": flags} if platform.system() == "Windows" else {"start_new_session": True}
     )
-    subprocess.Popen(
+    # The platform split above makes `extra` a dict of mixed value types,
+    # which no Popen overload accepts as **kwargs.
+    subprocess.Popen(  # type: ignore[call-overload]
         command,
         # The helper outlives BlindPilot, so it is left holding nothing of it.
         stdin=subprocess.DEVNULL,
@@ -1015,7 +1017,7 @@ def _spawn_detached(command: list[str], flags: int = 0) -> None:
         stderr=subprocess.DEVNULL,
         close_fds=True,
         cwd=tempfile.gettempdir(),
-        **extra,  # type: ignore[arg-type]
+        **extra,
     )
 
 
@@ -1108,7 +1110,7 @@ def schedule_install(archive: Path) -> None:
         # A stale reason from a previous attempt must not be reported as this
         # one's outcome.
         clear_pending_failure()
-        helper: Optional[Path] = None
+        helper = None
         try:
             fd, helper_name = tempfile.mkstemp(prefix=TEMPORARY_PREFIX, suffix=".sh")
             os.close(fd)

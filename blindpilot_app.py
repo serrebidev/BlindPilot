@@ -1170,7 +1170,10 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
     npm = _find_npm()
     if npm is None:
         npm = install_portable_node(log)
-    argv = _npm_install_argv(backend) if npm else None
+    if npm is None:
+        log(f"npm could not be installed, so BlindPilot cannot install {label} automatically.")
+        return None
+    argv = _npm_install_argv(backend)
     if argv is None:
         log(f"npm could not be installed, so BlindPilot cannot install {label} automatically.")
         return None
@@ -1274,10 +1277,11 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
         if _find_npm() is None and install_portable_node(log) is None:
             log(f"npm could not be installed, so BlindPilot cannot update {label} automatically.")
             return False
-        argv = _npm_update_argv(backend)
-        if argv is None:
+        updating = _npm_update_argv(backend)
+        if updating is None:
             log(f"npm could not be found, so BlindPilot cannot update {label} automatically.")
             return False
+        argv = updating
     if backend == BACKEND_OPENCODE:
         # The server BlindPilot has been talking to *is* the executable npm is
         # about to replace, and Windows will not overwrite one that is running.
@@ -2477,6 +2481,8 @@ class ClaudeWorker(threading.Thread):
         bounded, because a genuinely stuck one must not hang the turn.
         """
         proc = self._proc
+        if proc is None:
+            return True
         heard = len(self._stderr_lines)
         last_heard = time.monotonic()
         while True:

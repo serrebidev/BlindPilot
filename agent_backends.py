@@ -76,8 +76,11 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
     pid = getattr(proc, "pid", None)
     if platform.system() != "Windows" and isinstance(pid, int) and pid > 0:
         try:
-            if os.getpgid(pid) == pid:
-                os.killpg(pid, signal.SIGKILL)
+            # POSIX only, and the platform test above is a runtime condition
+            # the checker cannot read, so against a Windows target it reports
+            # all three of these as missing.
+            if os.getpgid(pid) == pid:  # type: ignore[attr-defined]
+                os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
         except OSError:
             pass
     kill = getattr(proc, "kill", None)
@@ -914,8 +917,8 @@ def blindpilot_data_dir() -> Path:
     if platform.system() == "Windows":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "BlindPilot"
-    base = os.environ.get("XDG_DATA_HOME")
-    return (Path(base) if base else Path.home() / ".local" / "share") / "blindpilot"
+    data = os.environ.get("XDG_DATA_HOME")
+    return (Path(data) if data else Path.home() / ".local" / "share") / "blindpilot"
 
 
 def _freebuff_choice_path() -> Path:
@@ -3850,6 +3853,18 @@ _POISON_HISTORY_RE = re.compile(
 )
 
 
+def _opencode_entry_info(entry: dict) -> dict:
+    """The `info` block of a history entry, or the entry itself.
+
+    opencode nests message metadata under `info` in some shapes and inlines it
+    in others. Written inline as a conditional this called `.get` twice, so the
+    guard tested one value and the code then used another - harmless in
+    practice, and exactly the shape that stops being harmless after an edit.
+    """
+    found = entry.get("info")
+    return found if isinstance(found, dict) else entry
+
+
 def _poison_history_error(text: str) -> bool:
     """Whether a backend error says the stored history itself was refused."""
     return bool(_POISON_HISTORY_RE.search(text or ""))
@@ -4107,8 +4122,9 @@ class OpencodeWorker(threading.Thread):
         ]
 
         def stamp(entry: dict) -> float:
-            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
-            time = info.get("time") if isinstance(info.get("time"), dict) else {}
+            info = _opencode_entry_info(entry)
+            stamped = info.get("time")
+            time = stamped if isinstance(stamped, dict) else {}
             try:
                 return float(time.get("created") or info.get("time_created") or 0)
             except (TypeError, ValueError):
@@ -4117,17 +4133,19 @@ class OpencodeWorker(threading.Thread):
         cutoff_id = ""
         cutoff_stamp = -1.0
         for entry in entries:
-            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
+            info = _opencode_entry_info(entry)
             if str(info.get("role") or "") != "assistant":
                 continue
             message_id = str(info.get("id") or "")
             if not message_id:
                 continue
-            parts = entry.get("parts") if isinstance(entry.get("parts"), list) else []
+            listed = entry.get("parts")
+            parts = listed if isinstance(listed, list) else []
             for part in parts:
                 if not isinstance(part, dict) or str(part.get("tool") or "") != "question":
                     continue
-                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                reported = part.get("state")
+                state = reported if isinstance(reported, dict) else {}
                 if str(state.get("status") or "") != "completed":
                     continue
                 when = stamp(entry)
@@ -4143,8 +4161,7 @@ class OpencodeWorker(threading.Thread):
             index = next(
                 position
                 for position, entry in enumerate(entries)
-                if (entry.get("info") if isinstance(entry.get("info"), dict) else entry).get("id")
-                == cutoff_id
+                if _opencode_entry_info(entry).get("id") == cutoff_id
             )
         except StopIteration:
             return False
@@ -4155,7 +4172,7 @@ class OpencodeWorker(threading.Thread):
         ]
         removed = False
         for entry in doomed:
-            info = entry.get("info") if isinstance(entry.get("info"), dict) else entry
+            info = _opencode_entry_info(entry)
             message_id = str(info.get("id") or "")
             if not message_id:
                 continue
@@ -4587,7 +4604,7 @@ class OpencodeWorker(threading.Thread):
 class AgentWorker(Protocol):
     """The part of a backend's worker that the window actually drives.
 
-    All three workers are threads, but a thread is not what the window wants
+    All four workers are threads, but a thread is not what the window wants
     from them: it wants to start a turn, ask whether it is still running, stop
     it, and wait for it to let go. Saying that here is what lets the window
     hold whichever worker the backend chose without knowing which one it is —
@@ -4598,6 +4615,8 @@ class AgentWorker(Protocol):
     def start(self) -> None: ...
 
     def is_alive(self) -> bool: ...
+
+    def steer(self, text: str) -> bool: ...
 
     def join(self, timeout: Optional[float] = None) -> None: ...
 

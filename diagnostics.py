@@ -65,8 +65,8 @@ def log_dir() -> Path:
         return Path(base) / "BlindPilot" / "Logs"
     if system == "Darwin":
         return Path.home() / "Library" / "Logs" / "BlindPilot"
-    base = os.environ.get("XDG_STATE_HOME")
-    return (Path(base) if base else Path.home() / ".local" / "state") / "blindpilot"
+    state = os.environ.get("XDG_STATE_HOME")
+    return (Path(state) if state else Path.home() / ".local" / "state") / "blindpilot"
 
 
 def log_path() -> Path:
