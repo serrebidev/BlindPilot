@@ -1232,11 +1232,40 @@ def _run_logged_process(
     return proc.wait()
 
 
+def _not_installable_message(backend: str) -> str:
+    """Why BlindPilot cannot install this backend, with its own instructions.
+
+    Built so the parts are sentences on their own: `install_command` is a
+    fragment for some backends ("See https://..."), and the old failure line
+    spliced it after "using", which a screen reader read as "install Hermes
+    yourself using See https://...".
+    """
+    info = BACKENDS[normalize_backend(backend)]
+    return f"BlindPilot cannot install {info.label} itself. {info.install_command}"
+
+
+def _install_failure_message(backend: str) -> str:
+    """What to hear when an install did not complete: the command, unspliced."""
+    info = BACKENDS[normalize_backend(backend)]
+    return (
+        "The install did not complete. Read the installer output, or install "
+        f"{info.label} yourself. {info.install_command} Then click Check Again."
+    )
+
+
 def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
     """Install one selected backend and return its discovered executable."""
     backend = normalize_backend(backend)
     if backend == BACKEND_CLAUDE:
         return install_claude(log)
+    if not _backend_installs_with_npm(backend):
+        # Hermes ships its own installer and is not on npm. Reaching here at
+        # all means an Install button existed for a backend this function
+        # cannot install, and the old path then reported "npm could not be
+        # installed" — untrue on machines that have npm, and the reason a
+        # captured NVDA session heard the claim on one that does. Refuse in
+        # terms of the backend before any npm machinery is consulted.
+        raise NotImplementedError(_not_installable_message(backend))
     label = backend_label(backend)
     npm = _find_npm()
     if npm is None:
@@ -7460,6 +7489,26 @@ class SetupWizard(wx.Dialog):
                 self._cli_path_btn.Show()
                 hint = "Tab to Add to PATH to make the CLI available in new terminals."
             self._next_btn.Enable(True)
+        elif not _backend_installs_with_npm(self.backend):
+            # This backend does not come from npm, so Install is not offered
+            # at all — the old order asked `_selected_install_argv` first,
+            # whose managed-Node sentinel answers for any backend when Node
+            # is installable, and Hermes was offered an install that runs
+            # nothing and then reports that npm could not be installed, on
+            # machines that have it. Point at its own instructions instead.
+            self._cli_status.SetLabel(f"{info.label} was not found.")
+            self._cli_detail.SetLabel(
+                f"BlindPilot could not find {info.label} on this computer.\n\n"
+                f"{info.install_command}\n\n"
+                "Install it, then choose Check Again, or go Back and select "
+                "another backend."
+            )
+            self._cli_install_btn.Hide()
+            self._cli_update_btn.Hide()
+            self._cli_path_btn.Hide()
+            self._cli_check_btn.Show()
+            self._next_btn.Enable(False)
+            hint = "Tab to Check Again once it is installed."
         elif self._selected_install_argv() is not None:
             self._cli_status.SetLabel(f"{info.label} is not installed.")
             if _find_npm() is None:
@@ -7483,22 +7532,6 @@ class SetupWizard(wx.Dialog):
             self._cli_check_btn.Show()
             self._next_btn.Enable(False)
             hint = f"Tab to Install {info.label}."
-        elif not _backend_installs_with_npm(self.backend):
-            # This backend does not come from npm, so naming npm would send the
-            # user after the wrong thing. Point at its own instructions instead.
-            self._cli_status.SetLabel(f"{info.label} was not found.")
-            self._cli_detail.SetLabel(
-                f"BlindPilot could not find {info.label} on this computer.\n\n"
-                f"{info.install_command}\n\n"
-                "Install it, then choose Check Again, or go Back and select "
-                "another backend."
-            )
-            self._cli_install_btn.Hide()
-            self._cli_update_btn.Hide()
-            self._cli_path_btn.Hide()
-            self._cli_check_btn.Show()
-            self._next_btn.Enable(False)
-            hint = "Tab to Check Again once it is installed."
         else:
             self._cli_status.SetLabel(f"{info.label} was not found.")
             self._cli_detail.SetLabel(
@@ -7550,6 +7583,16 @@ class SetupWizard(wx.Dialog):
 
     def _install_cli(self) -> None:
         label = backend_label(self.backend)
+        if not _backend_installs_with_npm(self.backend):
+            # The check hides this button for a backend BlindPilot cannot
+            # install, but a dialog built before that fix can still hold one.
+            # Pressing it must not promise "under a minute" for an install
+            # that cannot happen: captured from NVDA, the promise and three
+            # failure lines were spoken in the same breath, three milliseconds
+            # apart. Refuse at once, in terms of the backend.
+            self._cli_status.SetLabel(f"BlindPilot cannot install {label}.")
+            announce(_not_installable_message(self.backend))
+            return
         self._cli_install_btn.Disable()
         self._cli_update_btn.Disable()
         self._cli_check_btn.Disable()
@@ -7591,11 +7634,7 @@ class SetupWizard(wx.Dialog):
             announce(f"{label} installed.")
         else:
             self._cli_status.SetLabel("The install did not complete.")
-            announce(
-                "The install did not complete. Read the installer output, or "
-                f"install {label} yourself using {BACKENDS[self.backend].install_command} and "
-                "click Check Again."
-            )
+            announce(_install_failure_message(self.backend))
         self._check_cli()
 
     def _update_cli(self) -> None:
