@@ -1300,6 +1300,12 @@ def _codex_questions(raw: object) -> tuple[Question, ...]:
     return tuple(questions)
 
 
+# How long a failing Codex turn waits for the last line of stderr, which is
+# the one that says why. Long enough for a line already written to arrive,
+# short enough that a pipe which never closes cannot hold the turn open.
+_CODEX_LAST_WORDS_SECONDS = 1.0
+
+
 class CodexWorker(threading.Thread):
     """Run one Codex turn through the official app-server JSONL protocol."""
 
@@ -1351,6 +1357,7 @@ class CodexWorker(threading.Thread):
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
         self._stderr: list[str] = []
+        self._stderr_reader: Optional[threading.Thread] = None
         self._failed = False
 
     def accepting_input(self) -> bool:
@@ -1480,7 +1487,10 @@ class CodexWorker(threading.Thread):
             return
 
         if self._proc.stderr:
-            threading.Thread(target=self._read_stderr, daemon=True).start()
+            self._stderr_reader = threading.Thread(
+                target=self._read_stderr, name="codex-stderr", daemon=True
+            )
+            self._stderr_reader.start()
 
         init_id = self._next_id()
         self._send(
@@ -1664,8 +1674,25 @@ class CodexWorker(threading.Thread):
                 return
 
         if not self._cancelled:
+            self._await_last_words()
             detail = "\n".join(self._stderr[-10:]).strip()
             self._fail(detail or "Codex app server closed before the turn completed")
+
+    def _await_last_words(self) -> None:
+        """Let the final line of stderr land before reporting why Codex died.
+
+        Reaching here means stdout hit EOF. stderr is a different pipe read by
+        a different thread, and the line worth having - the panic, the
+        unauthorized, the out of memory - is the last one written, which is
+        exactly the one still in flight. Everything earlier is already in the
+        list, so the race did not lose noise, it lost the reason, and it lost
+        it differently each time.
+
+        Bounded, because a pipe that never closes must not hold the turn open.
+        """
+        reader = self._stderr_reader
+        if reader is not None:
+            reader.join(timeout=_CODEX_LAST_WORDS_SECONDS)
 
     def _read_stderr(self) -> None:
         if not self._proc or not self._proc.stderr:
