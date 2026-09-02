@@ -2106,6 +2106,11 @@ class Earcons:
         self._loop_stop = threading.Event()
         self._loop_thread: Optional[threading.Thread] = None
         self._loop_proc: Optional[subprocess.Popen] = None
+        # One-shot players still running. They stay referenced until reaped so
+        # the garbage collector never runs `Popen.__del__` on a live process -
+        # that raises an unraisable exception, which CI's `-W error` turns
+        # into a failed build.
+        self._reaping: list[subprocess.Popen] = []
 
     def _resolve(self, *basenames: str) -> Optional[str]:
         for name in basenames:
@@ -2135,17 +2140,41 @@ class Earcons:
             else:
                 player = self._unix_player()
                 if player:
-                    subprocess.Popen(
-                        player + [path],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    self._spawn(player + [path])
         except Exception:
             pass
 
     def _wanted(self, cue: str) -> bool:
         """Whether this cue sounds: the master switch, and then its own."""
         return self.enabled and self.cues.get(cue, True)
+
+    def _spawn(self, argv: list) -> None:
+        """Start a one-shot player and reap it in a daemon thread.
+
+        The process stays reachable through `self._reaping` until it has been
+        waited on. Dropping the Popen straight away lets `__del__` run while
+        `afplay` is still playing, which becomes an unraisable exception under
+        pytest's `-W error`.
+        """
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self._reaping.append(proc)
+
+        def _reap() -> None:
+            try:
+                proc.wait()
+            except Exception:
+                pass
+            finally:
+                try:
+                    self._reaping.remove(proc)
+                except ValueError:
+                    pass
+
+        threading.Thread(target=_reap, daemon=True).start()
 
     def play_send(self) -> None:
         if self._wanted("send"):
@@ -2165,11 +2194,7 @@ class Earcons:
             winsound.MessageBeep(winsound.MB_ICONHAND)
             return
         if self._system == "Darwin":
-            subprocess.Popen(
-                ["afplay", "/System/Library/Sounds/Basso.aiff"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self._spawn(["afplay", "/System/Library/Sounds/Basso.aiff"])
             return
         # Linux has no single answer here, and a wrong guess is worse than
         # nothing: the error is spoken either way.

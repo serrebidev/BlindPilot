@@ -18,6 +18,8 @@ macOS. High is now what an error gets, not what everything gets.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import blindpilot_app as app
@@ -98,6 +100,32 @@ def test_the_error_cue_uses_the_platform_sound_rather_than_a_file(tmp_path):
 
     assert box._resolve("error") is None, "no error file is shipped, by design"
     box.play_error()  # must not raise on any platform
+
+
+def test_every_spawned_player_is_waited_on_not_left_to_the_gc(tmp_path, monkeypatch):
+    """Dropping a Popen while `afplay` is still playing makes `Popen.__del__`
+    raise an unraisable exception when the garbage collector next runs, and
+    CI's `-W error` turns that into a failed build. Every one-shot player must
+    be reaped, on every platform."""
+    waited: list[bool] = []
+
+    class FakeProc:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def wait(self):
+            waited.append(True)
+
+    monkeypatch.setattr(app.subprocess, "Popen", FakeProc)
+    box = app.Earcons(str(tmp_path))
+    box._system = "Darwin"  # exercise the afplay path wherever the test runs
+
+    box._play_system_error()
+
+    deadline = time.monotonic() + 2
+    while not waited and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert waited, "the player process was never waited on"
 
 
 def test_a_muted_application_plays_no_error_cue(tmp_path, monkeypatch):
