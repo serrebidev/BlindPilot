@@ -3981,6 +3981,13 @@ class SessionPanel(wx.Panel):
 
     # ----- Focus helpers -----
     def focus_prompt(self) -> None:
+        if _STARTUP_CHECK:
+            # A startup check shows no window. Asking for focus anyway takes
+            # it from whoever is running the check, and Windows has to show a
+            # window to give it focus - which drags the hidden one onto their
+            # screen. Guarded here rather than at the four call sites, because
+            # a fifth would not know to guard itself.
+            return
         self.prompt.SetFocus()
 
     def focus_first_control(self) -> None:
@@ -6853,7 +6860,11 @@ class MainFrame(wx.Frame):
         cfg = _load_config()
         cfg["app_mode"] = mode
         _save_config(cfg)
-        if show_agent:
+        if _STARTUP_CHECK:
+            # A check shows no window, so there is nothing here to focus into,
+            # and asking for focus would take it from whoever is running it.
+            pass
+        elif show_agent:
             page = self.notebook.GetCurrentPage()
             if isinstance(page, SessionPanel):
                 page.focus_prompt()
@@ -6894,6 +6905,9 @@ class MainFrame(wx.Frame):
             item.Check(key == backend)
         cfg = _load_config()
         cfg["backend"] = backend
+        # Now rather than when the next message starts a terminal, so the
+        # console cannot arrive in the middle of a turn.
+        reserve_console_if_needed(backend)
         _save_config(cfg)
         for index in range(self.notebook.GetPageCount()):
             page = self.notebook.GetPage(index)
@@ -7763,6 +7777,35 @@ def _bring_to_front() -> None:
         pass
 
 
+# True for the length of a packaged startup check. Nothing a check does may
+# take the focus of whoever is running it: they are working in another window,
+# and on this application's users that means moving their screen reader too.
+_STARTUP_CHECK = False
+
+
+def reserve_console_if_needed(backend: object, startup_check: bool = False) -> bool:
+    """Claim a hidden console, but only for the backend that needs one.
+
+    FreeBuff is driven through a pseudo-terminal, and creating one gives a
+    windowed application a console whether it wants one or not. Claiming one
+    up front means there is nothing left to create later, so the console
+    never arrives in the middle of somebody's first message.
+
+    Nobody else needs it. Every other backend is an ordinary subprocess
+    spawned with CREATE_NO_WINDOW, and `_spawn_freebuff_pty` reserves one
+    itself anyway, so this is only about *when* rather than whether.
+
+    That matters because AllocConsole hands back a console that is already
+    visible and hiding it is the next thing that happens - one frame of a
+    window on screen, which Windows offers no way to avoid. Paying it on
+    every launch, for the three backends that will never use it, is the
+    part worth not doing.
+    """
+    if startup_check or normalize_backend(backend) != BACKEND_FREEBUFF:
+        return False
+    return reserve_hidden_console()
+
+
 def main() -> int:
     if "--startup-smoke" in sys.argv:
         # Importing this module has already loaded wxPython, every backend,
@@ -7796,13 +7839,10 @@ def main() -> int:
         )
     keep_bundle_off_child_path()
     activate_managed_cli_paths()
-    # Claim the console before anything can create one on screen. Doing it here,
-    # rather than when a terminal is first needed, keeps it out of the way of
-    # the first message as well as every later one.
-    reserve_hidden_console()
     app = wx.App(False)
 
     cfg = _load_config()
+    reserve_console_if_needed(cfg.get("backend"), gui_startup_smoke)
     # Installs that predate full-auto still carry the mode an older BlindPilot
     # saved for them. Moving them over here is what makes "nothing stops to
     # ask" true of an upgrade as well as of a fresh install.
@@ -7832,13 +7872,22 @@ def main() -> int:
         wizard.Destroy()
         # Even if cancelled, open the app — user may know what they're doing.
 
+    global _STARTUP_CHECK
+    _STARTUP_CHECK = gui_startup_smoke
     frame = MainFrame(initial_cwd=os.getcwd())
-    frame.Show()
-    frame.Raise()
-    _bring_to_front()
     if gui_startup_smoke:
+        # Never shown. What this checks is that the window can be *built* -
+        # every menu, control and binding made, and the sizers able to lay
+        # them out - and none of that needs it on screen. Showing it put a
+        # window in front of whoever was running the checks for a second and
+        # a half, and for somebody who navigates by ear that is not a
+        # harmless flicker.
+        frame.Layout()
         wx.CallLater(1500, frame.Close)
     else:
+        frame.Show()
+        frame.Raise()
+        _bring_to_front()
         # An update that failed did so with no window to report to, so its
         # reason is read out here, before anything else competes for attention.
         wx.CallLater(1200, frame.report_failed_update)

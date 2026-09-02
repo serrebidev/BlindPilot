@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import os
 import sys
 
@@ -53,6 +54,9 @@ def test_gui_startup_smoke_skips_first_run_wizard(monkeypatch):
 
         def Show(self) -> None:
             events.append("show")
+
+        def Layout(self) -> None:
+            events.append("layout")
 
         def Raise(self) -> None:
             events.append("raise")
@@ -190,3 +194,109 @@ def test_downloaded_update_schedules_before_forced_close(monkeypatch, tmp_path):
     assert events[0] == ("schedule", archive)
     assert events[-1] == ("close", True)
     assert not [event for event in events if event[0] == "error"]
+
+
+def test_a_startup_check_does_not_take_focus_from_whoever_is_working(monkeypatch):
+    """An automated check must not pull a screen reader off what it was reading.
+
+    The smoke test ran the whole show-and-raise path a real launch runs, then
+    closed a second and a half later. `Show` is the point of the check: it is
+    what forces the native controls and the layout to be built. `Raise` and
+    `_bring_to_front` only ask the window manager for attention, which verifies
+    nothing and, on the machine of somebody running the checks, moves them out
+    of whatever they were doing.
+    """
+    import blindpilot_app
+
+    events: list[object] = []
+
+    class FakeApp:
+        def MainLoop(self) -> None:
+            events.append("main-loop")
+
+    class FakeFrame:
+        def __init__(self, *, initial_cwd: str) -> None:
+            pass
+
+        def Show(self) -> None:
+            events.append("show")
+
+        def Layout(self) -> None:
+            events.append("layout")
+
+        def Raise(self) -> None:
+            events.append("raise")
+
+        def Close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(blindpilot_app.sys, "argv", ["blind_pilot.py", "--startup-gui-smoke"])
+    monkeypatch.setattr(blindpilot_app, "_load_config", dict)
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda _cfg: None)
+    monkeypatch.setattr(blindpilot_app, "MainFrame", FakeFrame)
+    monkeypatch.setattr(blindpilot_app, "_bring_to_front", lambda: events.append("front"))
+    monkeypatch.setattr(blindpilot_app.wx, "App", lambda _redirect: FakeApp())
+    monkeypatch.setattr(blindpilot_app.wx, "CallLater", lambda _delay, callback: callback())
+    monkeypatch.setattr(
+        blindpilot_app,
+        "reserve_hidden_console",
+        lambda: events.append("console"),
+    )
+
+    assert blindpilot_app.main() == 0
+
+    # Built and laid out, which is what the check is for, and never displayed.
+    assert "layout" in events
+    assert "show" not in events, "a startup check put a window on screen"
+    assert "raise" not in events, "a startup check asked for the foreground"
+    assert "front" not in events, "a startup check pulled itself in front"
+    # AllocConsole hands back a console that is already visible, and hiding it
+    # is the next thing that happens. On somebody's screen that is a window
+    # appearing and vanishing. A check creates no terminal, so it needs none.
+    assert "console" not in events, "a startup check allocated a console window"
+
+
+@pytest.mark.parametrize(
+    ("backend", "reserved"),
+    [
+        ("freebuff", True),
+        ("claude", False),
+        ("codex", False),
+        ("opencode", False),
+        (None, False),
+    ],
+)
+def test_only_the_backend_that_needs_a_console_gets_one(monkeypatch, backend, reserved):
+    """AllocConsole hands back a console that is already visible, and hiding it
+    is the next thing that happens - one frame of a window on screen, which
+    Windows offers no way to avoid. Only FreeBuff is driven through a
+    pseudo-terminal; the other three are ordinary subprocesses spawned with
+    CREATE_NO_WINDOW and never need one, so they should not pay for it.
+    """
+    import blindpilot_app
+
+    claimed: list[bool] = []
+    monkeypatch.setattr(
+        blindpilot_app,
+        "reserve_hidden_console",
+        lambda: claimed.append(True) or True,
+    )
+
+    blindpilot_app.reserve_console_if_needed(backend)
+
+    assert bool(claimed) is reserved
+
+
+def test_a_startup_check_never_claims_a_console_even_for_freebuff(monkeypatch):
+    import blindpilot_app
+
+    claimed: list[bool] = []
+    monkeypatch.setattr(
+        blindpilot_app,
+        "reserve_hidden_console",
+        lambda: claimed.append(True) or True,
+    )
+
+    blindpilot_app.reserve_console_if_needed("freebuff", startup_check=True)
+
+    assert claimed == []
