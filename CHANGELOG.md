@@ -4,6 +4,12 @@ Readable release history for BlindPilot. When adjacent releases were part of the
 same fix stream, they are combined with a version range such as
 `v0.3.6-v0.3.7`.
 
+## v0.19.2 - 2026-09-02
+
+- Shift+Tab into the session tab strip is no longer a dead end. Arrowing along the strip changed the session, and showing the newly selected conversation took focus off the strip and put it in that page's prompt — so the first arrow press threw you out of the tab control and the second never reached it. The strip keeps focus through a session change now, exactly as it did before the strip and the pages became two controls, and the native tab control announces the tab it moved to.
+- A Tab that BlindPilot routes but does not actually move is handed back to Windows instead of being swallowed. Every boundary between the Mode picker, the tab strip and the conversation is crossed by hand, and a hand-routed key that asks an unfocusable control for focus used to consume the keypress and leave the user where they were, however many times they pressed it. Focus is checked after the move, and native traversal gets the key when it did not happen.
+- Tab out of the tab strip lands in the Prompt when the responses list cannot take focus, rather than nowhere.
+
 ## v0.19.1 - 2026-09-02
 
 - Choosing a backend in the setup wizard no longer announces it a second time. The wizard said "Backend selected: …" through the app's own speech channel the moment the choice control had finished announcing its newly focused value natively, so a screen-reader user heard the same backend twice — once from the control, once from BlindPilot — on every change of the picker that drives the rest of the wizard. It was the only announcement in the application that narrated a native control's own selection; the others all report app events, and none of them is missed. `_on_backend_choice` has exactly one caller, the choice event itself, so there was never a programmatic selection that relied on the extra line.
