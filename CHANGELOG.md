@@ -4,6 +4,10 @@ Readable release history for BlindPilot. When adjacent releases were part of the
 same fix stream, they are combined with a version range such as
 `v0.3.6-v0.3.7`.
 
+## v0.19.1 - 2026-09-02
+
+- Choosing a backend in the setup wizard no longer announces it a second time. The wizard said "Backend selected: …" through the app's own speech channel the moment the choice control had finished announcing its newly focused value natively, so a screen-reader user heard the same backend twice — once from the control, once from BlindPilot — on every change of the picker that drives the rest of the wizard. It was the only announcement in the application that narrated a native control's own selection; the others all report app events, and none of them is missed. `_on_backend_choice` has exactly one caller, the choice event itself, so there was never a programmatic selection that relied on the extra line.
+
 ## v0.19.0 - 2026-09-02
 
 - The first-run wizard no longer loops silently on a profile the settings file cannot be written to. `_save_config` caught `OSError` and did nothing with it — no return value, no log line, nothing said — and completing the wizard is recorded by writing the settings, so a roaming profile on an unreachable share, a full disk, or a locked directory put somebody through the whole wizard, CLI install and browser sign-in included, on every launch, with nothing connecting that to a file nobody can write. The same write carries `backend`, so a Codex or FreeBuff user was also dropped back to the Claude default and sent through the Claude checks: the one visible symptom pointed at the wrong cause. It now returns whether it wrote, logs the reason, and the wizard says plainly that its settings were not saved and it will ask again.
