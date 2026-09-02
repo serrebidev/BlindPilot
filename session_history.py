@@ -3,11 +3,11 @@
 Every backend BlindPilot drives already keeps its own transcript of each
 conversation, and every one of them can be resumed by id — Claude Code with
 ``--resume``, Codex with the app-server's ``thread/resume``, FreeBuff with
-``--continue``, opencode by asking its server for the session again. What was
-missing was a way to *find* one again, which is what this module provides: one
-list of past conversations across every backend, each titled by its first
-message, plus a reader that turns any of them back into prompt-and-response
-turns the GUI can put in its rows.
+``--continue``, opencode by asking its server for the session again, Hermes with
+its gateway's ``session.resume``. What was missing was a way to *find* one
+again, which is what this module provides: one list of past conversations across
+every backend, each titled by its first message, plus a reader that turns any of
+them back into prompt-and-response turns the GUI can put in its rows.
 
 Where each backend keeps its history:
 
@@ -22,6 +22,10 @@ Where each backend keeps its history:
   ``chat-meta.json`` that already stores the first prompt.
 * opencode — ``~/.local/share/opencode/opencode.db``, one SQLite database for
   every conversation, with a row per session, message, and message part.
+* Hermes — ``~/.hermes/state.db``, one SQLite database holding every session it
+  has ever run, opened read-only. It is the odd one out even among these: there
+  is no file per conversation, and Hermes titles its own, so nothing has to be
+  scanned to build the list.
 
 Listing is deliberately cheap: it reads only as far into a transcript as it
 takes to find the first real user message, because the newest conversations
@@ -52,6 +56,7 @@ from agent_backends import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_FREEBUFF,
+    BACKEND_HERMES,
     BACKEND_IDS,
     BACKEND_OPENCODE,
     normalize_backend,
@@ -239,6 +244,26 @@ def _same_dir(a: str, b: str) -> bool:
     return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
+def _same_dir_across_wsl(recorded: str, wanted: str) -> bool:
+    """Whether two working directories are the same place, across WSL.
+
+    A Hermes running in WSL records ``/mnt/d/work``, while the folder picker in
+    a Windows desktop produces ``D:\\work``. They are one directory, so
+    comparing the strings hid every conversation from the folder filter -- the
+    dialog said "No past conversations found here" beside three hundred of
+    them. Both forms are normalised to the WSL one before comparing.
+    """
+    if _same_dir(recorded, wanted):
+        return True
+    from hermes_backend import windows_path_to_wsl
+
+    left = windows_path_to_wsl(recorded)
+    right = windows_path_to_wsl(wanted)
+    if not left or not right:
+        return False
+    return left.rstrip("/").lower() == right.rstrip("/").lower()
+
+
 # ----- Claude Code -----
 
 
@@ -411,6 +436,198 @@ def _codex_turns(entry: HistoryEntry) -> List[HistoryTurn]:
                 turns.append(HistoryTurn())
             turns[-1].response = _append(turns[-1].response, text)
     return turns
+
+
+# ----- Hermes -----
+#
+# Hermes is the one backend that does not keep a file per conversation: every
+# session it has ever run lives in one SQLite database. Two consequences shape
+# the code below.
+#
+# First, the database is opened read-only and queried, rather than parsed. It
+# is Hermes' own live store — the file a running Hermes is writing to — so this
+# never opens it for writing and never runs anything that could block a writer.
+#
+# Second, ``path`` on a Hermes entry is that shared database, so the size guard
+# in ``load_turns`` cannot apply to it: a busy Hermes' store passes tens of
+# megabytes quickly (2 GB is ordinary on a machine that has run it for months),
+# and applying a per-transcript limit to a shared store would silently hide
+# every Hermes conversation. The equivalent protection here is a row limit on
+# the query, which bounds the work regardless of how large the store has grown.
+
+# Rows read back for one conversation. Comfortably more than any conversation a
+# person scrolls through, and it keeps a runaway session from freezing the GUI.
+_HERMES_MAX_ROWS = 4000
+
+# Hermes writes its own bookkeeping into the transcript alongside the
+# conversation. Only "user" and "assistant" rows are ever turned into turns
+# below, so tool traffic is already excluded by that; these are the roles worth
+# skipping before the work of decoding a row happens at all.
+_HERMES_SKIP_ROLES = ("system", "session_meta", "tool")
+# Rows Hermes marks as not for replay.
+_HERMES_HIDDEN_KIND = "hidden"
+
+
+def _hermes_db_path() -> Path:
+    """Hermes' session store on this side of the machine, if there is one."""
+    override = os.environ.get("HERMES_HOME", "").strip()
+    root = Path(override).expanduser() if override else _home() / ".hermes"
+    return root / "state.db"
+
+
+def _hermes_query(sql: str, params: Sequence = ()) -> List[dict]:
+    """Run one read-only query against Hermes' store, wherever it lives.
+
+    Two routes, because Hermes keeps its store in WAL mode and that decides
+    which one works:
+
+    * a store on this machine is opened directly, read-only;
+    * a store belonging to a Hermes in WSL is read *through* WSL. It is also
+      visible to Windows under \\\\wsl.localhost, but WAL needs shared memory
+      that a network share cannot provide, so SQLite refuses with "database is
+      locked" -- measured, and the reason the dialog reported no conversations
+      at all. Asking WSL to run the query sidesteps that entirely.
+
+    Returns a list of plain dicts so the caller never holds a connection.
+    """
+    path = _hermes_db_path()
+    if path.is_file():
+        connection = _hermes_connect(path)
+        if connection is None:
+            return []
+        try:
+            return [dict(row) for row in connection.execute(sql, tuple(params)).fetchall()]
+        except Exception:  # noqa: BLE001 - an older schema is not a crash
+            return []
+        finally:
+            connection.close()
+
+    if os.environ.get("HERMES_HOME", "").strip():
+        # An explicit home names one store. If it is not there, that is the
+        # answer -- reaching into WSL would return a different Hermes' history
+        # than the one the user pointed at.
+        return []
+
+    from hermes_backend import wsl_sqlite_query
+
+    return wsl_sqlite_query(sql, params)
+
+
+def _hermes_connect(path: Path):
+    """Open Hermes' store read-only, or return None if it cannot be read.
+
+    Read-only matters: this is the database a running Hermes owns. The URI form
+    fails outright rather than creating an empty file when the path is wrong,
+    which is what a plain connect() would do.
+    """
+    if not path.is_file():
+        return None
+    try:
+        import sqlite3
+
+        connection = sqlite3.connect(f"file:{path}?mode=ro&immutable=0", uri=True, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        return connection
+    except Exception:  # noqa: BLE001 - a locked or corrupt store is just absent
+        return None
+
+
+def _hermes_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    path = _hermes_db_path()
+    modified = _mtime(path) if path.is_file() else 0.0
+    # Hermes titles its own conversations, so unlike the other backends there is
+    # no transcript to scan for a first message. Sessions with no messages are
+    # skipped: they are starts that never went anywhere.
+    rows = _hermes_query(
+        """
+        SELECT id, title, cwd, started_at, last_activity_at, message_count
+        FROM sessions
+        WHERE COALESCE(archived, 0) = 0 AND COALESCE(message_count, 0) > 0
+        ORDER BY COALESCE(last_activity_at, started_at) DESC
+        LIMIT 500
+        """
+    )
+    entries: List[HistoryEntry] = []
+
+    for row in rows:
+        session_id = str(row.get("id") or "")
+        if not session_id:
+            continue
+        session_cwd = str(row.get("cwd") or "")
+        if cwd and not _same_dir_across_wsl(session_cwd, cwd):
+            continue
+        title = make_title(clean_user_text(str(row.get("title") or "")))
+        if not title:
+            title = session_id
+        # Prefer the session's own last-activity time over the file's mtime:
+        # one shared store means every conversation would otherwise appear to
+        # have been touched at the same moment, and the list is sorted by this.
+        stamp = row.get("last_activity_at") or row.get("started_at") or modified
+        try:
+            # A query answered through WSL arrives as JSON, where a timestamp
+            # can come back as text.
+            stamp = float(stamp)
+        except (TypeError, ValueError):
+            stamp = modified
+        entries.append(
+            HistoryEntry(
+                backend=BACKEND_HERMES,
+                session_id=session_id,
+                title=title,
+                path=str(path),
+                modified=stamp,
+                cwd=session_cwd,
+                folder=_folder_name(session_cwd),
+            )
+        )
+    return entries
+
+
+def _hermes_turns_for(session_id: str) -> List[HistoryTurn]:
+    """Read one Hermes conversation back as prompt-and-response turns.
+
+    Which store is consulted is decided by :func:`_hermes_query`, so this does
+    not need to know whether Hermes runs here or in WSL.
+    """
+    rows = _hermes_query(
+        """
+        SELECT role, content, display_kind
+        FROM messages
+        WHERE session_id = ?
+        ORDER BY id
+        LIMIT ?
+        """,
+        (session_id, _HERMES_MAX_ROWS),
+    )
+
+    turns: List[HistoryTurn] = []
+    for row in rows:
+        role = str(row.get("role") or "")
+        if role in _HERMES_SKIP_ROLES:
+            continue
+        if str(row.get("display_kind") or "") == _HERMES_HIDDEN_KIND:
+            continue
+        text = str(row.get("content") or "").strip()
+        if not text:
+            # A turn that only called tools has no text of its own; the tool
+            # rows themselves are Hermes' bookkeeping, not the conversation.
+            continue
+        if role == "user":
+            turns.append(HistoryTurn(prompt=clean_user_text(text)))
+        elif role == "assistant":
+            if not turns:
+                turns.append(HistoryTurn())
+            turns[-1].response = _append(turns[-1].response, text)
+    return turns
+
+
+def _hermes_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    """Reader signature the public API uses. See :func:`load_turns`.
+
+    Hermes' entries all share one store, so the session id has to come from the
+    entry rather than the path -- the same shape opencode needs.
+    """
+    return _hermes_turns_for(entry.session_id)
 
 
 # ----- FreeBuff -----
@@ -727,16 +944,18 @@ _LISTERS = {
     BACKEND_CODEX: _codex_entries,
     BACKEND_FREEBUFF: _freebuff_entries,
     BACKEND_OPENCODE: _opencode_entries,
+    BACKEND_HERMES: _hermes_entries,
 }
 
-# Readers are given the whole entry rather than its path, because opencode
-# keeps every conversation in one database: what identifies its transcript is
-# the session id, not a file of its own.
+# Readers are given the whole entry rather than its path, because opencode and
+# Hermes each keep every conversation in one database: what identifies their
+# transcript is the session id, not a file of its own.
 _READERS = {
     BACKEND_CLAUDE: _claude_turns,
     BACKEND_CODEX: _codex_turns,
     BACKEND_FREEBUFF: _freebuff_turns,
     BACKEND_OPENCODE: _opencode_turns,
+    BACKEND_HERMES: _hermes_turns,
 }
 
 
@@ -780,9 +999,11 @@ def load_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     reader = _READERS.get(backend)
     if reader is None:
         return []
-    # opencode's path is the database every conversation shares, so its size
-    # is no measure of this one. It caps itself, in rows, while it reads.
-    if backend != BACKEND_OPENCODE:
+    # opencode's and Hermes' path is the database every conversation shares, so
+    # its size is no measure of this one -- and on a machine that has used
+    # Hermes for a while the shared store passes this limit, which would hide
+    # every conversation at once. Both cap themselves, in rows, while reading.
+    if backend not in (BACKEND_OPENCODE, BACKEND_HERMES):
         try:
             path = Path(entry.path)
             if path.is_file() and path.stat().st_size > _MAX_TRANSCRIPT_BYTES:

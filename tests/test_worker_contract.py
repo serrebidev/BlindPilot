@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import agent_backends
 import blindpilot_app
+from hermes_worker import HermesWorker
 
 WORKERS = [
     blindpilot_app.ClaudeWorker,
     agent_backends.CodexWorker,
     agent_backends.FreebuffWorker,
     agent_backends.OpencodeWorker,
+    HermesWorker,
 ]
 
 

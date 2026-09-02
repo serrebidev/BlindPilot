@@ -1,6 +1,6 @@
 # BlindPilot
 
-A vibe-coded, screen-reader-friendly desktop front end for AI coding agents on Windows and macOS, built so Claude Code, Codex, FreeBuff, and opencode can be driven without reading a terminal.
+A vibe-coded, screen-reader-friendly desktop front end for AI coding agents on Windows and macOS, built so Claude Code, Codex, FreeBuff, opencode, and Hermes can be driven without reading a terminal.
 
 [![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -12,9 +12,11 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 ## Features
 
 - Native wxPython controls throughout, so NVDA, JAWS, and VoiceOver read the app rather than interpreting a terminal.
-- Runs Claude Code, Codex, FreeBuff, and opencode, switchable from the Model menu and remembered between launches.
+- Runs Claude Code, Codex, FreeBuff, opencode, and Hermes, switchable from the Model menu and remembered between launches.
 - Switches between Agent and Chat from a named Mode combo box at the top of the window.
 - Chats directly through OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, OpenCode Go, or any OpenAI-compatible service, with keys in the OS credential store.
+- Drives a Hermes on another computer over the network, so a server elsewhere can be worked with from the desktop.
+- Reopens any conversation a Hermes knows, including one running right now, from Hermes Conversations (Ctrl+G) - and joins that running turn as it happens.
 - Segments every answer into navigable rows: one per heading, paragraph, list item, quote, code block, thought, tool action, and tool result.
 - Reads answers aloud as they arrive, or stays quiet until the whole answer is ready.
 - Reopens past conversations from any backend, titled by the message that started them, and carries on where they left off.
@@ -28,7 +30,7 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 - Picks the model and reasoning effort from whatever the installed CLI actually reports.
 - Marks sent, working, received, and failed with optional earcons, switchable together or one at a time.
 - Speaks every step of a run, or just the message, the answer and anything important, with the steps still in the list.
-- Installs, updates, adds to PATH, and signs into any of the four backends from an accessible wizard.
+- Installs, updates, adds to PATH, and signs into any of the five backends from an accessible wizard.
 - Writes a rotating log of what it did, and a separate crash log, with no prompt or answer text in either.
 - Updates itself from GitHub Releases after verifying the published SHA-256.
 
@@ -56,6 +58,7 @@ Backend, Permission Mode and Narration are radio items because the choices are e
 
 - **Ctrl+L** focus the prompt, **Ctrl+T** open a session, **Ctrl+W** close it.
 - **Ctrl+H** reopen a past conversation.
+- **Ctrl+G** list the conversations Hermes knows, and join one that is running.
 - **Ctrl+Shift+K** compact this conversation, **Ctrl+Shift+N** start a fresh one.
 - **Ctrl+F** search responses, **Ctrl+R** jump to the latest.
 - **Ctrl+M** choose the model and reasoning effort for this conversation.
@@ -90,12 +93,15 @@ Attachments are stored with the conversation. Chat data lives in `chat.sqlite3` 
 | Codex | Official app-server protocol | Yes | Yes, including reasoning effort | Yes | Yes | Yes |
 | FreeBuff | Pseudo-terminal adapter | Yes | Yes; GLM 5.3 Flash by default | Managed by FreeBuff | No | Yes |
 | opencode | Its own headless HTTP server | Yes | Yes, including per-model reasoning variants | Yes | Yes | Yes |
+| Hermes | Gateway JSON-RPC, local pipe or network | Yes | Yes | Yes | Yes | No |
 
-All four can stop a turn to ask a multiple-choice question, and each asks differently: Claude Code sends its AskUserQuestion tool through the permission channel, Codex sends `request_user_input` over the app-server protocol, opencode publishes a `question.asked` event, FreeBuff draws its `ask_user` tool onto its terminal. They all end up in the same dialog. An unanswered question is declined rather than left hanging.
+Four of the five backends can stop a turn to ask a multiple-choice question, and each asks differently: Claude Code sends its AskUserQuestion tool through the permission channel, Codex sends `request_user_input` over the app-server protocol, opencode publishes a `question.asked` event, FreeBuff draws its `ask_user` prompt as a text menu. One accessible dialog answers all four. Hermes' gateway protocol has no such request, so its turns never pause to ask.
 
 FreeBuff ships no JSON or headless API, so BlindPilot runs its terminal interface in a hidden pseudo-terminal, reads the answer off its screen a sentence at a time, and captures its chat id to resume. Redraws and advertisements are filtered before anything is spoken. Its permission picker and Compact Conversation are disabled because the CLI has no equivalent. FreeBuff renames and drops models between releases, so the default is a preference: GLM 5.3 Flash when it is on offer, FreeBuff's own choice when it is not.
 
 opencode is driven through the same headless server its own terminal interface uses. BlindPilot starts one, shared by every tab, on loopback behind a password generated for the run. That is what gives opencode everything the others have, plus `/connect` and a model picker covering every provider it reaches. Past conversations come out of opencode's own SQLite database, read-only.
+
+Hermes speaks its gateway JSON-RPC, which runs over both a local pipe and a network socket — so a Hermes on another computer can be driven from the desktop without a terminal (**Options → Remote Hermes**). Its answers are streamed a finished sentence at a time, the way FreeBuff's are, so a long turn is read while it is still being written. One connection is kept for the whole conversation rather than opened per message, and it is read continuously: a Hermes bound to a public address pings every twenty seconds and closes a connection that does not answer. Its reasoning channel carries a terminal spinner rather than the model's reasoning, so that is filtered out and the real reasoning shown instead. Hermes exposes no per-turn reasoning effort on this protocol, so that picker stays empty.
 
 ## Download and install
 
@@ -140,6 +146,10 @@ freebuff login
 # opencode
 npm install -g opencode-ai
 opencode providers login
+
+# Hermes Agent — see https://hermes-agent.nousresearch.com/docs
+hermes status     # shows the provider and model it will use
+hermes model      # pick one, if none is set yet
 ```
 
 **Sign In** does the same from inside BlindPilot, with no terminal. It runs the backend's own sign-in, reads the address out of its output, speaks it, and gets it to your default browser. **Open Sign-in Page** opens it again if the browser was closed or never arrived. When a provider hands back a code instead of finishing on its own, BlindPilot asks for the code and passes it to the CLI; that dialog closes itself if the browser finishes first.
@@ -147,6 +157,45 @@ opencode providers login
 opencode needs a provider connected to it, so BlindPilot carries its `/connect` as a dialog. Use **Model → Connect a Provider**, type `/connect` in the prompt, or use the wizard. Pick from every provider opencode knows, give it a key, or sign in through the browser. None of it needs a terminal.
 
 Type `/status` in the prompt to hear what the tab will do and whose account it will do it on: backend, model and effort, permission mode, folder, whether the next message continues this conversation or starts one, and who that backend is signed in as. All four answer it, even though none of them has a status command that works this way.
+
+Hermes is the exception to that browser flow: its setup is an interactive picker that asks which provider and model to use, so there is no address to open and nothing to watch for. **Sign In** opens a real terminal window for it and says to come back and choose **Already Signed In** once its questions are answered — running it hidden would fail instantly for want of a keyboard, and reporting that as a failed sign-in would be a lie.
+
+### Driving a Hermes on another computer
+
+Leave **Options → Remote Hermes** off and the Hermes backend runs the copy
+installed here — including one installed in WSL, which is found and started
+there without any network setup.
+
+To use a Hermes running on a different machine, how you start it decides how you
+sign in.
+
+On the same computer, bound to localhost, a session token is enough:
+
+```bash
+HERMES_DASHBOARD_SESSION_TOKEN=pick-a-long-random-string hermes serve --port 9119
+```
+
+Reachable from elsewhere, it has to be bound to a public address, and Hermes
+refuses that outright unless a login is configured — there is no unauthenticated
+public bind. Configure a password once, on the machine running Hermes:
+
+```bash
+hermes config set dashboard.basic_auth.username your-name
+# Hermes prints the hash to store; run this from its own installation:
+python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('your-password'))"
+hermes config set dashboard.basic_auth.password_hash 'the-hash-it-printed'
+hermes serve --port 9119 --host 0.0.0.0
+```
+
+Then choose **Username and password** in the settings. Hermes' WebSocket accepts
+only a single-use ticket once that gate is up, and those tickets live thirty
+seconds — far too short to paste into a field — so BlindPilot logs in and mints
+one itself each time it connects. **Test connection** reports whether the address
+and credentials work before anything is sent.
+
+Note that `websocket-client` is only needed for this path. The local backend
+uses a pipe, and a missing copy is reported as an installable package rather
+than stopping the app.
 
 ## Logs
 

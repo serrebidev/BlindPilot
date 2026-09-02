@@ -70,7 +70,12 @@ jobs:
           # runs the child inside OpenConsole.exe, and a hidden import collects
           # only the module and its DLLs. Without that executable no process can
           # start under a pseudo-terminal, so FreeBuff never runs.
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --add-data "EarCons;EarCons" --additional-hooks-dir hooks --collect-submodules accessible_output2 --collect-all winpty blind_pilot.py
+          #
+          # websocket needs collecting for the same reason: a hidden import of
+          # the package alone leaves out submodules it loads at runtime, and the
+          # remote Hermes backend then reports the package as missing on a
+          # machine that has it. Measured on a packaged build, not assumed.
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --add-data "EarCons;EarCons" --additional-hooks-dir hooks --collect-submodules accessible_output2 --collect-all winpty --collect-all websocket blind_pilot.py
           $startupSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-smoke" -PassThru -Wait
           if ($startupSmoke.ExitCode -ne 0) { throw "Packaged startup smoke test failed: $($startupSmoke.ExitCode)" }
           $guiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-gui-smoke" -PassThru -Wait
@@ -102,7 +107,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --osx-bundle-identifier com.serrebidev.blindpilot --add-data "EarCons:EarCons" --hidden-import pexpect blind_pilot.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --osx-bundle-identifier com.serrebidev.blindpilot --add-data "EarCons:EarCons" --hidden-import pexpect --collect-all websocket blind_pilot.py
           codesign --force --deep --sign - dist/BlindPilot.app
           dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-smoke
           dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-gui-smoke

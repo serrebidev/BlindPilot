@@ -17,3 +17,7 @@ pyte>=0.8,<1
 pywinpty>=2.0,<4; sys_platform == "win32"
 pexpect>=4.9,<5; sys_platform != "win32"
 keyring>=25,<26; sys_platform != "win32"
+# Only needed to drive a Hermes running on another machine. The local Hermes
+# backend uses a pipe and does not need it, so a missing copy is reported as an
+# actionable message rather than stopping the app from starting.
+websocket-client>=1.7

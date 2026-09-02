@@ -4,6 +4,8 @@ BlindPilot began as Claude Code Reader. Claude's adapter remains in
 ``blindpilot_app.py``; this module contains the
 provider-neutral discovery helpers plus the Codex, FreeBuff, and opencode
 workers.
+Hermes lives in ``hermes_backend.py`` and ``hermes_worker.py``, imported
+on demand so a machine without Hermes pays nothing for it.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 Based on the original Claude Code Reader application by doubletaponair:
@@ -29,6 +31,9 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import diagnostics
+
+from markdown_rows import _SENTENCE_END_RE as _markdown_sentence_end_re
+from markdown_rows import complete_sentences
 
 
 # A windowed app owns no console, so every child process Windows considers a
@@ -259,12 +264,20 @@ BACKEND_CLAUDE = "claude"
 BACKEND_CODEX = "codex"
 BACKEND_FREEBUFF = "freebuff"
 BACKEND_OPENCODE = "opencode"
-BACKEND_IDS = (BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_FREEBUFF, BACKEND_OPENCODE)
+BACKEND_HERMES = "hermes"
+BACKEND_IDS = (
+    BACKEND_CLAUDE,
+    BACKEND_CODEX,
+    BACKEND_FREEBUFF,
+    BACKEND_OPENCODE,
+    BACKEND_HERMES,
+)
 BACKEND_LABELS = {
     BACKEND_CLAUDE: "Claude Code",
     BACKEND_CODEX: "Codex",
     BACKEND_FREEBUFF: "FreeBuff",
     BACKEND_OPENCODE: "opencode",
+    BACKEND_HERMES: "Hermes",
 }
 
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
@@ -381,6 +394,19 @@ class BackendInfo:
     # written without a newline after it, so it is matched against the output
     # as it arrives rather than line by line. Empty when the CLI never asks.
     login_code_prompt: str = ""
+    # Whether signing in has to happen in a terminal the user can type into.
+    # Claude and Codex authenticate through a browser and report the result on
+    # exit, so BlindPilot can run them hidden and watch. Hermes' equivalent is
+    # an interactive picker: run hidden with no stdin it simply fails, so the
+    # wizard opens a real console instead of pretending to have signed in.
+    login_needs_terminal: bool = False
+    # Whether the backend takes an attachment's BYTES rather than its path.
+    # The CLI backends run on this machine, so naming the file is enough for
+    # them. Hermes may be running somewhere else entirely -- in WSL, or on
+    # another machine over the network -- where a path from here means nothing
+    # or, worse, means a different file that happens to share the name. Those
+    # backends are handed the file itself.
+    uploads_attachments: bool = False
 
 
 BACKENDS = {
@@ -439,6 +465,29 @@ BACKENDS = {
         True,
         supports_compaction=True,
     ),
+    BACKEND_HERMES: BackendInfo(
+        BACKEND_HERMES,
+        "Hermes",
+        "hermes",
+        "See https://hermes-agent.nousresearch.com/docs",
+        ("model",),
+        True,
+        # Hermes takes a reasoning level as a per-session override on
+        # session.create. This said False at first, with a comment claiming the
+        # protocol had no such control; it has one, and the effect is
+        # measurable -- a session created with "low" reads back "low" while one
+        # created without it reads the profile's own level. Saying False here
+        # hid the control in the picker AND told the setup wizard to announce
+        # that Hermes "does not expose a reasoning effort level".
+        True,
+        True,
+        True,
+        supports_compaction=True,
+        login_needs_terminal=True,
+        # Hermes' gateway takes an upload of the file, so an attachment works
+        # the same whether Hermes is here, in WSL, or on another machine.
+        uploads_attachments=True,
+    ),
 }
 
 # What a "compact this conversation" turn looks like per provider: the text to
@@ -453,6 +502,10 @@ _COMPACTION_REQUESTS: dict[str, tuple[str, dict]] = {
     BACKEND_CLAUDE: ("/compact", {}),
     BACKEND_CODEX: ("/compact", {"compact": True}),
     BACKEND_OPENCODE: ("/compact", {"compact": True}),
+    # Hermes compacts through a request of its own, like Codex. Its own name
+    # for the command is /compress; the text shown to the user says what was
+    # asked for in BlindPilot's words, and the worker acts on the flag.
+    BACKEND_HERMES: ("/compact", {"compact": True}),
 }
 
 
@@ -473,6 +526,9 @@ def normalize_backend(value: object) -> str:
         "freebuff": BACKEND_FREEBUFF,
         "opencode": BACKEND_OPENCODE,
         "opencodeai": BACKEND_OPENCODE,
+        "hermes": BACKEND_HERMES,
+        "hermesagent": BACKEND_HERMES,
+        "nous": BACKEND_HERMES,
     }
     return aliases.get(compact, BACKEND_CLAUDE)
 
@@ -515,6 +571,14 @@ def _fallback_cli_paths(name: str) -> tuple[Path, ...]:
 def find_backend_cli(backend: str) -> Optional[str]:
     """Find a provider CLI even in the restricted PATH inherited by a GUI."""
     info = BACKENDS[normalize_backend(backend)]
+    if info.id == BACKEND_HERMES:
+        # Hermes installs itself under its own home directory rather than into
+        # a shared bin, so it has a search of its own that also knows about the
+        # virtual environment the gateway is launched from. It is not an npm
+        # package, so it returns before the managed-prefix search below.
+        from hermes_backend import find_hermes_cli
+
+        return find_hermes_cli()
     # A backend BlindPilot installed itself is complete, writable by this user,
     # and updated through the same prefix. Prefer it over an older system/npm
     # copy that happens to occur earlier on PATH.
@@ -552,6 +616,10 @@ def find_backend_cli(backend: str) -> Optional[str]:
 def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
     """Best-effort non-interactive authentication check."""
     backend = normalize_backend(backend)
+    if backend == BACKEND_HERMES:
+        from hermes_backend import hermes_auth_ok
+
+        return hermes_auth_ok(timeout=max(timeout, 25))
     binary = find_backend_cli(backend)
     if not binary:
         return False
@@ -825,6 +893,16 @@ def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
+def _hermes_home() -> Path:
+    """Where Hermes keeps its configuration, honouring its own override.
+
+    `HERMES_HOME` is how one machine runs several Hermes profiles side by side,
+    so reading it is the difference between naming the file somebody is actually
+    using and naming a default they abandoned.
+    """
+    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+
+
 def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
     """Every settings file BlindPilot knows how to point somebody at.
 
@@ -863,6 +941,14 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             "global",
             home / ".config" / "opencode" / "opencode.json",
             "Applies to every project.",
+        ),
+        SettingsFile(
+            BACKEND_HERMES,
+            "global",
+            _hermes_home() / "config.yaml",
+            "Applies to every project. YAML rather than JSON, and it belongs to "
+            "the Hermes this backend talks to: a Hermes reached over the network "
+            "reads the file on that machine, not this one.",
         ),
     ]
     if project is not None:
@@ -2105,14 +2191,15 @@ _FREEBUFF_TURN_SECONDS = 60 * 60
 _FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
 
 # Sentence-ending punctuation, or the end of a paragraph, either of which is a
-# place a listener expects the reading to stop.
-_SENTENCE_END_RE = re.compile(r"(?s)^.*(?:[.!?:;…][\"'”’)\]]*(?=\s|$)|\n)")
+# place a listener expects the reading to stop. The definition lives in
+# ``markdown_rows`` (which depends on nothing of ours) so the Hermes worker can
+# share it without importing this module and closing an import cycle.
+_SENTENCE_END_RE = _markdown_sentence_end_re
 
 
 def _complete_sentences(text: str) -> str:
     """The part of ``text`` that reads as finished, or nothing yet."""
-    match = _SENTENCE_END_RE.search(text)
-    return match.group(0).rstrip() if match else ""
+    return complete_sentences(text)
 
 
 def _unwrap_screen_text(text: str) -> str:
@@ -4797,4 +4884,11 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         return FreebuffWorker
     if backend == BACKEND_OPENCODE:
         return OpencodeWorker
+    if backend == BACKEND_HERMES:
+        # Imported here rather than at module scope so a machine without Hermes
+        # pays nothing for it, and an import error in the adapter cannot stop
+        # the other backends from working.
+        from hermes_worker import HermesWorker
+
+        return HermesWorker
     return claude_worker

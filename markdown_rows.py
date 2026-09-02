@@ -382,3 +382,16 @@ def reassemble_all(rows: List[Row]) -> str:
         if block:
             blocks.append(block)
     return "\n\n".join(blocks)
+
+
+# Sentence-ending punctuation, or the end of a paragraph, either of which is a
+# place a listener expects the reading to stop. Lives here rather than beside
+# its first caller so both the streaming backends and the Hermes worker can
+# share one definition without importing each other.
+_SENTENCE_END_RE = re.compile(r"(?s)^.*(?:[.!?:;…][\"'”’)\]]*(?=\s|$)|\n)")
+
+
+def complete_sentences(text: str) -> str:
+    """The part of ``text`` that reads as finished, or nothing yet."""
+    match = _SENTENCE_END_RE.search(text)
+    return match.group(0).rstrip() if match else ""

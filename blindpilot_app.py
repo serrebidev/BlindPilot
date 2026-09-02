@@ -74,6 +74,7 @@ from agent_backends import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_FREEBUFF,
+    BACKEND_HERMES,
     BACKEND_IDS,
     BACKEND_LABELS,
     BACKEND_OPENCODE,
@@ -113,6 +114,13 @@ from agent_backends import (
     stop_opencode_server,
     subprocess_env,
     worker_class,
+)
+from hermes_backend import (
+    REMOTE_CREDENTIALS,
+    hermes_model_options,
+    hermes_session_catalog,
+    remote_ws_url,
+    wsl_path_to_windows,
 )
 
 from markdown_rows import (
@@ -930,6 +938,16 @@ _NPM_BACKEND_PACKAGES = {
 }
 
 
+def _backend_installs_with_npm(backend: str) -> bool:
+    """Whether this backend is one BlindPilot can install for the user.
+
+    Not every backend ships on npm: Hermes installs itself from its own
+    installer, so telling the user that npm is required would send them after
+    the wrong thing entirely.
+    """
+    return normalize_backend(backend) in _NPM_BACKEND_PACKAGES
+
+
 NODE_RELEASE_INDEX_URL = "https://nodejs.org/dist/index.json"
 NODE_RELEASE_BASE_URL = "https://nodejs.org/dist"
 _NODE_MINIMUM_MAJOR = 18
@@ -1585,17 +1603,53 @@ def probe_model_options(
     """
     backend = normalize_backend(backend)
     binary = _find_claude() if backend == BACKEND_CLAUDE else find_backend_cli(backend)
-    if binary is None:
+    # A Hermes reached over the network is the one backend that needs no local
+    # copy: the catalog comes from the server itself.
+    remote_hermes_url = REMOTE_HERMES.url() if backend == BACKEND_HERMES else ""
+    if binary is None and not remote_hermes_url:
         label = backend_label(backend)
         return ModelOptions(
             list(_FALLBACK_MODELS) if backend == BACKEND_CLAUDE else [],
-            list(_FALLBACK_EFFORTS) if backend != BACKEND_FREEBUFF else [],
+            # Only offer effort levels for a backend that actually accepts one;
+            # otherwise the picker shows a control its protocol ignores.
+            list(_FALLBACK_EFFORTS) if BACKENDS[backend].supports_effort else [],
             error=f"{label} was not found.",
         )
 
     fresh = cached_model_options(cwd, max_age, backend)
     if fresh is not None:
         return fresh
+
+    if backend == BACKEND_HERMES:
+        # A Hermes reached over the network answers the same model request as
+        # one on this machine: `hermes serve` dispatches its WebSocket through
+        # the identical JSON-RPC handlers. This used to return an error telling
+        # the user to pick the model "on the machine it runs on", which for a
+        # headless server (the whole point of the remote mode) meant there was
+        # nowhere to pick it at all.
+        models, efforts, current_model, current_effort, error = hermes_model_options(
+            cwd,
+            remote_url=remote_hermes_url,
+            remote_token=REMOTE_HERMES.key if remote_hermes_url else "",
+            remote_credential=(REMOTE_HERMES.credential if remote_hermes_url else "token"),
+            remote_username=REMOTE_HERMES.username if remote_hermes_url else "",
+        )
+        options = ModelOptions(models, efforts, current_model, current_effort, error)
+        if models and binary is not None:
+            # Only the local path has a binary to stamp the cache against; a
+            # remote catalog is re-read instead of being keyed on a file that
+            # does not exist here.
+            with _probe_lock:
+                _probe_cache[(f"{backend}:{cwd or ''}", _cli_stamp(binary))] = (
+                    time.time(),
+                    options,
+                )
+        return options
+
+    if binary is None:
+        # Only the remote-Hermes path above is allowed to get this far without
+        # a local CLI, and it has already returned.
+        return ModelOptions([], [], error=f"{backend_label(backend)} was not found.")
 
     if backend == BACKEND_CODEX:
         models, efforts, current_model, current_effort, error = codex_model_options(cwd)
@@ -2186,6 +2240,37 @@ SOUND_CUES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+CUE_LOOP = "loop"
+CUE_PERIODIC = "periodic"
+CUE_OFF = "off"
+PROGRESS_CUES = (CUE_LOOP, CUE_PERIODIC, CUE_OFF)
+
+# How often the periodic working cue plays, and the range the setting allows. A
+# cue every couple of seconds is barely different from the loop; one every few
+# minutes stops answering "is it still working".
+CUE_SECONDS_DEFAULT = 10
+CUE_SECONDS_MIN = 2
+CUE_SECONDS_MAX = 120
+
+
+def _valid_progress_cue(value: object) -> str:
+    """One of the three cue behaviours, whatever the config file holds.
+
+    A config written by a newer version, or edited by hand, must not stop the
+    app from starting, so anything unrecognised falls back to the default.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in PROGRESS_CUES else CUE_PERIODIC
+
+
+def _valid_cue_seconds(value: object) -> int:
+    try:
+        seconds = int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return CUE_SECONDS_DEFAULT
+    return max(CUE_SECONDS_MIN, min(CUE_SECONDS_MAX, seconds))
+
+
 class _Settings:
     """User preferences that change how a run is presented, saved to config.
 
@@ -2194,6 +2279,20 @@ class _Settings:
     pre-live-narration behaviour: nothing appears until the turn ends, and
     nothing is spoken. ``text_view`` swaps the responses list for a read-only
     edit field and defaults to off.
+
+    ``progress_cue`` decides how the working cue behaves while a turn runs:
+
+    ``loop``
+        the original behaviour, the cue repeating end to end for the whole turn
+    ``periodic``
+        the cue once every ``progress_cue_seconds``, so a long run still says it
+        is alive without repeating over the answer being spoken
+    ``off``
+        no working cue at all; send and received still play
+
+    ``periodic`` is the default. The cue file is under a second long, so looping
+    it means dozens of repeats per turn on top of the speech, and until now
+    there was no way to turn it down.
     """
 
     def __init__(self) -> None:
@@ -2222,6 +2321,8 @@ class _Settings:
         self.sound_cues = {cue: bool(stored.get(cue, True)) for cue, _label, _help in SOUND_CUES}
         self.text_view = bool(cfg.get("text_view", False))
         self.show_thinking = bool(cfg.get("show_thinking", False))
+        self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
+        self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
 
     def save(self) -> None:
         cfg = _load_config()
@@ -2232,10 +2333,103 @@ class _Settings:
         cfg["sound_cues"] = self.sound_cues
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
+        cfg["progress_cue"] = self.progress_cue
+        cfg["progress_cue_seconds"] = self.progress_cue_seconds
         _save_config(cfg)
 
 
 SETTINGS = _Settings()
+
+
+class _RemoteHermes:
+    """Where to find a Hermes that is not on this computer.
+
+    Off by default: with nothing configured, the Hermes backend launches the
+    local copy and there is nothing to set up. Filling this in points it at a
+    Hermes running elsewhere -- a home server, or the same machine reached over
+    a private network -- so the desktop can work with it without a terminal.
+
+    The key is stored separately from the display preferences, in a file of its
+    own with owner-only permissions where the platform supports them. It is a
+    credential: it belongs no more in a settings file full of checkboxes than a
+    password does.
+    """
+
+    def __init__(self) -> None:
+        cfg = _load_config()
+        remote = cfg.get("remote_hermes")
+        remote = remote if isinstance(remote, dict) else {}
+        self.enabled = bool(remote.get("enabled", False))
+        self.host = str(remote.get("host", "") or "")
+        try:
+            self.port = int(remote.get("port", 9119))
+        except (TypeError, ValueError):
+            self.port = 9119
+        self.secure = bool(remote.get("secure", False))
+        # "token" for a server on this machine; "password" for one reachable
+        # from elsewhere, where Hermes requires a login of its own and its
+        # WebSocket upgrade then wants a short-lived ticket.
+        credential = str(remote.get("credential", "token") or "token")
+        self.credential = credential if credential in REMOTE_CREDENTIALS else "token"
+        self.username = str(remote.get("username", "") or "")
+        self.key = self._read_key()
+
+    @staticmethod
+    def _key_path() -> Path:
+        return _config_dir() / "remote-hermes-key"
+
+    def _read_key(self) -> str:
+        try:
+            return self._key_path().read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            return ""
+
+    def _write_key(self) -> None:
+        path = self._key_path()
+        try:
+            _config_dir().mkdir(parents=True, exist_ok=True)
+            if not self.key:
+                path.unlink(missing_ok=True)
+                return
+            path.write_text(self.key, encoding="utf-8")
+            if platform.system() != "Windows":
+                # Owner-only. On Windows the per-user AppData directory is
+                # already the boundary, and chmod there does not mean this.
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    def url(self) -> str:
+        """The gateway address, or "" when the remote mode is not in use."""
+        if not self.enabled or not self.host.strip():
+            return ""
+        return remote_ws_url(self.host, self.port, self.secure)
+
+    def describe(self) -> str:
+        """One line saying where this will connect, for the settings dialog."""
+        if not self.enabled:
+            return "Off — the Hermes backend runs the copy installed here."
+        url = self.url()
+        if not url:
+            return "On, but no address is set yet."
+        how = "username and password" if self.credential == "password" else "session token"
+        return f"On — {url}, signing in with a {how}"
+
+    def save(self) -> None:
+        cfg = _load_config()
+        cfg["remote_hermes"] = {
+            "enabled": self.enabled,
+            "host": self.host,
+            "port": self.port,
+            "secure": self.secure,
+            "credential": self.credential,
+            "username": self.username,
+        }
+        _save_config(cfg)
+        self._write_key()
+
+
+REMOTE_HERMES = _RemoteHermes()
 
 
 def _resource_dir() -> str:
@@ -2271,6 +2465,11 @@ class Earcons:
         self._loop_stop = threading.Event()
         self._loop_thread: Optional[threading.Thread] = None
         self._loop_proc: Optional[subprocess.Popen] = None
+        # Whether a progress cue of ours has been started and not yet stopped.
+        # It matters because the Windows sound API is stopped by purging every
+        # sound this process started, which would also cut a one-shot that had
+        # just begun. So the purge only runs while there is a cue to stop.
+        self._cue_sounding = False
         # One-shot players still running. They stay referenced until reaped so
         # the garbage collector never runs `Popen.__del__` on a live process -
         # that raises an unraisable exception, which CI's `-W error` turns
@@ -2388,8 +2587,22 @@ class Earcons:
             self._play_once(self.received)
 
     def start_progress(self) -> None:
+        """Signal that a turn is running, in whichever way Options asks for.
+
+        Looping a cue under a second long means dozens of repeats per turn, on
+        top of the answer being spoken, so the periodic mode plays it once and
+        then only every few seconds. ``off`` plays nothing: send and received
+        still mark the boundaries of the turn.
+        """
         self.stop_progress()
         if not self._wanted("working") or not self.in_progress:
+            return
+        mode = SETTINGS.progress_cue
+        if mode == CUE_OFF:
+            return
+        if mode == CUE_PERIODIC:
+            self._cue_sounding = True
+            self._start_periodic(max(CUE_SECONDS_MIN, SETTINGS.progress_cue_seconds))
             return
         if self._system == "Windows":
             try:
@@ -2399,6 +2612,7 @@ class Earcons:
                     self.in_progress,
                     winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP,
                 )
+                self._cue_sounding = True
             except Exception:
                 pass
             return
@@ -2406,10 +2620,34 @@ class Earcons:
         # replaces may still be inside `wait()`, and clearing the event it is
         # watching would set it looping again alongside the new one. Turn by
         # turn that is how one progress cue becomes several playing at once.
+        self._cue_sounding = True
         stop = threading.Event()
         self._loop_stop = stop
         self._loop_thread = threading.Thread(target=self._loop_unix, args=(stop,), daemon=True)
         self._loop_thread.start()
+
+    def _start_periodic(self, every_seconds: int) -> None:
+        """Play the working cue now, then again every ``every_seconds``.
+
+        One timer thread, woken by the stop event rather than by sleeping in
+        fixed steps, so ``stop_progress`` ends it immediately instead of after
+        the current interval. The event is created fresh here for the same
+        reason as in the looping path above.
+        """
+        stop = threading.Event()
+        self._loop_stop = stop
+        self._loop_thread = threading.Thread(
+            target=self._periodic, args=(every_seconds, stop), daemon=True
+        )
+        self._loop_thread.start()
+
+    def _periodic(self, every_seconds: int, stop: threading.Event) -> None:
+        while not stop.is_set():
+            self._play_once(self.in_progress)
+            # Returns True the moment the turn ends, so the wait is not a
+            # fixed sleep the stop has to outlast.
+            if stop.wait(every_seconds):
+                return
 
     def _loop_unix(self, stop: threading.Event) -> None:
         player = self._unix_player()
@@ -2437,7 +2675,22 @@ class Earcons:
                 return
 
     def stop_progress(self) -> None:
+        # The periodic thread exists on every platform, so its stop is set
+        # first: on Windows the looping cue is stopped by the sound API, but a
+        # periodic cue is a thread of ours and would otherwise keep playing
+        # after the answer arrived.
+        self._loop_stop.set()
+        sounding = self._cue_sounding
+        self._cue_sounding = False
         if self._system == "Windows":
+            # Purging is per process, not per sound: it silences whatever this
+            # application is playing, including a one-shot that started a
+            # moment ago. So it runs only when a cue of ours is actually
+            # playing. Without this guard, ending a turn purged the 'received'
+            # cue it had just started -- and the faster the turn ended, the
+            # less of that cue was left to hear.
+            if not sounding:
+                return
             try:
                 import winsound
 
@@ -2445,7 +2698,6 @@ class Earcons:
             except Exception:
                 pass
             return
-        self._loop_stop.set()
         proc = self._loop_proc
         if proc is not None and proc.poll() is None:
             try:
@@ -3386,11 +3638,14 @@ class ReadView(wx.Dialog):
 class ModelDialog(wx.Dialog):
     """Model picker for /model: one combo box for the model, one for effort.
 
-    Both lists come from the CLI probe that ran just before this opened, so the
-    choices are whatever the installed Claude Code actually accepts. The first
-    entry in each box names what Claude Code is using right now — picking it
-    passes no flag at all, so it keeps that. The model box is editable so a
-    full model ID can be typed; the effort box is a fixed list. Esc cancels.
+    Both lists come from the probe that ran just before this opened, so the
+    choices are whatever the selected backend actually accepts. The first entry
+    in each box names what that backend is using right now -- picking it passes
+    nothing at all, so it keeps that. The model box is editable so a full model
+    ID can be typed; the effort box is a fixed list. Esc cancels.
+
+    A backend that takes no effort level gets an empty list for it, so the box
+    offers only "leave it alone" rather than a control the turn would ignore.
     """
 
     def __init__(
@@ -4281,6 +4536,234 @@ _CANCEL_JOIN_SECONDS = 3.0
 # it, short enough to be a read-back rather than an interruption.
 _DICTATION_PAUSE_MS = 1500
 
+# One row in the Hermes sessions list. A conversation that is live in the
+# gateway process is marked, because attaching to it is a different act from
+# reopening a finished one: the running turn is joined, and its event stream
+# moves here.
+_HERMES_LIVE_MARK = "Running now"
+
+# Where a Hermes conversation came from, said the way a person would. The
+# source matters when picking one: a conversation started in a terminal on the
+# server is a different thing from one started in this window.
+_HERMES_SOURCE_LABELS = {
+    "cli": "terminal",
+    "tui": "Hermes TUI",
+    "telegram": "Telegram",
+    "discord": "Discord",
+    "slack": "Slack",
+    "whatsapp": "WhatsApp",
+    "signal": "Signal",
+    "webhook": "webhook",
+    "acp": "editor",
+}
+
+
+def hermes_session_label(entry: dict, live: bool) -> str:
+    """The single line a screen reader reads for one Hermes conversation.
+
+    Ordered by what decides the choice: whether it is running, what it is
+    about, how long ago it was touched, how much is in it, and where it was
+    started. Running first, because that is the one fact that changes what
+    opening it will do.
+    """
+    parts = []
+    if live:
+        parts.append(_HERMES_LIVE_MARK)
+    title = str(entry.get("title") or "").strip()
+    preview = " ".join(str(entry.get("preview") or "").split())
+    parts.append(title or preview or "(untitled)")
+    started = float(entry.get("started_at") or 0)
+    if started:
+        parts.append(describe_age(started))
+    count = int(entry.get("message_count") or 0)
+    if count:
+        parts.append("1 message" if count == 1 else f"{count} messages")
+    source = str(entry.get("source") or "").strip().lower()
+    if source:
+        parts.append(_HERMES_SOURCE_LABELS.get(source, source))
+    return " — ".join(parts)
+
+
+class HermesSessionsDialog(wx.Dialog):
+    """Pick any Hermes conversation — including one that is running right now.
+
+    Recent Conversations reads what this machine has on disk, which is empty
+    for a Hermes running on another computer. This asks the Hermes itself, so
+    the list holds every conversation it knows: the ones started in this
+    window, the ones started in a terminal on that machine, and the ones a
+    messaging channel started.
+
+    Conversations the gateway is currently running are marked. Opening one of
+    those ATTACHES to it: its running turn is read out here as it happens.
+    Hermes keeps one event stream per conversation, so attaching takes that
+    stream over from whatever was reading it before — which is why the dialog
+    says so rather than letting it be discovered.
+    """
+
+    def __init__(self, parent: wx.Window, cwd: str):
+        super().__init__(
+            parent,
+            title="Hermes Conversations",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._cwd = cwd
+        self._entries: list[dict] = []
+        self._shown: list[dict] = []
+        self._live: set[str] = set()
+        self.entry: Optional[dict] = None
+        self.attaching = False
+
+        filter_label = wx.StaticText(self, label="&Filter:")
+        self.filter_box = wx.TextCtrl(self)
+        self.filter_box.SetName("Filter conversations")
+        self.filter_box.SetHint("Type part of a conversation's first message")
+        self.filter_box.Bind(wx.EVT_TEXT, lambda _e: self._refresh())
+
+        self.running_only = wx.CheckBox(self, label="Only the ones &running now")
+        self.running_only.SetName("Only the ones running now")
+        self.running_only.Bind(wx.EVT_CHECKBOX, lambda _e: self._refresh())
+
+        list_label = wx.StaticText(self, label="&Conversations:")
+        self.list_box = wx.ListBox(self, style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
+        self.list_box.SetName("Conversations")
+        self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
+        # The consequence of the selected row, spoken on arrow keys: attaching
+        # and reopening are different acts and the difference must be heard
+        # before Enter, not after.
+        self.list_box.Bind(wx.EVT_LISTBOX, lambda _e: self._announce_selection())
+
+        self.summary = wx.StaticText(self, label="")
+        self.summary.SetName("Summary")
+
+        buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+        open_button = self.FindWindowById(wx.ID_OK)
+        if open_button is not None:
+            open_button.SetLabel("&Open")
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(filter_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        sizer.Add(self.filter_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
+        sizer.Add(self.running_only, 0, wx.ALL, 12)
+        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT, 12)
+        sizer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, 12)
+        sizer.Add(self.summary, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        if buttons is not None:
+            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+        self.SetSizerAndFit(sizer)
+        self.SetSize(wx.Size(640, 480))
+
+        self.Bind(wx.EVT_BUTTON, lambda _e: self._accept(), id=wx.ID_OK)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self._reload()
+        self.filter_box.SetFocus()
+
+    # ----- Loading and filtering -----
+    def _reload(self) -> None:
+        """Ask Hermes for its conversations. Blocking, so it says it is working."""
+        self.summary.SetLabel("Asking Hermes for its conversations…")
+        with wx.BusyCursor():
+            remote_url = REMOTE_HERMES.url()
+            entries, live, error = hermes_session_catalog(
+                self._cwd,
+                remote_url=remote_url,
+                remote_token=REMOTE_HERMES.key if remote_url else "",
+                remote_credential=REMOTE_HERMES.credential if remote_url else "token",
+                remote_username=REMOTE_HERMES.username if remote_url else "",
+            )
+        self._entries = entries
+        self._live = live
+        if error:
+            # The reason is spoken, not logged: a blind user cannot glance at a
+            # console to find out why the list is empty.
+            self.summary.SetLabel(error)
+            announce(f"Error: {error}")
+            self.list_box.Set([])
+            self._shown = []
+            self._set_open_enabled(False)
+            return
+        self._refresh()
+
+    def _is_live(self, entry: dict) -> bool:
+        return str(entry.get("id") or "") in self._live
+
+    def _refresh(self) -> None:
+        term = self.filter_box.GetValue().strip().lower()
+        running_only = self.running_only.GetValue()
+        self._shown = [
+            entry
+            for entry in self._entries
+            if (not running_only or self._is_live(entry))
+            and (
+                not term
+                or term in str(entry.get("title") or "").lower()
+                or term in str(entry.get("preview") or "").lower()
+            )
+        ]
+        self.list_box.Set(
+            [hermes_session_label(entry, self._is_live(entry)) for entry in self._shown]
+        )
+        if self._shown:
+            self.list_box.SetSelection(0)
+        count = len(self._shown)
+        running = sum(1 for entry in self._shown if self._is_live(entry))
+        if not self._entries:
+            message = "Hermes reported no conversations"
+        else:
+            message = "1 conversation" if count == 1 else f"{count} conversations"
+            if running:
+                message += f", {running} running now"
+        self.summary.SetLabel(message)
+        self._set_open_enabled(bool(self._shown))
+
+    def _set_open_enabled(self, enabled: bool) -> None:
+        button = self.FindWindowById(wx.ID_OK)
+        if button is not None:
+            button.Enable(enabled)
+
+    def _selected(self) -> Optional[dict]:
+        index = self.list_box.GetSelection()
+        if index == wx.NOT_FOUND or index >= len(self._shown):
+            return None
+        return self._shown[index]
+
+    def _announce_selection(self) -> None:
+        entry = self._selected()
+        if entry is None:
+            return
+        if self._is_live(entry):
+            announce(
+                "Running now. Opening this attaches to the turn in progress and moves "
+                "its output here."
+            )
+
+    # ----- Choosing -----
+    def _accept(self) -> None:
+        entry = self._selected()
+        if entry is None:
+            announce("Error: Choose a conversation first")
+            return
+        self.entry = entry
+        self.attaching = self._is_live(entry)
+        self.EndModal(wx.ID_OK)
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        key = event.GetKeyCode()
+        if key == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self._shown:
+            self._accept()
+            return
+        if key == wx.WXK_F5:
+            self._reload()
+            announce("Refreshed")
+            return
+        if key == wx.WXK_DOWN and self.filter_box.HasFocus() and self._shown:
+            self.list_box.SetFocus()
+            self.list_box.SetSelection(0)
+            return
+        event.Skip()
+
 
 class SessionPanel(wx.Panel):
     """One conversation tab — owns its session_id, rows, and worker.
@@ -4339,6 +4822,11 @@ class SessionPanel(wx.Panel):
         self._session_id: Optional[str] = None
         self._session_backend = normalize_backend(self._get_backend())
         self._worker: Optional[AgentWorker] = None
+        # One Hermes connection per tab, reused by each turn of this
+        # conversation. Created on first use rather than here, so a machine
+        # without Hermes never imports its adapter -- the same reason
+        # ``worker_class`` defers that import.
+        self._held_hermes: Optional[object] = None
         # Worker callbacks arrive on a background thread. Keep them in one
         # ordered mailbox with at most one pending GUI callback; otherwise a
         # long, chatty job can flood wx's event queue and starve NVDA/key input.
@@ -4638,6 +5126,9 @@ class SessionPanel(wx.Panel):
             # now spends that wait while the user is still typing. The probe is
             # what starts it, and it caches its answer for /model as well.
             self.warm_model_probe()
+        # Ask the backend what it supports rather than naming the one that does
+        # not: a further backend arriving is otherwise silently given a control
+        # its protocol has no answer for.
         supports_permissions = BACKENDS[selected].supports_permissions
         self.mode_picker.Enable(supports_permissions)
         if supports_permissions:
@@ -4803,14 +5294,28 @@ class SessionPanel(wx.Panel):
         """Apply the model / effort to every message sent from here on."""
         if self.selected_backend() == BACKEND_FREEBUFF and model != self.model:
             self._session_id = None
+            self._drop_held_hermes()
             self._announce("FreeBuff model changed; the next message starts a new conversation.")
             # Whatever terminal was waiting was started on the old model, and
             # FreeBuff reads that at launch, so it cannot serve the new one.
             discard_freebuff_prewarm()
             prewarm_freebuff(self.cwd, None, model)
+        effort_changed = self.selected_backend() == BACKEND_HERMES and effort != self.effort
         self.model = model
         self.effort = effort
-        self._announce(f"Using {self._model_summary()} from your next message.")
+        note = ""
+        if effort_changed:
+            # Hermes fixes the reasoning level when the conversation is created
+            # and offers no way to move a live one onto another: its own
+            # /reasoning command runs in a separate worker process and does not
+            # reach the running agent (measured). Rather than accept the pick
+            # and quietly not apply it, the conversation is ended here, so the
+            # next message starts one that really does use the chosen level.
+            # The model needs none of this -- /model does reach a live session.
+            self._session_id = None
+            self._drop_held_hermes()
+            note = " Hermes fixes the reasoning level per conversation, so this starts a new one."
+        self._announce(f"Using {self._model_summary()} from your next message.{note}")
         self.prompt.SetFocus()
 
     def cycle_mode(self) -> None:
@@ -4998,12 +5503,19 @@ class SessionPanel(wx.Panel):
                 return
             self._on_send()
             return
-        if key == wx.WXK_UP:
-            # Enter the newest row, but only when the caret is on the first line
-            # so ordinary multi-line cursor movement still works.
-            ip = self.prompt.GetInsertionPoint()
-            on_first_line = "\n" not in self.prompt.GetRange(0, ip)
-            if on_first_line and self._row_count() > 0:
+        if key == wx.WXK_UP and (event.CmdDown() or event.AltDown()):
+            # Deliberately a modifier, not a bare Up. Up used to enter the
+            # newest response whenever the caret was on the first line, which
+            # made a multi-line prompt unreadable: reviewing what you had just
+            # typed, or moving back up through a dictated paragraph, threw focus
+            # out of the field the moment the caret reached the top line. In a
+            # screen reader that is worse than a missing shortcut, because the
+            # text is still there and the caret is not.
+            #
+            # Nothing is lost: the responses are reachable by Ctrl+R (which has
+            # its own menu entry saying so) and by Shift+Tab, and Up/Down inside
+            # the prompt now do only what every other multi-line field does.
+            if self._row_count() > 0:
                 self._focus_row(self._row_count() - 1)
                 return
         if key == ord("V") and (event.CmdDown() or event.ControlDown()) and not event.AltDown():
@@ -5254,6 +5766,8 @@ class SessionPanel(wx.Panel):
         selected_backend = self.selected_backend()
         if selected_backend != self._session_backend:
             self._session_id = None
+            # A held Hermes connection belongs to the conversation being left.
+            self._drop_held_hermes()
             self._session_backend = selected_backend
             self.model = ""
             self.effort = ""
@@ -5265,6 +5779,15 @@ class SessionPanel(wx.Panel):
             )
 
         send_text = self._build_send_text(prompt)
+        # Attachments leave the tab's pending list here, but the turn still
+        # needs them: an uploading backend is handed the paths so the worker
+        # can send the bytes.
+        outgoing_files = list(self._attachments)
+        uploading = bool(outgoing_files) and self._backend_uploads_attachments()
+        row_text = send_text
+        if uploading:
+            summary = self._attachment_summary()
+            row_text = f"{send_text}\n{summary}" if send_text else summary
         self._turns.append(Turn(prompt=prompt))
         if len(self._turns) == 1:
             # A conversation is named by its first message — that is the title
@@ -5275,7 +5798,7 @@ class SessionPanel(wx.Panel):
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
         self._stopping = False
-        self._add_your_message(send_text)
+        self._add_your_message(row_text)
         self.prompt.SetValue("")
         self._attachments = []
 
@@ -5287,6 +5810,12 @@ class SessionPanel(wx.Panel):
         self._earcons.start_progress()
 
         worker_type = worker_class(selected_backend, ClaudeWorker)
+        extra = dict(worker_extra or {})
+        if selected_backend == BACKEND_HERMES:
+            # No condition on "does this backend upload" here: this branch IS
+            # the uploading backend. Guarding it twice would be a line no test
+            # could ever hold to account.
+            extra.update(self._hermes_worker_extra(outgoing_files))
         self._worker = worker_type(
             send_text,
             self._session_id,
@@ -5301,7 +5830,7 @@ class SessionPanel(wx.Panel):
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,
-            **(worker_extra or {}),
+            **extra,
         )
         try:
             self._worker.start()
@@ -5393,13 +5922,77 @@ class SessionPanel(wx.Panel):
         self._refresh_list()
         self._announce("Stopped")
 
+    def _hermes_worker_extra(self, attachments: list[str]) -> dict:
+        """The extra arguments a Hermes turn needs, gathered in one place.
+
+        Kept as a method of its own so a test can ask what a turn will be
+        given. Inline in the send path this was untestable, and a mutation that
+        dropped the attachments -- meaning no file bytes ever left the machine,
+        the exact bug being fixed -- went unnoticed by a green test run.
+        """
+        extra: dict = {}
+        # Point the turn at a Hermes elsewhere when one is configured. Nothing
+        # is added when it is not, so the local path stays the
+        # zero-configuration default.
+        remote_url = REMOTE_HERMES.url()
+        if remote_url:
+            extra["remote_url"] = remote_url
+            extra["remote_token"] = REMOTE_HERMES.key
+            extra["remote_credential"] = REMOTE_HERMES.credential
+            extra["remote_username"] = REMOTE_HERMES.username
+        # The connection belongs to the conversation, not the turn: the next
+        # message reuses it instead of logging in and resuming again.
+        if self._held_hermes is None:
+            from hermes_worker import HeldConnection
+
+            self._held_hermes = HeldConnection()
+        extra["held"] = self._held_hermes
+        if attachments:
+            extra["attachments"] = list(attachments)
+        return extra
+
     def _build_send_text(self, prompt: str) -> str:
-        """Combine the prompt with file paths for the selected coding agent."""
+        """Combine the prompt with file paths for the selected coding agent.
+
+        Only for backends that read the file off this machine's disk. A backend
+        that takes an upload is handed the files themselves (see
+        ``uploads_attachments``), and naming their paths here would describe
+        them twice -- once as a path that may mean nothing on the far side.
+        """
         parts = [prompt] if prompt else []
-        if self._attachments:
+        if self._attachments and not self._backend_uploads_attachments():
             listing = "\n".join(self._attachments)
             parts.append("Attached files (please read them):\n" + listing)
         return "\n\n".join(parts)
+
+    def _backend_uploads_attachments(self) -> bool:
+        """Whether the chosen backend wants the file's bytes, not its path."""
+        return bool(getattr(BACKENDS[self.selected_backend()], "uploads_attachments", False))
+
+    def _attachment_summary(self) -> str:
+        """One line naming the files going out, for the transcript row.
+
+        An uploading backend gets no paths in its prompt, so without this the
+        user's own message in the list would not mention the attachment at all
+        and the transcript would read as a question about nothing.
+
+        The name comes from `attachment_name`, the same helper the upload itself
+        uses, rather than `os.path.basename`. On Linux or macOS basename does not
+        treat a backslash as a separator, so a Windows path attached to a Hermes
+        reached from a Linux desktop kept the whole of
+        `D:\\projekty\\raport.xlsx` in a line that is read aloud. Sharing the
+        helper is the point: the file Hermes stores and the name spoken in the
+        transcript cannot drift apart.
+        """
+        # Imported here, not at module scope: hermes_worker pulls in the
+        # websocket client, and a user on another backend should not pay for it.
+        from hermes_worker import attachment_name
+
+        names = [attachment_name(p) or p for p in self._attachments]
+        if not names:
+            return ""
+        noun = "file" if len(names) == 1 else "files"
+        return f"[Sending {len(names)} {noun}: {', '.join(names)}]"
 
     def clear_conversation(self) -> None:
         """Forget this conversation and start a fresh one in the same tab.
@@ -5414,6 +6007,7 @@ class SessionPanel(wx.Panel):
             self._announce("Error: Stop the running task before starting a new conversation")
             return
         self._session_id = None
+        self._drop_held_hermes()
         self._turns = []
         self._rows = []
         self._displayed = []
@@ -5463,6 +6057,9 @@ class SessionPanel(wx.Panel):
         continuation of it rather than the start of something new.
         """
         self._session_id = entry.session_id
+        # The tab is now a different conversation, so any connection held for
+        # the previous one must not carry the next message.
+        self._drop_held_hermes()
         self._session_backend = normalize_backend(entry.backend)
         self._turns = [Turn(prompt=turn.prompt, response=turn.response) for turn in turns]
         self._rows = []
@@ -5494,6 +6091,85 @@ class SessionPanel(wx.Panel):
             "1 response" if self._response_count == 1 else f"{self._response_count} responses"
         )
         self._set_status(f"Resumed: {entry.title} — {responses}")
+
+    def open_hermes_session(self, session_id: str, title: str, attaching: bool) -> None:
+        """Take over this tab with a Hermes conversation, and read it back.
+
+        Unlike ``restore_history`` this does not read a transcript off local
+        disk: the conversation may live on another machine, so the transcript
+        is asked of Hermes itself. A worker started in resume-only mode
+        replays it through the same callbacks a live turn uses, which is what
+        makes a conversation from a terminal on the server read exactly like
+        one that just happened here.
+
+        When ``attaching`` is true the conversation is running right now: the
+        replay is followed by the events of the turn in progress, and Hermes'
+        one-stream-per-conversation rule means this window now owns that
+        stream.
+        """
+        if self._worker is not None and self._worker.is_alive():
+            self._announce("Error: Stop the running task before opening another conversation")
+            return
+        # The tab becomes that conversation: the id it will continue, and the
+        # backend it belongs to. A held connection from the previous one must
+        # not carry the next message.
+        self._session_id = session_id
+        self._drop_held_hermes()
+        self._session_backend = BACKEND_HERMES
+        self._turns = []
+        self._rows = []
+        self._displayed = []
+        self._search_term = ""
+        self._response_count = 0
+        self._stream_response = None
+        self._streamed_assistant = ""
+        self._assistant_narrated_this_turn = False
+        self._stopping = False
+        self._refresh_list()
+        self._on_title(self, title or make_title(session_id))
+        self.backend_changed()
+
+        extra = self._hermes_worker_extra([])
+        # Resume-only: this worker reopens the conversation and says nothing
+        # into it. Without the flag it would submit a prompt, which on a live
+        # conversation would post an empty message into someone else's turn.
+        extra["resume_only"] = True
+        self._announce("Attaching" if attaching else "Reopening")
+        self._earcons.start_progress()
+        self._worker = worker_class(BACKEND_HERMES, ClaudeWorker)(
+            "",
+            self._session_id,
+            self.cwd,
+            self.mode,
+            model=self.model,
+            effort=self.effort,
+            on_session=lambda sid: self._queue_worker_event("session", sid),
+            on_started=lambda: self._queue_worker_event("started"),
+            on_activity=lambda kind, text: self._queue_worker_event("activity", kind, text),
+            on_complete=lambda txt: self._queue_worker_event("complete", txt),
+            on_failed=lambda msg: self._queue_worker_event("failed", msg),
+            on_done=lambda: self._queue_worker_event("done"),
+            on_question=self._ask_questions,
+            **extra,
+        )
+        self._worker.start()
+        self.stop_btn.Enable()
+        if attaching:
+            # Steering a turn someone else started is exactly what this is for.
+            self.steer_btn.Enable()
+
+    def _drop_held_hermes(self) -> None:
+        """Let go of the held Hermes connection, if this tab has one.
+
+        Called wherever the tab stops being the conversation the connection was
+        opened for: a new conversation, a restored one, a different backend.
+        The connection carries a live session id, so reusing it across that
+        boundary would send the next message into the previous conversation.
+        """
+        held = self._held_hermes
+        if held is not None:
+            held.drop()  # type: ignore[attr-defined]
+            self._held_hermes = None
 
     def _on_session_started(self, session_id: str) -> None:
         if not self._session_id:
@@ -5537,7 +6213,22 @@ class SessionPanel(wx.Panel):
         if not SETTINGS.live_rows:
             return
         n = self._begin_stream_response()
-        if kind == "result":
+        if kind == "you":
+            # A replayed conversation carries the user's own messages, which a
+            # live turn adds itself (_add_your_message) before the worker
+            # starts. Reopening one has no such moment, so the row is built
+            # here — same label, so a reopened conversation reads exactly like
+            # one that just happened.
+            self._rows.append(
+                Row(
+                    kind="you",
+                    label=f"You: {' '.join(text.split())}",
+                    payload=text,
+                    response_number=n,
+                )
+            )
+            self._say(f"You: {' '.join(text.split())}")
+        elif kind == "result":
             self._rows.append(
                 Row(
                     kind="result",
@@ -5630,6 +6321,15 @@ class SessionPanel(wx.Panel):
         self._stopping = False
         # Stop the in-progress loop and play the "received" cue.
         self._earcons.play_received()
+        # A reopened conversation completes with no text: nothing new was said,
+        # the rows are the transcript that was just replayed. Announcing a
+        # "response received, 0 segments" there, or parsing "" into a fresh
+        # response, would invent an empty answer at the end of someone's
+        # history — and a screen reader would read that gap as the last thing
+        # in the conversation.
+        if not text.strip() and not self._turns:
+            self._set_status(f"Reopened, {len(self._rows)} rows")
+            return
         self._narrate_completed_response(text)
         if self._turns:
             self._turns[-1].response = text
@@ -6032,6 +6732,21 @@ class SessionPanel(wx.Panel):
             # time this panel's widgets may not exist.
             self._dictation_timer.Stop()
             self._dictation_timer = None
+        # The Hermes connection outlives a single turn, so closing the tab is
+        # what closes it. Left open it would hold a session on the server for a
+        # conversation nobody is looking at any more. It goes before the early
+        # returns below: a tab with no live turn must still let go of it.
+        #
+        # Read with getattr because this runs during teardown, on whatever the
+        # caller has: a panel closed before its own __init__ finished, and the
+        # stand-ins the tab-closing tests drive this path with, both reach here
+        # without the attribute. Raising while shutting a tab down would leave
+        # the turn uncancelled and the window half closed - a worse failure
+        # than a connection this panel never had.
+        held = getattr(self, "_held_hermes", None)
+        if held is not None:
+            held.drop()  # type: ignore[attr-defined]
+            self._held_hermes = None
         worker = self._worker
         if worker is None or not worker.is_alive():
             return None
@@ -6517,6 +7232,13 @@ class SetupWizard(wx.Dialog):
                 "sign in through your browser. If you have already connected one, or "
                 f"already ran '{login}' in a terminal, choose Already Signed In."
             )
+        elif info.login_needs_terminal:
+            self._signin_intro.SetLabel(
+                f"BlindPilot needs {label} to have a provider and model configured.\n\n"
+                f"If you have already run '{login}' in a terminal, choose Already "
+                "Signed In. Otherwise choose Sign In: its setup opens in a terminal "
+                "window where you can answer its questions."
+            )
         else:
             self._signin_intro.SetLabel(
                 f"BlindPilot needs you to be signed in to use {label}.\n\n"
@@ -6527,9 +7249,13 @@ class SetupWizard(wx.Dialog):
         self._signin_intro.Wrap(520)
         limitations = ""
         if not info.supports_model:
-            limitations += "\nFreeBuff manages model selection in its own terminal UI."
+            limitations += f"\n{label} manages model selection in its own terminal UI."
         if not info.supports_permissions:
-            limitations += "\nFreeBuff manages permissions internally."
+            limitations += f"\n{label} manages permissions internally."
+        if not info.supports_effort:
+            limitations += f"\n{label} does not expose a reasoning effort level."
+        if not info.supports_compaction:
+            limitations += f"\n{label} cannot compact a conversation; start a new one instead."
         self._done_text.SetLabel(
             f"All done! BlindPilot is ready to use {label}.\n\n"
             "Type in the Prompt field and press Enter to send.\n"
@@ -6671,7 +7397,7 @@ class SetupWizard(wx.Dialog):
                 "rights and no Node.js needed. It is put on your PATH so "
                 f"'claude' also works in {_path_shells()}.\n\n"
                 "You can also install it yourself from claude.com/claude-code "
-                "and click Check Again. To use Codex or FreeBuff instead, press "
+                "and click Check Again. To use another backend instead, press "
                 "Escape and choose it from File, Backend in the main window."
             )
             self._cli_install_btn.Show()
@@ -6696,7 +7422,7 @@ class SetupWizard(wx.Dialog):
                 f"{_missing_prereq_message()}\n\n"
                 f"Install Claude Code by running this in a terminal:\n\n"
                 f"{command}\n\n"
-                "then click Check Again. To use Codex or FreeBuff instead, press "
+                "then click Check Again. To use another backend instead, press "
                 "Escape and choose it from File, Backend in the main window."
             )
             self._cli_install_btn.Hide()
@@ -6711,7 +7437,7 @@ class SetupWizard(wx.Dialog):
         announce(" ".join(filter(None, (self._cli_status.GetLabel(), hint))))
 
     def _check_npm_backend_cli(self) -> None:
-        """Check Codex or FreeBuff without showing Claude-specific guidance."""
+        """Check a non-Claude backend without showing Claude-specific guidance."""
         info = BACKENDS[self.backend]
         self._backend_path = self._find_selected_cli()
         hint = ""
@@ -6757,6 +7483,22 @@ class SetupWizard(wx.Dialog):
             self._cli_check_btn.Show()
             self._next_btn.Enable(False)
             hint = f"Tab to Install {info.label}."
+        elif not _backend_installs_with_npm(self.backend):
+            # This backend does not come from npm, so naming npm would send the
+            # user after the wrong thing. Point at its own instructions instead.
+            self._cli_status.SetLabel(f"{info.label} was not found.")
+            self._cli_detail.SetLabel(
+                f"BlindPilot could not find {info.label} on this computer.\n\n"
+                f"{info.install_command}\n\n"
+                "Install it, then choose Check Again, or go Back and select "
+                "another backend."
+            )
+            self._cli_install_btn.Hide()
+            self._cli_update_btn.Hide()
+            self._cli_path_btn.Hide()
+            self._cli_check_btn.Show()
+            self._next_btn.Enable(False)
+            hint = "Tab to Check Again once it is installed."
         else:
             self._cli_status.SetLabel(f"{info.label} was not found.")
             self._cli_detail.SetLabel(
@@ -6962,6 +7704,19 @@ class SetupWizard(wx.Dialog):
         self._login_thread.start()
 
     def _run_login(self) -> None:
+        if BACKENDS[self.backend].login_needs_terminal:
+            # An interactive setup cannot run hidden with no stdin: it dies
+            # immediately and the wizard would report a failed sign-in for a
+            # backend that is simply waiting to be asked. Give it a real
+            # console and let the user answer it. This is decided before
+            # BackendLogin runs, because watching output for a browser address
+            # is meaningless for a setup that asks its questions in a console.
+            binary = self._backend_path
+            if binary is None:
+                wx.CallAfter(self._on_login_terminal_opened, "", False)
+                return
+            self._launch_login_terminal([binary, *BACKENDS[self.backend].login_args])
+            return
         login = self._login
         assert login is not None
         rc = login.run(
@@ -6976,6 +7731,60 @@ class SetupWizard(wx.Dialog):
         # signed in settles it either way.
         ok = rc == 0 or backend_auth_ok(self.backend)
         wx.CallAfter(self._on_login_done, ok, login.failure)
+
+    def _launch_login_terminal(self, args: List[str]) -> None:
+        """Open a real console for a backend whose setup asks questions.
+
+        The user answers in that window, not in this one, so there is no exit
+        code worth waiting for here: the wizard says what to do and re-checks
+        afterwards rather than declaring a result it cannot know.
+        """
+        command = subprocess.list2cmdline(args)
+        try:
+            if platform.system() == "Windows":
+                # start opens a console window of its own; the empty title
+                # argument is what keeps a quoted path from being read as one.
+                subprocess.Popen(["cmd", "/c", "start", "", *args], close_fds=True)
+            elif platform.system() == "Darwin":
+                script = f'tell application "Terminal" to do script "{command}"'
+                subprocess.Popen(["osascript", "-e", script], close_fds=True)
+            else:
+                for terminal in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+                    if shutil.which(terminal):
+                        subprocess.Popen([terminal, "-e", *args], close_fds=True)
+                        break
+                else:
+                    raise OSError("no terminal emulator found")
+        except (OSError, ValueError):
+            wx.CallAfter(self._on_login_terminal_opened, command, False)
+            return
+        wx.CallAfter(self._on_login_terminal_opened, command, True)
+
+    def _on_login_terminal_opened(self, command: str, opened: bool) -> None:
+        if not self:
+            return
+        self._signin_btn.Enable()
+        self._already_btn.Enable()
+        self._next_btn.Enable()
+        if opened:
+            self._signin_status.SetLabel(
+                f"{backend_label(self.backend)} setup has opened in a terminal "
+                "window. Answer its questions there, then come back and choose "
+                "Already Signed In."
+            )
+        elif command:
+            self._signin_status.SetLabel(
+                f"BlindPilot could not open a terminal. Run this yourself, then "
+                f"choose Already Signed In:\n\n{command}"
+            )
+        else:
+            self._signin_status.SetLabel(
+                f"BlindPilot could not find {backend_label(self.backend)} to run. "
+                "Go back a page and install or locate it first."
+            )
+        self._pages[2].Layout()
+        self.Layout()
+        announce(self._signin_status.GetLabel())
 
     def _on_login_progress(self, text: str) -> None:
         if not self:
@@ -7093,6 +7902,171 @@ class SetupWizard(wx.Dialog):
         announce(f"Projects folder: {self.projects_folder}")
 
 
+class RemoteHermesDialog(wx.Dialog):
+    """Where a Hermes on another computer lives, and how to prove who we are.
+
+    Deliberately plain: a checkbox, an address, a port, a key, and a button
+    that tries it. Every field has a label of its own so a screen reader
+    announces what it is on the way in, and the test button reports its result
+    in the same status line rather than a message box that has to be dismissed.
+    """
+
+    def __init__(self, parent: wx.Window):
+        super().__init__(parent, title="Remote Hermes", style=wx.DEFAULT_DIALOG_STYLE)
+        intro = wx.StaticText(
+            self,
+            label=(
+                "By default the Hermes backend runs the copy installed on this "
+                "computer. Turn this on to drive a Hermes running somewhere "
+                "else instead — start it there with 'hermes serve'."
+            ),
+        )
+        intro.Wrap(520)
+
+        self._enabled = wx.CheckBox(self, label="&Use a Hermes on another computer")
+        self._enabled.SetValue(REMOTE_HERMES.enabled)
+
+        host_label = wx.StaticText(self, label="Computer &name or address:")
+        self._host = wx.TextCtrl(self, value=REMOTE_HERMES.host)
+        self._host.SetHint("for example: my-server, or 100.64.0.5")
+
+        port_label = wx.StaticText(self, label="&Port:")
+        self._port = wx.SpinCtrl(self, min=1, max=65535, initial=REMOTE_HERMES.port)
+
+        self._secure = wx.CheckBox(self, label="Connect over &TLS (wss)")
+        self._secure.SetValue(REMOTE_HERMES.secure)
+
+        credential_label = wx.StaticText(self, label="Sign in &with:")
+        self._credential = wx.Choice(
+            self,
+            choices=[
+                "Session token — a Hermes on this same computer",
+                "Username and password — a Hermes on another computer",
+            ],
+        )
+        self._credential.SetSelection(0 if REMOTE_HERMES.credential == "token" else 1)
+        self._credential.Bind(wx.EVT_CHOICE, lambda _e: self._sync_credential_fields())
+
+        user_label = wx.StaticText(self, label="&Username:")
+        self._user = wx.TextCtrl(self, value=REMOTE_HERMES.username)
+
+        key_label = wx.StaticText(self, label="&Key or password:")
+        # Not masked: a screen-reader user has to be able to review what was
+        # pasted, and a session token is a machine-generated string nobody
+        # types from memory. It is stored in a file of its own either way.
+        self._key = wx.TextCtrl(self, value=REMOTE_HERMES.key)
+
+        self._status = wx.StaticText(self, label=REMOTE_HERMES.describe())
+        self._status.Wrap(520)
+
+        self._test_btn = wx.Button(self, label="&Test connection")
+        self._test_btn.Bind(wx.EVT_BUTTON, lambda _e: self._test())
+
+        buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+
+        grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
+        grid.AddGrowableCol(1, 1)
+        for label, control in (
+            (host_label, self._host),
+            (port_label, self._port),
+            (credential_label, self._credential),
+            (user_label, self._user),
+            (key_label, self._key),
+        ):
+            grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(control, 1, wx.EXPAND)
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(intro, 0, wx.ALL, 10)
+        sizer.Add(self._enabled, 0, wx.LEFT | wx.BOTTOM, 10)
+        sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        sizer.Add(self._secure, 0, wx.ALL, 10)
+        sizer.Add(self._test_btn, 0, wx.LEFT | wx.BOTTOM, 10)
+        sizer.Add(self._status, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, 10)
+        self.SetSizerAndFit(sizer)
+        self._sync_credential_fields()
+        self._host.SetFocus()
+
+    def _credential_name(self) -> str:
+        return "token" if self._credential.GetSelection() == 0 else "password"
+
+    def _sync_credential_fields(self) -> None:
+        """A username only means something when signing in with a password."""
+        wants_user = self._credential_name() == "password"
+        self._user.Enable(wants_user)
+
+    def _say(self, text: str) -> None:
+        self._status.SetLabel(text)
+        self._status.Wrap(520)
+        self.Layout()
+        announce(text)
+
+    def _test(self) -> None:
+        """Try the address now, so a mistake is found here and not mid-turn."""
+        host = self._host.GetValue().strip()
+        if not host:
+            self._say("Enter the computer's name or address first.")
+            self._host.SetFocus()
+            return
+        url = remote_ws_url(host, int(self._port.GetValue()), self._secure.GetValue())
+        self._test_btn.Disable()
+        self._say(f"Trying {url}…")
+        key = self._key.GetValue().strip()
+        credential = self._credential_name()
+        username = self._user.GetValue().strip()
+        threading.Thread(
+            target=self._run_test, args=(url, key, credential, username), daemon=True
+        ).start()
+
+    def _run_test(self, url: str, key: str, credential: str, username: str) -> None:
+        from hermes_backend import WebSocketTransport
+
+        transport = WebSocketTransport(url, key, credential, username)
+        try:
+            transport.start()
+        except OSError as exc:
+            wx.CallAfter(self._test_done, str(exc))
+            return
+        # Connecting proves the address and the key. Waiting for Hermes to
+        # announce itself proves the far end really is a Hermes gateway, which
+        # is the difference between a wrong port and a wrong program.
+        try:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                frame = transport.receive(0.5)
+                if frame is None:
+                    continue
+                params = frame.get("params")
+                if isinstance(params, dict) and params.get("type") == "gateway.ready":
+                    wx.CallAfter(self._test_done, "")
+                    return
+            wx.CallAfter(
+                self._test_done,
+                f"Connected to {url}, but it did not identify itself as Hermes.",
+            )
+        finally:
+            transport.close()
+
+    def _test_done(self, error: str) -> None:
+        self._test_btn.Enable()
+        if error:
+            self._say(error)
+        else:
+            self._say("Hermes answered. This address and key work.")
+
+    def apply(self) -> None:
+        """Copy the fields into the saved settings."""
+        REMOTE_HERMES.enabled = self._enabled.GetValue()
+        REMOTE_HERMES.host = self._host.GetValue().strip()
+        REMOTE_HERMES.port = int(self._port.GetValue())
+        REMOTE_HERMES.secure = self._secure.GetValue()
+        REMOTE_HERMES.credential = self._credential_name()
+        REMOTE_HERMES.username = self._user.GetValue().strip()
+        REMOTE_HERMES.key = self._key.GetValue().strip()
+        REMOTE_HERMES.save()
+
+
 class MainFrame(wx.Frame):
     def __init__(self, initial_cwd: str):
         super().__init__(None, title=APP_NAME, size=wx.Size(900, 760))
@@ -7168,11 +8142,45 @@ class MainFrame(wx.Frame):
             "&Silent until the response mode",
             "Turn both off: nothing appears or is spoken until the whole response is ready",
         )
+        options_menu.AppendSeparator()
+        # Radio items rather than a checkbox: three states, and a screen reader
+        # announces which one is selected when moving through them.
+        self._cue_loop_item = options_menu.AppendRadioItem(
+            wx.ID_ANY,
+            "Working sound: &continuous",
+            "Repeat the working sound for the whole turn, the way earlier versions did",
+        )
+        self._cue_periodic_item = options_menu.AppendRadioItem(
+            wx.ID_ANY,
+            "Working sound: e&very few seconds",
+            "Play the working sound occasionally, so a long turn still says it is alive",
+        )
+        self._cue_off_item = options_menu.AppendRadioItem(
+            wx.ID_ANY,
+            "Working sound: o&ff",
+            "No working sound; the send and received sounds still play",
+        )
+        cue_interval_item = options_menu.Append(
+            wx.ID_ANY,
+            "Working sound &interval...",
+            "How many seconds between working sounds in the every-few-seconds mode",
+        )
+        options_menu.AppendSeparator()
+        remote_hermes_item = options_menu.Append(
+            wx.ID_ANY,
+            "Re&mote Hermes...",
+            "Drive a Hermes running on another computer instead of the one installed here",
+        )
         self._rows_item.Check(SETTINGS.live_rows)
         self._speak_item.Check(SETTINGS.speak_live)
         self._thinking_item.Check(SETTINGS.show_thinking)
         self._sounds_item.Check(SETTINGS.sounds_enabled)
         self._text_view_item.Check(SETTINGS.text_view)
+        {
+            CUE_LOOP: self._cue_loop_item,
+            CUE_PERIODIC: self._cue_periodic_item,
+            CUE_OFF: self._cue_off_item,
+        }[SETTINGS.progress_cue].Check(True)
         menubar.Append(options_menu, "&Options")
 
         chat_menu = wx.Menu()
@@ -7250,12 +8258,22 @@ class MainFrame(wx.Frame):
         self.SetMenuBar(menubar)
         self._refresh_compact_item()
         self._refresh_connect_item()
+        self._refresh_hermes_sessions_item()
         self._refresh_mode_items()
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_live_rows(), self._rows_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_speak_live(), self._speak_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_show_thinking(), self._thinking_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_sounds(), self._sounds_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_text_view(), self._text_view_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._choose_progress_cue(CUE_LOOP), self._cue_loop_item)
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._choose_progress_cue(CUE_PERIODIC),
+            self._cue_periodic_item,
+        )
+        self.Bind(wx.EVT_MENU, lambda _e: self._choose_progress_cue(CUE_OFF), self._cue_off_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._configure_cue_interval(), cue_interval_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._configure_remote_hermes(), remote_hermes_item)
         self.Bind(
             wx.EVT_MENU,
             lambda _e: self._use_silent_until_response_mode(),
@@ -7537,6 +8555,9 @@ class MainFrame(wx.Frame):
             item.Enable(not show_agent)
         self.mode_combo.SetSelection(0 if show_agent else 1)
         self._refresh_compact_item()
+        # Chat mode has no backend conversation to reopen, so the Hermes list
+        # goes with it rather than sitting in File doing nothing.
+        self._refresh_hermes_sessions_item()
         self._root.Layout()
 
         cfg = _load_config()
@@ -7597,6 +8618,7 @@ class MainFrame(wx.Frame):
                 page.backend_changed()
         self._refresh_compact_item()
         self._refresh_connect_item()
+        self._refresh_hermes_sessions_item()
         message = (
             f"Backend changed to {backend_label(backend)}. It will be used for the next new turn."
         )
@@ -7943,6 +8965,9 @@ class MainFrame(wx.Frame):
         menu accelerator whose key is Tab at all.
         """
         menu = wx.Menu()
+        # Kept so the Hermes conversation list can be taken out of this menu and
+        # put back as the backend changes.
+        self._file_menu = menu
         add = self._menu_item
         add(
             menu,
@@ -7956,6 +8981,12 @@ class MainFrame(wx.Frame):
             "&Recent Conversations…	Ctrl+H",
             "Reopen a past conversation and carry on with it",
             self._open_history,
+        )
+        self._hermes_sessions_item = add(
+            menu,
+            "Hermes &Conversations…	Ctrl+G",
+            "List every conversation Hermes knows, including the ones running right now",
+            self._open_hermes_sessions,
         )
         add(
             menu,
@@ -8110,6 +9141,51 @@ class MainFrame(wx.Frame):
         if item is not None and not item.IsChecked():
             item.Check(True)
 
+    def _refresh_hermes_sessions_item(self) -> None:
+        """Offer Hermes' conversation list only while Hermes is the backend.
+
+        Greying it out, the way Compact and Connect are treated, is the wrong
+        answer here. Those two are commands for THIS conversation that the
+        current backend cannot perform, so a disabled item with a reason tells
+        you something worth knowing. This one asks a Hermes for its own
+        conversations: with another backend selected there is no Hermes in the
+        picture at all, so the item is not "unavailable", it is irrelevant --
+        and an irrelevant item still costs an arrow press to read past. The
+        File menu is at the ten-item ceiling upstream set for exactly that
+        reason, so the item is REMOVED rather than disabled, and File is nine
+        items long for everybody who does not use Hermes.
+
+        Removing keeps the accelerator too: Ctrl+G is registered by this menu
+        item, so with the item gone the chord does nothing rather than opening a
+        dialog that would immediately report there is no Hermes to ask.
+        """
+        item = getattr(self, "_hermes_sessions_item", None)
+        menu = item.GetMenu() if item is not None else None
+        wanted = self._app_mode == APP_MODE_AGENT and self._backend == BACKEND_HERMES
+        if wanted:
+            if item is not None and menu is None:
+                # Put it back where it was: immediately after Recent
+                # Conversations, so its place in the menu does not depend on
+                # how many times the backend has been switched.
+                self._insert_hermes_sessions_item()
+            return
+        if item is not None and menu is not None:
+            menu.Remove(item)
+
+    def _insert_hermes_sessions_item(self) -> None:
+        """Re-insert the Hermes list after Recent Conversations."""
+        menu = getattr(self, "_file_menu", None)
+        item = getattr(self, "_hermes_sessions_item", None)
+        if menu is None or item is None:
+            return
+        position = 0
+        for index, existing in enumerate(menu.GetMenuItems()):
+            if "Recent Conversations" in existing.GetItemLabelText():
+                position = index + 1
+                break
+        menu.Insert(position, item)
+        self.Bind(wx.EVT_MENU, lambda _event: self._open_hermes_sessions(), item)
+
     def _refresh_connect_item(self) -> None:
         """Grey out Connect for a backend that has no providers to connect.
 
@@ -8174,6 +9250,70 @@ class MainFrame(wx.Frame):
         SETTINGS.save()
         state = "on" if SETTINGS.speak_live else "off"
         self._announce_setting(f"Speaking activity aloud {state}")
+
+    def _turn_in_flight(self) -> bool:
+        """Whether the tab in front is in the middle of a turn.
+
+        Used to decide if a cue change should be applied now: the sounds belong
+        to the frame, but only a running turn has one playing.
+        """
+        page = self.notebook.GetCurrentPage()
+        worker = getattr(page, "_worker", None) if isinstance(page, SessionPanel) else None
+        return worker is not None and worker.is_alive()
+
+    def _choose_progress_cue(self, mode: str) -> None:
+        """Pick how the working sound behaves, and apply it to a running turn.
+
+        Applied at once rather than from the next turn: the setting exists
+        because the sound is intrusive, and someone reaching for it mid-turn
+        wants it to stop now.
+        """
+        SETTINGS.progress_cue = _valid_progress_cue(mode)
+        SETTINGS.save()
+        if mode == CUE_OFF:
+            self.earcons.stop_progress()
+            spoken = "off"
+        elif mode == CUE_PERIODIC:
+            spoken = f"every {SETTINGS.progress_cue_seconds} seconds"
+        else:
+            spoken = "continuous"
+        if mode != CUE_OFF and self._turn_in_flight():
+            # Restart under the new mode so a turn in flight follows the choice
+            # instead of keeping the behaviour it started with.
+            self.earcons.start_progress()
+        self._announce_setting(f"Working sound {spoken}")
+
+    def _configure_cue_interval(self) -> None:
+        """Ask how many seconds between working sounds.
+
+        A number entry rather than a set of fixed choices: what counts as too
+        often is a matter of hearing and of how long the runs are.
+        """
+        dialog = wx.NumberEntryDialog(
+            self,
+            "How many seconds between working sounds?",
+            f"Seconds ({CUE_SECONDS_MIN} to {CUE_SECONDS_MAX})",
+            "Working sound interval",
+            SETTINGS.progress_cue_seconds,
+            CUE_SECONDS_MIN,
+            CUE_SECONDS_MAX,
+        )
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            seconds = _valid_cue_seconds(dialog.GetValue())
+        finally:
+            dialog.Destroy()
+        SETTINGS.progress_cue_seconds = seconds
+        # Choosing an interval says what the sound should do, so the mode
+        # follows: setting an interval while the sound is off or continuous
+        # would otherwise change nothing anyone can hear.
+        SETTINGS.progress_cue = CUE_PERIODIC
+        SETTINGS.save()
+        self._cue_periodic_item.Check(True)
+        if self._turn_in_flight():
+            self.earcons.start_progress()
+        self._announce_setting(f"Working sound every {seconds} seconds")
 
     def _toggle_show_thinking(self) -> None:
         SETTINGS.show_thinking = self._thinking_item.IsChecked()
@@ -8349,6 +9489,45 @@ class MainFrame(wx.Frame):
             return
         self._resume_history(entry)
 
+    def _open_hermes_sessions(self) -> None:
+        """List Hermes' own conversations and open one in a new tab (Ctrl+G).
+
+        Recent Conversations answers "what is on this disk". This answers "what
+        does that Hermes know", which for a Hermes on another machine is the
+        only question with a useful answer: the transcripts are over there, and
+        so are the conversations that are running right now.
+        """
+        if self._backend != BACKEND_HERMES:
+            # Opening a Hermes conversation while another backend is selected
+            # would make the next message start a new conversation elsewhere,
+            # so the backend follows the conversation being opened.
+            self._set_backend(BACKEND_HERMES)
+        dlg = HermesSessionsDialog(self, cwd=self._history_cwd())
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            entry = dlg.entry
+            attaching = dlg.attaching
+        finally:
+            dlg.Destroy()
+        if not entry:
+            return
+        session_id = str(entry.get("id") or "")
+        if not session_id:
+            announce("Error: that conversation has no id to reopen")
+            return
+        title = str(entry.get("title") or "").strip() or str(entry.get("preview") or "").strip()
+        panel = self._add_session(self._history_cwd())
+        panel.open_hermes_session(session_id, title, attaching)
+        if attaching:
+            wx.CallAfter(
+                announce,
+                f"Attaching to {title or session_id}. This window now receives its output; "
+                "steer to send it guidance.",
+            )
+        else:
+            wx.CallAfter(announce, f"Reopening {title or session_id}")
+
     def _resume_history(self, entry: HistoryEntry) -> None:
         """Open one past conversation in its own tab, ready to be continued."""
         with wx.BusyCursor():
@@ -8361,7 +9540,18 @@ class MainFrame(wx.Frame):
         # new conversation on the next send — so resuming switches to it.
         if normalize_backend(entry.backend) != self._backend:
             self._set_backend(entry.backend)
-        cwd = entry.cwd if entry.cwd and os.path.isdir(entry.cwd) else self._history_cwd()
+        cwd = self._history_cwd()
+        if entry.cwd:
+            candidate = entry.cwd
+            if not os.path.isdir(candidate):
+                # A Hermes in WSL records its own form of the path, which
+                # Windows cannot open. Translate it back before giving up,
+                # otherwise a resumed conversation quietly reopens in whatever
+                # folder happened to be current.
+                translated = wsl_path_to_windows(candidate)
+                candidate = translated if os.path.isdir(translated) else ""
+            if candidate:
+                cwd = candidate
         panel = self._add_session(cwd)
         # restore_history reports the conversation's name, which is what
         # renames the tab: that title is what tells this conversation apart
@@ -8375,6 +9565,22 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.compact_conversation()
+
+    def _configure_remote_hermes(self) -> None:
+        """Point the Hermes backend at another computer, or back at this one."""
+        dlg = RemoteHermesDialog(self)
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            dlg.apply()
+        finally:
+            dlg.Destroy()
+        # A conversation already open belongs to whichever Hermes started it,
+        # so the change applies from the next new conversation rather than
+        # silently moving this one to a different machine. The cached model
+        # catalog belonged to the old address and would be wrong for the new.
+        invalidate_model_options(BACKEND_HERMES)
+        announce(f"Remote Hermes: {REMOTE_HERMES.describe()}. Applies to new conversations.")
 
     def _new_conversation_active(self) -> None:
         """Start a fresh conversation in the active tab (Ctrl+Shift+N)."""

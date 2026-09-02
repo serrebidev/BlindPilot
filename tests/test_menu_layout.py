@@ -42,6 +42,10 @@ def frame(wx_app):
     for name in (
         "_new_session",
         "_open_history",
+        # Hermes' own conversation list is a File-menu entry like the others, so
+        # its handler has to exist by name here too — the builder takes a
+        # reference to it while appending, before anything is ever clicked.
+        "_open_hermes_sessions",
         "_side_chat_active",
         "_set_projects_folder",
         "_create_desktop_shortcut",

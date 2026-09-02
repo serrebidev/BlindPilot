@@ -8,11 +8,14 @@ __pycache__/
 .test-tmp/
 .tmp_*
 dist/
+dist_new/
 build/
 *.spec
 NVIDIA Corporation/
 artifacts/
 .release-setup/
+.venv-test/
+.venv-win/
 .freebuff/
 .ruff_cache/
 .claude/settings.local.json
