@@ -29,6 +29,10 @@ jobs:
             asset: BlindPilot-macOS-x64.zip
             kind: macos
     runs-on: ${{ matrix.runner }}
+    # PyInstaller and Inno Setup make this the slow one; a green build is
+    # about fifteen minutes. The default is six hours, which is what a
+    # deadlocked test or a subprocess that never exits would cost.
+    timeout-minutes: 60
 
     steps:
       - name: Check out source
@@ -115,6 +119,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Check out release notes
         uses: actions/checkout@v7

@@ -92,3 +92,13 @@ def test_the_tests_run_on_every_platform_that_ships(platform):
     assert testing, "nothing tests a pull request, so no platform is covered"
     covered = any(platform in text for text in testing)
     assert covered, f"pull requests are tested, but never on a {platform} runner"
+
+
+def test_a_job_cannot_run_for_six_hours():
+    """GitHub's default job timeout is 360 minutes. This suite drives real
+    subprocesses, pseudo-terminals and worker threads, so a deadlock is a
+    plausible way to spend a whole afternoon of somebody's runner minutes."""
+    for name, text in _workflow_text().items():
+        if "pytest" not in text:
+            continue
+        assert "timeout-minutes:" in text, f"{name} runs the tests with no job timeout"
