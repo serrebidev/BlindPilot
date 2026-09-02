@@ -820,6 +820,18 @@ def subprocess_env(binary: str) -> dict[str, str]:
             entries.append(entry)
             known.add(entry)
     env["PATH"] = os.pathsep.join(entries)
+    if platform.system() == "Windows":
+        # Every CLI is started with `cwd` set to the user's project folder, and
+        # CLIs shell out constantly - git, node, npm, sh. Windows has
+        # historically searched the current directory for those, and the
+        # project folder is usually a repository somebody cloned in order to
+        # ask an agent about it, not code they wrote. A `git.exe` committed to
+        # it should not be what runs when the agent asks for git.
+        #
+        # This is the documented way off that search path, read by
+        # NeedCurrentDirectoryForExePathW, and it is inherited - so it covers
+        # the CLI and everything the CLI goes on to start.
+        env["NoDefaultCurrentDirectoryInExePath"] = "1"
     return env
 
 
