@@ -6552,7 +6552,6 @@ class SetupWizard(wx.Dialog):
         self._signin_status.SetLabel("")
         self._refresh_backend_copy()
         self.Layout()
-        announce(f"Backend selected: {backend_label(self.backend)}")
 
     def _find_selected_cli(self) -> Optional[str]:
         if self.backend == BACKEND_CLAUDE:
