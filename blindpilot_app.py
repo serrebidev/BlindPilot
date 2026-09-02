@@ -182,7 +182,7 @@ def _linux_announce(text: str) -> bool:
     return _linux_native_announce(text)
 
 
-def announce(text: str) -> None:
+def announce(text: str, urgent: bool = False) -> None:
     """Speak `text` via the screen reader without stealing focus.
 
     macOS uses the NSAccessibility announcement API, Windows goes through
@@ -240,6 +240,7 @@ def announce(text: str) -> None:
             NSAccessibilityAnnouncementKey,
             NSAccessibilityPriorityKey,
             NSAccessibilityPriorityHigh,
+            NSAccessibilityPriorityMedium,
         )
 
         app = NSApp()
@@ -250,7 +251,12 @@ def announce(text: str) -> None:
             return
         info = {
             NSAccessibilityAnnouncementKey: text,
-            NSAccessibilityPriorityKey: NSAccessibilityPriorityHigh,
+            # High is what an error gets, not what everything gets. Posting
+            # every line at the speak-now tier meant the same code queued
+            # politely on Windows and chopped off the previous line here.
+            NSAccessibilityPriorityKey: (
+                NSAccessibilityPriorityHigh if urgent else NSAccessibilityPriorityMedium
+            ),
         }
         NSAccessibilityPostNotificationWithUserInfo(
             window,
@@ -2011,6 +2017,7 @@ SOUND_CUES: tuple[tuple[str, str, str], ...] = (
     ("send", "Message &sent", "Play a sound when a message is sent"),
     ("working", "&Working", "Play a sound for as long as a turn is running"),
     ("received", "&Answer received", "Play a sound when the answer arrives"),
+    ("error", "So&mething went wrong", "Play a sound when a turn fails"),
 )
 
 
@@ -2143,6 +2150,45 @@ class Earcons:
     def play_send(self) -> None:
         if self._wanted("send"):
             self._play_once(self.send)
+
+    def _play_system_error(self) -> None:
+        """The platform's own error sound, rather than an asset of our own.
+
+        `EarCons/` ships three files and authoring a fourth is not something to
+        fake. This is also the sound the person already associates with
+        something having gone wrong on this machine, which is worth more than
+        one that matches the other three.
+        """
+        if self._system == "Windows":
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONHAND)
+            return
+        if self._system == "Darwin":
+            subprocess.Popen(
+                ["afplay", "/System/Library/Sounds/Basso.aiff"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        # Linux has no single answer here, and a wrong guess is worse than
+        # nothing: the error is spoken either way.
+
+    def play_error(self) -> None:
+        """Say a turn failed before saying why.
+
+        An error was spoken at the back of a queue a fan-out can make minutes
+        deep, and there was no failure cue at all. Interrupting was the other
+        option and was rejected - it purges the reader's whole queue, including
+        other applications' speech. A sound costs nobody else anything.
+        """
+        if not self._wanted("error"):
+            return
+        try:
+            self._play_system_error()
+        except Exception:
+            # A missing cue is never worth losing the error message over.
+            pass
 
     def play_received(self) -> None:
         # Stopping the loop stays unconditional: it has to end when the turn
@@ -4508,9 +4554,9 @@ class SessionPanel(wx.Panel):
         self.last_status = text
         self._on_status(self, text)
 
-    def _announce(self, text: str) -> None:
+    def _announce(self, text: str, urgent: bool = False) -> None:
         """Speak a confirmation and mirror it to the status bar as a fallback."""
-        announce(text)
+        announce(text, urgent=urgent)
         self._set_status(text)
 
     # ----- Prompt focus / key handling -----
@@ -5221,10 +5267,11 @@ class SessionPanel(wx.Panel):
             # for it, so it is not news, and it is not an error.
             return
         self._earcons.stop_progress()
+        self._earcons.play_error()
         if self._turns and not self._turns[-1].response:
             self._turns.pop()
         self._stream_response = None
-        self._announce(f"Error: {message}")
+        self._announce(f"Error: {message}", urgent=True)
 
     def _on_worker_finished(self) -> None:
         # Safety net: make sure the loop is never left running.
