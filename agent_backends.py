@@ -26,7 +26,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Protocol, Sequence, cast
+from typing import Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import diagnostics
 
@@ -797,6 +797,96 @@ def login_shell_path_dirs() -> list[str]:
                 dirs = []
         _login_shell_path = dirs
         return list(dirs)
+
+
+class SettingsFile(NamedTuple):
+    """One file that configures one backend, and how to describe it.
+
+    `scope` and `note` are both spoken. They are not decoration: the two
+    project-level Claude Code files differ only in whether the repository
+    carries them, and opening the wrong one silently is how somebody's personal
+    settings end up committed to a repository that is not theirs.
+    """
+
+    backend: str
+    scope: str
+    path: Path
+    note: str
+
+    @property
+    def exists(self) -> bool:
+        try:
+            return self.path.is_file()
+        except OSError:
+            return False
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
+    """Every settings file BlindPilot knows how to point somebody at.
+
+    Listing them creates nothing. These belong to the CLIs, which write their
+    own on first run, and a file invented at a path BlindPilot guessed would
+    be worse than no file: it would do nothing while looking like it did.
+
+    Locations are the ones each CLI documents. opencode also reads
+    `.opencode/opencode.json` inside a project, and Claude Code reads an
+    enterprise policy file above all of these that is not an individual's to
+    edit, so neither is offered here.
+    """
+    home = Path.home()
+    project = Path(cwd).expanduser() if cwd else None
+    entries = [
+        SettingsFile(
+            BACKEND_CLAUDE,
+            "global",
+            home / ".claude" / "settings.json",
+            "Applies to every project on this machine.",
+        ),
+        SettingsFile(
+            BACKEND_CODEX,
+            "global",
+            _codex_home() / "config.toml",
+            "Applies to every project. TOML rather than JSON.",
+        ),
+        SettingsFile(
+            BACKEND_FREEBUFF,
+            "global",
+            home / ".config" / "manicode" / "settings.json",
+            "Applies to every project. BlindPilot keeps your model choice here.",
+        ),
+        SettingsFile(
+            BACKEND_OPENCODE,
+            "global",
+            home / ".config" / "opencode" / "opencode.json",
+            "Applies to every project.",
+        ),
+    ]
+    if project is not None:
+        entries += [
+            SettingsFile(
+                BACKEND_CLAUDE,
+                "this folder",
+                project / ".claude" / "settings.json",
+                "Shared: committed to this repository, so anyone who has it gets these.",
+            ),
+            SettingsFile(
+                BACKEND_CLAUDE,
+                "this folder, personal",
+                project / ".claude" / "settings.local.json",
+                "Yours alone: normally ignored by git, so it stays on this machine.",
+            ),
+            SettingsFile(
+                BACKEND_OPENCODE,
+                "this folder",
+                project / "opencode.json",
+                "Applies in this folder, and can pin a model or turn providers off.",
+            ),
+        ]
+    return entries
 
 
 def subprocess_env(binary: str) -> dict[str, str]:

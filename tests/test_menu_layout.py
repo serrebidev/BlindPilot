@@ -209,7 +209,13 @@ def _model_menu(frame):
     """
     frame._build_backend_menu = lambda: wx.Menu()
     frame._build_permission_mode_menu = lambda: wx.Menu()
-    for name in ("_model_active", "_connect_active", "_manage_backends", "_status_active"):
+    for name in (
+        "_model_active",
+        "_connect_active",
+        "_manage_backends",
+        "_status_active",
+        "_settings_files_active",
+    ):
         setattr(frame, name, lambda: None)
     return app.MainFrame._build_model_menu(frame)
 
@@ -252,7 +258,12 @@ def test_the_model_menu_says_what_this_tab_is_set_to(frame):
 def test_the_model_menu_still_holds_what_it_held(frame):
     labels = " | ".join(_labels(_model_menu(frame)))
 
-    for wanted in ("Model and Effort", "Manage Backends", "Connect a Provider"):
+    for wanted in (
+        "Model and Effort",
+        "Backend Settings",
+        "Manage Backends",
+        "Connect a Provider",
+    ):
         assert wanted in labels, f"{wanted} went missing: {labels}"
 
 
