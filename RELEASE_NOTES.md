@@ -1,56 +1,58 @@
-# BlindPilot 0.20.2
+# BlindPilot 0.20.3
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release repairs what the setup wizard says when a backend is not there. It was
-captured, not imagined: an NVDA log of one press of Install Hermes, four lines spoken
-within three milliseconds, two of them untrue and one of them not a sentence.
+This release finishes what the last one started: every backend the setup wizard offers
+now installs from the setup wizard, on Windows, macOS and Linux — Hermes included,
+through its own official installer.
 
-## Four lines in three milliseconds
+## The last backend the wizard could not install
 
-Pressing Install Hermes on a machine that has Hermes missing and npm installed spoke
-this:
+Hermes is not distributed on npm. Until this release, that fact meant the setup wizard
+could not install it — and the captured NVDA session behind 0.20.2 showed what the user
+heard instead: an install that ran nothing, a report that npm could not be installed on
+a machine that has npm, and an instruction spliced mid-sentence. The honest answer —
+"BlindPilot cannot install this" — was still the wrong answer, because Hermes ships
+installers of its own.
 
-1. "Installing Hermes. This usually takes under a minute." — a promise.
-2. "npm could not be installed, so BlindPilot cannot install Hermes automatically." —
-   untrue on the machine it was spoken on, which has npm.
-3. "The install did not complete. Read the installer output, or install Hermes
-   yourself using See https://hermes-agent.nousresearch.com/docs and click Check
-   Again." — a sentence with another sentence's fragment spliced into its middle.
-4. "Hermes is not installed. Tab to Install Hermes." — the offer again, which is how
-   the first line came to be a promise.
+They are the same shape as the Claude installer this application has driven since its
+early versions, which made the work one of generalisation rather than invention:
 
-The root is an ordering question the wizard answered backwards. Its check asked
-whether Node was installable before asking whether the backend comes from npm at all,
-and its install helper answers a managed-Node sentinel for any backend whenever Node
-is installable — so Hermes, which ships its own installer and is not on npm, was
-offered an install that runs nothing, fails immediately, and reports npm as the reason
-whether or not npm exists. The offer came back after the failure, which made the
-whole thing a loop: promise, lie, splice, offer.
+- Native Windows, through PowerShell: `iex (irm
+  https://hermes-agent.nousresearch.com/install.ps1)`
+- macOS, Linux and WSL2, through curl and bash:
+  `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`
 
-## What it says now
+The prerequisites are the ones Claude's installer has always needed, and they already
+ship with the platform: PowerShell comes with Windows; curl and bash come with macOS.
+No administrator rights and no Node.js in either case.
 
-The check asks npm-membership first. A backend BlindPilot does not install — Hermes is
-the only one today — gets its own guidance: BlindPilot could not find it, here are its
-own instructions, install it and choose Check Again. No Install button is offered,
-because there is nothing for one to do.
+## What an install here means
 
-`install_backend` refuses such a backend in its own terms before any npm machinery is
-consulted, so the npm sentence can never again be spoken about a backend that has no
-npm package. Pressing an Install button that a dialog built before this fix still
-holds refuses at once — "BlindPilot cannot install Hermes itself. See
-https://..." — instead of promising a minute it does not have.
+The same discipline as every other install in this application. The installer's output
+streams into the accessible log as it happens, so nothing between the first line and
+the last is silent. The installer's exit code is treated as advisory — what counts is
+a working `hermes` launcher afterwards, searched for with the install directories on
+PATH, and a version check that proves it starts. On success the launcher's folder is
+put on the user's persistent PATH, so `hermes` works in a terminal the same way the
+other backends' CLIs do. On failure the log holds the installer's own words, and the
+user is told what to do with them.
 
-And the failure message is built from parts that are sentences on their own. The
-install command reaches the user exactly as each backend documents it — npm one-liners
-for Codex, FreeBuff and opencode, the Hermes instructions for Hermes — but never
-spliced into the middle of another sentence again. Every backend in the registry is
-pinned by a test: no splice, command always present.
+The Update button had the same hole as Install and is fixed with it: updating a found
+Hermes used to fall through to npm and report that npm could not be found — for a
+backend with no npm package. It now re-runs the official installer, which upgrades in
+place, and measures the result the same way.
+
+And npm is never named in any Hermes branch. It has nothing to do with that install,
+and the last release showed exactly what happens when a message names the wrong
+prerequisite: somebody is sent looking for a thing that was never missing.
 
 ## Verification
 
-pytest 1005 passed, 3 skipped; ruff check, ruff format --check, mypy, `--startup-smoke`
-and `--startup-gui-smoke` all clean at the release commit. Five new tests, written
-failing-first against the captured NVDA behaviour.
+pytest 1017 passed, 3 skipped; ruff check, ruff format --check, mypy,
+`--startup-smoke` and `--startup-gui-smoke` all clean at the release commit. Sixteen
+new tests, written failing-first: per-platform installer argv, missing prerequisites
+named by name, binary-not-exit-code success, the install and update routes, and what
+the wizard says in each branch.
