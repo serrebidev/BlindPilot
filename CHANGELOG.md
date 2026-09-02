@@ -4,7 +4,7 @@ Readable release history for BlindPilot. When adjacent releases were part of the
 same fix stream, they are combined with a version range such as
 `v0.3.6-v0.3.7`.
 
-## Unreleased
+## v0.20.0 - 2026-09-02
 
 - Stay connected through a long turn, and say so while it lasts. A turn that produced no output for about twenty seconds lost its connection: the socket's connect timeout applies to every later read, so an ordinary quiet stretch — a build, a test run, a model thinking, a rate limit being waited out — raised a timeout that was treated as a dead connection and ended the thread reading it. With nobody reading, nobody answered the server's keepalive pings either, so the server closed a connection that was perfectly healthy. Measured against a server pinging as Hermes does: the reading thread died after twenty-one seconds of quiet before, and survives three minutes of it now, with the next message answered normally. A read that times out is no longer confused with a peer that has gone away, while a peer that really has gone away still ends the turn as before.
 - Say what a long turn is doing instead of leaving it silent. Waiting was unnarrated for up to fifteen minutes, which is indistinguishable from a hang for anyone who cannot glance at the screen. A quiet turn now reports itself about once a minute, saying how long it has been working and which step it is working on, and Hermes' own account of what it is doing — the process it started, the conversation being summarised to free up room — is read out as it arrives instead of being discarded. A turn that is reporting steps of its own is left alone.
