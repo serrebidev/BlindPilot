@@ -1,47 +1,55 @@
-# BlindPilot 0.16.0
+# BlindPilot 0.17.0
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release fixes a quiet bug in how FreeBuff finishes reading an answer: a word could
-be cut at the wrong letter, silently, with no reason given. It was found by property
-testing, not by reading — pointed at the arithmetic, a falsifying case showed up in
-seconds.
+This release stops BlindPilot from alarming you about a process that was doing its job.
+A user reported it after a turn that had worked perfectly:
 
-## Keep the letters and their places in step
+> BlindPilot stopped Claude Code: it had not finished shutting down 30 seconds after it went quiet.
 
-FreeBuff reads its answer off a terminal, so working out which part was never spoken
-means comparing what was drawn against what was written, letter by letter. `_keyed`
-reduces both to a comparable form and records where each kept character came from. The
-two ran out of step.
+Nothing had gone wrong. That sentence was BlindPilot's own — and the bug was in the very
+fix that introduced it.
 
-`casefold()` is not length-preserving. German `ß` folds to `ss`, Turkish `İ` to two
-characters, the `fi` ligature to two — but the position list got one entry per character
-of the input. `"Straße"`, six characters, produced a seven-character key and only seven
-positions including the sentinel, so `positions[len(key)]` indexed past the end.
+## Stop waiting on a CLI whose turn is already over
 
-Two failures came out of it:
+A turn finishes and delivers its answer. BlindPilot closed the CLI's stdin, waited for
+it to exit, gave up, and killed it. On Windows, `Popen.kill` is
+`TerminateProcess(handle, 1)`, so it then read back the exit code it had just caused and
+reported it. A correct answer, a thirty-second pause, and an alarming sentence.
 
-- **An answer read out in full:** `IndexError` — at least it was loud.
-- **An answer read out in part:** cut at the wrong letter, silently.
-  `_unspoken_tail("Grüße", "Grüße gehen raus")` returned `"ehen raus"`. A German user
-  hears a word with its first letter missing and is given no reason.
+### Why the wait did not work
 
-One position per character of the key fixes both. The sentinel that keeps a fully-spoken
-answer indexable stays.
+The wait restarted its clock whenever the CLI wrote to stderr, reasoning that one still
+writing is still working. That reasoning is sound for a CLI dying mid-turn — it is
+writing the traceback there, and that traceback is the only thing BlindPilot can offer.
+It is worthless at the end of a healthy turn, because a CLI shutting down cleanly has no
+errors to write. The clock never restarted. What shipped was a flat thirty-second
+timeout describing itself as patient.
 
-## How it was found
+### The change
 
-Property testing, not reading. Hypothesis had already been run at the segmenter and
-found nothing across 18,000 examples — that code is solid. Pointed at this arithmetic it
-produced a falsifying case in seconds.
+The waiting was the mistake, not its duration. Once the answer is in, no exit code
+changes what anybody hears — so a turn that answered neither waits for its process nor
+kills it:
 
-The inputs are ordinary words. What nobody writing examples by hand does is put
-`"Straße"` in one.
+- `poll()`, which is free, sees whether it has already gone.
+- A process still running is left to a daemon reaper thread that collects it, bounded at
+  five minutes and silent, because the turn it belonged to ended correctly long ago.
+- A bad exit code the CLI reached on its own is still reported; one BlindPilot caused no
+  longer exists to report.
 
-The properties are kept only for this file — a few hundred examples, about two seconds —
-because it is the arithmetic that earned them and the next edit deserves the same
-treatment. Hypothesis is not spread further than the place that paid for it. Example-based
-tests written from what the property test produced sit alongside, so the specific
-regressions are named and readable.
+The thirty-second wait stays on the failure path, where its stderr signal is real, and
+both docstrings now say which path is which.
+
+### What this costs if left
+
+Every turn slower than thirty seconds to shut down was killed partway through writing
+the session file the next `--resume` reads, and partway through stopping its MCP servers
+rather than cutting them off. A run that fanned out background agents has the most to put
+away and is the most likely to be interrupted.
+
+Four new tests drive a process that answers and then shuts down silently — which is what
+the old fake could not express. Before, they would have failed: killed, ~30 seconds, and
+the notice emitted. Now: instant, not killed, answer only.
