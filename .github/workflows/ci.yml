@@ -37,6 +37,10 @@ jobs:
           - label: Linux
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
+    # A whole job, not just one test. The default is six hours, which is
+    # what a deadlocked wait or a subprocess that never exits would cost.
+    # A green run takes one to three minutes.
+    timeout-minutes: 20
 
     steps:
       - name: Check out source

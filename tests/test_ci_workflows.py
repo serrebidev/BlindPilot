@@ -100,3 +100,13 @@ def test_the_types_are_checked_somewhere():
     assert any("mypy" in text for text in testing), (
         "nothing that runs the tests also checks the types"
     )
+
+
+def test_a_job_cannot_run_for_six_hours():
+    """GitHub's default job timeout is 360 minutes. This suite drives real
+    subprocesses, pseudo-terminals and worker threads, so a deadlock is a
+    plausible way to spend a whole afternoon of somebody's runner minutes."""
+    for name, text in _workflow_text().items():
+        if "pytest" not in text:
+            continue
+        assert "timeout-minutes:" in text, f"{name} runs the tests with no job timeout"

@@ -1,7 +1,12 @@
 -r requirements.txt
 pyinstaller>=6.0,<7
 pytest>=8,<10
-ruff==0.15.10
+ruff==0.16.5
 # Pinned for the same reason as ruff: a checker that gains a
 # rule on its own schedule turns somebody else's release into a red build here.
 mypy==2.3.1
+# A hung test fails in a minute instead of running out GitHub's six-hour
+# default, and the order is shuffled so one test cannot quietly depend on
+# another having run first - which has already happened here twice.
+pytest-timeout>=2.4,<3
+pytest-randomly>=5,<6
