@@ -1,69 +1,74 @@
-# BlindPilot 0.11.1
+# BlindPilot 0.12.0
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-One bug, reported over and over since 0.10.0: **Claude Code exited with code 1**. This
-release is three separate causes of it. The first is not Claude Code failing at all — it
-is BlindPilot, reporting its own kill as the CLI's error.
+This release is about how much a run says out loud. Until now it said everything: every
+tool call, every result, every subagent's running commentary, in order. On a short turn
+that is right. On a fan-out it is minutes of backlog you cannot skip.
 
-Nothing here removes a button or changes a chord.
+Nothing here removes a button or changes a chord, and the default is unchanged.
 
-## BlindPilot produced the exit code it then complained about
+## Follow a run step by step, or just keep up with it
 
-At the end of a turn, BlindPilot closed the CLI's input and waited five seconds flat
-before killing it. On Windows `Popen.kill()` is `TerminateProcess(handle, 1)`, so a killed
-process reports exit code *exactly* 1 — and the next line said "Claude Code exited with
-code 1".
+The backlog is not BlindPilot's to manage. It sits in the screen reader's own queue,
+which cannot be measured, shortened, or popped from — only purged entirely, which would
+silence other applications too. So this is a choice offered rather than a cleverness
+applied.
 
-Both the number and the ending were BlindPilot's own, attributed to the CLI. Nothing in
-the message told that apart from a genuine failure, which is why this has been so hard to
-place from a bug report.
+**Options > Narration** now has two modes:
 
-Five seconds was the wrong measure too. Shutting down is not instant — a session is
-written to disk and MCP servers are torn down — and a run that has just kept a fan-out of
-agents alive is the one with the most to put away. The 0.8.0 fix that let those agents
-finish therefore made this fire *more* often, not less.
+- **Follow everything** — the default, and what BlindPilot has always done. Nobody's
+  narration goes quiet because of an upgrade they did not ask for.
+- **Keep up** — speaks what the turn is saying: your message, the answer, notices and
+  errors. The step-by-step stays in the list.
 
-Waiting now watches for silence instead of counting seconds. A CLI that is still writing
-is still working, so the clock restarts whenever it says anything, and only a process that
-has gone quiet for thirty seconds is stopped. It is still bounded, so a genuinely stuck
-CLI cannot hang the turn. And when BlindPilot does stop it, it says so plainly rather than
-inventing an exit code for it.
+Nothing is lost in Keep up, only unspoken. Every tool call and result is still a row,
+still under the review cursor, still in the status bar.
 
-## An event that said nothing about the agents ended the run
+Two new kinds of activity make that possible. **Notices** are BlindPilot speaking for
+itself — waiting on background agents, how a run ended — and are never muted, because
+muting "Waiting for 3 background agents" would lose the one line that explains a long
+silence. **Subagent** lines are somebody else's commentary rather than this turn's reply;
+five agents' monologues merged into one voice is what makes a fan-out unfollowable.
 
-The number of background agents still going was read from each result event on its own,
-with nothing remembered between them. An event carrying no `subagent_stats` returned zero,
-closed stdin, and killed every agent — the original 0.8.0 bug, brought back by a field
-simply being absent.
+## Failure has a sound
 
-That was not a hypothetical. Plain `{"type": "result"}` is the ordinary shape of a turn.
-What was last known now stands until an event actually says otherwise.
+There was no error cue at all — sent, working, received, and nothing for failure — so the
+only signal a turn had died was a sentence that might be a long time coming.
 
-Two smaller faults in the same counting are fixed with it. Both hang a turn forever rather
-than ending it early:
+It ships no audio file. `EarCons/` holds three, and authoring a fourth is not something to
+fake, so this uses the platform's own error sound: `MessageBeep` on Windows, Basso on
+macOS, and nothing on Linux, where a wrong guess is worse than none. That is also the
+sound you already associate with something having gone wrong on your machine.
 
-- `True` is an `int` in Python, so `started_in_background: true` counted as one agent that
-  could never settle. Counts now refuse bools.
-- A `killed` field arriving as anything other than a dictionary was ignored entirely,
-  leaving those agents counted as running for good.
+It sits with the others as a fourth switch under **Options > Sounds**.
 
-## A late error threw away an answer you had already been given
+Interrupting the speech was the other option, and was rejected on purpose: it purges the
+reader's whole queue, including speech belonging to other applications. A sound costs
+nobody else anything.
 
-Waiting for background agents made a late `is_error` result reachable for the first time,
-and that path failed the turn outright — which drops it from the transcript.
+## macOS was doing the opposite of Windows
 
-The exit-code path directly below it is careful to keep an answer that arrived before the
-process ended badly. This one now does the same: how the run ended is worth saying, but
-not instead of the work it already produced.
+Every announcement posted at `NSAccessibilityPriorityHigh` — the tier VoiceOver treats as
+speak-now — so the same code queued politely on Windows and chopped off the previous line
+on macOS. The same complaint from the two platforms would have needed two different fixes.
+High is now what an error gets rather than what everything gets.
 
-## Known, and not fixed here
+Stated plainly: **this half is unverified.** It is a one-line change in the direction the
+Windows path already documents as its intent, but nobody with VoiceOver has listened to it
+yet. If you use VoiceOver, this is the change worth telling us about.
 
-`FreebuffWorker` has the same premature-kill shape. It records a running status for its
-agents and then ends the turn when the main prompt completes, without ever consulting
-that, after which the terminal is killed.
+## Also
 
-It is left alone on purpose. Verifying a process-teardown change there needs a real
-FreeBuff terminal to run against, and fixing that path blind is how one bug becomes two.
+Narration stops when Stop is pressed. Queued lines kept arriving and kept talking
+afterwards, which sounds exactly like a Stop that did not work.
+
+FreeBuff turns out not to have the premature-kill bug 0.11.1 suspected it of, and the
+obvious fix would have introduced a worse one. That was checked against a real FreeBuff
+rather than reasoned about — two live turns and the saved chats on disk. The run-complete
+marker is written after every agent finishes, so ending the turn on it cuts nothing short;
+meanwhile an agent can be recorded as "running" permanently, so waiting for them all to
+finish would hang the turn for an hour. The finding is now a test, so a later attempt at
+the obvious fix fails there first.

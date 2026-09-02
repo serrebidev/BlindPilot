@@ -268,7 +268,7 @@ def announce(text: str, urgent: bool = False) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.11.1"
+APP_VERSION = "0.12.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2011,7 +2011,7 @@ NARRATION_MODES = (
 # is not tool narration and must not be muted along with it.
 _ALWAYS_SPOKEN = ("assistant", "notice")
 
-# The three cues, in the order the menu offers them. The key is what the
+# The four cues, in the order the menu offers them. The key is what the
 # configuration stores, so it must not change; the rest is only wording.
 SOUND_CUES: tuple[tuple[str, str, str], ...] = (
     ("send", "Message &sent", "Play a sound when a message is sent"),
@@ -6665,7 +6665,8 @@ class MainFrame(wx.Frame):
         self._sounds_item = options_menu.AppendCheckItem(
             wx.ID_ANY,
             "Play &sound cues",
-            "Play sounds when a message is sent, while it is working, and when a response arrives",
+            "Play sounds when a message is sent, while it is working, when a response "
+            "arrives, and when a turn fails",
         )
         options_menu.AppendSubMenu(
             self._build_narration_menu(),
@@ -6675,7 +6676,7 @@ class MainFrame(wx.Frame):
         options_menu.AppendSubMenu(
             self._build_sound_cue_menu(),
             "So&unds",
-            "Choose which of the three sounds are played",
+            "Choose which of the four sounds are played",
         )
         options_menu.AppendSeparator()
         self._text_view_item = options_menu.AppendCheckItem(

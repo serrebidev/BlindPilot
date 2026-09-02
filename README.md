@@ -26,7 +26,8 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 - Attaches files and pasted clipboard images as explicit prompt paths.
 - Searches responses, jumps between them, and copies a code block, a response, or the whole conversation.
 - Picks the model and reasoning effort from whatever the installed CLI actually reports.
-- Marks sent, working, and received with optional earcons, switchable together or one at a time.
+- Marks sent, working, received, and failed with optional earcons, switchable together or one at a time.
+- Speaks every step of a run, or just the message, the answer and anything important, with the steps still in the list.
 - Installs, updates, adds to PATH, and signs into any of the four backends from an accessible wizard.
 - Writes a rotating log of what it did, and a separate crash log, with no prompt or answer text in either.
 - Updates itself from GitHub Releases after verifying the published SHA-256.
@@ -41,13 +42,15 @@ Every action is in the menu bar. Only moving focus is chord-only: **Ctrl+L** to 
 
 **Model** — Backend (one radio item per CLI), Model and Effort (**Ctrl+M**), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Manage Backends, Connect a Provider.
 
-**Options** — Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Sounds (Message sent, Working, Answer received), Responses as a read-only text field, Silent until the response mode.
+**Options** — Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Silent until the response mode.
 
 **Chat** — Accounts, Conversation profiles, Refresh models, History view, Diagnostics. Greyed out until you switch the Mode combo box to Chat.
 
 **Help** — Check for Updates, Check for updates at startup, Open Log Folder, About BlindPilot.
 
-Backend and Permission Mode are radio items because the choices are exclusive, and that is what a screen reader says about them. Compact Conversation and Connect a Provider grey out for a backend that has no equivalent, rather than being offered and then refused.
+Backend, Permission Mode and Narration are radio items because the choices are exclusive, and that is what a screen reader says about them. Compact Conversation and Connect a Provider grey out for a backend that has no equivalent, rather than being offered and then refused.
+
+**Narration** decides how much of a run is spoken. *Follow everything* is the default and speaks every tool call, result and subagent line in order. *Keep up* speaks your message, the answer, and anything BlindPilot says for itself — why a run is waiting, how it ended — and leaves the steps in the list, where the review cursor still reaches them. Nothing is lost in Keep up, only unspoken. The backlog a fan-out creates sits in the screen reader's own queue, which BlindPilot cannot measure or shorten, so this is a choice offered rather than a cleverness applied.
 
 ## Keyboard
 
