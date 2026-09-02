@@ -541,6 +541,67 @@ def test_freebuff_structured_chat_reports_progress_and_authoritative_completion(
     assert agent_backends._freebuff_run_status(chat, log.stat().st_size) == ""
 
 
+def test_freebuff_finished_turn_can_still_hold_an_agent_marked_running(monkeypatch, tmp_path):
+    """A completed FreeBuff turn can carry an agent block that says "running".
+
+    FreeBuff writes an agent block the moment the spawn tool is called, keyed
+    `<spawnToolCallId>-<index>` and carrying no blocks of its own, and replaces
+    it once the agent actually reports. A spawn that never produced anything
+    leaves that placeholder behind at "running" for good, in the newest answer
+    message - which is the one `_freebuff_chat_snapshot` reads and the one
+    `agent_states` is built from.
+
+    This is taken from a real chat on disk, not imagined: the turn finished, the
+    answer was written, "Main prompt finished" was the last line of the log, and
+    the placeholder still said running. So the end of a FreeBuff turn must not
+    be made conditional on every agent reaching "complete" - the run status is
+    the authority, and waiting on the agents would hang this turn until the
+    hour-long deadline rather than ending it early.
+    """
+    chat = tmp_path / ".config" / "manicode" / "projects" / "project" / "chats" / "session-id"
+    chat.mkdir(parents=True)
+    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda cls: tmp_path))
+    messages = [
+        {
+            "id": "ai-1",
+            "variant": "ai",
+            "blocks": [
+                {
+                    "type": "agent",
+                    "agentId": "7ObcZKxPdBw",
+                    "agentName": "basher",
+                    "spawnToolCallId": "7OZig1YvntU",
+                    "status": "complete",
+                    "blocks": [{"type": "text", "content": "done"}],
+                },
+                {
+                    # Spawned, never reported, never replaced.
+                    "type": "agent",
+                    "agentId": "7ObcAqmVj38-0",
+                    "agentName": "basher",
+                    "spawnToolCallId": "7ObcAqmVj38",
+                    "status": "running",
+                    "blocks": [],
+                },
+                {"type": "text", "textType": "text", "content": "Both numbers are 15 and 56."},
+            ],
+        },
+    ]
+    (chat / "chat-messages.json").write_text(json.dumps(messages), encoding="utf-8")
+    (chat / "log.jsonl").write_text(
+        '{"msg":"End agent basher step 4"}\n{"msg":"Main prompt finished"}\n',
+        encoding="utf-8",
+    )
+
+    _answer_id, _thinking, answer, agents = agent_backends._freebuff_chat_snapshot(chat)
+
+    assert answer == "Both numbers are 15 and 56."
+    assert ("7ObcAqmVj38-0", "basher", "running") in agents
+    # The two coexist. The run is over and an agent still says it is going.
+    assert agent_backends._freebuff_run_status(chat) == "complete"
+    assert [agent for agent in agents if agent[2] not in ("complete", "completed")]
+
+
 def test_freebuff_structured_chat_reports_interruption(tmp_path):
     chat = tmp_path / "chat"
     chat.mkdir()
