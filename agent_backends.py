@@ -2943,7 +2943,7 @@ class FreebuffWorker(threading.Thread):
 
             if sent and now >= next_heartbeat:
                 elapsed = max(1, int(now - (turn_started_at or now)))
-                self._on_activity("tool", f"FreeBuff is still working; {elapsed} seconds elapsed")
+                self._on_activity("notice", f"FreeBuff is still working; {elapsed} seconds elapsed")
                 next_heartbeat = now + 30
             # The screen is the only place the answer appears as it is written:
             # the chat file is not saved until the reply is finished. So the
@@ -4481,7 +4481,7 @@ class OpencodeWorker(threading.Thread):
                 problem = opencode_error_text(exc, f"opencode would not accept {what}")
         # Saying so matters: unanswered, the turn waits for an answer that is
         # never coming, and silence would look like the model thinking.
-        self._on_activity("tool", f"Could not answer {what}: {problem}")
+        self._on_activity("notice", f"Could not answer {what}: {problem}")
         return False
 
     def _answer_permission(self, properties: dict) -> None:

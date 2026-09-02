@@ -458,7 +458,7 @@ def _stub_panel(app, **overrides):
     panel._announce = lambda text: (panel.announced.append(text), panel.status.append(text))
     panel._set_status = lambda text: panel.status.append(text)
     panel._refresh_list = lambda: None
-    panel._say = lambda _text: False
+    panel._say = lambda _text, _kind="assistant": False
     # Whether a turn is still going is asked through the real method, so a stub
     # cannot quietly disagree with the window about it.
     panel._worker = None
@@ -859,7 +859,9 @@ def test_askuserquestion_answers_go_back_as_the_tools_own_input():
     assert reply["response"]["response"]["updatedInput"]["answers"] == {"Tabs or spaces?": "Spaces"}
     # The transcript keeps the question as well as the answer: read back later,
     # a bare "Spaces" says nothing about what it decided.
-    assert ("tool", 'You answered "Tabs or spaces?" with "Spaces".') in activity
+    # A "notice", not a "tool": this is BlindPilot reporting what it answered,
+    # not the backend narrating a step, and Keep up must not mute it.
+    assert ("notice", 'You answered "Tabs or spaces?" with "Spaces".') in activity
 
 
 def test_several_answers_to_one_question_are_joined_the_way_the_tool_reads_them():

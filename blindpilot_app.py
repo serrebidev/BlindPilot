@@ -1933,6 +1933,33 @@ def _save_config(cfg: dict) -> None:
         pass
 
 
+# How much of a run is read out.
+#
+# "Everything" is what BlindPilot has always done and stays the default: every
+# tool call, result and subagent line spoken in order. On a short turn that is
+# right. On a fan-out it is minutes of backlog, and the backlog is not ours -
+# it sits in the screen reader's own queue, which cannot be measured, shortened
+# or popped from, only purged wholesale, which would silence other applications
+# too. So this is a choice offered rather than a cleverness applied.
+#
+# "Keep up" speaks what the turn is saying - the message, the answer, notices
+# and errors - and leaves the step-by-step in the list to be read.
+NARRATION_EVERYTHING = "everything"
+NARRATION_KEEP_UP = "keep_up"
+NARRATION_MODES = (
+    (NARRATION_EVERYTHING, "Follow &everything", "Speak every step of a run as it happens"),
+    (
+        NARRATION_KEEP_UP,
+        "&Keep up",
+        "Speak the message, the answer and anything important, and leave the steps in the list",
+    ),
+)
+
+# Kinds of activity that are spoken whatever the mode. "notice" is BlindPilot
+# speaking for itself - waiting for background agents, how a run ended - which
+# is not tool narration and must not be muted along with it.
+_ALWAYS_SPOKEN = ("assistant", "notice")
+
 # The three cues, in the order the menu offers them. The key is what the
 # configuration stores, so it must not change; the rest is only wording.
 SOUND_CUES: tuple[tuple[str, str, str], ...] = (
@@ -1957,6 +1984,14 @@ class _Settings:
         self.live_rows = bool(cfg.get("live_rows", True))
         self.speak_live = bool(cfg.get("speak_live", True))
         self.sounds_enabled = bool(cfg.get("sounds_enabled", True))
+        # A mode this version does not know is somebody else's config, not an
+        # instruction to go quiet.
+        narration = cfg.get("narration")
+        self.narration = (
+            narration
+            if narration in {mode for mode, _label, _help in NARRATION_MODES}
+            else NARRATION_EVERYTHING
+        )
         # `sounds_enabled` above is the master switch and keeps its meaning.
         # These say which cues it turns on, because the three are not
         # interchangeable: "working" is a loop that runs for the whole turn,
@@ -1976,6 +2011,7 @@ class _Settings:
         cfg["live_rows"] = self.live_rows
         cfg["speak_live"] = self.speak_live
         cfg["sounds_enabled"] = self.sounds_enabled
+        cfg["narration"] = self.narration
         cfg["sound_cues"] = self.sound_cues
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
@@ -2574,7 +2610,7 @@ class ClaudeWorker(threading.Thread):
         raw = payload.get("questions")
         questions = _claude_questions(raw if isinstance(raw, list) else [])
         answers = self._on_question(questions) if (questions and self._on_question) else None
-        self._on_activity("tool", question_summary(questions, answers))
+        self._on_activity("notice", question_summary(questions, answers))
         if answers is None:
             self._write_json(
                 {
@@ -2750,7 +2786,10 @@ class ClaudeWorker(threading.Thread):
                         if text:
                             if not from_subagent:
                                 text_parts.append(text)
-                            self._on_activity("assistant", text)
+                            # Somebody else's running commentary, not this
+                            # turn's reply. Shown as a row either way; in
+                            # Keep up it is what a fan-out would drown in.
+                            self._on_activity("subagent" if from_subagent else "assistant", text)
                     elif btype == "thinking":
                         # Extended-thinking blocks: Claude reasoning about what to
                         # do next. Surfaced live so the user hears the plan while
@@ -2796,7 +2835,7 @@ class ClaudeWorker(threading.Thread):
                     if still_working != announced_waiting:
                         announced_waiting = still_working
                         self._on_activity(
-                            "tool",
+                            "notice",
                             f"Waiting for {still_working} background "
                             f"{'agent' if still_working == 1 else 'agents'} to finish. "
                             "Stop Task ends the run now.",
@@ -2815,7 +2854,7 @@ class ClaudeWorker(threading.Thread):
                         # is worth saying; saying it *instead of* the answer
                         # loses work that was already done, which is what the
                         # exit-code path below is careful not to do.
-                        self._on_activity("result", note)
+                        self._on_activity("notice", note)
                         self._close_stdin()
                         break
                     self._fail(note)
@@ -2863,7 +2902,7 @@ class ClaudeWorker(threading.Thread):
             # The turn answered before the process ended badly. How it ended is
             # worth saying, but saying it instead of the answer threw away work
             # that had already been done.
-            self._on_activity("result", note)
+            self._on_activity("notice", note)
 
         if not complete and not text_parts:
             self._log_unfinished_turn(rc, complete, self._stderr_text())
@@ -5006,10 +5045,10 @@ class SessionPanel(wx.Panel):
                     response_number=n,
                 )
             )
-            self._say(_result_label(text))
+            self._say(_result_label(text), "result")
         elif kind == "tool":
             self._rows.append(Row(kind="tool", label=text, payload=text, response_number=n))
-            self._say(text)
+            self._say(text, "tool")
         elif kind == "thinking":
             # Reasoning is the backend talking to itself. It is off by default:
             # it roughly doubles what has to be listened through before the
@@ -5027,32 +5066,49 @@ class SessionPanel(wx.Panel):
                     response_number=n,
                 )
             )
-            self._say(flat)
+            self._say(flat, "thinking")
         else:
             # Reuse the Markdown segmenter; drop its header (index 0) since
             # this turn already has one. The first row of each incoming message
             # is marked with the active backend's name, the way "You:" marks
             # the user's own messages.
             speaker = backend_label(self._session_backend)
+            from_subagent = kind == "subagent"
+            if from_subagent:
+                # Named so the row says whose words these are: several
+                # agents' commentary arrives interleaved on one stream.
+                speaker = f"{speaker} subagent"
             segments = parse_response(text, n)[1:]
             for i, row in enumerate(segments):
                 if i == 0 and row.kind != "code":
                     row.label = f"{speaker}: {row.label}"
                 self._rows.append(row)
-            self._streamed_assistant += ("\n\n" if self._streamed_assistant else "") + text
-            if self._say(f"{speaker}. {' '.join(text.split())}"):
+            if not from_subagent:
+                # A subagent's words are not this turn's answer, and were
+                # already kept out of it upstream.
+                self._streamed_assistant += ("\n\n" if self._streamed_assistant else "") + text
+            if self._say(f"{speaker}. {' '.join(text.split())}", kind) and not from_subagent:
                 self._assistant_narrated_this_turn = True
         if refresh:
             self._refresh_list()
 
-    def _say(self, text: str) -> bool:
+    def _say(self, text: str, kind: str = "assistant") -> bool:
         """Speak live activity, and mirror a short form to the status bar.
 
         Only the visible tab narrates — a background session talking over the
-        one being read would be unusable.
+        one being read would be unusable. The status bar gets the line either
+        way, so nothing this declines to speak is actually lost: it is a row in
+        the list and it is under the review cursor.
         """
         self._set_status(text[:99] + "…" if len(text) > 100 else text)
         if not SETTINGS.speak_live:
+            return False
+        if self._stopping:
+            # The turn was stopped. Narration queued before that still arrives
+            # afterwards, and hearing the run carry on describing itself sounds
+            # exactly like a Stop that did not work.
+            return False
+        if SETTINGS.narration == NARRATION_KEEP_UP and kind not in _ALWAYS_SPOKEN:
             return False
         book = self.GetParent()
         if isinstance(book, wx.BookCtrlBase) and book.GetCurrentPage() is not self:
@@ -6516,6 +6572,11 @@ class MainFrame(wx.Frame):
             "Play sounds when a message is sent, while it is working, and when a response arrives",
         )
         options_menu.AppendSubMenu(
+            self._build_narration_menu(),
+            "&Narration",
+            "Choose how much of a run is read out as it happens",
+        )
+        options_menu.AppendSubMenu(
             self._build_sound_cue_menu(),
             "So&unds",
             "Choose which of the three sounds are played",
@@ -7454,6 +7515,23 @@ class MainFrame(wx.Frame):
         SETTINGS.save()
         state = "shown" if SETTINGS.show_thinking else "hidden"
         self._announce_setting(f"The backend's reasoning is {state}")
+
+    def _build_narration_menu(self) -> wx.Menu:
+        """How much of a run is spoken. Radio items: the modes are exclusive."""
+        menu = wx.Menu()
+        self._narration_items: dict[str, wx.MenuItem] = {}
+        for mode, label, help_text in NARRATION_MODES:
+            item = menu.AppendRadioItem(wx.ID_ANY, label, help_text)
+            item.Check(mode == SETTINGS.narration)
+            self._narration_items[mode] = item
+            self.Bind(wx.EVT_MENU, lambda _e, chosen=mode: self._set_narration(chosen), item)
+        return menu
+
+    def _set_narration(self, mode: str) -> None:
+        SETTINGS.narration = mode
+        SETTINGS.save()
+        label = next(text for key, text, _help in NARRATION_MODES if key == mode)
+        self._announce_setting(f"Narration: {label.replace('&', '')}")
 
     def _build_sound_cue_menu(self) -> wx.Menu:
         """One check item per cue, under the master switch that governs them.
