@@ -1929,8 +1929,14 @@ def _tab_label(title: str, cwd: str) -> str:
     The conversation in it, which is the one thing that tells two tabs in the
     same folder apart. A conversation has no name until its first message, so
     until then the folder is the most useful thing the tab can say.
+
+    A remote session may have NEITHER: no name was typed and the folder belongs
+    to another machine, so ``cwd`` is empty. Both parts empty used to leave the
+    tab labelled with nothing at all, which is the one label a screen reader
+    cannot tell from its neighbour -- hence the placeholder, replaced by the
+    real name as soon as Hermes titles the conversation.
     """
-    return _tab_title(title) or _short_label(cwd)
+    return _tab_title(title) or (_short_label(cwd) if cwd else "New session")
 
 
 def _line_change_counts(old: str, new: str) -> tuple[int, int]:
@@ -4275,44 +4281,131 @@ class ConnectDialog(wx.Dialog):
 
 
 class NewSessionDialog(wx.Dialog):
-    """New Session: a blank folder field, a Browse button, OK and Cancel.
+    """New Session. What it asks for depends on WHERE the session will run.
 
-    The field starts empty so a path can simply be typed or pasted; Browse
-    fills it in from a folder picker. OK is refused (with a spoken message)
-    until the field names a real folder, so the dialog never opens a session
-    on a path that does not exist. Esc cancels.
+    A local backend runs in a folder on this disk, so the folder is the useful
+    question and Browse can answer it. A Hermes on another machine cannot see
+    this disk at all, so the folder picker is worse than useless there — it is
+    misleading. Measured against a live gateway, with the result read back from
+    the server's own state.db rather than from the reply:
+
+        cwd sent = C:\\Users\\g\\Desktop\\projekt   (a Windows path, Linux Hermes)
+        -> session.create returns OK, no error of any kind
+        -> the session's stored cwd is '/home/ubuntu' — the SERVER's home
+
+    The remote end validates the path against its own filesystem, silently
+    substitutes its own directory, and says nothing. Meanwhile this dialog
+    required the path to exist HERE, so a folder browsed to on the Windows
+    desktop passed validation and the session ran somewhere else entirely, with
+    the tab named after a directory it was never in.
+
+    So in remote mode the dialog asks for a NAME, and the folder becomes an
+    optional path ON THE SERVER — free text, because only that machine can say
+    whether it exists, and with no Browse button, since a picker here would
+    browse the wrong computer.
+
+    The name is optional in both modes. Hermes titles a conversation from its
+    first message when none is given, which is the better default for anyone
+    who does not want to name things up front; a name typed here is stored with
+    title_source='user' and is NOT overwritten by that automatic title
+    (measured: 'Nazwa z BlindPilota' survived a completed turn, while a session
+    created without one came out as 'Odpowiedź jednym słowem OK #9').
     """
 
-    def __init__(self, parent: wx.Window, default_dir: Optional[str] = None):
+    def __init__(
+        self,
+        parent: wx.Window,
+        default_dir: Optional[str] = None,
+        remote_label: str = "",
+    ):
         super().__init__(parent, title="New Session")
         self._default_dir = default_dir or os.path.expanduser("~")
+        # Empty means "the Hermes installed here", i.e. the local-folder shape.
+        self._remote_label = remote_label.strip()
         self.path = ""
+        self.title_text = ""
 
-        label = wx.StaticText(self, label="&Folder for the new session:")
+        rows = wx.BoxSizer(wx.VERTICAL)
+
+        if self._remote_label:
+            intro = wx.StaticText(
+                self,
+                label=(
+                    f"This session will run on {self._remote_label}, "
+                    "so folders on this computer do not apply to it."
+                ),
+            )
+            rows.Add(intro, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+
+        # The name goes first in remote mode because it is the only field that
+        # can be answered from here, and tab order is the order of usefulness.
+        name_label = wx.StaticText(self, label="&Name for this session (optional):")
+        self.name_box = wx.TextCtrl(self, value="")
+        self.name_box.SetName("Name for this session, optional")
+        self.name_box.SetMinSize(wx.Size(420, -1))
+        name_help = wx.StaticText(
+            self,
+            label="Leave it empty to let Hermes name it after your first message.",
+        )
+
+        folder_caption = (
+            "&Folder on that computer (optional):"
+            if self._remote_label
+            else "&Folder for the new session:"
+        )
+        folder_label = wx.StaticText(self, label=folder_caption)
         self.folder_box = wx.TextCtrl(self, value="")
-        self.folder_box.SetName("Folder for the new session")
+        self.folder_box.SetName(
+            "Folder on the remote computer, optional"
+            if self._remote_label
+            else "Folder for the new session"
+        )
         self.folder_box.SetMinSize(wx.Size(420, -1))
-        browse_btn = wx.Button(self, label="&Browse…")
-        browse_btn.Bind(wx.EVT_BUTTON, lambda _e: self._browse())
 
-        row = wx.BoxSizer(wx.HORIZONTAL)
-        row.Add(self.folder_box, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        row.Add(browse_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        folder_row = wx.BoxSizer(wx.HORIZONTAL)
+        folder_row.Add(self.folder_box, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        if not self._remote_label:
+            # No Browse in remote mode: it would open a picker on this machine
+            # for a path that has to be valid on another one. An empty control
+            # in the tab order is a cost a screen reader pays on every visit.
+            browse_btn = wx.Button(self, label="&Browse…")
+            browse_btn.Bind(wx.EVT_BUTTON, lambda _e: self._browse())
+            folder_row.Add(browse_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        if self._remote_label:
+            rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, 12)
+        else:
+            rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, 12)
+            rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
-
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-        sizer.Add(row, 0, wx.EXPAND | wx.ALL, 12)
         if buttons is not None:
-            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-        self.SetSizerAndFit(sizer)
+            rows.Add(buttons, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        self.SetSizerAndFit(rows)
 
         # Validate before the dialog closes, so a bad path can be corrected
         # in place instead of failing after the session is created.
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
-        self.folder_box.SetFocus()
+        self.initial_focus().SetFocus()
+
+    def initial_focus(self) -> wx.Window:
+        """The field this dialog opens on: the one this machine can answer.
+
+        Named rather than inlined so a test can assert on it. Reading it back
+        with ``FindFocus()`` does not work -- that reports the focus of a window
+        the platform has SHOWN, and on macOS it answers None for a dialog that
+        was only constructed, which made the same assertion pass on Windows and
+        Linux and fail on macOS for a reason unrelated to this code.
+        """
+        return self.name_box if self._remote_label else self.folder_box
 
     def _browse(self) -> None:
         typed = self.folder_box.GetValue().strip().strip('"')
@@ -4332,8 +4425,20 @@ class NewSessionDialog(wx.Dialog):
         announce(f"Folder set to {path}")
 
     def _on_ok(self, event: wx.CommandEvent) -> None:
+        self.title_text = self.name_box.GetValue().strip()
         # Quotes are stripped because a path copied from Explorer often has them.
         typed = self.folder_box.GetValue().strip().strip('"')
+
+        if self._remote_label:
+            # Only the remote machine can judge this path, so it travels as
+            # typed — expanded neither by os.path nor by this machine's
+            # environment, whose variables and separators are not the server's.
+            # Empty is the normal case: Hermes then uses its own working
+            # directory, which is what a remote session usually wants.
+            self.path = typed
+            event.Skip()
+            return
+
         if not typed:
             self._reject("Type a folder path, or use the Browse button.")
             return
@@ -4789,9 +4894,14 @@ class SessionPanel(wx.Panel):
         get_backend: Callable[[], str],
         focus_before: Callable[[], None],
         focus_after: Callable[[], None],
+        session_title: str = "",
     ):
         super().__init__(parent)
         self.cwd = cwd
+        # A name given when the session was created. Sent on the first turn's
+        # session.create and then done with: from that point Hermes owns the
+        # conversation's title, so keeping it would make a rename here lie.
+        self._session_title = (session_title or "").strip()
         self._on_status = on_status
         self._on_title = on_title
         self._earcons = earcons
@@ -5265,7 +5375,10 @@ class SessionPanel(wx.Panel):
             f"Model: {self.model or self._cli_model or 'CLI default'}",
             f"Effort: {self.effort or self._cli_effort or 'CLI default'}",
             f"Permission mode: {mode}",
-            f"Folder: {self.cwd}",
+            # A remote Hermes session may have no folder on this machine at all,
+            # and "Folder: " followed by nothing reads as a missing value rather
+            # than as a deliberate one.
+            f"Folder: {self.cwd or 'chosen by the Hermes running this session'}",
             f"Conversation: {conversation}",
         ]
 
@@ -5947,6 +6060,19 @@ class SessionPanel(wx.Panel):
 
             self._held_hermes = HeldConnection()
         extra["held"] = self._held_hermes
+        # Only on the turn that CREATES the conversation. session.resume takes
+        # no title, and sending one after the first turn would be a value the
+        # protocol drops -- so it is cleared once it has been handed over,
+        # leaving Hermes as the single owner of the name from then on.
+        #
+        # Read through getattr because upstream calls this method on stand-in
+        # panels (and on one that has not finished __init__). Touching the
+        # attribute directly raised AttributeError there, which in a teardown
+        # path would leave a turn uncancelled -- the same class of defect as
+        # the held-connection read, and caught the same way.
+        session_title = str(getattr(self, "_session_title", "") or "")
+        if session_title and not self._session_id:
+            extra["session_title"] = session_title
         if attachments:
             extra["attachments"] = list(attachments)
         return extra
@@ -8825,7 +8951,9 @@ class MainFrame(wx.Frame):
             self,
         )
 
-    def _add_session(self, cwd: str, initial_prompt: str = "") -> "SessionPanel":
+    def _add_session(
+        self, cwd: str, initial_prompt: str = "", session_title: str = ""
+    ) -> "SessionPanel":
         panel = SessionPanel(
             self.notebook,
             cwd,
@@ -8836,8 +8964,13 @@ class MainFrame(wx.Frame):
             get_backend=self.current_backend,
             focus_before=lambda: self.tab_switcher.SetFocus(),
             focus_after=lambda: self.mode_combo.SetFocus(),
+            session_title=session_title,
         )
-        self.notebook.AddPage(panel, _tab_label("", cwd), select=True)
+        # A named session says its name from the start. Without this the tab
+        # falls back to the folder, which for a remote session may be empty --
+        # and an unnamed tab is the one thing a screen reader cannot tell from
+        # its neighbour.
+        self.notebook.AddPage(panel, _tab_label(session_title, cwd), select=True)
         self._sync_tab_switcher()
         # Model catalogs are intentionally lazy. FreeBuff's installed catalog
         # is embedded in a large executable, and scanning it here caused a
@@ -9456,18 +9589,37 @@ class MainFrame(wx.Frame):
         self._select_session(idx)
 
     def _new_session(self) -> None:
-        """Open a session in a folder that is typed in or browsed to."""
-        dlg = NewSessionDialog(self, default_dir=self._projects_folder)
+        """Open a session: a folder locally, a name when Hermes is elsewhere."""
+        # Only the Hermes backend can run somewhere else, so only it changes the
+        # question. Asked here rather than inside the dialog so the dialog stays
+        # a dialog and this stays the place that knows what is selected.
+        remote_label = ""
+        if self._backend == BACKEND_HERMES and REMOTE_HERMES.url():
+            # The address without the credential: the URL is built from a host
+            # and a port here, and the key only joins it as a query parameter
+            # deeper down, so splitting on "?" keeps a token out of a label a
+            # screen reader will read aloud.
+            remote_label = REMOTE_HERMES.url().split("?", 1)[0]
+        dlg = NewSessionDialog(self, default_dir=self._projects_folder, remote_label=remote_label)
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 return
             cwd = dlg.path
+            title = dlg.title_text
         finally:
             dlg.Destroy()
-        if not cwd:
+        if not cwd and not remote_label:
+            # Locally a folder is required; remotely an empty one is normal and
+            # means "wherever that Hermes runs".
             return
-        self._add_session(cwd)
-        wx.CallAfter(announce, f"New session: {_short_label(cwd)}")
+        self._add_session(cwd, session_title=title)
+        if title:
+            spoken = f"New session: {title}"
+        elif cwd:
+            spoken = f"New session: {_short_label(cwd)}"
+        else:
+            spoken = f"New session on {remote_label}"
+        wx.CallAfter(announce, spoken)
 
     def _history_cwd(self) -> str:
         """The directory the history picker starts out scoped to."""
