@@ -1,48 +1,56 @@
-# BlindPilot 0.20.1
+# BlindPilot 0.20.2
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This is a point release with one change, and the change is to a test — but it is the
-kind of test defect that quietly corrupts every number a contributor reports, so it is
-worth its own release note.
+This release repairs what the setup wizard says when a backend is not there. It was
+captured, not imagined: an NVDA log of one press of Install Hermes, four lines spoken
+within three milliseconds, two of them untrue and one of them not a sentence.
 
-## The sweep that counted somebody else's site-packages
+## Four lines in three milliseconds
 
-One test in this repository compiles every Python module in the tree, so that no
-`SyntaxWarning` — an invalid escape sequence written without its `r`, which Python
-compiles with a warning and carries on — can reach a release and fail it there. To do
-that it has to decide what counts as source, and it decided with a list of exact
-directory names: `.venv`, `venv`, `build`, `dist`, `__pycache__`, `.test-tmp`.
+Pressing Install Hermes on a machine that has Hermes missing and npm installed spoke
+this:
 
-A contributor whose virtualenv was named `.venv-win` and whose staging directory was
-`dist_new` therefore had 4,652 files of installed wxPython swept in and compiled as
-parametrised test cases. Every suite-wide total their reports quoted was measuring
-their own site-packages alongside the repository: "5682 passed" against a project with
-1,001 tests. Nothing that rested on a named, targeted run was wrong, and nothing in
-BlindPilot was wrong — but the number at the top of every check list was, and it took
-a reviewer re-deriving the count to find out.
+1. "Installing Hermes. This usually takes under a minute." — a promise.
+2. "npm could not be installed, so BlindPilot cannot install Hermes automatically." —
+   untrue on the machine it was spoken on, which has npm.
+3. "The install did not complete. Read the installer output, or install Hermes
+   yourself using See https://hermes-agent.nousresearch.com/docs and click Check
+   Again." — a sentence with another sentence's fragment spliced into its middle.
+4. "Hermes is not installed. Tab to Install Hermes." — the offer again, which is how
+   the first line came to be a promise.
 
-The exclusion now matches a prefix on directory components, judged relative to the
-swept root rather than the absolute path. Three consequences, each of which is a
-defect the old form had: a virtualenv called anything at all is excluded, not only the
-half-dozen spellings somebody thought to list; a file whose own name happens to start
-with dist is still source, because the filter reads directories and not file names; and
-a checkout that happens to live under a path containing one of these words — pytest's
-own basetemp among them, which is `.test-tmp` here and is how the new test exercises
-the behaviour — is not thrown away wholesale.
+The root is an ordering question the wizard answered backwards. Its check asked
+whether Node was installable before asking whether the backend comes from npm at all,
+and its install helper answers a managed-Node sentinel for any backend whenever Node
+is installable — so Hermes, which ships its own installer and is not on npm, was
+offered an install that runs nothing, fails immediately, and reports npm as the reason
+whether or not npm exists. The offer came back after the failure, which made the
+whole thing a loop: promise, lie, splice, offer.
 
-The layout that exposed the defect is now a test of its own: `.venv`, `.venv-win`,
-`venv`, `build`, `dist`, `dist_new`, one file named `distance_util.py` that must
-survive, and one real module that must survive. Written failing-first, like everything
-else here.
+## What it says now
 
-Diagnosed by michaldziwisz, in the conversation around the Hermes backend — the second
-time in one PR that a stand-in that did not match the real thing hid a defect, and the
-first time the stand-in was this repository's own.
+The check asks npm-membership first. A backend BlindPilot does not install — Hermes is
+the only one today — gets its own guidance: BlindPilot could not find it, here are its
+own instructions, install it and choose Check Again. No Install button is offered,
+because there is nothing for one to do.
+
+`install_backend` refuses such a backend in its own terms before any npm machinery is
+consulted, so the npm sentence can never again be spoken about a backend that has no
+npm package. Pressing an Install button that a dialog built before this fix still
+holds refuses at once — "BlindPilot cannot install Hermes itself. See
+https://..." — instead of promising a minute it does not have.
+
+And the failure message is built from parts that are sentences on their own. The
+install command reaches the user exactly as each backend documents it — npm one-liners
+for Codex, FreeBuff and opencode, the Hermes instructions for Hermes — but never
+spliced into the middle of another sentence again. Every backend in the registry is
+pinned by a test: no splice, command always present.
 
 ## Verification
 
-pytest 999 passed, 3 skipped; ruff check, ruff format --check, mypy, `--startup-smoke`
-and `--startup-gui-smoke` all clean at the release commit.
+pytest 1005 passed, 3 skipped; ruff check, ruff format --check, mypy, `--startup-smoke`
+and `--startup-gui-smoke` all clean at the release commit. Five new tests, written
+failing-first against the captured NVDA behaviour.
