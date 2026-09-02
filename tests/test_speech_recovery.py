@@ -33,7 +33,16 @@ class _Speaker:
 
 @pytest.fixture(autouse=True)
 def _restore():
+    """Start each test from "a rebuild is allowed right now", and put back what
+    was there.
+
+    `_speaker_retry_after` is module state, and any test anywhere that reaches
+    `announce()` on Windows with no reader sets it five seconds into the
+    future. A test here would then be testing the throttle rather than what it
+    is about, depending only on which file ran first.
+    """
     before = (app._SPEAKER, app._speaker_retry_after)
+    app._speaker_retry_after = 0.0
     try:
         yield
     finally:
