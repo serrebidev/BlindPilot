@@ -4,6 +4,10 @@ Readable release history for BlindPilot. When adjacent releases were part of the
 same fix stream, they are combined with a version range such as
 `v0.3.6-v0.3.7`.
 
+## v0.20.1 - 2026-09-02
+
+- The warning-clean sweep now excludes a virtualenv however it is named. The test that compiles every module so no `SyntaxWarning` can reach a release carried a hard-coded list of directory names — `.venv`, `venv`, `build`, `dist`, `__pycache__`, `.test-tmp` — and a contributor whose virtualenv was `.venv-win` and whose staging directory was `dist_new` had 4,652 files of installed wxPython swept in and compiled as parametrised cases, which is where a reported suite of 5,682 came from against a repository with 1,001 tests. The exclusion matches a prefix on directory components relative to the swept root now: a virtualenv called anything at all is excluded, a file whose own name starts with dist is still source, and a checkout living under a path that contains one of these words — pytest's own basetemp among them — is not discarded wholesale. A real directory layout, written out as a test, pins it. Diagnosed by michaldziwisz in the Hermes PR, whose suite totals had been quietly counting their own site-packages.
+
 ## v0.20.0 - 2026-09-02
 
 - Stay connected through a long turn, and say so while it lasts. A turn that produced no output for about twenty seconds lost its connection: the socket's connect timeout applies to every later read, so an ordinary quiet stretch — a build, a test run, a model thinking, a rate limit being waited out — raised a timeout that was treated as a dead connection and ended the thread reading it. With nobody reading, nobody answered the server's keepalive pings either, so the server closed a connection that was perfectly healthy. Measured against a server pinging as Hermes does: the reading thread died after twenty-one seconds of quiet before, and survives three minutes of it now, with the next message answered normally. A read that times out is no longer confused with a peer that has gone away, while a peer that really has gone away still ends the turn as before.
