@@ -113,6 +113,7 @@ from agent_backends import (
 from hermes_backend import (
     REMOTE_CREDENTIALS,
     hermes_model_options,
+    hermes_session_catalog,
     remote_ws_url,
     wsl_path_to_windows,
 )
@@ -3927,6 +3928,235 @@ class HistoryDialog(wx.Dialog):
         event.Skip()
 
 
+# One row in the Hermes sessions list. A conversation that is live in the
+# gateway process is marked, because attaching to it is a different act from
+# reopening a finished one: the running turn is joined, and its event stream
+# moves here.
+_HERMES_LIVE_MARK = "Running now"
+
+# Where a Hermes conversation came from, said the way a person would. The
+# source matters when picking one: a conversation started in a terminal on the
+# server is a different thing from one started in this window.
+_HERMES_SOURCE_LABELS = {
+    "cli": "terminal",
+    "tui": "Hermes TUI",
+    "telegram": "Telegram",
+    "discord": "Discord",
+    "slack": "Slack",
+    "whatsapp": "WhatsApp",
+    "signal": "Signal",
+    "webhook": "webhook",
+    "acp": "editor",
+}
+
+
+def hermes_session_label(entry: dict, live: bool) -> str:
+    """The single line a screen reader reads for one Hermes conversation.
+
+    Ordered by what decides the choice: whether it is running, what it is
+    about, how long ago it was touched, how much is in it, and where it was
+    started. Running first, because that is the one fact that changes what
+    opening it will do.
+    """
+    parts = []
+    if live:
+        parts.append(_HERMES_LIVE_MARK)
+    title = str(entry.get("title") or "").strip()
+    preview = " ".join(str(entry.get("preview") or "").split())
+    parts.append(title or preview or "(untitled)")
+    started = float(entry.get("started_at") or 0)
+    if started:
+        parts.append(describe_age(started))
+    count = int(entry.get("message_count") or 0)
+    if count:
+        parts.append("1 message" if count == 1 else f"{count} messages")
+    source = str(entry.get("source") or "").strip().lower()
+    if source:
+        parts.append(_HERMES_SOURCE_LABELS.get(source, source))
+    return " — ".join(parts)
+
+
+class HermesSessionsDialog(wx.Dialog):
+    """Pick any Hermes conversation — including one that is running right now.
+
+    Recent Conversations reads what this machine has on disk, which is empty
+    for a Hermes running on another computer. This asks the Hermes itself, so
+    the list holds every conversation it knows: the ones started in this
+    window, the ones started in a terminal on that machine, and the ones a
+    messaging channel started.
+
+    Conversations the gateway is currently running are marked. Opening one of
+    those ATTACHES to it: its running turn is read out here as it happens.
+    Hermes keeps one event stream per conversation, so attaching takes that
+    stream over from whatever was reading it before — which is why the dialog
+    says so rather than letting it be discovered.
+    """
+
+    def __init__(self, parent: wx.Window, cwd: str):
+        super().__init__(
+            parent,
+            title="Hermes Conversations",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._cwd = cwd
+        self._entries: list[dict] = []
+        self._shown: list[dict] = []
+        self._live: set[str] = set()
+        self.entry: Optional[dict] = None
+        self.attaching = False
+
+        filter_label = wx.StaticText(self, label="&Filter:")
+        self.filter_box = wx.TextCtrl(self)
+        self.filter_box.SetName("Filter conversations")
+        self.filter_box.SetHint("Type part of a conversation's first message")
+        self.filter_box.Bind(wx.EVT_TEXT, lambda _e: self._refresh())
+
+        self.running_only = wx.CheckBox(self, label="Only the ones &running now")
+        self.running_only.SetName("Only the ones running now")
+        self.running_only.Bind(wx.EVT_CHECKBOX, lambda _e: self._refresh())
+
+        list_label = wx.StaticText(self, label="&Conversations:")
+        self.list_box = wx.ListBox(self, style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
+        self.list_box.SetName("Conversations")
+        self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
+        # The consequence of the selected row, spoken on arrow keys: attaching
+        # and reopening are different acts and the difference must be heard
+        # before Enter, not after.
+        self.list_box.Bind(wx.EVT_LISTBOX, lambda _e: self._announce_selection())
+
+        self.summary = wx.StaticText(self, label="")
+        self.summary.SetName("Summary")
+
+        buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+        open_button = self.FindWindowById(wx.ID_OK)
+        if open_button is not None:
+            open_button.SetLabel("&Open")
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(filter_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        sizer.Add(self.filter_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
+        sizer.Add(self.running_only, 0, wx.ALL, 12)
+        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT, 12)
+        sizer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, 12)
+        sizer.Add(self.summary, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        if buttons is not None:
+            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+        self.SetSizerAndFit(sizer)
+        self.SetSize(wx.Size(640, 480))
+
+        self.Bind(wx.EVT_BUTTON, lambda _e: self._accept(), id=wx.ID_OK)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self._reload()
+        self.filter_box.SetFocus()
+
+    # ----- Loading and filtering -----
+    def _reload(self) -> None:
+        """Ask Hermes for its conversations. Blocking, so it says it is working."""
+        self.summary.SetLabel("Asking Hermes for its conversations…")
+        with wx.BusyCursor():
+            remote_url = REMOTE_HERMES.url()
+            entries, live, error = hermes_session_catalog(
+                self._cwd,
+                remote_url=remote_url,
+                remote_token=REMOTE_HERMES.key if remote_url else "",
+                remote_credential=REMOTE_HERMES.credential if remote_url else "token",
+                remote_username=REMOTE_HERMES.username if remote_url else "",
+            )
+        self._entries = entries
+        self._live = live
+        if error:
+            # The reason is spoken, not logged: a blind user cannot glance at a
+            # console to find out why the list is empty.
+            self.summary.SetLabel(error)
+            announce(f"Error: {error}")
+            self.list_box.Set([])
+            self._shown = []
+            self._set_open_enabled(False)
+            return
+        self._refresh()
+
+    def _is_live(self, entry: dict) -> bool:
+        return str(entry.get("id") or "") in self._live
+
+    def _refresh(self) -> None:
+        term = self.filter_box.GetValue().strip().lower()
+        running_only = self.running_only.GetValue()
+        self._shown = [
+            entry
+            for entry in self._entries
+            if (not running_only or self._is_live(entry))
+            and (
+                not term
+                or term in str(entry.get("title") or "").lower()
+                or term in str(entry.get("preview") or "").lower()
+            )
+        ]
+        self.list_box.Set(
+            [hermes_session_label(entry, self._is_live(entry)) for entry in self._shown]
+        )
+        if self._shown:
+            self.list_box.SetSelection(0)
+        count = len(self._shown)
+        running = sum(1 for entry in self._shown if self._is_live(entry))
+        if not self._entries:
+            message = "Hermes reported no conversations"
+        else:
+            message = "1 conversation" if count == 1 else f"{count} conversations"
+            if running:
+                message += f", {running} running now"
+        self.summary.SetLabel(message)
+        self._set_open_enabled(bool(self._shown))
+
+    def _set_open_enabled(self, enabled: bool) -> None:
+        button = self.FindWindowById(wx.ID_OK)
+        if button is not None:
+            button.Enable(enabled)
+
+    def _selected(self) -> Optional[dict]:
+        index = self.list_box.GetSelection()
+        if index == wx.NOT_FOUND or index >= len(self._shown):
+            return None
+        return self._shown[index]
+
+    def _announce_selection(self) -> None:
+        entry = self._selected()
+        if entry is None:
+            return
+        if self._is_live(entry):
+            announce(
+                "Running now. Opening this attaches to the turn in progress and moves "
+                "its output here."
+            )
+
+    # ----- Choosing -----
+    def _accept(self) -> None:
+        entry = self._selected()
+        if entry is None:
+            announce("Error: Choose a conversation first")
+            return
+        self.entry = entry
+        self.attaching = self._is_live(entry)
+        self.EndModal(wx.ID_OK)
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        key = event.GetKeyCode()
+        if key == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self._shown:
+            self._accept()
+            return
+        if key == wx.WXK_F5:
+            self._reload()
+            announce("Refreshed")
+            return
+        if key == wx.WXK_DOWN and self.filter_box.HasFocus() and self._shown:
+            self.list_box.SetFocus()
+            self.list_box.SetSelection(0)
+            return
+        event.Skip()
+
+
 class SessionPanel(wx.Panel):
     """One conversation tab — owns its session_id, rows, and worker.
 
@@ -5095,6 +5325,72 @@ class SessionPanel(wx.Panel):
         )
         self._set_status(f"Resumed: {entry.title} — {responses}")
 
+    def open_hermes_session(self, session_id: str, title: str, attaching: bool) -> None:
+        """Take over this tab with a Hermes conversation, and read it back.
+
+        Unlike ``restore_history`` this does not read a transcript off local
+        disk: the conversation may live on another machine, so the transcript
+        is asked of Hermes itself. A worker started in resume-only mode
+        replays it through the same callbacks a live turn uses, which is what
+        makes a conversation from a terminal on the server read exactly like
+        one that just happened here.
+
+        When ``attaching`` is true the conversation is running right now: the
+        replay is followed by the events of the turn in progress, and Hermes'
+        one-stream-per-conversation rule means this window now owns that
+        stream.
+        """
+        if self._worker is not None and self._worker.is_alive():
+            self._announce("Error: Stop the running task before opening another conversation")
+            return
+        # The tab becomes that conversation: the id it will continue, and the
+        # backend it belongs to. A held connection from the previous one must
+        # not carry the next message.
+        self._session_id = session_id
+        self._drop_held_hermes()
+        self._session_backend = BACKEND_HERMES
+        self._turns = []
+        self._rows = []
+        self._displayed = []
+        self._search_term = ""
+        self._response_count = 0
+        self._stream_response = None
+        self._streamed_assistant = ""
+        self._assistant_narrated_this_turn = False
+        self._stopping = False
+        self._refresh_list()
+        self._on_title(self, title or make_title(session_id))
+        self.backend_changed()
+
+        extra = self._hermes_worker_extra([])
+        # Resume-only: this worker reopens the conversation and says nothing
+        # into it. Without the flag it would submit a prompt, which on a live
+        # conversation would post an empty message into someone else's turn.
+        extra["resume_only"] = True
+        self._announce("Attaching" if attaching else "Reopening")
+        self._earcons.start_progress()
+        self._worker = worker_class(BACKEND_HERMES, ClaudeWorker)(
+            "",
+            self._session_id,
+            self.cwd,
+            self.mode,
+            model=self.model,
+            effort=self.effort,
+            on_session=lambda sid: self._queue_worker_event("session", sid),
+            on_started=lambda: self._queue_worker_event("started"),
+            on_activity=lambda kind, text: self._queue_worker_event("activity", kind, text),
+            on_complete=lambda txt: self._queue_worker_event("complete", txt),
+            on_failed=lambda msg: self._queue_worker_event("failed", msg),
+            on_done=lambda: self._queue_worker_event("done"),
+            on_question=self._ask_questions,
+            **extra,
+        )
+        self._worker.start()
+        self.stop_btn.Enable()
+        if attaching:
+            # Steering a turn someone else started is exactly what this is for.
+            self.steer_btn.Enable()
+
     def _drop_held_hermes(self) -> None:
         """Let go of the held Hermes connection, if this tab has one.
 
@@ -5150,7 +5446,22 @@ class SessionPanel(wx.Panel):
         if not SETTINGS.live_rows:
             return
         n = self._begin_stream_response()
-        if kind == "result":
+        if kind == "you":
+            # A replayed conversation carries the user's own messages, which a
+            # live turn adds itself (_add_your_message) before the worker
+            # starts. Reopening one has no such moment, so the row is built
+            # here — same label, so a reopened conversation reads exactly like
+            # one that just happened.
+            self._rows.append(
+                Row(
+                    kind="you",
+                    label=f"You: {' '.join(text.split())}",
+                    payload=text,
+                    response_number=n,
+                )
+            )
+            self._say(f"You: {' '.join(text.split())}")
+        elif kind == "result":
             self._rows.append(
                 Row(
                     kind="result",
@@ -5226,6 +5537,15 @@ class SessionPanel(wx.Panel):
         self._stopping = False
         # Stop the in-progress loop and play the "received" cue.
         self._earcons.play_received()
+        # A reopened conversation completes with no text: nothing new was said,
+        # the rows are the transcript that was just replayed. Announcing a
+        # "response received, 0 segments" there, or parsing "" into a fresh
+        # response, would invent an empty answer at the end of someone's
+        # history — and a screen reader would read that gap as the last thing
+        # in the conversation.
+        if not text.strip() and not self._turns:
+            self._set_status(f"Reopened, {len(self._rows)} rows")
+            return
         self._narrate_completed_response(text)
         if self._turns:
             self._turns[-1].response = text
@@ -6885,6 +7205,11 @@ class MainFrame(wx.Frame):
             "&Recent Conversations…\tCtrl+H",
             "Reopen a past conversation and carry on with it",
         )
+        hermes_sessions_item = file_menu.Append(
+            wx.ID_ANY,
+            "Hermes Conversations…\tCtrl+G",
+            "List every conversation Hermes knows, including the ones running right now",
+        )
         backend_menu = wx.Menu()
         self._backend_items: dict[str, wx.MenuItem] = {}
         for backend in BACKEND_IDS:
@@ -7157,6 +7482,7 @@ class MainFrame(wx.Frame):
         )
         self.Bind(wx.EVT_MENU, lambda _e: self._new_session(), new_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._open_history(), history_item)
+        self.Bind(wx.EVT_MENU, lambda _e: self._open_hermes_sessions(), hermes_sessions_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._compact_active(), self._compact_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._new_conversation_active(), new_convo_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._manage_backends(), manage_backends_item)
@@ -7895,6 +8221,45 @@ class MainFrame(wx.Frame):
         if entry is None:
             return
         self._resume_history(entry)
+
+    def _open_hermes_sessions(self) -> None:
+        """List Hermes' own conversations and open one in a new tab (Ctrl+G).
+
+        Recent Conversations answers "what is on this disk". This answers "what
+        does that Hermes know", which for a Hermes on another machine is the
+        only question with a useful answer: the transcripts are over there, and
+        so are the conversations that are running right now.
+        """
+        if self._backend != BACKEND_HERMES:
+            # Opening a Hermes conversation while another backend is selected
+            # would make the next message start a new conversation elsewhere,
+            # so the backend follows the conversation being opened.
+            self._set_backend(BACKEND_HERMES)
+        dlg = HermesSessionsDialog(self, cwd=self._history_cwd())
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            entry = dlg.entry
+            attaching = dlg.attaching
+        finally:
+            dlg.Destroy()
+        if not entry:
+            return
+        session_id = str(entry.get("id") or "")
+        if not session_id:
+            announce("Error: that conversation has no id to reopen")
+            return
+        title = str(entry.get("title") or "").strip() or str(entry.get("preview") or "").strip()
+        panel = self._add_session(self._history_cwd())
+        panel.open_hermes_session(session_id, title, attaching)
+        if attaching:
+            wx.CallAfter(
+                announce,
+                f"Attaching to {title or session_id}. This window now receives its output; "
+                "steer to send it guidance.",
+            )
+        else:
+            wx.CallAfter(announce, f"Reopening {title or session_id}")
 
     def _resume_history(self, entry: HistoryEntry) -> None:
         """Open one past conversation in its own tab, ready to be continued."""

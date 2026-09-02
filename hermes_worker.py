@@ -274,6 +274,56 @@ def _describe_tool_result(result: object) -> str:
     return str(result).strip()
 
 
+# When a replayed transcript's last turn is still running, the attach worker
+# consumes events until it ends, exactly like a live turn. Same timeouts, same
+# narration, for the same reason: silence at a screen reader is the worst
+# failure mode this loop can produce.
+_REPLAY_READ_SETTINGS = True
+
+
+def _message_text(message: dict) -> str:
+    """The display text of one transcript message, whichever shape it arrived in."""
+    if not isinstance(message, dict):
+        return ""
+    text = message.get("text")
+    if isinstance(text, str) and text.strip():
+        return text
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    return ""
+
+
+def _replay_rows(messages: list) -> list[tuple[str, str]]:
+    """Turn a resume transcript into (kind, text) rows the window understands.
+
+    The window's own rows are built from these: a user message becomes its
+    "You:" row, an assistant message goes through the same Markdown segmenter
+    a live answer does, and a tool call becomes the step line it would have
+    announced live. Empty rows are dropped rather than spoken as gaps.
+    """
+    rows: list[tuple[str, str]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        if role == "user":
+            text = _message_text(message)
+            if text.strip():
+                rows.append(("you", text))
+            continue
+        if role == "assistant":
+            text = _message_text(message)
+            if text.strip():
+                rows.append(("assistant", text))
+            continue
+        if role == "tool":
+            name = str(message.get("name") or "tool")
+            context = str(message.get("context") or "").strip()
+            rows.append(("tool", f"{name}: {context}" if context else name))
+    return rows
+
+
 class HeldConnection:
     """One connection kept across the turns of a single conversation.
 
@@ -346,6 +396,7 @@ class HermesWorker(threading.Thread):
         remote_username: str = "",
         held: Optional[HeldConnection] = None,
         attachments: Optional[Sequence[str]] = None,
+        resume_only: bool = False,
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -387,6 +438,12 @@ class HermesWorker(threading.Thread):
         # worker owns its own, so a caller that has not opted in keeps the old
         # connect-per-turn behaviour and nothing about it changes.
         self._held = held
+        # Resume-only turns replay a stored conversation instead of adding to
+        # it: the worker asks Hermes for the transcript (and, when the
+        # conversation is live, the tail of its running turn) and ends without
+        # sending anything. The window uses this to open a past conversation
+        # -- including one that is running right now on the gateway.
+        self._resume_only = resume_only
         # Files the user attached to this message. They live on the machine
         # BlindPilot runs on, which is not necessarily the machine Hermes runs
         # on, so their bytes are uploaded before the prompt goes out.
@@ -450,17 +507,26 @@ class HermesWorker(threading.Thread):
 
     def steer(self, text: str) -> bool:
         """Push guidance into the turn that is already running."""
-        if not self.accepting_input() or not self._gateway_session:
+        if not self.accepting_input() or not (self._live_session or self._gateway_session):
             return False
-        return self._request("session.steer", {"session_id": self._gateway_session, "text": text})
+        # The live session id is the one Hermes answers to: steering and
+        # interrupting by the stored id always came back "session not found"
+        # (measured on a live gateway), so a steer in remote mode silently did
+        # nothing. Fall back to the stored id only while no live id is known,
+        # which is the local stdio path before its first reply.
+        target = self._live_session or self._gateway_session
+        return self._request("session.steer", {"session_id": target, "text": text})
 
     def cancel(self) -> None:
         self._cancelled = True
         self._accepting_input.clear()
-        if self._gateway_session:
+        target = self._live_session or self._gateway_session
+        if target:
             # Ask Hermes to stop the turn before dropping the connection, so a
             # remote Hermes is not left working on an answer nobody will read.
-            self._request("session.interrupt", {"session_id": self._gateway_session})
+            # Addressed by the live id -- see steer() for why the stored one
+            # cannot be used.
+            self._request("session.interrupt", {"session_id": target})
         # A cancelled turn leaves the connection mid-conversation: the interrupt
         # is answered by frames this worker will not read. Reusing it would hand
         # those to the next turn, so the connection goes with the cancellation.
@@ -574,6 +640,9 @@ class HermesWorker(threading.Thread):
             # the remote path is the difference between "wrong address" and "slow".
             if self._wait_for_ready() is False:
                 return
+            if self._resume_only:
+                self._run_replay()
+                return
             if not self._ensure_session():
                 return
         else:
@@ -653,6 +722,83 @@ class HermesWorker(threading.Thread):
             detail = self._transport.failure_detail() if self._transport else ""
             self._on_failed(detail or "Hermes did not become ready in time")
         return False
+
+    def _run_replay(self) -> None:
+        """Reopen a stored conversation and hand its transcript to the window.
+
+        One request does both jobs: ``session.resume`` with the transcript not
+        omitted returns the whole visible history, and -- when that
+        conversation is live in the gateway process -- attaches to it, reusing
+        the SAME live session instead of building a parallel one. That is what
+        makes "go back to the conversation that is running right now" real:
+        the reply's ``running`` flag says the turn is still going, and this
+        worker then consumes its events exactly like a turn of its own, until
+        the completion event arrives.
+
+        The price of attaching is ownership of the stream: the gateway keeps
+        one transport per session, so whoever resumed last receives the events.
+        The window says so before this worker is started.
+        """
+        transport = self._transport
+        if transport is None:
+            return
+        target = self._gateway_session
+        if not target:
+            self._on_failed("There is no conversation id to reopen")
+            return
+        request_id = self._next_id()
+        transport.send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "session.resume",
+                "params": {"session_id": target, "omit_messages": False},
+            }
+        )
+        reply = self._await_response(request_id, 120.0)
+        if reply is None:
+            if not self._cancelled:
+                detail = transport.failure_detail() if transport else ""
+                self._on_failed(detail or "Hermes did not answer the resume request")
+            return
+        error = reply.get("error")
+        if error:
+            self._on_failed(self._error_text(error, "Hermes could not reopen that conversation"))
+            return
+        result = reply.get("result") or {}
+        self._live_session = str(result.get("session_id") or "")
+        # Which id the window must remember is NOT the one it was handed back
+        # under ``session_id``: that is the per-process handle the gateway
+        # addresses turns with, and it dies with the gateway. The durable id
+        # comes back as ``session_key`` (or ``resumed``), because resume --
+        # unlike session.create -- has no ``stored_session_id`` field.
+        # Measured: without this the tab would store "7e76fdca" and the
+        # conversation would be unreachable after a restart, quietly, while
+        # everything looked fine for the rest of the session.
+        stored = str(
+            result.get("session_key")
+            or result.get("resumed")
+            or result.get("stored_session_id")
+            or target
+        )
+        if not self._live_session:
+            self._on_failed("Hermes did not return a session id")
+            return
+        self._on_session(stored)
+        self._accepting_input.set()
+        self._on_started()
+        for kind, text in _replay_rows(result.get("messages") or []):
+            self._on_activity(kind, text)
+        if bool(result.get("running")):
+            # The conversation's turn is still going on the gateway. Eating its
+            # events here is what "attaching" means; the same idle and
+            # connection checks as a live turn guard the wait.
+            self._consume_turn()
+            return
+        # A finished conversation replays silently: nothing is "completed" into
+        # the transcript, because there is no new answer -- the window marks
+        # the end itself from on_done.
+        self._on_complete("")
 
     def _ensure_session(self) -> bool:
         """Create a conversation, or reopen the one we were given."""

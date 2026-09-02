@@ -1090,6 +1090,128 @@ def _model_rows(payload: dict) -> tuple[list[str], str]:
     return models, current
 
 
+SESSION_DENY_SOURCES = ("kanban", "tool")
+
+
+def _ready_or_fail(transport: Transport, deadline_seconds: float) -> str:
+    """Wait for the gateway announcement; return "" when ready, else the error."""
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        frame = transport.receive(0.5)
+        if frame is None:
+            continue
+        params = frame.get("params")
+        if isinstance(params, dict) and params.get("type") == "gateway.ready":
+            return ""
+    return "Hermes did not respond in time."
+
+
+def hermes_session_catalog(
+    cwd: Optional[str] = None,
+    *,
+    remote_url: str = "",
+    remote_token: str = "",
+    remote_credential: str = "token",
+    remote_username: str = "",
+) -> tuple[list[dict], set[str], str]:
+    """List Hermes conversations, and say which of them are live right now.
+
+    Returns ``(sessions, live_keys, error)``. ``sessions`` rows carry ``id``,
+    ``title``, ``preview``, ``message_count``, ``source`` and ``started_at``;
+    ``live_keys`` holds the session keys that currently run inside the target
+    gateway process, so the caller can mark them attachable.
+
+    Two questions, two answers. ``session.list`` reads the profile database and
+    shows every human conversation on every surface (CLI, TUI, messaging) --
+    that is the "go back to any conversation" list. ``session.active_list``
+    reports only sessions with an agent in the gateway process -- a session on
+    that list can be attached to live, with its running turn.
+
+    A row whose source is internal bookkeeping (kanban workers, tool runs) is
+    dropped, the same deny-list Hermes' own resume picker uses.
+    """
+    if remote_url:
+        transport: Transport = WebSocketTransport(
+            remote_url, remote_token, remote_credential, remote_username
+        )
+    else:
+        if not hermes_installed():
+            return [], set(), "Hermes Agent was not found on this computer."
+        transport = StdioTransport(cwd or str(Path.home()))
+    try:
+        transport.start()  # type: ignore[attr-defined]
+    except OSError as exc:
+        return [], set(), str(exc)
+    try:
+        problem = _ready_or_fail(transport, MODEL_QUERY_TIMEOUT)
+        if problem:
+            return [], set(), problem
+
+        transport.send(
+            {"jsonrpc": "2.0", "id": 1, "method": "session.list", "params": {"limit": 200}}
+        )
+        sessions: list[dict] = []
+        error = ""
+        deadline = time.monotonic() + MODEL_QUERY_TIMEOUT
+        while time.monotonic() < deadline:
+            frame = transport.receive(0.5)
+            if frame is None:
+                continue
+            if frame.get("id") != 1:
+                continue
+            if isinstance(frame.get("error"), dict):
+                error = str(frame["error"].get("message") or "Hermes could not list its sessions.")
+                break
+            result = frame.get("result")
+            if not isinstance(result, dict):
+                error = "Hermes returned no session list."
+                break
+            for row in result.get("sessions") or []:
+                if not isinstance(row, dict):
+                    continue
+                source = str(row.get("source") or "").strip().lower()
+                if source in SESSION_DENY_SOURCES:
+                    continue
+                sessions.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "title": str(row.get("title") or ""),
+                        "preview": str(row.get("preview") or ""),
+                        "message_count": int(row.get("message_count") or 0),
+                        "source": source,
+                        "started_at": float(row.get("started_at") or 0),
+                    }
+                )
+            break
+        if error:
+            return [], set(), error
+
+        transport.send({"jsonrpc": "2.0", "id": 2, "method": "session.active_list", "params": {}})
+        live: set[str] = set()
+        deadline = time.monotonic() + MODEL_QUERY_TIMEOUT
+        while time.monotonic() < deadline:
+            frame = transport.receive(0.5)
+            if frame is None:
+                continue
+            if frame.get("id") != 2:
+                continue
+            if isinstance(frame.get("error"), dict):
+                # Attaching is a bonus on top of the list; a refusal to
+                # enumerate live sessions must not lose the list itself.
+                break
+            result = frame.get("result")
+            if isinstance(result, dict):
+                for row in result.get("sessions") or []:
+                    if isinstance(row, dict):
+                        key = str(row.get("session_key") or "")
+                        if key:
+                            live.add(key)
+            break
+        return sessions, live, ""
+    finally:
+        transport.close()
+
+
 def hermes_model_options(
     cwd: Optional[str] = None,
     *,
