@@ -6872,6 +6872,9 @@ class MainFrame(wx.Frame):
             item.Check(key == backend)
         cfg = _load_config()
         cfg["backend"] = backend
+        # Now rather than when the next message starts a terminal, so the
+        # console cannot arrive in the middle of a turn.
+        reserve_console_if_needed(backend)
         _save_config(cfg)
         for index in range(self.notebook.GetPageCount()):
             page = self.notebook.GetPage(index)
@@ -7107,9 +7110,8 @@ class MainFrame(wx.Frame):
             panel.prompt.SetValue(initial_prompt)
             # Defer so the page is shown before the request fires.
             wx.CallAfter(panel.send_now)
-        elif not _STARTUP_CHECK:
+        else:
             # Defer initial focus so VoiceOver picks it up after the page is shown.
-            # Skipped during a startup check, which shows no window to focus into.
             wx.CallAfter(panel.focus_prompt)
         return panel
 
@@ -7748,6 +7750,29 @@ def _bring_to_front() -> None:
 _STARTUP_CHECK = False
 
 
+def reserve_console_if_needed(backend: object, startup_check: bool = False) -> bool:
+    """Claim a hidden console, but only for the backend that needs one.
+
+    FreeBuff is driven through a pseudo-terminal, and creating one gives a
+    windowed application a console whether it wants one or not. Claiming one
+    up front means there is nothing left to create later, so the console
+    never arrives in the middle of somebody's first message.
+
+    Nobody else needs it. Every other backend is an ordinary subprocess
+    spawned with CREATE_NO_WINDOW, and `_spawn_freebuff_pty` reserves one
+    itself anyway, so this is only about *when* rather than whether.
+
+    That matters because AllocConsole hands back a console that is already
+    visible and hiding it is the next thing that happens - one frame of a
+    window on screen, which Windows offers no way to avoid. Paying it on
+    every launch, for the three backends that will never use it, is the
+    part worth not doing.
+    """
+    if startup_check or normalize_backend(backend) != BACKEND_FREEBUFF:
+        return False
+    return reserve_hidden_console()
+
+
 def main() -> int:
     if "--startup-smoke" in sys.argv:
         # Importing this module has already loaded wxPython, every backend,
@@ -7772,19 +7797,10 @@ def main() -> int:
     # stay open long after BlindPilot has closed and cannot be updated.
     keep_bundle_off_child_path()
     activate_managed_cli_paths()
-    # Claim the console before anything can create one on screen. Doing it here,
-    # rather than when a terminal is first needed, keeps it out of the way of
-    # the first message as well as every later one.
-    #
-    # Not during a startup check. AllocConsole hands back a console that is
-    # already visible, and hiding it is the next thing that happens - which is
-    # a window appearing and vanishing on the screen of whoever is running the
-    # checks. A check creates no pseudo-terminal, so it needs no console.
-    if not gui_startup_smoke:
-        reserve_hidden_console()
     app = wx.App(False)
 
     cfg = _load_config()
+    reserve_console_if_needed(cfg.get("backend"), gui_startup_smoke)
     # Installs that predate full-auto still carry the mode an older BlindPilot
     # saved for them. Moving them over here is what makes "nothing stops to
     # ask" true of an upgrade as well as of a fresh install.
