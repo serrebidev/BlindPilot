@@ -925,6 +925,16 @@ def _hermes_binary_after_install() -> Optional[str]:
     local_bin = Path.home() / ".local" / "bin"
     if local_bin.is_dir():
         _add_to_process_path(local_bin)
+    if platform.system() == "Windows":
+        # Measured on the machine the installer ran on: the launcher lands in
+        # %LOCALAPPDATA%\hermes\bin, beside the managed uv, and the
+        # installer's own "PATH already configured" only helps shells started
+        # afterwards -- not this process, which was running during the
+        # install.
+        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        hermes_bin = local / "hermes" / "bin"
+        if hermes_bin.is_dir():
+            _add_to_process_path(hermes_bin)
     return find_hermes_cli()
 
 

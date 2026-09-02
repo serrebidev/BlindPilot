@@ -92,6 +92,15 @@ def hermes_source_root() -> Optional[Path]:
     gateway has to be launched as a subprocess out of that tree.
     """
     candidates = [hermes_home() / HERMES_SOURCE_DIRNAME]
+    if platform.system() == "Windows":
+        # Where the official Windows installer puts the source tree, measured:
+        # %LOCALAPPDATA%\hermes\hermes-agent, with HERMES_HOME set
+        # persistently for the shells that start afterwards. A process that
+        # was already running when the installer finished -- this application,
+        # during a wizard-driven install -- has the old environment, so the
+        # default location is checked on disk rather than trusted from it.
+        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        candidates.append(local / "hermes" / HERMES_SOURCE_DIRNAME)
     launcher = shutil.which("hermes")
     if launcher:
         # A packaged install ships the launcher next to the venv that holds the
@@ -124,20 +133,34 @@ def find_hermes_cli() -> Optional[str]:
     if found:
         return found
     home = Path.home()
+    venv_roots = [hermes_home()]
     if platform.system() == "Windows":
         local = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        # The official Windows installer's bin directory -- measured, next to
+        # the managed uv it installs -- ahead of the older guesses.
         candidates = [
+            local / "hermes" / "bin" / "hermes.exe",
+            local / "hermes" / "bin" / "hermes",
             home / ".local" / "bin" / "hermes.exe",
             home / ".local" / "bin" / "hermes",
             local / "Programs" / "hermes" / "hermes.exe",
         ]
+        venv_roots.append(local / "hermes")
     else:
         candidates = [
             home / ".local" / "bin" / "hermes",
             Path("/usr/local/bin/hermes"),
             Path("/opt/homebrew/bin/hermes"),
         ]
-    candidates.append(hermes_home() / HERMES_SOURCE_DIRNAME / "venv" / "bin" / "hermes")
+    # The gateway's own venv launcher, which the older code only looked for
+    # through `bin/hermes` -- a POSIX layout. On Windows the venv is
+    # `Scripts\hermes.exe`, so a complete install looked incomplete.
+    for base in venv_roots:
+        venv = base / HERMES_SOURCE_DIRNAME / "venv"
+        if platform.system() == "Windows":
+            candidates.extend([venv / "Scripts" / "hermes.exe", venv / "Scripts" / "hermes"])
+        else:
+            candidates.append(venv / "bin" / "hermes")
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
