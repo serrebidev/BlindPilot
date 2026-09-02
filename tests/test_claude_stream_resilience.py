@@ -358,3 +358,69 @@ def test_an_answer_survives_a_nonzero_exit():
     # How it ended is still worth saying — just not instead of the answer.
     assert any("exited with code 1" in text for _kind, text in activity)
     assert not failures, f"a turn that answered was still reported as failed: {failures}"
+
+
+def test_a_result_without_agent_counts_does_not_end_a_run_still_working():
+    """Silence about the agents is not the same as the agents being done.
+
+    The count is read out of each result event on its own. A later event that
+    simply does not mention subagents returned zero, which ended the run and
+    killed every agent — the original bug, restored by nothing more than a
+    field going missing. The plain `{"type": "result"}` used everywhere else
+    in this file is exactly that shape.
+    """
+    working = {
+        "type": "result",
+        "subagent_stats": {"started_in_background": 2, "completed": 0, "failed": 0},
+    }
+    done = {
+        "type": "result",
+        "subagent_stats": {"started_in_background": 2, "completed": 2, "failed": 0},
+    }
+
+    def stdout():
+        yield _line(working)
+        # No subagent_stats at all. The run must not take this as "finished".
+        yield _line(RESULT)
+        yield _line(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "an agent reported back"}]},
+            }
+        )
+        yield _line(done)
+
+    proc = _FakeProc(stdout())
+    activity, completed, failures, raised, finished = _drive(proc)
+
+    assert finished and not raised
+    spoken = " | ".join(text for _kind, text in activity)
+    assert "an agent reported back" in spoken, (
+        f"the run ended at the event with no counts, killing the agents: {spoken}"
+    )
+    assert completed and not failures
+
+
+def test_an_error_result_arriving_after_an_answer_keeps_the_answer():
+    """Waiting for agents made a late error result reachable for the first time.
+
+    The exit-code path deliberately keeps an answer that arrived before the
+    process ended badly. This path did not: it failed the turn and threw the
+    answer away, and `_on_failed` then dropped the turn from the transcript.
+    """
+    working = {
+        "type": "result",
+        "subagent_stats": {"started_in_background": 1, "completed": 0, "failed": 0},
+    }
+
+    def stdout():
+        yield _line(ANSWER)
+        yield _line(working)
+        yield _line({"type": "result", "is_error": True, "result": "an agent could not finish"})
+
+    proc = _FakeProc(stdout())
+    _activity, completed, failures, raised, finished = _drive(proc)
+
+    assert finished and not raised
+    assert completed, f"the answer was discarded; only failures were reported: {failures}"
+    assert "the answer" in completed[0]

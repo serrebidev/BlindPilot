@@ -2358,7 +2358,13 @@ class ClaudeWorker(threading.Thread):
         return f"Claude Code exited with code {rc}{detail}"
 
     @staticmethod
-    def _background_agents_running(event: dict) -> int:
+    def _count(value: object) -> int:
+        """A count, or zero. `True` is an `int` in Python and is not a count:
+        `started_in_background: true` would otherwise mean one agent forever."""
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    @staticmethod
+    def _background_agents_running(event: dict, previously: int = 0) -> int:
         """How many agents this run started in the background are still going.
 
         A turn that launches background agents finishes while they are still
@@ -2369,16 +2375,22 @@ class ClaudeWorker(threading.Thread):
         """
         stats = event.get("subagent_stats")
         if not isinstance(stats, dict):
-            return 0
-        started = stats.get("started_in_background")
-        started = started if isinstance(started, int) else 0
-        settled = 0
-        for field in ("completed", "failed"):
-            value = stats.get(field)
-            settled += value if isinstance(value, int) else 0
+            # No account of the agents at all. If none were ever running this
+            # is an ordinary turn and the answer is nought either way; if some
+            # were, this event simply does not mention them, and reading
+            # silence as "they have finished" is precisely what killed a whole
+            # fan-out before. What was last known stands until something says
+            # otherwise.
+            return previously
+        started = ClaudeWorker._count(stats.get("started_in_background"))
+        settled = sum(ClaudeWorker._count(stats.get(field)) for field in ("completed", "failed"))
         killed = stats.get("killed")
         if isinstance(killed, dict):
-            settled += sum(value for value in killed.values() if isinstance(value, int))
+            settled += sum(ClaudeWorker._count(value) for value in killed.values())
+        elif killed is not None:
+            # A shape nobody here understands. Counting it as nothing settled
+            # would leave the run waiting on agents that can never come back.
+            settled += ClaudeWorker._count(killed)
         return max(0, started - settled)
 
     @staticmethod
@@ -2682,6 +2694,9 @@ class ClaudeWorker(threading.Thread):
         # How many background agents the last wait was announced for, so the
         # count is only spoken when it changes rather than at every result.
         announced_waiting = 0
+        # Remembered across events: an event that says nothing about the agents
+        # must not be read as saying they have finished.
+        still_working = 0
 
         assert self._proc.stdout is not None
         for raw_line in self._proc.stdout:
@@ -2772,7 +2787,7 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
-                still_working = self._background_agents_running(event)
+                still_working = self._background_agents_running(event, still_working)
                 if not event.get("is_error") and still_working:
                     # The turn is over, the run is not: agents it started in
                     # the background are still going, and what they find comes
@@ -2791,8 +2806,19 @@ class ClaudeWorker(threading.Thread):
                     detail = (event.get("result") or "").strip()
                     if _looks_like_auth_error(detail):
                         self._fail(AUTH_HINT)
-                    else:
-                        self._fail(detail or "Claude Code returned an error")
+                        return
+                    note = detail or "Claude Code returned an error"
+                    if text_parts:
+                        # Waiting for background agents made a late error
+                        # result reachable for the first time, and this threw
+                        # away a turn that had already answered. How it ended
+                        # is worth saying; saying it *instead of* the answer
+                        # loses work that was already done, which is what the
+                        # exit-code path below is careful not to do.
+                        self._on_activity("result", note)
+                        self._close_stdin()
+                        break
+                    self._fail(note)
                     return
                 # In streaming-input mode the process waits for more messages
                 # rather than ending at EOF, so the turn's own result event is
