@@ -400,6 +400,13 @@ def _find_claude() -> Optional[str]:
 WINDOWS_INSTALL_PS1_URL = "https://claude.ai/install.ps1"
 POSIX_INSTALL_SH_URL = "https://claude.ai/install.sh"
 
+# Hermes ships per-platform script installers of the same shape — a PowerShell
+# one-liner on native Windows, curl through bash on macOS, Linux and WSL2 —
+# and is not on npm. It drops a launcher under the user's home directory and
+# self-updates from then on; no administrator rights, no Node.js.
+HERMES_INSTALL_PS1_URL = "https://hermes-agent.nousresearch.com/install.ps1"
+HERMES_INSTALL_SH_URL = "https://hermes-agent.nousresearch.com/install.sh"
+
 # CREATE_NO_WINDOW: without it every helper process flashes a console window,
 # which also steals focus away from the screen reader mid-install.
 _NO_WINDOW = 0x08000000 if platform.system() == "Windows" else 0
@@ -865,6 +872,94 @@ def _missing_prereq_message() -> str:
     )
 
 
+def _hermes_install_argv() -> Optional[List[str]]:
+    """Hermes' official installer for this platform, or None without prereqs.
+
+    The same prerequisites as Claude's script installer, for the same reason:
+    PowerShell ships with Windows, curl and bash ship with macOS, and a Linux
+    box without curl is possible.
+    """
+    if platform.system() == "Windows":
+        shell = _powershell_exe()
+        if shell is None:
+            return None
+        return [
+            shell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            f"iex (irm {HERMES_INSTALL_PS1_URL})",
+        ]
+
+    if shutil.which("curl") is None:
+        return None
+    shell = shutil.which("bash") or shutil.which("sh")
+    if shell is None:
+        return None
+    return [shell, "-c", f"curl -fsSL {HERMES_INSTALL_SH_URL} | bash"]
+
+
+def _hermes_missing_prereq_message() -> str:
+    if platform.system() == "Windows":
+        return (
+            "Could not find PowerShell on this computer, so Hermes' installer "
+            "cannot be run automatically."
+        )
+    return (
+        "Could not find curl and bash on this computer, so Hermes' installer "
+        "cannot be run automatically."
+    )
+
+
+def _hermes_binary_after_install() -> Optional[str]:
+    """The Hermes launcher after an install, with its install dirs on PATH.
+
+    The installers drop the launcher under the user's home — ``~/.local/bin``
+    on POSIX, ``LOCALAPPDATA\\Programs\\hermes`` among the Windows candidates
+    — so that directory is put on this process' PATH before the search.
+    """
+    from hermes_backend import find_hermes_cli
+
+    local_bin = Path.home() / ".local" / "bin"
+    if local_bin.is_dir():
+        _add_to_process_path(local_bin)
+    return find_hermes_cli()
+
+
+def install_hermes(log: Callable[[str], None]) -> Optional[str]:
+    """Run Hermes' official installer for this platform and report the result.
+
+    The same discipline as install_claude: the installer's exit code is
+    advisory, and a working `hermes` afterwards is the fact that counts.
+    """
+    argv = _hermes_install_argv()
+    if argv is None:
+        log(_hermes_missing_prereq_message())
+        return None
+
+    log(
+        "Downloading and running the official Hermes installer. This usually takes a minute or two."
+    )
+    rc = _run_logged_process(argv, log)
+
+    binary = _hermes_binary_after_install()
+    if binary is None:
+        log(f"The installer finished with exit code {rc} but `hermes` was not found afterwards.")
+        return None
+
+    log(f"Installed: {binary}")
+    folder = Path(binary).parent
+    try:
+        changed = ensure_on_path(folder)
+        if changed:
+            log(f"Added {folder} to {changed}.")
+    except OSError as exc:
+        log(f"Installed, but adding it to PATH failed: {exc}")
+    return binary
+
+
 def _path_shells() -> str:
     """The shells worth naming when telling the user to open a new terminal."""
     if platform.system() == "Windows":
@@ -1232,18 +1327,6 @@ def _run_logged_process(
     return proc.wait()
 
 
-def _not_installable_message(backend: str) -> str:
-    """Why BlindPilot cannot install this backend, with its own instructions.
-
-    Built so the parts are sentences on their own: `install_command` is a
-    fragment for some backends ("See https://..."), and the old failure line
-    spliced it after "using", which a screen reader read as "install Hermes
-    yourself using See https://...".
-    """
-    info = BACKENDS[normalize_backend(backend)]
-    return f"BlindPilot cannot install {info.label} itself. {info.install_command}"
-
-
 def _install_failure_message(backend: str) -> str:
     """What to hear when an install did not complete: the command, unspliced."""
     info = BACKENDS[normalize_backend(backend)]
@@ -1258,14 +1341,10 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
     backend = normalize_backend(backend)
     if backend == BACKEND_CLAUDE:
         return install_claude(log)
-    if not _backend_installs_with_npm(backend):
-        # Hermes ships its own installer and is not on npm. Reaching here at
-        # all means an Install button existed for a backend this function
-        # cannot install, and the old path then reported "npm could not be
-        # installed" — untrue on machines that have npm, and the reason a
-        # captured NVDA session heard the claim on one that does. Refuse in
-        # terms of the backend before any npm machinery is consulted.
-        raise NotImplementedError(_not_installable_message(backend))
+    if backend == BACKEND_HERMES:
+        # Hermes is not on npm. Its official per-platform script installer is
+        # the install path, the same shape as Claude's.
+        return install_hermes(log)
     label = backend_label(backend)
     npm = _find_npm()
     if npm is None:
@@ -1373,6 +1452,26 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
         _models, _efforts, previous_freebuff_model, _effort, _error = freebuff_model_options()
     if backend == BACKEND_CLAUDE:
         argv = [binary, "update"]
+    elif backend == BACKEND_HERMES:
+        # Not on npm: its official installer is the update path too. It is
+        # safe to re-run — it upgrades in place — and success is measured by
+        # the launcher afterwards, not the exit code. This path used to fall
+        # through to npm and report that npm could not be found, for a
+        # backend that has no npm package.
+        hermes_argv = _hermes_install_argv()
+        if hermes_argv is None:
+            log(_hermes_missing_prereq_message())
+            return False
+        log(f"Running the official {label} installer to update...")
+        rc = _run_logged_process(hermes_argv, log)
+        if rc != 0:
+            log(f"{label} update exited with code {rc}.")
+            return False
+        if _hermes_binary_after_install() is None:
+            log(f"{label} update finished, but `hermes` was not found afterwards.")
+            return False
+        log(f"{label} is up to date.")
+        return True
     else:
         if _find_npm() is None and install_portable_node(log) is None:
             log(f"npm could not be installed, so BlindPilot cannot update {label} automatically.")
@@ -7320,6 +7419,8 @@ class SetupWizard(wx.Dialog):
     def _selected_install_argv(self) -> Optional[List[str]]:
         if self.backend == BACKEND_CLAUDE:
             return _install_argv()
+        if self.backend == BACKEND_HERMES:
+            return _hermes_install_argv()
         argv = _npm_install_argv(self.backend)
         if argv is not None:
             return argv
@@ -7490,25 +7591,41 @@ class SetupWizard(wx.Dialog):
                 hint = "Tab to Add to PATH to make the CLI available in new terminals."
             self._next_btn.Enable(True)
         elif not _backend_installs_with_npm(self.backend):
-            # This backend does not come from npm, so Install is not offered
-            # at all — the old order asked `_selected_install_argv` first,
-            # whose managed-Node sentinel answers for any backend when Node
-            # is installable, and Hermes was offered an install that runs
-            # nothing and then reports that npm could not be installed, on
-            # machines that have it. Point at its own instructions instead.
-            self._cli_status.SetLabel(f"{info.label} was not found.")
-            self._cli_detail.SetLabel(
-                f"BlindPilot could not find {info.label} on this computer.\n\n"
-                f"{info.install_command}\n\n"
-                "Install it, then choose Check Again, or go Back and select "
-                "another backend."
-            )
-            self._cli_install_btn.Hide()
-            self._cli_update_btn.Hide()
-            self._cli_path_btn.Hide()
-            self._cli_check_btn.Show()
-            self._next_btn.Enable(False)
-            hint = "Tab to Check Again once it is installed."
+            # This backend does not come from npm: it has an installer of its
+            # own. Offer it when the prerequisites are here — the same offer
+            # the npm backends get, in the backend's own terms — and name what
+            # is missing when they are not. npm is never named: it has nothing
+            # to do with this install, and saying it would send the user after
+            # the wrong thing.
+            if _hermes_install_argv() is not None:
+                self._cli_status.SetLabel(f"{info.label} is not installed.")
+                self._cli_detail.SetLabel(
+                    f"Choose Install {info.label}. BlindPilot runs {info.label}'s official "
+                    "installer — no administrator rights and no Node.js needed — then checks "
+                    "that it starts and puts it on your PATH.\n\n"
+                    f"You can also run it yourself: {info.install_command}\n\n"
+                    "Then choose Check Again."
+                )
+                self._cli_install_btn.Show()
+                self._cli_update_btn.Hide()
+                self._cli_path_btn.Hide()
+                self._cli_check_btn.Show()
+                self._next_btn.Enable(False)
+                hint = f"Tab to Install {info.label}."
+            else:
+                self._cli_status.SetLabel(f"{info.label} was not found.")
+                self._cli_detail.SetLabel(
+                    f"{_hermes_missing_prereq_message()}\n\n"
+                    f"Install {info.label} by running this in a terminal:\n\n"
+                    f"{info.install_command}\n\n"
+                    "Then choose Check Again, or go Back and select another backend."
+                )
+                self._cli_install_btn.Hide()
+                self._cli_update_btn.Hide()
+                self._cli_path_btn.Hide()
+                self._cli_check_btn.Show()
+                self._next_btn.Enable(False)
+                hint = "Tab to Check Again once it is installed."
         elif self._selected_install_argv() is not None:
             self._cli_status.SetLabel(f"{info.label} is not installed.")
             if _find_npm() is None:
@@ -7583,15 +7700,18 @@ class SetupWizard(wx.Dialog):
 
     def _install_cli(self) -> None:
         label = backend_label(self.backend)
-        if not _backend_installs_with_npm(self.backend):
-            # The check hides this button for a backend BlindPilot cannot
-            # install, but a dialog built before that fix can still hold one.
-            # Pressing it must not promise "under a minute" for an install
-            # that cannot happen: captured from NVDA, the promise and three
-            # failure lines were spoken in the same breath, three milliseconds
-            # apart. Refuse at once, in terms of the backend.
-            self._cli_status.SetLabel(f"BlindPilot cannot install {label}.")
-            announce(_not_installable_message(self.backend))
+        argv = self._selected_install_argv()
+        if argv is None:
+            # A stale Install button (a dialog built before a check that no
+            # longer offers one), or the prerequisites vanished mid-session.
+            # Captured from NVDA: pressing this used to promise "under a
+            # minute" for an install that could not happen, then report npm —
+            # whether or not npm existed — three milliseconds later. Promise
+            # nothing; say what is missing in the backend's own terms.
+            if _backend_installs_with_npm(self.backend):
+                announce(_missing_prereq_message())
+            else:
+                announce(_hermes_missing_prereq_message())
             return
         self._cli_install_btn.Disable()
         self._cli_update_btn.Disable()

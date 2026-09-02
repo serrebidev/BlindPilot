@@ -1,12 +1,14 @@
 """What the setup wizard says when a backend is not there.
 
-Three things a screen-reader user heard on one press of "Install Hermes",
-captured from NVDA: a promise ("Installing Hermes. This usually takes under a
-minute."), a lie ("npm could not be installed" on a machine that has npm), and
-a splice ("install Hermes yourself using See https://..."). The first two came
-from the wizard offering Install for a backend BlindPilot cannot install at
-all — Hermes ships its own installer and is not on npm — and the third from a
-sentence fragment spliced into a sentence.
+Captured from NVDA on one press of "Install Hermes": a promise, a lie about
+npm on a machine that has npm, and a fragment spliced into a sentence. The
+root was that the only install machinery was npm's, so a backend that does
+not come from npm — Hermes ships its own installer — was offered an install
+that runs nothing and then reports npm as the reason.
+
+Hermes is now installed through its own official installer, so every backend
+the registry holds is installable in the wizard on Windows, macOS and Linux.
+These tests pin what the user hears in every branch.
 """
 
 from __future__ import annotations
@@ -112,37 +114,55 @@ def test_an_npm_backend_without_node_promises_node_not_npm(monkeypatch, wx_app):
     assert "npm could not be installed" not in wizard._cli_detail.text
 
 
-def test_hermes_is_never_offered_an_install_button(monkeypatch, wx_app):
-    """Hermes is not on npm; Install would run nothing and then lie about it."""
+def test_hermes_is_offered_an_install_of_its_own(monkeypatch, wx_app):
+    """Hermes installs through its official installer now, so the wizard
+    offers it — with Hermes' instructions, not npm's."""
     wizard = _Wizard(BACKEND_HERMES)
     monkeypatch.setattr(app, "_find_npm", lambda: "C:/npm/npm.cmd")
+    monkeypatch.setattr(app, "_hermes_install_argv", lambda: ["powershell.exe", "-Command", "x"])
+
+    app.SetupWizard._check_npm_backend_cli(wizard)
+
+    assert wizard._cli_install_btn.shown
+    assert wizard._cli_status.text == "Hermes is not installed."
+    assert "official" in wizard._cli_detail.text
+    assert "npm" not in wizard._cli_detail.text
+    assert "https://hermes-agent.nousresearch.com/docs" in wizard._cli_detail.text
+
+
+def test_hermes_without_prerequisites_still_gets_its_own_guidance(monkeypatch, wx_app):
+    """No PowerShell (or no curl): the message names what is missing and the
+    manual instructions, never npm."""
+    wizard = _Wizard(BACKEND_HERMES)
+    monkeypatch.setattr(app, "_find_npm", lambda: "C:/npm/npm.cmd")
+    monkeypatch.setattr(app, "_hermes_install_argv", lambda: None)
 
     app.SetupWizard._check_npm_backend_cli(wizard)
 
     assert not wizard._cli_install_btn.shown
     assert wizard._cli_status.text == "Hermes was not found."
     assert "https://hermes-agent.nousresearch.com/docs" in wizard._cli_detail.text
+    assert "npm" not in wizard._cli_detail.text
 
 
-def test_hermes_install_backend_never_reaches_npm_and_never_lies(monkeypatch):
-    """install_backend refuses a backend it cannot install, for its own
-    reason, before any npm machinery is consulted."""
+def test_hermes_install_backend_goes_through_its_own_installer(monkeypatch):
+    """install_backend routes Hermes to install_hermes — never npm."""
     lines: list[str] = []
-    monkeypatch.setattr(app, "_find_npm", lambda: "C:/npm/npm.cmd")
+    monkeypatch.setattr(
+        app,
+        "install_hermes",
+        lambda log: log("installing through the official installer") or "hermes.exe",
+    )
 
-    with pytest.raises(NotImplementedError) as excinfo:
-        app.install_backend(BACKEND_HERMES, lines.append)
-
-    assert "npm" not in str(excinfo.value)
-    assert lines == []
+    assert app.install_backend(BACKEND_HERMES, lines.append) == "hermes.exe"
+    assert any("official installer" in line for line in lines)
 
 
 def test_the_failed_install_message_is_a_sentence_for_every_backend():
     """Hermes' install_command is a fragment ("See https://..."), and the old
     message spliced it after "using", which read as "yourself using See".
     The failure message must carry the command without splicing it into a
-    sentence, for every backend the wizard offers — and a backend whose
-    command is a sentence is never re-fenced into a splice either."""
+    sentence, for every backend the registry holds."""
     for backend in app.BACKENDS:
         message = app._install_failure_message(backend)
         command = app.BACKENDS[backend].install_command
@@ -150,17 +170,14 @@ def test_the_failed_install_message_is_a_sentence_for_every_backend():
         assert command in message
 
 
-def test_installing_a_backend_blindpilot_cannot_install_says_so_up_front(monkeypatch, wx_app):
-    """The promise and the failure must not be spoken in the same breath:
-    pressing Install for a backend BlindPilot cannot install refuses at once
-    instead of promising a minute it does not have."""
+def test_installing_hermes_promises_nothing_until_it_is_running(monkeypatch, wx_app):
+    """The captured burst: the promise and the failures in one breath. The
+    promise now belongs to the install that is actually going to run."""
     spoken = _said(monkeypatch)
     wizard = _Wizard(BACKEND_HERMES)
-    monkeypatch.setattr(
-        app, "install_backend", lambda _b, _log: (_ for _ in ()).throw(AssertionError("reached"))
-    )
+    monkeypatch.setattr(app, "_hermes_install_argv", lambda: None)
 
     app.SetupWizard._install_cli(wizard)
 
     assert not any("This usually takes under a minute" in text for text in spoken)
-    assert any("cannot install" in text for text in spoken)
+    assert any("PowerShell" in text or "curl" in text for text in spoken)
