@@ -165,3 +165,96 @@ def test_opening_a_side_chat_with_no_session_open_does_nothing():
     stub._open_side_chat = lambda *_a: pytest.fail("opened a side chat with no tab to copy")
 
     app.MainFrame._side_chat_active(stub)
+
+
+# ----- every command BlindPilot owns can be found without being told -----
+#
+# The menu bar is meant to be the complete inventory, and a slash command that
+# nothing in it names can only be discovered by somebody telling you the word.
+# `/status` was exactly that: BlindPilot's own command, offered for every
+# backend because none of them answers it themselves, reachable only by typing
+# it into the prompt.
+#
+# The mapping is written out rather than guessed at, so adding a command
+# without deciding where it lives fails here instead of shipping invisibly.
+
+COMMAND_MENU_ENTRY = {
+    "/btw": "Side Chat",
+    "/clear": "Start New Conversation",
+    "/compact": "Compact Conversation",
+    "/exit": "Close Session",
+    "/model": "Model and Effort",
+    "/resume": "Recent Conversations",
+    "/status": "Session Status",
+}
+
+# Commands that are deliberately not menu items, and why. A second way to say
+# the same thing is not a second command.
+NOT_A_MENU_ITEM = {
+    "/models": "opens the same dialog as /model, which refreshes in the background anyway",
+    "/model [model-id]": "an argument form of /model, not a separate command",
+}
+
+
+def _command_names():
+    """The command word, without the argument placeholder."""
+    return [command.split(" ")[0] for command, _help in app._BLINDPILOT_SLASH_COMMANDS]
+
+
+def _model_menu(frame):
+    """The Model menu, with its two submenus stubbed out.
+
+    Those read live backend and permission state; what is being checked here
+    is the flat items, which is where a command becomes findable.
+    """
+    frame._build_backend_menu = lambda: wx.Menu()
+    frame._build_permission_mode_menu = lambda: wx.Menu()
+    for name in ("_model_active", "_connect_active", "_manage_backends", "_status_active"):
+        setattr(frame, name, lambda: None)
+    return app.MainFrame._build_model_menu(frame)
+
+
+def _every_label(frame):
+    return " | ".join(
+        _labels(app.MainFrame._build_file_menu(frame))
+        + _labels(app.MainFrame._build_conversation_menu(frame))
+        + _labels(_model_menu(frame))
+    )
+
+
+def test_every_blindpilot_command_is_either_in_a_menu_or_deliberately_not(frame):
+    """The guard: a new command cannot be added without deciding this."""
+    decided = set(COMMAND_MENU_ENTRY) | set(NOT_A_MENU_ITEM)
+    for command, _help in app._BLINDPILOT_SLASH_COMMANDS:
+        name = command if command in decided else command.split(" ")[0]
+        assert name in decided, (
+            f"{command} is BlindPilot's own command and nothing says where it lives. "
+            "Give it a menu entry, or record here why it has none."
+        )
+
+
+@pytest.mark.parametrize("command", sorted(COMMAND_MENU_ENTRY))
+def test_the_menu_entry_for_each_command_is_really_there(frame, command):
+    wanted = COMMAND_MENU_ENTRY[command]
+    labels = _every_label(frame)
+
+    assert wanted in labels, f"{command} is supposed to be {wanted!r} in a menu: {labels}"
+
+
+def test_the_model_menu_says_what_this_tab_is_set_to(frame):
+    """`/status` reports the backend, model and account, which is what this
+    menu is about."""
+    labels = _labels(_model_menu(frame))
+
+    assert any("Session Status" in label for label in labels), labels
+
+
+def test_the_model_menu_still_holds_what_it_held(frame):
+    labels = " | ".join(_labels(_model_menu(frame)))
+
+    for wanted in ("Model and Effort", "Manage Backends", "Connect a Provider"):
+        assert wanted in labels, f"{wanted} went missing: {labels}"
+
+
+def test_the_model_menu_is_not_longer_than_it_can_be_listened_to(frame):
+    assert len(_labels(_model_menu(frame))) <= 10

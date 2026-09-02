@@ -6803,39 +6803,7 @@ class MainFrame(wx.Frame):
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
 
-        # ----- Model: what answers you, and what it may do -----
-        #
-        # The picker below already existed and worked, but `/model` typed into
-        # the prompt was the only way to reach it, and nothing in the menu bar
-        # said the word "model" at all.
-        model_menu = wx.Menu()
-        model_menu.AppendSubMenu(
-            self._build_backend_menu(),
-            "&Backend",
-            "Choose which coding-agent CLI BlindPilot uses",
-        )
-        model_item = model_menu.Append(
-            wx.ID_ANY,
-            "&Model and Effort…	Ctrl+M",
-            "Choose the model and effort level this conversation runs at",
-        )
-        model_menu.AppendSubMenu(
-            self._build_permission_mode_menu(),
-            "&Permission Mode",
-            "Choose what the backend may do without asking, for this conversation",
-        )
-        model_menu.AppendSeparator()
-        manage_backends_item = model_menu.Append(
-            wx.ID_ANY,
-            "Ma&nage Backends...",
-            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
-        )
-        self._connect_item = model_menu.Append(
-            wx.ID_ANY,
-            "&Connect a Provider…",
-            "Connect a provider to opencode, or disconnect one",
-        )
-        menubar.Append(model_menu, "&Model")
+        menubar.Append(self._build_model_menu(), "&Model")
 
         # ----- Options: how much of a run is narrated -----
         options_menu = wx.Menu()
@@ -6967,8 +6935,6 @@ class MainFrame(wx.Frame):
         self._refresh_compact_item()
         self._refresh_connect_item()
         self._refresh_mode_items()
-        self.Bind(wx.EVT_MENU, lambda _e: self._model_active(), model_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._connect_active(), self._connect_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_live_rows(), self._rows_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_speak_live(), self._speak_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._toggle_show_thinking(), self._thinking_item)
@@ -7009,7 +6975,6 @@ class MainFrame(wx.Frame):
             lambda _e: self._show_chat_diagnostics(),
             self._chat_diagnostics_item,
         )
-        self.Bind(wx.EVT_MENU, lambda _e: self._manage_backends(), manage_backends_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._open_log_folder(), logs_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
@@ -7591,6 +7556,58 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda _event: action(), item)
         return item
 
+    def _build_model_menu(self) -> wx.Menu:
+        """What answers you, and what it may do.
+
+        The picker already existed and worked, but `/model` typed into the
+        prompt was the only way to reach it and nothing in the menu bar said
+        the word "model" at all. `/status` was in the same position for longer:
+        BlindPilot's own command, offered for every backend because none of
+        them answers it themselves, and findable only by being told the word.
+
+        Built here rather than inline in `_build_menubar` so that appending an
+        item and binding it stay together - they were a hundred and fifty lines
+        apart - and so the menu can be read by a test.
+        """
+        menu = wx.Menu()
+        add = self._menu_item
+        menu.AppendSubMenu(
+            self._build_backend_menu(),
+            "&Backend",
+            "Choose which coding-agent CLI BlindPilot uses",
+        )
+        add(
+            menu,
+            "&Model and Effort…	Ctrl+M",
+            "Choose the model and effort level this conversation runs at",
+            self._model_active,
+        )
+        menu.AppendSubMenu(
+            self._build_permission_mode_menu(),
+            "&Permission Mode",
+            "Choose what the backend may do without asking, for this conversation",
+        )
+        add(
+            menu,
+            "Session &Status…",
+            "Show the backend, model, and account this conversation is using",
+            self._status_active,
+        )
+        menu.AppendSeparator()
+        add(
+            menu,
+            "Ma&nage Backends...",
+            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
+            self._manage_backends,
+        )
+        self._connect_item = add(
+            menu,
+            "&Connect a Provider…",
+            "Connect a provider to opencode, or disconnect one",
+            self._connect_active,
+        )
+        return menu
+
     def _build_file_menu(self) -> wx.Menu:
         """Sessions, tabs, and the application itself.
 
@@ -7791,6 +7808,12 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_model_dialog()
+
+    def _status_active(self) -> None:
+        """What the active tab is set to (Model > Session Status, or /status)."""
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.open_status_dialog()
 
     def _connect_active(self) -> None:
         page = self.notebook.GetCurrentPage()
