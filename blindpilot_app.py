@@ -4030,15 +4030,15 @@ class HistoryDialog(wx.Dialog):
         event.Skip()
 
 
-# How long the prompt has to stop changing before dictated or pasted text is
-# read back. Long enough that the pauses inside one utterance do not split
-# it, short enough to be a read-back rather than an interruption.
 # How long the application waits, in total, for the turns still running when it
 # quits. They are cancelled at the same time and share this, rather than each
 # being given the whole of it.
 _CANCEL_JOIN_SECONDS = 3.0
 
 
+# How long the prompt has to stop changing before dictated or pasted text is
+# read back. Long enough that the pauses inside one utterance do not split
+# it, short enough to be a read-back rather than an interruption.
 _DICTATION_PAUSE_MS = 1500
 
 
