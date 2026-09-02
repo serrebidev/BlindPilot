@@ -104,6 +104,7 @@ from agent_backends import (
     opencode_oauth_finish,
     opencode_oauth_start,
     opencode_providers,
+    settings_files,
     own_group_kwargs,
     prewarm_freebuff,
     question_summary,
@@ -418,6 +419,57 @@ def _open_web_page(url: str) -> bool:
         return bool(webbrowser.open(url))
     except Exception:
         return False
+
+
+def _open_path(path) -> bool:
+    """Hand a file or folder to whatever this platform opens it with.
+
+    False means nothing happened, for any reason. Every caller says the path
+    out loud in that case, so there is still a way through by hand.
+    """
+    try:
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(str(path))  # noqa: S606 - a path this application chose
+            return True
+        opener = "open" if system == "Darwin" else "xdg-open"
+        return subprocess.Popen([opener, str(path)]) is not None
+    except (OSError, ValueError):
+        return False
+
+
+def _settings_label(entry) -> str:
+    """One row of the settings list, as the screen reader will read it.
+
+    Everything is in the label because the label is what gets read on arrow.
+    The scope and the note are not decoration: the two project-level Claude
+    Code files differ only in whether the repository carries them, and opening
+    the wrong one is how somebody's own settings end up committed to a
+    repository that is not theirs.
+    """
+    state = "present" if entry.exists else "not created yet"
+    return f"{backend_label(entry.backend)}, {entry.scope}. {entry.note} ({state})"
+
+
+def _reach_settings_file(entry) -> str:
+    """Open one, and say what happened. Never writes and never creates.
+
+    A settings file belongs to the CLI that reads it, and every one of them
+    writes its own on first run. One invented here, at a path BlindPilot chose,
+    would do nothing while looking like it did.
+    """
+    if entry.exists:
+        if _open_path(entry.path):
+            return f"Opened {entry.path.name}"
+        return f"Could not open {entry.path}. Open it yourself to edit it."
+    folder = entry.path.parent
+    if folder.is_dir() and _open_path(folder):
+        return (
+            f"{entry.path.name} does not exist yet. "
+            f"{backend_label(entry.backend)} writes it itself. "
+            "Opened the folder it belongs in."
+        )
+    return f"{entry.path.name} does not exist yet. It would be at {entry.path}."
 
 
 def _same_dir(a: str, b: str) -> bool:
@@ -3165,6 +3217,93 @@ class ClaudeWorker(threading.Thread):
         # Blank line between blocks: a turn now usually has several (the running
         # narration, then the answer), and they are separate paragraphs.
         self._on_complete("\n\n".join(text_parts).strip())
+
+
+class SettingsFilesDialog(wx.Dialog):
+    """Where each backend keeps its settings, and a way in to them.
+
+    BlindPilot opens these; it does not change them. That is the whole feature.
+    The problem was never that editing text is hard - it is that these are
+    dotfiles in directories nothing announces, so reaching one meant leaving
+    the application already knowing where to look. `open_log_folder` exists on
+    the same reasoning: reading a path out loud and leaving somebody to
+    navigate to it is not a way in.
+
+    Editing them here was considered and rejected. Claude Code's is over three
+    hundred lines of nested JSON and Codex's over two hundred lines of TOML; a
+    text box holding either, navigated by ear, is worse than the editor
+    somebody already has, and a stray comma written back breaks the CLI
+    silently until it next refuses to start.
+
+    Every file is listed whether or not it exists, because half of what this
+    answers is "where would that even be".
+    """
+
+    def __init__(self, parent: Optional[wx.Window], cwd: Optional[str]):
+        super().__init__(
+            parent,
+            title="Backend Settings",
+            size=wx.Size(780, 480),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self._entries = list(settings_files(cwd))
+        outer = wx.BoxSizer(wx.VERTICAL)
+        intro = wx.StaticText(
+            self,
+            label=(
+                "The files each coding agent reads its settings from. "
+                "BlindPilot opens them in your editor; it never changes them."
+            ),
+        )
+        outer.Add(intro, 0, wx.ALL, 10)
+        outer.Add(wx.StaticText(self, label="Settings &files:"), 0, wx.LEFT | wx.RIGHT, 10)
+        self.list_box = wx.ListBox(
+            self,
+            choices=[_settings_label(entry) for entry in self._entries],
+            style=wx.LB_SINGLE,
+        )
+        if self._entries:
+            self.list_box.SetSelection(0)
+        outer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, 10)
+        self.status = wx.StaticText(self, label="")
+        outer.Add(self.status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        open_button = wx.Button(self, wx.ID_ANY, "&Open")
+        buttons.Add(open_button, 0, wx.RIGHT, 8)
+        buttons.Add(wx.Button(self, wx.ID_CANCEL, "&Close"), 0)
+        outer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
+        self.SetSizer(outer)
+
+        self.Bind(wx.EVT_BUTTON, lambda _event: self._open_selected(), open_button)
+        self.Bind(wx.EVT_LISTBOX_DCLICK, lambda _event: self._open_selected(), self.list_box)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.list_box.SetFocus()
+
+    def _open_selected(self) -> None:
+        index = self.list_box.GetSelection()
+        if index == wx.NOT_FOUND or index >= len(self._entries):
+            announce("Choose a settings file first")
+            return
+        said = _reach_settings_file(self._entries[index])
+        announce(said)
+        self.status.SetLabel(said)
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        key = event.GetKeyCode()
+        if key == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            # CHAR_HOOK fires before the focused control sees the key, so Enter
+            # on Close has to reach Close. The same mistake as the
+            # past-conversations dialog, not repeated here.
+            if isinstance(self.FindFocus(), wx.Button):
+                event.Skip()
+                return
+            self._open_selected()
+            return
+        event.Skip()
 
 
 class ReadView(wx.Dialog):
@@ -7657,6 +7796,12 @@ class MainFrame(wx.Frame):
         menu.AppendSeparator()
         add(
             menu,
+            "Backend Se&ttings…",
+            "Open the file a coding agent reads its own settings from",
+            self._settings_files_active,
+        )
+        add(
+            menu,
             "Ma&nage Backends...",
             "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
             self._manage_backends,
@@ -7875,6 +8020,18 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_status_dialog()
+
+    def _settings_files_active(self) -> None:
+        """Where the backends keep their settings (Model > Backend Settings).
+
+        The active tab's folder decides the project-level entries, so it is
+        built when opened rather than being a submenu that would go stale the
+        moment somebody switched tabs.
+        """
+        page = self.notebook.GetCurrentPage()
+        cwd = page.cwd if isinstance(page, SessionPanel) else None
+        with SettingsFilesDialog(self, cwd) as dlg:
+            dlg.ShowModal()
 
     def _connect_active(self) -> None:
         page = self.notebook.GetCurrentPage()
