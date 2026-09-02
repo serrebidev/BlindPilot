@@ -1,48 +1,51 @@
-# BlindPilot 0.13.0
+# BlindPilot 0.14.0
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release changes nothing you can hear, and that is the point of it. Behaviour is
-exactly as in 0.12.0. What changed is the ground underneath the build and the evidence
-behind the narration choice.
+Nothing you hear changes in this release. What changed is the ground underneath the
+code: the types are now checked, and the checker found a contract that was wrong.
 
-## Every dependency is bounded, not half of them
+## The types are checked, and the checker found a real defect
 
-The build file has always pinned its own three tools to the next major version. The
-application's requirements bounded four of nine — and two of the other five had already
-drifted a whole major version under a floor that allowed it:
+The type annotations were already in the code — the scattered `# type: ignore` comments
+said somebody once meant to run a checker, but nobody was, so nothing held them to it.
+Mypy now runs in CI, pinned like ruff. One runner is enough: `mypy.ini` pins
+`platform = win32` because this code carries both halves of every platform split behind
+runtime checks no checker can read, so unpinned the same tree reports 21 errors on
+Windows and 52 on Linux.
 
-- pywinpty 2 → 3: this drives the pseudo-terminal FreeBuff runs in.
-- markdown-it-py 3 → 4: this segments every answer into the rows BlindPilot navigates.
+There were 21 errors across 15,855 lines. One was a real defect:
 
-A packaged release resolves dependencies fresh on the build machine, so a major version
-arriving unannounced meant a broken release — and the first anybody would know was a
-download that did not work.
+**Steer was not part of the worker contract.** The window holds whichever backend's
+worker was chosen through a shared Protocol, so it can drive it without knowing which
+one it is. That Protocol promised `start`, `is_alive`, `join` and `cancel` — but not
+`steer`, which is called directly when you press Steer. All four workers happened to
+implement it, so nothing ever broke. A fifth that did not would have type-checked clean
+and failed the first time somebody pressed Steer. The call site used to reach for it
+with `getattr(worker, "steer")`, which is what hid the gap: written that way, neither a
+reader nor a checker could see the Protocol was short. That indirection is gone, `steer`
+is in the Protocol, and a test now holds every worker to the whole contract — it fails
+without the fix.
 
-Every dependency now carries an upper bound, each one being the next major above a
-version the application has actually been run against. Raising one is now a deliberate
-act, with the test suite to back it, rather than something that happens on its own
-between two releases. Two of the bounds — for the macOS and non-Windows entries — could
-not be exercised on the Windows development machine; CI covers both platforms before a
-release ships.
+Two more errors were latent rather than broken — safe today, and both stopping being
+safe after an edit:
 
-## The fan-out claim is measured, not asserted
+- An npm install guarded on the argument list rather than on npm itself, so nothing
+  established the value it then passed on. Installing a backend that needs npm now says
+  so plainly when npm cannot be installed.
+- An opencode history helper called `entry.get("info")` twice, so the guard tested one
+  value and the code used another. That shape appeared five times; it is now one named
+  helper.
 
-**Keep up** narration exists because of a claim: that a fan-out stops flooding the
-screen reader. The tests that arrived with the mode checked the rule — this kind of line
-is spoken, that kind is not — but never the claim, and the claim is the reason the mode
-exists. Now it is measured: five agents at eight steps each is 85 spoken lines in
-*Follow everything*, and one in *Keep up*. At a couple of seconds apiece, 85 lines is
-minutes of backlog in a queue BlindPilot cannot see into, cannot shorten and cannot pop
-from.
+The rest were platform splits behind runtime checks no checker can read, variables
+reused for two different lookups, and one pre-existing `# type: ignore` that carried the
+wrong error code. Three ignored lines remain, each with the reason written beside it.
+82% of expressions are precisely typed even with wxPython untyped, because the third
+parties that ship no stubs are covered narrowly rather than by loosening anything else.
 
-Two more tests hold the mode honest where it could go wrong: quieter is only worth
-having if the answer survives it, and skipping a line must not mean losing it — every
-tool call and result is still a row, still under the review cursor.
-
-The tests drive the narration pipeline directly rather than through a screen-reader
-bridge, so they run for anybody, in CI on all three platforms, rather than only on one
-machine. The bridge remains a tool for verifying speech changes by hand, which is what
-it is good at.
+Not proposed and worth saying why: `--strict` is 161 errors, 77 of them bare
+`dict`/`list`, and pyright — the stronger checker — would need real checks suppressed to
+reach zero, because wxPython's bundled stubs declare `wx.GetApp()` non-Optional and
+several runtime `is None` guards are genuinely needed.
