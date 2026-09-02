@@ -4021,6 +4021,12 @@ class HistoryDialog(wx.Dialog):
         event.Skip()
 
 
+# How long the prompt has to stop changing before dictated or pasted text is
+# read back. Long enough that the pauses inside one utterance do not split
+# it, short enough to be a read-back rather than an interruption.
+_DICTATION_PAUSE_MS = 1500
+
+
 class SessionPanel(wx.Panel):
     """One conversation tab — owns its session_id, rows, and worker.
 
@@ -4137,6 +4143,10 @@ class SessionPanel(wx.Panel):
         self.prompt.Bind(wx.EVT_SET_FOCUS, self._on_prompt_focus)
         self.prompt.Bind(wx.EVT_TEXT, self._on_prompt_text_changed)
         self._dictation_timer = None
+        # What the prompt held at the last change, so the next one can be
+        # told apart from a keystroke, and what is waiting to be read back.
+        self._prompt_text = ""
+        self._dictation_pending = ""
         char_h = self.prompt.GetCharHeight()
         self.prompt.SetMinSize(wx.Size(-1, char_h * 5 + 8))
 
@@ -4670,14 +4680,42 @@ class SessionPanel(wx.Panel):
             wx.CallAfter(announce, "Prompt, edit text")
 
     def _on_prompt_text_changed(self, event: wx.CommandEvent) -> None:
+        """Arrange to read back text that nothing else will have spoken.
+
+        Dictation puts words in the prompt with no keystrokes, so the screen
+        reader stays silent and there is no way to tell what landed. Typing is
+        the opposite: every character has already been echoed, and this used to
+        fire for that too, so pausing to think for a second and a half read the
+        whole prompt back over the top of it.
+
+        One more character is a keystroke. Bulk is dictation or a paste.
+        """
         event.Skip()
+        text = self.prompt.GetValue()
+        before, self._prompt_text = self._prompt_text, text
         if self._dictation_timer is not None:
             self._dictation_timer.Stop()
-        self._dictation_timer = wx.CallLater(1500, self._read_prompt_text)
+            self._dictation_timer = None
+        if len(text) - len(before) <= 1:
+            # Typed, or deleted. Either way it has been spoken already, and a
+            # pending read-back is now stale: carrying on by hand means the
+            # screen reader is echoing again.
+            self._dictation_pending = ""
+            return
+        # Successive chunks of one utterance land as separate events, so they
+        # accumulate and are read once when the dictating stops.
+        if text.startswith(before):
+            self._dictation_pending += text[len(before) :]
+        else:
+            self._dictation_pending = text
+        self._dictation_timer = wx.CallLater(_DICTATION_PAUSE_MS, self._read_prompt_text)
 
     def _read_prompt_text(self) -> None:
         self._dictation_timer = None
-        text = self.prompt.GetValue().strip()
+        # What arrived, not the whole prompt: dictating a second sentence onto
+        # a long one should not replay the first.
+        text = (self._dictation_pending or self.prompt.GetValue()).strip()
+        self._dictation_pending = ""
         if text:
             announce(text)
 
