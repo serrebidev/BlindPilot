@@ -1976,6 +1976,23 @@ def _config_path() -> Path:
     return _config_dir() / "config.json"
 
 
+def _record_setup_complete(cfg: dict) -> bool:
+    """Remember that the wizard was done, and say so if that failed.
+
+    Without this the only symptom of an unwritable settings file is the whole
+    wizard appearing again next launch - the CLI check, the sign-in, all of it -
+    and nothing connects that to a file nobody can write.
+    """
+    if _save_config(cfg):
+        return True
+    announce(
+        "Your settings could not be saved, so BlindPilot will ask you to set it "
+        "up again next time it starts. Check that its settings folder is "
+        "reachable and not full."
+    )
+    return False
+
+
 def _load_config() -> dict:
     for path in (_config_path(), _legacy_config_path()):
         try:
@@ -1987,13 +2004,36 @@ def _load_config() -> dict:
     return {}
 
 
-def _save_config(cfg: dict) -> None:
+def _save_config(cfg: dict) -> bool:
+    """Write the settings. False if they did not get written.
+
+    This used to swallow `OSError` and return nothing, so no caller could tell
+    - and several of them announce a sentence the failed write has just made
+    untrue. The one that matters most is the first-run wizard: finishing it is
+    recorded here, and startup shows the wizard again when that record is
+    missing, so a profile whose settings cannot be written puts somebody
+    through the entire wizard on every launch with nothing saying why.
+
+    Written to one side and moved into place, so an interruption partway
+    through cannot leave a half-written file. `_load_config` cannot parse one
+    of those and starts again from empty, which loses every setting at once
+    rather than the one being saved.
+    """
+    path = _config_path()
+    temporary = path.with_name(path.name + ".new")
     try:
         _config_dir().mkdir(parents=True, exist_ok=True)
-        with open(_config_path(), "w", encoding="utf-8") as fh:
+        with open(temporary, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, indent=2)
-    except OSError:
-        pass
+        os.replace(temporary, path)
+        return True
+    except (OSError, ValueError, TypeError):
+        logging.getLogger("blindpilot").warning("could not write the settings to %s", path)
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        return False
 
 
 # How much of a run is read out.
@@ -8298,7 +8338,7 @@ def main() -> int:
         # count as handled. Users choosing Codex or FreeBuff should not be sent
         # back through the Claude wizard on every launch.
         cfg["setup_complete"] = True
-        _save_config(cfg)
+        _record_setup_complete(cfg)
         wizard.Destroy()
         # Even if cancelled, open the app — user may know what they're doing.
 
