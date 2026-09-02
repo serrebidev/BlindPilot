@@ -2260,6 +2260,15 @@ def _claude_questions(raw: list) -> tuple[Question, ...]:
     return tuple(questions)
 
 
+# How long the CLI may say nothing at all, after its input has closed, before
+# BlindPilot stops waiting for it. Shutting down is not instant: a session is
+# written to disk and MCP servers are torn down, and a run that has just kept a
+# fan-out of agents alive has the most to put away. The old limit was five
+# seconds flat, which on Windows produced the exit code it then complained
+# about - `Popen.kill` is `TerminateProcess(handle, 1)`.
+_SHUTDOWN_QUIET_SECONDS = 30.0
+
+
 class ClaudeWorker(threading.Thread):
     """Runs the Claude Code CLI subprocess and delivers results via callbacks.
 
@@ -2300,6 +2309,7 @@ class ClaudeWorker(threading.Thread):
         self._on_question = on_question
         self._proc: Optional[subprocess.Popen] = None
         self._cancelled = False
+        self._stopped_by_us = False
         # Set once the process is up and the opening prompt has gone in, cleared
         # when the turn ends. Guards `steer()` against writing to a pipe that is
         # not there yet (or is already gone).
@@ -2350,8 +2360,56 @@ class ClaudeWorker(threading.Thread):
             thread.join(timeout=2)
         return "".join(self._stderr_lines).strip()
 
+    def _wait_for_shutdown(self) -> bool:
+        """Wait for the CLI to exit once its input has closed.
+
+        True if it exited by itself, False if it has gone quiet and should be
+        stopped. Time is not the measure: a CLI that is still writing is still
+        working, so the clock restarts whenever it says anything, and only a
+        process that has said nothing for a while is given up on. Still
+        bounded, because a genuinely stuck one must not hang the turn.
+        """
+        proc = self._proc
+        heard = len(self._stderr_lines)
+        last_heard = time.monotonic()
+        while True:
+            try:
+                proc.wait(timeout=0.25)
+                return True
+            except subprocess.TimeoutExpired:
+                pass
+            said = len(self._stderr_lines)
+            if said != heard:
+                heard = said
+                last_heard = time.monotonic()
+            if time.monotonic() - last_heard >= _SHUTDOWN_QUIET_SECONDS:
+                return False
+
+    def _ending_note(self, rc: object, detail: str) -> str:
+        """How the run ended, saying who ended it.
+
+        A kill is BlindPilot's doing, and on Windows it is also BlindPilot's
+        number: a terminated process reports exactly 1. Reporting that as
+        "Claude Code exited with code 1" blamed the CLI for something this
+        application had just done, and made the two indistinguishable in a bug
+        report.
+        """
+        if self._stopped_by_us:
+            return (
+                "BlindPilot stopped Claude Code: it had not finished shutting down "
+                f"{int(_SHUTDOWN_QUIET_SECONDS)} seconds after it went quiet. "
+                "Whatever the turn had already produced is kept."
+            )
+        return f"Claude Code exited with code {rc}{detail}"
+
     @staticmethod
-    def _background_agents_running(event: dict) -> int:
+    def _count(value: object) -> int:
+        """A count, or zero. `True` is an `int` in Python and is not a count:
+        `started_in_background: true` would otherwise mean one agent forever."""
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    @staticmethod
+    def _background_agents_running(event: dict, previously: int = 0) -> int:
         """How many agents this run started in the background are still going.
 
         A turn that launches background agents finishes while they are still
@@ -2362,16 +2420,22 @@ class ClaudeWorker(threading.Thread):
         """
         stats = event.get("subagent_stats")
         if not isinstance(stats, dict):
-            return 0
-        started = stats.get("started_in_background")
-        started = started if isinstance(started, int) else 0
-        settled = 0
-        for field in ("completed", "failed"):
-            value = stats.get(field)
-            settled += value if isinstance(value, int) else 0
+            # No account of the agents at all. If none were ever running this
+            # is an ordinary turn and the answer is nought either way; if some
+            # were, this event simply does not mention them, and reading
+            # silence as "they have finished" is precisely what killed a whole
+            # fan-out before. What was last known stands until something says
+            # otherwise.
+            return previously
+        started = ClaudeWorker._count(stats.get("started_in_background"))
+        settled = sum(ClaudeWorker._count(stats.get(field)) for field in ("completed", "failed"))
         killed = stats.get("killed")
         if isinstance(killed, dict):
-            settled += sum(value for value in killed.values() if isinstance(value, int))
+            settled += sum(ClaudeWorker._count(value) for value in killed.values())
+        elif killed is not None:
+            # A shape nobody here understands. Counting it as nothing settled
+            # would leave the run waiting on agents that can never come back.
+            settled += ClaudeWorker._count(killed)
         return max(0, started - settled)
 
     @staticmethod
@@ -2672,6 +2736,9 @@ class ClaudeWorker(threading.Thread):
         # How many background agents the last wait was announced for, so the
         # count is only spoken when it changes rather than at every result.
         announced_waiting = 0
+        # Remembered across events: an event that says nothing about the agents
+        # must not be read as saying they have finished.
+        still_working = 0
 
         assert self._proc.stdout is not None
         for raw_line in self._proc.stdout:
@@ -2762,7 +2829,7 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
-                still_working = self._background_agents_running(event)
+                still_working = self._background_agents_running(event, still_working)
                 if not event.get("is_error") and still_working:
                     # The turn is over, the run is not: agents it started in
                     # the background are still going, and what they find comes
@@ -2781,8 +2848,19 @@ class ClaudeWorker(threading.Thread):
                     detail = (event.get("result") or "").strip()
                     if _looks_like_auth_error(detail):
                         self._fail(AUTH_HINT)
-                    else:
-                        self._fail(detail or "Claude Code returned an error")
+                        return
+                    note = detail or "Claude Code returned an error"
+                    if text_parts:
+                        # Waiting for background agents made a late error
+                        # result reachable for the first time, and this threw
+                        # away a turn that had already answered. How it ended
+                        # is worth saying; saying it *instead of* the answer
+                        # loses work that was already done, which is what the
+                        # exit-code path below is careful not to do.
+                        self._on_activity("result", note)
+                        self._close_stdin()
+                        break
+                    self._fail(note)
                     return
                 # In streaming-input mode the process waits for more messages
                 # rather than ending at EOF, so the turn's own result event is
@@ -2791,9 +2869,8 @@ class ClaudeWorker(threading.Thread):
                 break
 
         self._close_stdin()
-        try:
-            self._proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        if not self._wait_for_shutdown():
+            self._stopped_by_us = True
             self._proc.kill()
             self._proc.wait()
 
@@ -2821,7 +2898,7 @@ class ClaudeWorker(threading.Thread):
                     " without finishing the turn, and without saying why. "
                     f"BlindPilot kept a note of it in {self._diagnostic_path()}."
                 )
-            note = f"Claude Code exited with code {rc}{detail}"
+            note = self._ending_note(rc, detail)
             if not complete and not text_parts:
                 self._fail(note)
                 return
