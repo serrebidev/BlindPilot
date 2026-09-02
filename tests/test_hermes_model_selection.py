@@ -73,6 +73,7 @@ class _CatalogTransport:
         self.sent: list[dict] = []
         self.started = False
         self.closed = False
+        self.alive = True
         self._frames: list[dict] = [
             {"jsonrpc": "2.0", "method": "event", "params": {"type": "gateway.ready"}}
         ]
@@ -81,19 +82,28 @@ class _CatalogTransport:
         self.started = True
 
     def send(self, message: dict) -> bool:
+        if self.closed:
+            return False
         self.sent.append(message)
         if message.get("method") == "model.options":
             self._frames.append({"jsonrpc": "2.0", "id": message.get("id"), "result": self.payload})
         return True
 
     def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
-        return self._frames.pop(0) if self._frames else None
+        if self.closed:
+            return None
+        if self._frames:
+            return self._frames.pop(0)
+        # The catalog request is answered and the stream is over: a real
+        # transport's pipe has closed by now, so stop claiming otherwise.
+        self.alive = False
+        return None
 
     def close(self) -> None:
         self.closed = True
 
     def connected(self) -> bool:
-        return not self.closed
+        return self.alive and not self.closed
 
     def failure_detail(self) -> str:
         return "catalog transport ended"
@@ -300,10 +310,18 @@ class _ChatterTransport:
         return None
 
     def send(self, message: dict) -> bool:
+        if self.closed:
+            # Measured on a real StdioTransport: a closed pipe answers False.
+            # The frames-for-ever behaviour below is deliberate and real (a busy
+            # Hermes trickling content-free housekeeping); writing to a closed
+            # connection is not.
+            return False
         self.sent.append(message)
         return True
 
-    def receive(self, timeout: float) -> dict:  # noqa: ARG002 - interface
+    def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
+        if self.closed:
+            return None
         return {
             "jsonrpc": "2.0",
             "method": "event",

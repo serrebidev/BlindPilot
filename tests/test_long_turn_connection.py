@@ -249,10 +249,17 @@ class _ScriptedTransport:
         self.sent: list[dict] = []
 
     def send(self, message: dict) -> bool:
+        if not self.alive:
+            # A closed connection cannot be written to. The empty reads this
+            # class produces model a BUSY Hermes and are deliberately real; a
+            # successful write after close() would not be.
+            return False
         self.sent.append(message)
         return True
 
     def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
+        if not self.alive:
+            return None
         self.reads += 1
         if self.dead_at is not None and self.reads >= self.dead_at:
             self.alive = False
@@ -636,13 +643,21 @@ def test_an_empty_status_update_produces_no_row():
 
 
 class _DeadAfterConnect:
-    """A transport that is connected, then quietly is not."""
+    """A transport that is connected, then quietly is not.
+
+    Registered in tests/test_transport_contract.py with ``stream_ends=False``:
+    it answers None to every read while alive, which models a peer that has
+    stopped talking rather than a stream that has run out.
+    """
 
     def __init__(self) -> None:
         self.alive = True
         self.sent: list[dict] = []
 
     def send(self, message: dict) -> bool:
+        if not self.alive:
+            # A dead connection cannot be written to.
+            return False
         self.sent.append(message)
         return True
 
