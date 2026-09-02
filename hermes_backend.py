@@ -37,7 +37,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Optional, Protocol, Sequence
+from typing import Any, Optional, Protocol, Sequence
 
 # Hermes' launcher is a plain executable on PATH, but the gateway itself is a
 # Python module inside Hermes' own virtual environment. A GUI cannot rely on
@@ -862,7 +862,13 @@ class WebSocketTransport:
         # Kept credential-free for anything shown to the user: a token spoken
         # aloud by a screen reader is a token read out to the room.
         self._display_url = _redacted_ws_url(url)
-        self._ws = None
+        # Annotated rather than left to inference: `websocket` is imported inside
+        # `start()` so a user on another backend need not have it installed, and
+        # with no type here mypy reads the attribute as `None` and rejects the
+        # assignment in `start()` on a machine where the package ships its own
+        # types. Deliberately loose: naming `WebSocket` would fail wherever it
+        # is untyped instead, which is the same problem the other way round.
+        self._ws: Optional[Any] = None
         self._error = ""
         self._frames: "queue.Queue[dict]" = queue.Queue()
         self._reader: Optional[threading.Thread] = None
