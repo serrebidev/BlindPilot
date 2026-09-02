@@ -5493,14 +5493,18 @@ class SessionPanel(wx.Panel):
                 return
             self._search_term = dlg.GetValue().strip()
         self._refresh_list()
+        # Spoken, not just written to the status bar. No screen reader reads a
+        # status bar it was not asked to, and a search that matched nothing
+        # does not move focus either - so the list quietly emptied and not one
+        # thing said so, which is indistinguishable from a dropped keystroke.
         if self._search_term:
-            self._set_status(
+            self._announce(
                 f"Showing {len(self._displayed)} of {len(self._rows)} rows for '{self._search_term}'"
             )
             if self._row_count() > 0:
                 self._focus_row(0)
         else:
-            self._set_status("Search cleared")
+            self._announce("Search cleared")
 
     def _on_list_key(self, event: wx.KeyEvent) -> None:
         """Row keys for both responses controls — the list box and the
