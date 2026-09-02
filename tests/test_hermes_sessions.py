@@ -55,7 +55,16 @@ class _FakeTransport:
         return True
 
     def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
-        return self.frames.pop(0) if self.frames else None
+        if self.frames:
+            return self.frames.pop(0)
+        # A real transport that has run out of frames has ended: the pipe closed
+        # or the socket went away, and `connected()` then answers False. Keeping
+        # this stand-in "connected" for ever made it a shape no real transport
+        # has, and any wait-for-frames loop tested against it spun until its own
+        # deadline -- which on Linux is a 60s pytest-timeout failure and on
+        # Windows was invisible.
+        self.alive = False
+        return None
 
     def close(self) -> None:
         self.closed = True

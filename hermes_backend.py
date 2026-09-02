@@ -1115,11 +1115,23 @@ SESSION_DENY_SOURCES = ("kanban", "tool")
 
 
 def _ready_or_fail(transport: Transport, deadline_seconds: float) -> str:
-    """Wait for the gateway announcement; return "" when ready, else the error."""
+    """Wait for the gateway announcement; return "" when ready, else the error.
+
+    A dropped connection ends the wait immediately instead of sitting out the
+    whole deadline. `receive` returning None means "nothing yet", which is
+    ordinary while a gateway starts up -- but on a transport that is no longer
+    connected there is nobody left to announce anything, and spinning for the
+    full sixty seconds only delays telling the user what happened. Worth being
+    explicit about: this loop does not sleep, so on a dead transport it was a
+    busy wait, and the failure it reported was a timeout rather than the real
+    reason the connection ended.
+    """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
         frame = transport.receive(0.5)
         if frame is None:
+            if not transport.connected():
+                return transport.failure_detail() or "Hermes closed the connection."
             continue
         params = frame.get("params")
         if isinstance(params, dict) and params.get("type") == "gateway.ready":

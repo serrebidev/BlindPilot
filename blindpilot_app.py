@@ -5975,8 +5975,20 @@ class SessionPanel(wx.Panel):
         An uploading backend gets no paths in its prompt, so without this the
         user's own message in the list would not mention the attachment at all
         and the transcript would read as a question about nothing.
+
+        The name comes from `attachment_name`, the same helper the upload itself
+        uses, rather than `os.path.basename`. On Linux or macOS basename does not
+        treat a backslash as a separator, so a Windows path attached to a Hermes
+        reached from a Linux desktop kept the whole of
+        `D:\\projekty\\raport.xlsx` in a line that is read aloud. Sharing the
+        helper is the point: the file Hermes stores and the name spoken in the
+        transcript cannot drift apart.
         """
-        names = [os.path.basename(p) or p for p in self._attachments]
+        # Imported here, not at module scope: hermes_worker pulls in the
+        # websocket client, and a user on another backend should not pay for it.
+        from hermes_worker import attachment_name
+
+        names = [attachment_name(p) or p for p in self._attachments]
         if not names:
             return ""
         noun = "file" if len(names) == 1 else "files"
