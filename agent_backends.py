@@ -1969,6 +1969,10 @@ _FREEBUFF_MAX_LAG_SECONDS = 0.4
 # message and an hour of silence with it. Two minutes because a first launch
 # downloads a 125MB FreeBuff and then unpacks it, and only the download half
 # draws a progress bar.
+# The longest a single FreeBuff turn is listened to. Reaching it is not the
+# turn finishing, and is reported as what it is - see the end of `_do_run`.
+_FREEBUFF_TURN_SECONDS = 60 * 60
+
 _FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
 
 # Sentence-ending punctuation, or the end of a paragraph, either of which is a
@@ -2718,7 +2722,7 @@ class FreebuffWorker(threading.Thread):
         turn_started_at: Optional[float] = None
         next_heartbeat = float("inf")
         completion_seen_at: Optional[float] = None
-        deadline = time.monotonic() + 60 * 60
+        deadline = time.monotonic() + _FREEBUFF_TURN_SECONDS
 
         def refresh(wait: float) -> str:
             """Feed whatever the terminal has produced and re-read the screen.
@@ -3009,6 +3013,13 @@ class FreebuffWorker(threading.Thread):
         self._emit_screen_delta("assistant", spoken_answer, screen_response, whole=True)
         # The saved chat is the answer as FreeBuff wrote it, rather than as the
         # terminal laid it out, so it is what the transcript keeps.
+        # The loop ends either because FreeBuff finished - which breaks out of
+        # it - or because the hour ran out underneath a turn that was still
+        # going. Those were indistinguishable from here, so a turn cut off
+        # mid-sentence was delivered through the same `_on_complete` a finished
+        # one uses: announced as the answer, kept in the transcript as the
+        # answer, with nothing to suggest it was not the whole of it.
+        timed_out = not self._cancelled and time.monotonic() >= deadline
         response = structured_answer or _unwrap_screen_text(screen_response)
         if response:
             # An answer taller than the terminal scrolls its own beginning off
@@ -3017,7 +3028,20 @@ class FreebuffWorker(threading.Thread):
             tail = _unspoken_tail(self._narrated.get("assistant", ""), response)
             if tail:
                 self._on_activity("assistant", tail)
+            if timed_out:
+                # Kept, not discarded: an hour of work is worth having. Said
+                # first, so it is not mistaken for the end of the answer.
+                self._on_activity(
+                    "notice",
+                    "BlindPilot stopped listening to FreeBuff an hour after the message "
+                    "was sent. What follows is as far as it had got, not a finished answer.",
+                )
             self._on_complete(response)
+        elif timed_out:
+            self._fail(
+                "FreeBuff was still working an hour after the message was sent and had "
+                "produced no answer, so BlindPilot stopped waiting for it."
+            )
         else:
             self._fail("No response received from FreeBuff")
             return
