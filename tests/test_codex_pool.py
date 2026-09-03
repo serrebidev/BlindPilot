@@ -1151,3 +1151,274 @@ def test_a_message_that_cannot_be_routed_is_written_down(caplog):
     written = " ".join(record.getMessage() for record in caplog.records)
     assert "id=11" in written
     assert "not an object" not in written, "the message content was written to the log"
+
+
+# ----- stopping one turn without stopping the server -----
+
+
+def _stoppable(server, thread_id="thread-1", turn_id="turn-1"):
+    """A worker in the middle of a turn, ready to be cancelled."""
+    worker = _bare_worker()
+    worker._server = server
+    worker._thread_id = thread_id
+    worker._turn_id = turn_id
+    worker._turn_requested = True
+    if turn_id:
+        worker._turn_id_known.set()
+    return worker
+
+
+def _confirming(server, answer, seen=None):
+    """Stand in for the app-server's confirmation of an interrupt."""
+
+    def confirm_interrupt(thread_id, turn_id, timeout):
+        if seen is not None:
+            seen.append((thread_id, turn_id, timeout))
+        return answer
+
+    server.confirm_interrupt = confirm_interrupt
+
+
+def test_cancelling_asks_codex_to_stop_the_turn_and_waits_to_hear_that_it_did():
+    """Fire and forget is not a stop: the tab said it stopped either way."""
+    seen: list[tuple] = []
+    server = agent_backends.CodexServer(_FakeProc())
+    _confirming(server, True, seen)
+    worker = _stoppable(server)
+
+    worker.cancel()
+
+    sent = [json.loads(line) for line in server.proc.stdin.written]
+    interrupts = [m for m in sent if m.get("method") == "turn/interrupt"]
+    assert len(interrupts) == 1, f"the turn was not asked to stop: {sent}"
+    assert interrupts[0]["params"] == {"threadId": "thread-1", "turnId": "turn-1"}
+    assert seen == [("thread-1", "turn-1", agent_backends._CODEX_INTERRUPT_VERIFY_SECONDS)], (
+        "the interrupt was sent but never waited on"
+    )
+
+
+def test_a_confirmed_interrupt_keeps_the_thread():
+    server = agent_backends.CodexServer(_FakeProc())
+    _confirming(server, True)
+    worker = _stoppable(server)
+
+    worker.cancel()
+
+    assert worker.abandoned_thread == ""
+
+
+def test_an_unconfirmed_interrupt_abandons_the_thread_not_the_server():
+    """The middle rung: the wedged conversation pays, the server does not."""
+    server = agent_backends.CodexServer(_FakeProc())
+    _confirming(server, False)
+    worker = _stoppable(server)
+
+    worker.cancel()
+
+    assert worker.abandoned_thread == "thread-1"
+    assert server.proc.killed is False
+
+
+def test_cancelling_never_kills_the_server_the_other_tabs_are_using():
+    """A shared process must survive one tab's Escape.
+
+    Four other conversations are held in it, so the "kill if unsure" a
+    per-turn process could afford would end them all to stop one.
+    """
+    killed: list[object] = []
+    server = agent_backends.CodexServer(_FakeProc())
+    _confirming(server, False)
+    worker = _stoppable(server)
+    original = agent_backends.end_process_group
+    agent_backends.end_process_group = lambda p, timeout=0.0: killed.append(p)
+    try:
+        worker.cancel()
+    finally:
+        agent_backends.end_process_group = original
+
+    assert killed == [], "cancelling one tab stopped the server every tab shares"
+    assert server.proc.killed is False
+
+
+def test_cancelling_before_anything_was_asked_of_codex_is_harmless():
+    """Escape pressed between Send and the first reply."""
+    worker = _bare_worker()
+
+    started = time.monotonic()
+    worker.cancel()
+    took = time.monotonic() - started
+
+    assert worker.abandoned_thread == ""
+    assert took < 0.1, f"a turn with nothing to stop waited {took:.2f}s"
+
+
+def test_a_turn_asked_for_but_never_named_gives_up_the_thread():
+    """The orphan: Stop between `turn/start` and the reply that names it.
+
+    Nothing can be interrupted by name, and the turn is running under
+    workspace-write. Reporting the tab stopped while carrying on in the same
+    conversation would put whatever that turn does next outside the history
+    the next prompt is answered from, so the thread is given up instead.
+    """
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _stoppable(server, turn_id="")
+    worker._turn_id_known.set()  # the turn has already stopped looking
+
+    worker.cancel()
+
+    assert worker.abandoned_thread == "thread-1"
+    assert server.proc.stdin.written == [], "an interrupt was sent naming no turn"
+    assert server.proc.killed is False
+
+
+def test_a_cancel_waits_for_the_name_of_a_turn_that_was_just_asked_for():
+    """The reply is usually already on its way, and then it can be stopped."""
+    seen: list[tuple] = []
+    server = agent_backends.CodexServer(_FakeProc())
+    _confirming(server, True, seen)
+    worker = _stoppable(server, turn_id="")
+
+    def name_it():
+        time.sleep(0.05)
+        worker._turn_id = "turn-9"
+        worker._watch_turn()
+
+    namer = threading.Thread(target=name_it, daemon=True)
+    namer.start()
+    try:
+        worker.cancel()
+    finally:
+        namer.join(timeout=5)
+
+    assert [t for _thread, t, _timeout in seen] == ["turn-9"], "the turn was never named"
+    assert worker.abandoned_thread == ""
+
+
+def test_a_stopped_turn_looks_for_its_own_name_before_it_leaves():
+    """What makes that wait worth having: the reply is read, not raced for."""
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _stoppable(server, turn_id="")
+    inbox = server.inbox()
+    inbox.put({"method": "item/agentMessage/delta", "params": {"delta": "half a sentence"}})
+    inbox.put({"id": 42, "result": {"turn": {"id": "turn-9"}}})
+
+    worker._name_the_stopped_turn(inbox, 42)
+
+    assert worker._turn_id == "turn-9"
+    assert worker._turn_id_known.is_set()
+    assert worker._assistant_parts == [], "a stopped turn kept reading what Codex said"
+
+
+def test_a_turn_codex_refused_leaves_the_thread_alone():
+    """An error reply means no turn ever ran, so there is nothing to give up."""
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _stoppable(server, turn_id="")
+    inbox = server.inbox()
+    inbox.put({"id": 42, "error": {"message": "no"}})
+
+    worker._name_the_stopped_turn(inbox, 42)
+    worker.cancel()
+
+    assert worker._turn_id == ""
+    assert worker.abandoned_thread == ""
+
+
+def test_a_cancel_does_not_wait_for_a_turn_that_has_already_ended():
+    """`run` closes the door on its way out, so nothing waits on a dead thread."""
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _stoppable(server, turn_id="")
+    worker._do_run = lambda: None
+    worker.run()
+
+    started = time.monotonic()
+    worker.cancel()
+    took = time.monotonic() - started
+
+    assert took < agent_backends._CODEX_TURN_ID_GRACE_SECONDS, (
+        f"a cancel spent {took:.2f}s waiting for a turn that had gone"
+    )
+
+
+def test_stopping_a_turn_fits_inside_the_windows_teardown_budget():
+    """Naming and then verifying are spent one after the other on one cancel,
+    and the window is waiting on both with a join still to come."""
+    import blindpilot_app
+
+    whole = (
+        agent_backends._CODEX_TURN_ID_GRACE_SECONDS + agent_backends._CODEX_INTERRUPT_VERIFY_SECONDS
+    )
+    assert whole < blindpilot_app._CANCEL_JOIN_SECONDS
+
+
+class _StopsBeforeItIsNamed(_ScriptedProc):
+    """Stop lands in the gap between `turn/start` and the reply naming it.
+
+    The reply is held back past the turn's own poll, so the loop has already
+    seen the cancel and left the ordinary path by the time it arrives.
+    """
+
+    def __init__(self, cancel) -> None:
+        super().__init__()
+        self._cancel = cancel
+        self.cancelling: threading.Thread | None = None
+        self.stdout = self._stop_script()
+
+    def _stop_script(self):
+        start = self._asked("thread/start")
+        yield json.dumps({"id": start["id"], "result": {"thread": {"id": "thread-1"}}})
+        turn = self._asked("turn/start")
+        self.cancelling = threading.Thread(target=self._cancel, daemon=True)
+        self.cancelling.start()
+        time.sleep(agent_backends._CODEX_POLL_SECONDS + 0.05)
+        yield json.dumps({"id": turn["id"], "result": {"turn": {"id": "turn-1"}}})
+        self._asked("turn/interrupt")
+        yield json.dumps(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "interrupted"},
+                },
+            }
+        )
+
+
+def test_a_turn_stopped_before_it_was_named_is_still_stopped(monkeypatch):
+    """The orphan, end to end.
+
+    Nothing was sent for this case before: `cancel` saw an empty turn id and
+    returned, leaving the turn running under workspace-write while the tab
+    reported itself stopped, and its output arriving later as somebody else's.
+    """
+    later: list = []
+    proc = _StopsBeforeItIsNamed(lambda: later[0].cancel())
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _b: "codex")
+    monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda b: b)
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _b: {})
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: proc)
+    failures: list[str] = []
+    worker = agent_backends.CodexWorker(
+        "hello",
+        None,
+        ".",
+        "default",
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _v: None,
+        on_complete=lambda _v: None,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+    later.append(worker)
+
+    worker.run()
+    assert proc.cancelling is not None
+    proc.cancelling.join(timeout=5)
+
+    sent = [json.loads(line) for line in proc.stdin.written]
+    interrupts = [m for m in sent if m.get("method") == "turn/interrupt"]
+    assert [m["params"]["turnId"] for m in interrupts] == ["turn-1"], (
+        f"the orphaned turn was left running: {sent}"
+    )
+    assert worker.abandoned_thread == "", "Codex confirmed the stop, so the thread is fine"
+    assert proc.killed is False

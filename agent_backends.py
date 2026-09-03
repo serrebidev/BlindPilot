@@ -1500,6 +1500,14 @@ _CODEX_LAST_WORDS_SECONDS = 1.0
 # (_CANCEL_JOIN_SECONDS, 3.0), leaving the rest for the join that follows.
 _CODEX_INTERRUPT_VERIFY_SECONDS = 1.5
 
+# How long a cancel waits to be told the id of a turn it has already asked for.
+# Stop can land in the gap between `turn/start` and the reply that names the
+# turn, and a turn with no name cannot be interrupted -- so the last thing a
+# stopped turn does is look for that reply. Small: the reply is either already
+# on its way or it is not coming, and this is spent before the verify wait, so
+# the two together still fit inside the window's teardown budget.
+_CODEX_TURN_ID_GRACE_SECONDS = 0.25
+
 # How long a turn waits on its inbox before looking at its own cancelled flag.
 # Short enough that Stop is answered promptly, long enough that a quiet turn
 # is not a spin.
@@ -2076,6 +2084,21 @@ class CodexWorker(threading.Thread):
         self._accepting_input = threading.Event()
         self._thread_id = session_id or ""
         self._turn_id = ""
+        # Set when an interrupt went unconfirmed, or when a turn that was asked
+        # for could never be named: this conversation is not trusted to be
+        # carried on in the process, and the next turn resumes it from its
+        # rollout on disk instead. The thread is what is given up, never the
+        # server -- several other tabs are talking through that.
+        self.abandoned_thread = ""
+        # Whether Codex has been asked to run a turn on this conversation. True
+        # from the moment the request goes out, which is before there is any id
+        # to name it by: between the two, a turn is running that a cancel
+        # cannot address.
+        self._turn_requested = False
+        # Set once `_turn_id` will not change again -- either because the turn
+        # has been named or because this turn has stopped looking. A cancel on
+        # another thread waits on it rather than polling.
+        self._turn_id_known = threading.Event()
         # The turn id currently registered with the server, so the registration
         # is given back exactly once.
         self._watched = ""
@@ -2141,19 +2164,47 @@ class CodexWorker(threading.Thread):
         )
 
     def cancel(self) -> None:
+        """Stop this turn without stopping the server the other tabs share.
+
+        Codex's app-server multiplexes: one process holds every tab's thread.
+        Killing it here would end four other conversations to stop one, so the
+        usual "kill if unsure" is replaced by a middle rung. The interrupt is
+        sent and waited on, and if Codex does not confirm the turn stopped, the
+        THREAD is abandoned rather than the process: the next turn resumes it
+        from its rollout, and the wedged conversation is the only thing that
+        pays.
+
+        This runs off the window's thread, and everything it waits on is
+        bounded, because the window is waiting on it: at worst the grace for
+        naming the turn and then the verify, which together fit inside the
+        teardown budget with room for the join that follows.
+        """
         self._cancelled = True
         self._accepting_input.clear()
-        if self._thread_id and self._turn_id:
-            self._send(
-                {
-                    "method": "turn/interrupt",
-                    "id": self._next_id(),
-                    "params": {"threadId": self._thread_id, "turnId": self._turn_id},
-                }
-            )
-        # No kill here any more: the app-server is shared, and ending it would
-        # end every other tab's conversation with it. Task 8 decides what to
-        # do when the interrupt is not confirmed.
+        server = self._server
+        thread_id = self._thread_id
+        if server is None or not thread_id:
+            # Nothing has been asked of Codex about this conversation: a turn
+            # is only ever started after the reply that names its thread.
+            return
+        turn_id = self._turn_id
+        if not turn_id and self._turn_requested:
+            # Stop landed between asking for a turn and being told its id. The
+            # turn is running -- writing files, spending tokens -- and the only
+            # thing missing is its name, which is usually already on its way.
+            self._turn_id_known.wait(_CODEX_TURN_ID_GRACE_SECONDS)
+            turn_id = self._turn_id
+        if not turn_id:
+            if self._turn_requested:
+                # A turn was asked for and never named, so there is nothing to
+                # interrupt by name. Saying the tab stopped while trusting the
+                # conversation anyway would be the lie: whatever that turn goes
+                # on to do is not in this thread's history as the next prompt
+                # would read it, so the thread is given up instead.
+                self.abandoned_thread = thread_id
+            return
+        if not server.interrupt(thread_id, turn_id, _CODEX_INTERRUPT_VERIFY_SECONDS):
+            self.abandoned_thread = thread_id
 
     def _fail(self, message: str) -> None:
         """Report why the turn ended, once.
@@ -2185,6 +2236,10 @@ class CodexWorker(threading.Thread):
             self._fail(f"BlindPilot stopped reading Codex: {exc}")
         finally:
             self._accepting_input.clear()
+            # Nothing more will be read, so no further name can be learned. A
+            # cancel racing the end of the turn stops waiting for one rather
+            # than spending its whole grace on a thread that has gone.
+            self._turn_id_known.set()
             # The process belongs to the pool now, not to this turn. It is
             # stopped when the conversation goes away, when it is found dead,
             # or when the reaper decides nobody is using it. All the turn
@@ -2331,6 +2386,7 @@ class CodexWorker(threading.Thread):
         started_notified = False
         while True:
             if self._cancelled:
+                self._name_the_stopped_turn(inbox, turn_request)
                 return
             try:
                 queued = inbox.get(timeout=_CODEX_POLL_SECONDS)
@@ -2372,6 +2428,11 @@ class CodexWorker(threading.Thread):
                     # an empty result and then runs a turn of its own, whose
                     # notifications the loop below already understands.
                     compact_request = self._next_id()
+                    # Compaction runs a turn of its own, so from here a cancel
+                    # has something to stop -- but the reply to this request is
+                    # empty, so nothing but the turn's own notifications will
+                    # ever name it.
+                    self._turn_requested = True
                     inbox.put(_CODEX_ASKED)
                     self._expect(compact_request)
                     self._send(
@@ -2395,6 +2456,11 @@ class CodexWorker(threading.Thread):
                 if self._effort:
                     params["effort"] = self._effort
                 turn_request = self._next_id()
+                # Set before the send, not after the reply: from here on a turn
+                # may be running that a cancel has no name for, and treating
+                # that as "nothing was started" is exactly how one gets left
+                # running under a tab that says it stopped.
+                self._turn_requested = True
                 inbox.put(_CODEX_ASKED)
                 self._expect(turn_request)
                 self._send({"method": "turn/start", "id": turn_request, "params": params})
@@ -2560,13 +2626,66 @@ class CodexWorker(threading.Thread):
         counts its watchers, and one that is never given back is one event kept
         for the life of a process that now outlives thousands of turns.
         """
+        if not self._turn_id:
+            return
+        # A cancel on another thread may be waiting to learn this, so that it
+        # has something to name in its interrupt.
+        self._turn_id_known.set()
         server = self._server
-        if server is None or not self._turn_id or self._turn_id == self._watched:
+        if server is None or self._turn_id == self._watched:
             return
         if self._watched:
             server.forget_turn(self._watched)
         self._watched = self._turn_id
         server.watch_turn(self._turn_id)
+
+    def _name_the_stopped_turn(self, inbox: "queue.Queue[object]", turn_request: int) -> None:
+        """Before leaving, learn the id of a turn that was asked for unnamed.
+
+        Stop can land in the gap between `turn/start` and the reply that names
+        the turn. The turn is running on the server -- under `workspaceWrite`
+        or `dangerFullAccess`, writing files and spending tokens -- and the
+        only thing missing is the name to interrupt it by, which the reply is
+        about to carry. So the last thing this turn does is look for that one
+        reply, and hand the id to the `cancel` waiting on `_turn_id_known`.
+
+        Only the reply to this turn's own request id is taken. Everything else
+        read here is dropped unlooked at: the answer is already abandoned, and
+        a message acted on after Stop is how a stopped turn's words get spliced
+        into the next one's.
+        """
+        try:
+            if self._turn_id or not turn_request:
+                return
+            deadline = time.monotonic() + _CODEX_TURN_ID_GRACE_SECONDS
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return
+                try:
+                    queued = inbox.get(timeout=min(left, _CODEX_POLL_SECONDS))
+                except queue.Empty:
+                    continue
+                if queued is _CODEX_CLOSED:
+                    # The server has gone, so the turn has gone with it.
+                    return
+                if not isinstance(queued, dict) or queued.get("id") != turn_request:
+                    continue
+                if queued.get("error"):
+                    # Codex refused the turn, so nothing is running to name and
+                    # the conversation is as it was.
+                    self._turn_requested = False
+                    return
+                # Shape-checked at every step: a malformed reply here would
+                # come back as "BlindPilot stopped reading Codex" on a turn the
+                # person has already stopped.
+                result = queued.get("result")
+                turn = result.get("turn") if isinstance(result, dict) else None
+                self._turn_id = str(turn.get("id") or "") if isinstance(turn, dict) else ""
+                return
+        finally:
+            # Whether or not it was found, nobody else is going to find it.
+            self._turn_id_known.set()
 
     @staticmethod
     def _turn_named(params: dict) -> str:
