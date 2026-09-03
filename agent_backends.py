@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
+import backend_pool
 import diagnostics
 
 from markdown_rows import _SENTENCE_END_RE as _markdown_sentence_end_re
@@ -1492,6 +1493,122 @@ def _codex_questions(raw: object) -> tuple[Question, ...]:
 # the one that says why. Long enough for a line already written to arrive,
 # short enough that a pipe which never closes cannot hold the turn open.
 _CODEX_LAST_WORDS_SECONDS = 1.0
+
+# How long an interrupt is given to be confirmed before the turn's thread is
+# treated as wedged. Half of the window's whole teardown budget
+# (_CANCEL_JOIN_SECONDS, 3.0), leaving the rest for the join that follows.
+_CODEX_INTERRUPT_VERIFY_SECONDS = 1.5
+
+
+class CodexServer:
+    """One ``codex app-server`` process, shared by every tab using Codex.
+
+    The app-server multiplexes: several threads live in one process, keyed by
+    threadId, which is what lets one server serve every tab instead of one per
+    tab. Replies are routed back to whichever turn asked, by request id.
+    """
+
+    def __init__(self, proc: object) -> None:
+        self.proc = proc
+        self._lock = threading.Lock()
+        self._next_id = 10
+        # request id -> the queue the waiting turn is reading
+        self._waiting: dict[int, "queue.Queue"] = {}
+
+    def alive(self) -> bool:
+        poll = getattr(self.proc, "poll", None)
+        return poll is not None and poll() is None
+
+    def next_id(self) -> int:
+        with self._lock:
+            self._next_id += 1
+            return self._next_id
+
+    def send(self, message: dict) -> bool:
+        stdin = getattr(self.proc, "stdin", None)
+        if stdin is None:
+            return False
+        try:
+            data = json.dumps(message, ensure_ascii=False) + "\n"
+            with self._lock:
+                stdin.write(data)
+                stdin.flush()
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def confirm_interrupt(self, thread_id: str, turn_id: str, timeout: float) -> bool:
+        """Wait for Codex to say the turn stopped. Overridden in tests.
+
+        The real implementation waits on the reader thread reporting a
+        turn/completed for this turn id; until Task 7 wires that reader up,
+        nothing confirms and this returns False -- which is the safe answer.
+        """
+        return False
+
+    def interrupt(self, thread_id: str, turn_id: str, timeout: float) -> bool:
+        """Ask Codex to stop this turn and say whether it confirmed."""
+        if not thread_id or not turn_id:
+            return False
+        sent = self.send(
+            {
+                "method": "turn/interrupt",
+                "id": self.next_id(),
+                "params": {"threadId": thread_id, "turnId": turn_id},
+            }
+        )
+        if not sent:
+            return False
+        return self.confirm_interrupt(thread_id, turn_id, timeout)
+
+    def stop(self) -> None:
+        end_process_group(self.proc, timeout=2)
+
+
+def _start_codex_server() -> CodexServer:
+    """Launch the shared app-server. Raises OSError if it cannot be started."""
+    binary = find_backend_cli(BACKEND_CODEX)
+    if not binary:
+        raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
+    server_binary = _codex_app_server_binary(binary)
+    proc = subprocess.Popen(
+        [server_binary, *_CODEX_QUESTION_ARGS, "app-server", "--stdio"],
+        cwd=str(Path.home()),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
+        env=subprocess_env(server_binary),
+        # npm's `codex` is a Node launcher that runs the real Codex as a child
+        # of its own; stopping only the launcher leaves that child holding the
+        # app-server session.
+        **own_group_kwargs(),
+        **no_window_kwargs(),
+    )
+    return CodexServer(proc)
+
+
+def codex_adapter() -> backend_pool.Adapter:
+    """How the pool starts, checks, interrupts and stops Codex."""
+
+    def alive(server: object) -> bool:
+        return bool(cast(CodexServer, server).alive())
+
+    def stop(server: object) -> None:
+        cast(CodexServer, server).stop()
+
+    return backend_pool.Adapter(
+        start=_start_codex_server,
+        alive=alive,
+        # The pool's generic interrupt has no turn to name. Codex's cancel path
+        # goes through CodexServer.interrupt with the ids it holds; reaching
+        # here means nothing could be confirmed.
+        interrupt=lambda _server, _timeout: False,
+        stop=stop,
+    )
 
 
 class CodexWorker(threading.Thread):
