@@ -971,3 +971,183 @@ def test_a_compaction_whose_items_arrive_before_its_announcement_still_finishes(
     assert ("tool", "Running: git log") in activity, (
         "what the compaction did before it announced itself was dropped"
     )
+
+
+class _StragglesPastTheMark(_FakeProc):
+    """The turn before this one goes on talking after this one has asked.
+
+    Some of the interrupted turn's output queues ahead of the mark, which is
+    the ordinary case, and the rest arrives after it -- late enough that where
+    it sits can no longer tell whose it is.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stdout = self._script()
+
+    def _asked(self, method: str, timeout: float = 10.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            for line in list(self.stdin.written):
+                message = json.loads(line)
+                if message.get("method") == method:
+                    return message
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the worker never sent {method}")
+            time.sleep(0.005)
+
+    @staticmethod
+    def _said_by_turn_one(text: str) -> str:
+        return json.dumps(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {"id": "m0", "type": "agentMessage", "text": text},
+                },
+            }
+        )
+
+    def _script(self):
+        resume = self._asked("thread/resume")
+        yield json.dumps({"id": resume["id"], "result": {"thread": {"id": "thread-1"}}})
+        # Ahead of the mark: named here, and so recognised from here on.
+        yield self._said_by_turn_one("half a thought")
+        turn = self._asked("turn/start")
+        # Behind the mark, and before this turn knows its own id: position
+        # cannot tell whose this is, only the name can.
+        yield self._said_by_turn_one("and the rest of it")
+        yield json.dumps({"id": turn["id"], "result": {"turn": {"id": "turn-2"}}})
+        yield json.dumps(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-2",
+                    "itemId": "m1",
+                    "delta": "the answer",
+                },
+            }
+        )
+        yield json.dumps(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-2", "status": "completed"},
+                },
+            }
+        )
+
+
+def test_the_stopped_turns_words_are_never_spliced_into_the_next_turns_answer(monkeypatch):
+    """A straggler past the mark is still the stopped turn's, not this one's.
+
+    `_item_completed` on an agentMessage both speaks the text and adds it to
+    the answer, so admitting one of these is the agent saying words it never
+    said - to people who read entirely by ear, with nothing on screen to
+    contradict it.
+    """
+    proc = _StragglesPastTheMark()
+
+    _worker, completed, failures, activity = _turn(proc, monkeypatch, session_id="thread-1")
+
+    assert failures == [], failures
+    assert completed == ["the answer"], "the stopped turn's words got into the answer"
+    spoken = [value for kind, value in activity if kind == "assistant"]
+    assert "half a thought" not in spoken
+    assert "and the rest of it" not in spoken, "a straggler past the mark was spoken as this turn"
+
+
+def test_a_turn_already_known_to_be_somebody_elses_stays_that_way():
+    """The name is remembered, so lateness stops being a way in."""
+    worker = _bare_worker()
+    leftover = {"threadId": "thread-1", "turnId": "turn-1", "item": {}}
+
+    # Before the mark, position alone rejects it - and the name is noted.
+    assert worker._is_this_turn("item/completed", leftover) is False
+    worker._stale_turns.add(agent_backends.CodexWorker._turn_named(leftover))
+
+    # After the mark, position would have let the rest of it through.
+    worker._turn_asked = True
+    assert worker._is_this_turn("item/completed", leftover) is False
+    assert worker._is_this_turn("item/started", {"turnId": "turn-1", "item": {}}) is False
+    # A turn nobody has seen before is still this turn's to adopt.
+    assert worker._is_this_turn("item/started", {"turnId": "turn-9", "item": {}}) is True
+
+
+def test_a_server_is_not_dropped_while_another_tab_is_registering_its_borrow(monkeypatch):
+    """Between one tab's take and its borrow, another tab must not let go.
+
+    `take` leaves the entry in the pool, so a tab that has been handed the
+    server but has not yet been counted is invisible to a count taken outside
+    the lock - and a failing tab would drop the process it is a few
+    instructions from using.
+    """
+    server = agent_backends.CodexServer(_FakeProc())
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+
+    holding = _bare_worker()
+    assert holding._borrow_server() is not None
+
+    handed_over = threading.Event()
+    carry_on = threading.Event()
+    registered = server.inbox
+
+    def between_the_take_and_the_borrow():
+        handed_over.set()
+        carry_on.wait(10)
+        return registered()
+
+    monkeypatch.setattr(server, "inbox", between_the_take_and_the_borrow)
+    arriving = _bare_worker()
+    borrowing = threading.Thread(target=arriving._borrow_server, daemon=True)
+    borrowing.start()
+    assert handed_over.wait(10), "the arriving tab never reached the window under test"
+
+    giving_up = threading.Thread(target=holding._discard_server, daemon=True)
+    giving_up.start()
+    # Under the fix this is still waiting on the same lock the borrow is
+    # registered under; without it, it has already counted one and dropped.
+    giving_up.join(timeout=0.2)
+    carry_on.set()
+    borrowing.join(timeout=10)
+    giving_up.join(timeout=10)
+    assert not borrowing.is_alive() and not giving_up.is_alive()
+
+    assert backend_pool.pool().take(key) is not None, (
+        "the server was dropped from under a tab that had just been handed it"
+    )
+    assert not server.proc.killed
+
+
+def test_a_message_that_cannot_be_routed_is_written_down(caplog):
+    """Dropping it beats closing the server, but silence is not the trade.
+
+    The turn it was for now waits on a reply that will not come, and the only
+    other sign of that is a turn ending at the reaper a quarter of an hour
+    later. The record says method and id, never what the message was about.
+    """
+    proc = _FakeProc([json.dumps({"id": 11, "result": {"thread": "not an object"}})])
+    server = agent_backends.CodexServer(proc)
+    mine = server.inbox()
+    server.expect_thread(11, mine)
+
+    def explode(_message):
+        raise TypeError("something nobody anticipated")
+
+    server._route = explode
+    with caplog.at_level("WARNING", logger="blindpilot.codex"):
+        server.start_readers()
+        for reader in server._readers:
+            reader.join(timeout=5)
+
+    assert any("could not be routed" in record.getMessage() for record in caplog.records), (
+        f"nothing was written down: {[r.getMessage() for r in caplog.records]}"
+    )
+    written = " ".join(record.getMessage() for record in caplog.records)
+    assert "id=11" in written
+    assert "not an object" not in written, "the message content was written to the log"

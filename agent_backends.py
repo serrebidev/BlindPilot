@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import platform
 import queue
@@ -1813,10 +1814,25 @@ class CodexServer:
                     continue
                 try:
                     self._route(message)
-                except Exception:
+                except Exception as exc:
                     # One message nobody anticipated must not be read as the
                     # stream breaking: this reader serves every tab, and
-                    # closing here would end all of their turns at once.
+                    # closing here would end all of their turns at once. It is
+                    # written down, though: the turn that message was for now
+                    # waits on a reply that will not come, and without a record
+                    # the only sign of it is a turn that ends at the reaper a
+                    # quarter of an hour later. Method and id only -- what the
+                    # message was about is not this log's business.
+                    try:
+                        logging.getLogger("blindpilot.codex").warning(
+                            "dropped an app-server message that could not be routed: "
+                            "method=%r id=%r (%s)",
+                            message.get("method"),
+                            message.get("id"),
+                            type(exc).__name__,
+                        )
+                    except Exception:
+                        pass
                     continue
         except Exception as exc:
             # Whatever broke the pipe is the reason every turn on this server
@@ -2066,6 +2082,10 @@ class CodexWorker(threading.Thread):
         # Whether this turn has asked for a turn of its own yet. Until it has,
         # anything naming a turn names an older one.
         self._turn_asked = False
+        # The turns those earlier messages named. Once a turn has been seen to
+        # be somebody else's, it stays somebody else's however late the rest of
+        # it arrives.
+        self._stale_turns: set[str] = set()
         self._request_id = 10
         self._assistant_parts: list[str] = []
         self._assistant_delta_seen: set[str] = set()
@@ -2219,12 +2239,15 @@ class CodexWorker(threading.Thread):
                     self._fail(detail)
                     return None
             shared.keep(key, held)
-        self._held = held
-        server = cast(CodexServer, held.handle)
-        self._server = server
-        self._inbox = server.inbox()
-        server.borrow()
-        self._borrowed = True
+            # Registered under the same lock the drop takes, so a turn that
+            # has been handed this server is never counted as absent by a turn
+            # deciding whether anyone still wants it.
+            self._held = held
+            server = cast(CodexServer, held.handle)
+            self._server = server
+            self._inbox = server.inbox()
+            server.borrow()
+            self._borrowed = True
         return held
 
     def _discard_server(self) -> None:
@@ -2242,9 +2265,12 @@ class CodexWorker(threading.Thread):
         another's live turn.
         """
         server = self._server
-        if server is None or server.borrower_count() > 1:
+        if server is None:
             return
-        backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
+        with _CODEX_START_LOCK:
+            if server.borrower_count() > 1:
+                return
+            backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
 
     @staticmethod
     def _policy(mode: str) -> tuple[str, dict]:
@@ -2402,6 +2428,13 @@ class CodexWorker(threading.Thread):
                 # The conversation is right but the turn is not: Codex is still
                 # winding up a turn that was interrupted, and its trailing
                 # deltas and its `turn/completed` are not this turn's to act on.
+                if not self._turn_asked:
+                    # Learned by name, so the rest of that turn is recognised
+                    # however late it comes -- including after the point where
+                    # position alone would have let it through.
+                    named = self._turn_named(params)
+                    if named:
+                        self._stale_turns.add(named)
                 if method and "id" in message:
                     # It asked something, though, and an answer it never gets
                     # is a request id Codex holds for ever.
@@ -2558,12 +2591,23 @@ class CodexWorker(threading.Thread):
         about this turn. Anything after it may be, in whatever order it comes,
         so a compaction turn -- whose id no reply ever carries -- does not
         depend on `turn/started` arriving before its items.
+
+        Position alone cannot judge a straggler that arrives after the mark, so
+        the turns rejected before it are remembered by name as well. Leftovers
+        are exactly what queues ahead of the mark, so in the ordinary case the
+        first of them names the turn and the rest are recognised however late
+        they come.
         """
         named = self._turn_named(params)
         if not named:
             # Nothing to attribute it to: process-wide, or about the thread
             # rather than a turn.
             return True
+        if named in self._stale_turns:
+            # Already known to belong to the turn before this one. Position
+            # cannot vouch for a straggler that arrives after the mark; a name
+            # already seen on the wrong side of it can.
+            return False
         if self._turn_id:
             return named == self._turn_id
         if not self._turn_asked:
