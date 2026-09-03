@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import os
+import re
 import threading
 import time
 from typing import Callable, Optional, Sequence
@@ -60,6 +61,33 @@ def _now() -> float:
 # drop), and without this the turn would sit out the whole idle limit before
 # saying anything -- fifteen minutes of silence that looks exactly like work.
 _CONNECTION_CHECK_SECONDS = 15.0
+
+# A turn that has produced NOTHING for this long gets a one-time diagnosis
+# instead of only the generic still-working notices. Measured on a live
+# gateway: a provider that is rate-limited or out of credits makes Hermes
+# grind through backoff and fallbacks it mostly does not narrate, so the
+# listener cannot tell a real hang from an account problem -- and the two
+# have different remedies. The diagnosis names the likely causes so the
+# remedy is the next thing heard.
+_SILENCE_DIAGNOSTIC_SECONDS = 120.0
+_SILENCE_DIAGNOSTIC_MESSAGE = (
+    "Hermes has been silent for 2 minutes. It may be rate-limited or out of "
+    "credits, or another Hermes session may be using the same account. "
+    "Pick a different model with /model if this continues."
+)
+
+# Hermes decorates some status lines for a terminal: "\u26a0\ufe0f Model fallback: ..."
+# and "\u26a0 Auxiliary title generation failed: ...". A screen reader reads the
+# symbol as "warning sign" before every sentence -- noise on every one of these
+# lines -- so the decoration is dropped and the words kept.
+_LEADING_SYMBOLS_RE = re.compile(r"^[\W_]+\s*")
+
+
+def _clean_status_text(text: str) -> str:
+    """A status line without the terminal decorations that prefix it."""
+    stripped = text.strip()
+    return _LEADING_SYMBOLS_RE.sub("", stripped) or stripped
+
 
 # Hermes advertises its permission surface as slash commands and config rather
 # than per-turn flags, so BlindPilot's picker maps onto the closest Hermes
@@ -524,6 +552,10 @@ class HermesWorker(threading.Thread):
         # it is quiet ON. "Still working on terminal" tells a listener the run
         # is alive and where it is; "still working" only tells them the first.
         self._last_step = ""
+        # Whether the silence diagnosis has been spoken. One per turn: once the
+        # listener has been told what a quiet turn is probably waiting on,
+        # repeating the same sentence every minute is noise, not news.
+        self._silence_diagnosed = False
 
     # -- public surface the window drives ---------------------------------
 
@@ -1123,6 +1155,15 @@ class HermesWorker(threading.Thread):
                 if not transport.connected():
                     self._on_failed(transport.failure_detail())
                     return
+            # Absolute silence gets a diagnosis, once, instead of only the
+            # generic notices. Measured: the most common reason a live Hermes
+            # produces nothing is a rate-limited or credit-exhausted provider,
+            # which it grinds through with backoff and fallbacks the gateway
+            # mostly does not narrate -- indistinguishable from a hang until
+            # the listener is told what it probably is.
+            if quiet >= _SILENCE_DIAGNOSTIC_SECONDS and not self._silence_diagnosed:
+                self._silence_diagnosed = True
+                self._on_activity("tool", _SILENCE_DIAGNOSTIC_MESSAGE)
             if quiet >= next_notice:
                 next_notice = quiet + _PROGRESS_NOTICE_SECONDS
                 self._announce_still_working(quiet)
@@ -1198,11 +1239,28 @@ class HermesWorker(threading.Thread):
             # free up context, and so on. Ignoring it is what left a long turn
             # with nothing to say for itself, so it becomes a row like any other
             # step -- and it is remembered, so a turn that then goes quiet can
-            # say what it went quiet on.
+            # say what it went quiet on. The \u26a0\ufe0f / \u26a0 prefixes Hermes draws
+            # for a terminal are dropped: a screen reader reads them as
+            # "warning sign", which precedes nearly every one of these lines.
             text = _first_text(payload.get("text"), payload.get("kind"))
             if text:
                 kind = str(payload.get("kind") or "")
                 label = "Summarising the conversation" if kind == "compacting" else text
+                label = _clean_status_text(label)
+                self._last_step = label
+                self._on_activity("tool", label)
+            return None
+
+        if event == "notification.show":
+            # The gateway's own account of why nothing has happened yet: the
+            # agent is still building (tool discovery, model setup) and the
+            # message will be sent as soon as it is ready. Dropping it left a
+            # slow start sounding exactly like a hang, so it becomes a row like
+            # any other step -- and it is remembered, so the still-working
+            # notice can say what the wait is FOR.
+            text = _first_text(payload.get("text"), payload.get("message"))
+            if text:
+                label = _clean_status_text(text)
                 self._last_step = label
                 self._on_activity("tool", label)
             return None

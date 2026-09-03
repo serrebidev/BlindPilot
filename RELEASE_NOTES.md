@@ -1,59 +1,47 @@
-# BlindPilot 0.20.6
+# BlindPilot 0.20.7
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release is what the last one's standard was for. The New Session dialog was held
-to the same captured-log bar as the install wizard — no sentence may name something it
-is not about, context a dialog is built around cannot be silent, and nothing may be
-spoken twice — and three findings came out of it, each the same class as one the wizard
-had already given us.
+This release is an audit come back as a fix. "Hermes does not work at all in the app"
+turned out, under a live audit, to be a true report with a false conclusion: every layer
+of the Hermes integration — discovery, the model picker, the session list, and full
+turns through the application's own send path — was verified working against a real
+install. What was actually happening was that the application sat through the provider
+grind in silence.
 
-## The name-field help stopped claiming Hermes names every session
+## The grind, and what was silent about it
 
-"Leave it empty to let Hermes name it after your first message" was true for a Hermes
-session and false for a local Claude, Codex, FreeBuff or opencode one, where the first
-message names the tab and Hermes is not involved in naming anything at all — the same
-class of false statement as the wizard's "npm could not be installed" on a machine that
-has npm. The help now reads "Leave it empty to let the first message name it", which is
-true in every mode for every backend.
+With an account rate-limited or out of credits, Hermes does not fail a turn. It backs
+off and falls back, one provider at a time — a captured run showed claude-opus-5, then
+gpt-5.6-sol, then claude-sonnet-5 all answering 429 before a fourth provider finally
+answered — and most of that journey is not narrated on the gateway's wire. The only
+explanations Hermes sends were being thrown away by the worker, and the fallback lines
+that did arrive were decorated for a terminal: "⚠️ Model fallback: …", which a screen
+reader reads as "warning sign" before every sentence.
 
-## The remote-mode context is spoken
+Three fixes, each a sentence that used to be missing:
 
-The dialog's only explanation of its remote shape — the session will run on another
-machine, so folders on this computer do not apply — was a StaticText, and no screen
-reader announces a StaticText when a dialog opens. The person landed on the name field
-having heard none of the context that makes the dialog's shape make sense. The one
-sentence that explains it is now spoken the moment the dialog opens, before the field
-takes the focus. A local dialog says nothing extra, which is its own guard.
-
-## A refusal is said once
-
-A folder the dialog could not use was announced explicitly and then shown in a modal
-dialog, which announces the same sentence again — the duplicate-speech class the
-backend-selection announcement was removed for. The refusal is now said by the dialog
-that asks for a correction, and nothing more.
-
-## The suite is hermetic again, and fully green
-
-The official Hermes installer sets `HERMES_HOME` persistently, and two test fixtures
-that point every history store at a throwaway home never cleared it — so on a machine
-where the installer has run, fifteen history tests and one settings-file test answered
-with the machine's own conversations instead of the ones the tests had built. The
-fixtures now delete `HERMES_HOME` the way they already delete `CODEX_HOME` and the
-opencode variables, and the suite is green with `-W error` for the first time since
-Hermes was installed here.
-
-One real leak surfaced by the same standard: the Hermes login path caught an
-`HTTPError` without closing the response body it carries, which warns "Implicitly
-cleaning up" when it is collected — a failure under `-W error`, and an open response
-stream in real use until then. It is closed now, deterministically: the test that
-exposed it passes every run instead of one in six.
+- The gateway's own "Still starting the agent (tool discovery / model setup) — your
+  message will be sent as soon as it's ready" is now a spoken row that names the wait,
+  instead of being dropped on the floor while a slow agent build ran.
+- A turn that produces nothing for two minutes now says what it is probably waiting on
+  — a rate-limited or credit-exhausted provider, or another Hermes session on the same
+  account — and what to do about it: pick a different model with /model. Once, not as a
+  repeating error: a silent-but-connected turn is news, never a failure.
+- Terminal decorations are stripped from status lines, so the fallback chain reads
+  "Model fallback: claude-opus-5 via anthropic unavailable (rate limit); using
+  gpt-5.6-sol" instead of "warning sign. Model fallback: …".
 
 ## Verification
 
-Five new tests, all failing-first against the three dialog findings. Full suite:
-**1084 passed, 3 skipped, zero failures** with `-W error` — the first fully green run
-on this machine since the Hermes install. ruff, format and mypy clean; both startup
-smokes clean.
+Four new tests, failing-first, each pinning one of the sentences above; the full suite
+is green under `-W error`, and ruff, mypy and both startup smoke tests are clean. The
+end-to-end proof that nothing else was broken: full Hermes turns, through the real
+application path, completing in seconds on the same machine the report came from — with
+the answer arriving over the fallback provider that still had room to answer.
+
+If Hermes feels slow, the app will now say why. The other half of the remedy is on the
+account side: the default model is still claude-opus-5, and picking a model with credits
+available is what makes the wait short rather than merely explained.
