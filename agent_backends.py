@@ -1516,6 +1516,21 @@ class _Closed:
 _CODEX_CLOSED = _Closed()
 
 
+class _Asked:
+    """The mark a turn puts in its own inbox when it asks for a turn.
+
+    Everything already queued behind it was said before this turn asked for
+    anything, so none of it can be about this turn. Everything after it may
+    be. The inbox is first in, first out and both threads write to it in
+    order, so the mark separates the two exactly -- which a flag set at send
+    time does not, because by then the earlier messages are already queued and
+    are read after it.
+    """
+
+
+_CODEX_ASKED = _Asked()
+
+
 class _TurnWatch:
     """One turn's completion, and how many callers are waiting to hear it."""
 
@@ -1589,6 +1604,8 @@ class CodexServer:
         self._stderr_reader: Optional[threading.Thread] = None
         self._closed = False
         self._read_error = ""
+        # How many turns are speaking through this process right now.
+        self._borrowers = 0
 
     # ----- lifetime -----
 
@@ -1658,10 +1675,13 @@ class CodexServer:
         id (both `required: ["thread", ...]` in the app server's own schema),
         and the reader binds that conversation to this queue *before* it hands
         the reply on. Everything arrives on one stdout read by one thread, so
-        a notification for the conversation can only be the next message or a
-        later one -- by which time the binding is already in place. That is why
-        nothing has to be buffered for a thread nobody is reading yet: there is
-        no moment at which such a thread exists.
+        any message routed after that reply finds the binding already in place,
+        and nothing has to be buffered for a thread nobody is reading yet.
+
+        Messages routed *before* the reply are a different matter: a threadId
+        nothing is bound to yet is dropped. In practice the only notification
+        Codex sends between creating a thread and answering for it is
+        `mcpServer/startupStatus/updated`, which this worker ignores.
         """
         self._expect(request_id, listener, binds_thread=True)
 
@@ -1703,10 +1723,38 @@ class CodexServer:
             if self._threads.get(thread_id) is listener:
                 del self._threads[thread_id]
 
-    def attached_count(self) -> int:
-        """How many conversations are being read right now."""
+    def detach_listener(self, listener: "queue.Queue[object]") -> None:
+        """Stop reading every conversation bound to this queue.
+
+        By identity rather than by id, because the id is exactly what a turn
+        may not have. The reader binds the conversation the moment the reply
+        names it; a turn cancelled between that routing and its own reading of
+        the reply never learns the id, and detaching by an id it does not have
+        would leave the binding there for the life of the process.
+        """
         with self._state_lock:
-            return len(self._threads)
+            for thread_id in [k for k, v in self._threads.items() if v is listener]:
+                del self._threads[thread_id]
+
+    def borrow(self) -> None:
+        """One more turn is speaking through this process."""
+        with self._state_lock:
+            self._borrowers += 1
+
+    def give_back(self) -> None:
+        with self._state_lock:
+            self._borrowers = max(0, self._borrowers - 1)
+
+    def borrower_count(self) -> int:
+        """How many turns hold this process right now.
+
+        Not the same as how many conversations are bound: a turn that has sent
+        `thread/start` and is waiting for the reply holds the process without
+        being bound to anything, and is exactly the turn that must not have it
+        stopped underneath it.
+        """
+        with self._state_lock:
+            return self._borrowers
 
     def watch_turn(self, turn_id: str) -> threading.Event:
         """The event the reader sets when this turn completes.
@@ -1761,8 +1809,15 @@ class CodexServer:
                     message = json.loads(raw)
                 except ValueError:
                     continue
-                if isinstance(message, dict):
+                if not isinstance(message, dict):
+                    continue
+                try:
                     self._route(message)
+                except Exception:
+                    # One message nobody anticipated must not be read as the
+                    # stream breaking: this reader serves every tab, and
+                    # closing here would end all of their turns at once.
+                    continue
         except Exception as exc:
             # Whatever broke the pipe is the reason every turn on this server
             # is about to end, so it is carried rather than lost to a thread
@@ -1797,8 +1852,13 @@ class CodexServer:
                     self._thread_replies.discard(request_id)
                     if waiting is not None and binds and not self._closed:
                         result = message.get("result")
-                        thread = (result or {}).get("thread") if isinstance(result, dict) else None
-                        thread_id = str((thread or {}).get("id") or "")
+                        thread = result.get("thread") if isinstance(result, dict) else None
+                        # Shape-checked at every step. This runs on the one
+                        # reader thread, and anything raised here would be
+                        # caught as a broken stream and end every tab's turn,
+                        # where the same malformed reply parsed in a worker
+                        # only ever ended that worker's own.
+                        thread_id = str(thread.get("id") or "") if isinstance(thread, dict) else ""
                         if thread_id:
                             self._threads[thread_id] = waiting
             if waiting is not None:
@@ -1995,6 +2055,7 @@ class CodexWorker(threading.Thread):
         self._held: object = None
         self._inbox: Optional["queue.Queue[object]"] = None
         self._expected: list[int] = []
+        self._borrowed = False
         self._cancelled = False
         self._accepting_input = threading.Event()
         self._thread_id = session_id or ""
@@ -2002,6 +2063,9 @@ class CodexWorker(threading.Thread):
         # The turn id currently registered with the server, so the registration
         # is given back exactly once.
         self._watched = ""
+        # Whether this turn has asked for a turn of its own yet. Until it has,
+        # anything naming a turn names an older one.
+        self._turn_asked = False
         self._request_id = 10
         self._assistant_parts: list[str] = []
         self._assistant_delta_seen: set[str] = set()
@@ -2120,7 +2184,12 @@ class CodexWorker(threading.Thread):
         self._expected = []
         inbox = self._inbox
         if inbox is not None:
-            server.detach(self._thread_id, inbox)
+            # By identity: a turn cancelled before it read the reply that named
+            # its conversation never learned the id to detach by.
+            server.detach_listener(inbox)
+        if self._borrowed:
+            self._borrowed = False
+            server.give_back()
 
     def _borrow_server(self) -> Optional[backend_pool.HeldProcess]:
         """The app-server this turn will speak through, or None having failed.
@@ -2154,6 +2223,8 @@ class CodexWorker(threading.Thread):
         server = cast(CodexServer, held.handle)
         self._server = server
         self._inbox = server.inbox()
+        server.borrow()
+        self._borrowed = True
         return held
 
     def _discard_server(self) -> None:
@@ -2163,12 +2234,15 @@ class CodexWorker(threading.Thread):
         process that will not serve any turn -- an app-server whose handshake
         went unanswered, say -- and leaving it there would fail every prompt
         for the next quarter of an hour, where a per-turn process used to get a
-        fresh start each time. It is only dropped while no other tab is reading
-        it: this must never be the way one conversation's bad session id ends
+        fresh start each time. It is only dropped while no other tab is holding
+        it -- borrowing, not reading: a turn that has sent `thread/start` and
+        is still waiting on the reply is bound to no conversation yet, and is
+        exactly the turn that must not have its process stopped underneath it.
+        This must never be the way one conversation's bad session id ends
         another's live turn.
         """
         server = self._server
-        if server is None or server.attached_count():
+        if server is None or server.borrower_count() > 1:
             return
         backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
 
@@ -2238,6 +2312,11 @@ class CodexWorker(threading.Thread):
                 continue
             if queued is _CODEX_CLOSED:
                 break
+            if queued is _CODEX_ASKED:
+                # Everything read before here was said before this turn asked
+                # for anything, so none of it was about this turn.
+                self._turn_asked = True
+                continue
             if not isinstance(queued, dict):
                 continue
             message: dict = queued
@@ -2267,6 +2346,7 @@ class CodexWorker(threading.Thread):
                     # an empty result and then runs a turn of its own, whose
                     # notifications the loop below already understands.
                     compact_request = self._next_id()
+                    inbox.put(_CODEX_ASKED)
                     self._expect(compact_request)
                     self._send(
                         {
@@ -2289,6 +2369,7 @@ class CodexWorker(threading.Thread):
                 if self._effort:
                     params["effort"] = self._effort
                 turn_request = self._next_id()
+                inbox.put(_CODEX_ASKED)
                 self._expect(turn_request)
                 self._send({"method": "turn/start", "id": turn_request, "params": params})
                 continue
@@ -2321,7 +2402,21 @@ class CodexWorker(threading.Thread):
                 # The conversation is right but the turn is not: Codex is still
                 # winding up a turn that was interrupted, and its trailing
                 # deltas and its `turn/completed` are not this turn's to act on.
+                if method and "id" in message:
+                    # It asked something, though, and an answer it never gets
+                    # is a request id Codex holds for ever.
+                    self._decline_server_request(message)
                 continue
+            if self._compact and not self._turn_id:
+                # Only compaction: `thread/compact/start` answers empty, so
+                # nothing but the turn's own messages will ever name its turn.
+                # Everywhere else the `turn/start` reply names it, and adopting
+                # from a notification instead would give a straggler from the
+                # turn before this one a way in.
+                named = self._turn_named(params)
+                if named:
+                    self._turn_id = named
+                    self._watch_turn()
 
             if method and "id" in message:
                 self._handle_server_request(message)
@@ -2456,6 +2551,13 @@ class CodexWorker(threading.Thread):
         one, and acting on their `turn/completed` used to fail the new turn
         instantly with "Codex turn was interrupted" -- for a person who cannot
         see a spinner, an unexplained failure a retry then fixes.
+
+        What separates the two is not the order the messages arrive in but
+        where they sit relative to the point this turn asked for a turn --
+        which is what `_CODEX_ASKED` marks. Nothing said before that can be
+        about this turn. Anything after it may be, in whatever order it comes,
+        so a compaction turn -- whose id no reply ever carries -- does not
+        depend on `turn/started` arriving before its items.
         """
         named = self._turn_named(params)
         if not named:
@@ -2464,10 +2566,13 @@ class CodexWorker(threading.Thread):
             return True
         if self._turn_id:
             return named == self._turn_id
-        # This turn has not started yet, so anything naming a turn names an
-        # older one -- unless it is the announcement of this one arriving
-        # before the reply that would have named it.
-        return method == "turn/started"
+        if not self._turn_asked:
+            # Nothing has been asked for, so this is the tail of the turn that
+            # ran before this one -- the one somebody stopped.
+            return False
+        # Asked, and not yet told which turn we were given. An ending is the
+        # exception: a turn cannot finish before the beginning we never saw.
+        return method != "turn/completed"
 
     def _why_it_died(self, fallback: str) -> str:
         """The best account available of why the app-server stopped talking.
@@ -2516,6 +2621,34 @@ class CodexWorker(threading.Thread):
             self._send({"id": request_id, "result": {"decision": decision}})
         elif method == "item/tool/requestUserInput":
             self._answer_user_input(request_id, message.get("params") or {})
+        else:
+            self._send(
+                {
+                    "id": request_id,
+                    "error": {
+                        "code": -32601,
+                        "message": "BlindPilot cannot handle this request yet",
+                    },
+                }
+            )
+
+    def _decline_server_request(self, message: dict) -> None:
+        """Say no to something a turn that is over asked for.
+
+        Codex holds an unanswered request id open, so silence is not the same
+        as refusal. Declining is: the turn it belongs to was interrupted, and
+        the person is not going to be shown a question from it.
+        """
+        method = str(message.get("method") or "")
+        request_id = message.get("id")
+        if method == "item/tool/requestUserInput":
+            questions = _codex_questions((message.get("params") or {}).get("questions"))
+            answers: dict[str, dict] = {
+                question.id or question.question: {"answers": []} for question in questions
+            }
+            self._send({"id": request_id, "result": {"answers": answers}})
+        elif method.endswith("requestApproval"):
+            self._send({"id": request_id, "result": {"decision": "decline"}})
         else:
             self._send(
                 {

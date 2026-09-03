@@ -175,19 +175,67 @@ def test_what_a_finished_turn_says_on_its_way_out_is_not_kept_for_the_next_one()
     assert second.empty(), "the next turn was handed the last turn's leftovers"
 
 
+def _bare_worker(session_id=None, prompt="hello"):
+    """A worker with none of its callbacks doing anything, for unit work."""
+    return agent_backends.CodexWorker(
+        prompt,
+        session_id,
+        ".",
+        "default",
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _v: None,
+        on_complete=lambda _v: None,
+        on_failed=lambda _v: None,
+        on_done=lambda: None,
+    )
+
+
+def _cancelled_before_it_read_its_reply(server):
+    """A turn bound to a conversation it never learned the id of.
+
+    The reader binds the thread from the `thread/start` reply. A turn stopped
+    between that routing and its own reading of the reply has a binding on the
+    server and an empty `_thread_id`, so it cannot detach by id.
+    """
+    worker = _bare_worker()
+    inbox = server.inbox()
+    server.expect_thread(11, inbox)
+    server._route({"id": 11, "result": {"thread": {"id": "thread-new"}}})
+    assert server._threads == {"thread-new": inbox}, "the reply did not bind the conversation"
+    worker._server = server
+    worker._inbox = inbox
+    assert worker._thread_id == "", "this turn is supposed never to have learned its id"
+    return worker
+
+
+def test_a_conversation_bound_by_a_reply_nobody_read_is_not_left_behind():
+    """Stop between the reply being routed and the turn reading it.
+
+    No race is needed: the binding happens on the reader thread, the reading
+    on the turn's. Detaching by an id the turn never learned would leave the
+    conversation registered for the life of the process -- which both makes
+    every unnamed message look ambiguous and stops the server ever being seen
+    as free again.
+    """
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _cancelled_before_it_read_its_reply(server)
+
+    worker._release()
+
+    assert server._threads == {}, "a conversation the turn never named was left bound"
+
+
 def test_only_the_tabs_actually_reading_count_towards_ambiguity():
     """The unnamed-message fallback must not be confused by a stale entry.
 
     `configWarning` carries no threadId. With one conversation being read there
-    is no doubt who should hear it, and a conversation that has been released
-    must not make it look as though there were two.
+    is no doubt who should hear it, and one orphan left behind by a cancelled
+    turn must not make it look as though there were two.
     """
     warning = {"method": "configWarning", "params": {"summary": "check your config"}}
-    proc = _FakeProc()
-    server = agent_backends.CodexServer(proc)
-    gone = server.inbox()
-    server.attach("thread-1", gone)
-    server.detach("thread-1", gone)
+    server = agent_backends.CodexServer(_FakeProc())
+    _cancelled_before_it_read_its_reply(server)._release()
     live = server.inbox()
     server.attach("thread-2", live)
 
@@ -643,27 +691,19 @@ def test_a_server_that_cannot_start_a_conversation_does_not_serve_the_next_turn(
     assert backend_pool.pool().take(key) is None, "the broken server was left for the next turn"
 
 
-def test_a_conversation_being_read_is_never_dropped_by_another_tabs_failure():
+def test_a_conversation_being_read_is_never_dropped_by_another_tabs_failure(monkeypatch):
     """One tab's bad session id must not end another tab's live turn."""
     server = agent_backends.CodexServer(_FakeProc())
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
-    server.attach("someone-elses-thread", server.inbox())
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    mid_turn = _bare_worker()
+    assert mid_turn._borrow_server() is not None
+    server.attach("someone-elses-thread", mid_turn._inbox)
 
-    worker = agent_backends.CodexWorker(
-        "hello",
-        "no-such-thread",
-        ".",
-        "default",
-        on_session=lambda _s: None,
-        on_started=lambda: None,
-        on_activity=lambda _k, _v: None,
-        on_complete=lambda _v: None,
-        on_failed=lambda _v: None,
-        on_done=lambda: None,
-    )
-    worker._server = server
-    worker._discard_server()
+    giving_up = _bare_worker(session_id="no-such-thread")
+    assert giving_up._borrow_server() is not None
+    giving_up._discard_server()
 
     assert backend_pool.pool().take(key) is not None, "a tab mid-turn had its server taken away"
 
@@ -697,3 +737,237 @@ def test_a_turn_gives_its_place_back_and_leaves_nothing_behind(monkeypatch):
     assert held.handle._turns == {}, "the turn's completion watch was left behind"
     assert held.handle._waiting == {}, "a reply the turn asked for is still expected"
     assert held.handle._thread_replies == set()
+
+
+def test_a_server_a_turn_is_still_waiting_on_is_not_taken_away(monkeypatch):
+    """Tab A has sent thread/start and is waiting; tab B fails and gives up.
+
+    Tab A holds the process without being bound to any conversation yet -- MCP
+    servers can take hundreds of milliseconds to come up before the reply
+    arrives -- so counting bound conversations says nobody is there. Counting
+    borrowers says otherwise, which is the difference between tab A finishing
+    its turn and hearing "Codex app server closed before the turn completed".
+    """
+    server = agent_backends.CodexServer(_FakeProc())
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+
+    waiting = _bare_worker()
+    assert waiting._borrow_server() is not None
+    assert server._threads == {}, "tab A is supposed to be bound to nothing yet"
+
+    giving_up = _bare_worker(session_id="no-such-thread")
+    assert giving_up._borrow_server() is not None
+    giving_up._discard_server()
+
+    assert backend_pool.pool().take(key) is not None, (
+        "a turn waiting on thread/start had its app server stopped underneath it"
+    )
+    assert not server.proc.killed
+
+
+def test_the_last_turn_holding_a_broken_server_is_the_one_that_drops_it(monkeypatch):
+    """With nobody else holding it, a server that cannot start a conversation goes."""
+    server = agent_backends.CodexServer(_FakeProc())
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+
+    worker = _bare_worker(session_id="no-such-thread")
+    assert worker._borrow_server() is not None
+    worker._discard_server()
+
+    assert backend_pool.pool().take(key) is None, "the broken server was left for the next turn"
+
+
+def test_a_turn_gives_its_borrow_back_when_it_ends():
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _bare_worker()
+    worker._server = server
+    worker._inbox = server.inbox()
+    server.borrow()
+    worker._borrowed = True
+
+    worker._release()
+    worker._release()
+
+    assert server.borrower_count() == 0, "the turn is over but still counted as holding it"
+
+
+def test_a_reply_of_the_wrong_shape_does_not_end_every_tabs_turn():
+    """The reader serves everyone, so nothing it parses may take it down.
+
+    Before the thread binding moved into the reader, this same malformed reply
+    was parsed inside one worker and failed one turn. On the reader thread it
+    would be read as the stream breaking and end all of them at once.
+    """
+    nonsense = {"id": 11, "result": {"thread": "not an object"}}
+    healthy = {"method": "item/started", "params": {"threadId": "thread-1", "item": {}}}
+    proc = _FakeProc([json.dumps(nonsense), json.dumps(healthy)])
+    server = agent_backends.CodexServer(proc)
+    mine = server.inbox()
+    server.expect_thread(11, mine)
+    other = server.inbox()
+    server.attach("thread-1", other)
+    server.start_readers()
+
+    assert mine.get(timeout=5) == nonsense
+    assert other.get(timeout=5) == healthy, "one malformed reply closed the whole server"
+    assert server.read_error() == ""
+
+
+def test_a_question_from_a_turn_that_is_over_is_declined_rather_than_ignored():
+    """Codex holds an unanswered request id open, so silence is not refusal."""
+    sent: list[dict] = []
+    worker = _bare_worker()
+    worker._turn_id = "turn-2"
+    worker._send = lambda message: sent.append(message) or True
+
+    worker._decline_server_request(
+        {
+            "method": "item/commandExecution/requestApproval",
+            "id": 77,
+            "params": {"threadId": "thread-1", "turnId": "turn-1"},
+        }
+    )
+    worker._decline_server_request(
+        {
+            "method": "item/tool/requestUserInput",
+            "id": 78,
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "questions": [{"id": "pick", "question": "Which one?", "options": []}],
+            },
+        }
+    )
+
+    assert sent == [
+        {"id": 77, "result": {"decision": "decline"}},
+        {"id": 78, "result": {"answers": {"pick": {"answers": []}}}},
+    ]
+
+
+def test_a_turn_knows_its_own_whichever_message_names_it_first():
+    """Compaction never learns its turn id from a reply.
+
+    `thread/compact/start` answers empty and the turn announces itself, so the
+    guard must not depend on `turn/started` arriving before the turn's items.
+    Anything else silently drops the compaction's content and its completion,
+    and the turn hangs until the reaper takes the process.
+    """
+    worker = _bare_worker(prompt="/compact")
+    worker._turn_asked = True
+
+    item = {"threadId": "thread-1", "turnId": "turn-c", "item": {}}
+    assert worker._is_this_turn("item/started", item) is True
+    assert agent_backends.CodexWorker._turn_named(item) == "turn-c"
+    # And the announcement that follows it is recognised as the same turn.
+    worker._turn_id = "turn-c"
+    started = {"threadId": "thread-1", "turn": {"id": "turn-c"}}
+    assert worker._is_this_turn("turn/started", started) is True
+
+
+def test_nothing_naming_a_turn_is_this_turn_before_this_turn_is_asked_for():
+    """The other half: what makes the leftovers of a stopped turn recognisable."""
+    worker = _bare_worker()
+
+    leftover = {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "interrupted"}}
+    assert worker._is_this_turn("turn/completed", leftover) is False
+    assert worker._is_this_turn("turn/started", {"turn": {"id": "turn-1"}}) is False
+    # Nothing naming a turn at all is nobody's leftovers.
+    assert worker._is_this_turn("configWarning", {"summary": "check your config"}) is True
+
+    # Once a turn has been asked for, an ending is still not adoptable: a turn
+    # cannot finish before the beginning this one never saw.
+    worker._turn_asked = True
+    assert worker._is_this_turn("turn/completed", leftover) is False
+    assert worker._is_this_turn("item/started", {"turnId": "turn-9", "item": {}}) is True
+
+
+def test_a_compaction_whose_items_arrive_before_its_announcement_still_finishes(monkeypatch):
+    """The ordering N5 warned about, driven end to end."""
+
+    class _CompactsOutOfOrder(_FakeProc):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stdout = self._script()
+
+        def _asked(self, method: str, timeout: float = 10.0) -> dict:
+            deadline = time.monotonic() + timeout
+            while True:
+                for line in list(self.stdin.written):
+                    message = json.loads(line)
+                    if message.get("method") == method:
+                        return message
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"the worker never sent {method}")
+                time.sleep(0.005)
+
+        def _script(self):
+            resume = self._asked("thread/resume")
+            yield json.dumps({"id": resume["id"], "result": {"thread": {"id": "thread-1"}}})
+            compact = self._asked("thread/compact/start")
+            yield json.dumps({"id": compact["id"], "result": {}})
+            # An item before the announcement, which is the order under test.
+            # It has to be one that says something, or the test cannot tell
+            # whether it was acted on or quietly dropped.
+            yield json.dumps(
+                {
+                    "method": "item/started",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-c",
+                        "item": {
+                            "type": "commandExecution",
+                            "id": "c1",
+                            "command": ["git", "log"],
+                        },
+                    },
+                }
+            )
+            yield json.dumps(
+                {
+                    "method": "turn/started",
+                    "params": {"threadId": "thread-1", "turn": {"id": "turn-c"}},
+                }
+            )
+            yield json.dumps(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {"id": "turn-c", "status": "completed"},
+                    },
+                }
+            )
+
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _b: "codex")
+    monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda b: b)
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _b: {})
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: _CompactsOutOfOrder())
+    completed: list[str] = []
+    failures: list[str] = []
+    activity: list[tuple] = []
+    worker = agent_backends.CodexWorker(
+        "/compact",
+        "thread-1",
+        ".",
+        "default",
+        compact=True,
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda kind, value: activity.append((kind, value)),
+        on_complete=completed.append,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+
+    worker.run()
+
+    assert not failures, failures
+    assert completed == ["Conversation compacted."]
+    assert ("tool", "Running: git log") in activity, (
+        "what the compaction did before it announced itself was dropped"
+    )
