@@ -270,3 +270,54 @@ def test_a_reap_is_announced_so_the_next_cold_start_is_never_a_surprise():
 
 def test_the_idle_limit_is_fifteen_minutes():
     assert backend_pool._HELD_IDLE_SECONDS == 900.0
+
+
+def test_the_pool_is_swept_at_exit(monkeypatch):
+    """Quitting must not leave an app-server and its MCP children behind.
+
+    Held Hermes connections have no atexit hook today; this is the first.
+    atexit exposes no supported way to read what is registered, so this
+    re-imports the module with a recording stand-in in place of `register`
+    and asserts the sweep is what gets handed to it.
+    """
+    import atexit
+    import importlib
+
+    recorded: list = []
+    monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: recorded.append(fn) or fn)
+    importlib.reload(backend_pool)
+    try:
+        assert backend_pool.stop_all_held_processes in recorded
+    finally:
+        # Reload again so the real registration is back in place and the
+        # module globals other tests read are not the reloaded copies.
+        importlib.reload(backend_pool)
+
+
+def test_sweeping_at_exit_stops_every_held_process():
+    pool = backend_pool.pool()
+    handle = _FakeHandle()
+    key = backend_pool.pool_key("codex")
+    try:
+        pool.keep(key, backend_pool.HeldProcess(handle, _adapter()))
+        backend_pool.stop_all_held_processes()
+        assert handle.stops == 1
+        assert pool.held_count() == 0
+    finally:
+        pool.drop_all()
+
+
+def test_the_reaper_runs_on_a_daemon_thread():
+    """A non-daemon reaper would hold the interpreter open at quit."""
+    thread = backend_pool.start_reaper(interval=0.01)
+    try:
+        assert thread.daemon is True
+        assert thread.is_alive()
+    finally:
+        backend_pool.stop_reaper()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "the reaper did not stop when asked"
+
+
+def test_the_shared_pool_is_the_same_object_every_time():
+    assert backend_pool.pool() is backend_pool.pool()

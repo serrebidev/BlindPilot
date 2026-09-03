@@ -14,6 +14,7 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+import atexit
 import threading
 import time
 import weakref
@@ -252,3 +253,45 @@ def pool() -> BackendPool:
         if _pool is None:
             _pool = BackendPool()
         return _pool
+
+
+_reaper: Optional[threading.Thread] = None
+_reaper_stop = threading.Event()
+
+
+def stop_all_held_processes() -> None:
+    """Stop every held process -- at quit, and before an update replaces a CLI.
+
+    Belt and braces alongside the window's own teardown: `_on_close` cancels
+    each tab, but a crash on the way out, or a path that never reaches the
+    window at all, would otherwise leave an app-server and its MCP children
+    running with nobody to stop them.
+    """
+    running = _pool
+    if running is not None:
+        running.drop_all()
+
+
+def start_reaper(interval: float = 60.0) -> threading.Thread:
+    """Sweep idle processes on a timer, on a thread of its own."""
+    global _reaper
+    _reaper_stop.clear()
+
+    def sweep() -> None:
+        while not _reaper_stop.wait(interval):
+            try:
+                pool().reap(now=time.monotonic())
+            except Exception:
+                # A sweep that throws must not end the sweeping.
+                pass
+
+    _reaper = threading.Thread(target=sweep, name="backend-pool-reaper", daemon=True)
+    _reaper.start()
+    return _reaper
+
+
+def stop_reaper() -> None:
+    _reaper_stop.set()
+
+
+atexit.register(stop_all_held_processes)
