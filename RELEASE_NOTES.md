@@ -1,80 +1,59 @@
-# BlindPilot 0.20.5
+# BlindPilot 0.20.6
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release is about the questions a session can answer. For a Hermes reached over a
-network, "which folder should this run in?" is a question this computer cannot answer —
-the folder lives on another machine, and a dialog that insisted on a real local path
-turned the silence into a conversation that ran somewhere the person never chose. New
-Session now asks the question this machine *can* answer: what is this session called?
+This release is what the last one's standard was for. The New Session dialog was held
+to the same captured-log bar as the install wizard — no sentence may name something it
+is not about, context a dialog is built around cannot be silent, and nothing may be
+spoken twice — and three findings came out of it, each the same class as one the wizard
+had already given us.
 
-## A name, then a folder on that computer
+## The name-field help stopped claiming Hermes names every session
 
-Remote mode asks for a name first, because it is the only field this computer can
-answer, and for an optional folder on the *other* machine as free text. There is no
-Browse button: a picker here would browse the wrong computer, and an inert control
-costs a screen reader user a stop in the tab order on every visit. The path travels
-exactly as typed — no `expanduser`, no `abspath`, no `expandvars`, each of which would
-resolve against the wrong filesystem.
+"Leave it empty to let Hermes name it after your first message" was true for a Hermes
+session and false for a local Claude, Codex, FreeBuff or opencode one, where the first
+message names the tab and Hermes is not involved in naming anything at all — the same
+class of false statement as the wizard's "npm could not be installed" on a machine that
+has npm. The help now reads "Leave it empty to let the first message name it", which is
+true in every mode for every backend.
 
-The silence this replaces was measured against a live gateway, read back from the
-server's own state.db rather than from the reply, because the reply looks fine either
-way: a Windows path sent to a Linux Hermes comes back with no error of any kind, and
-the session is quietly running in the server's home directory. The dialog's old check
-only ever proved the folder existed *here*, so a browsed folder passed validation and
-the conversation ran somewhere else — in a tab named after a directory it was never in.
-Now the resolved directory is reported when it is not what was asked for: "Hermes could
-not use `C:\Users\g\Desktop\projekt`, so this conversation is running in
-`/home/ubuntu`" — deliberately quiet when the folder was honoured, or when none was
-asked for, the ordinary remote case. The comparison is textual, because the two paths
-live on different machines with different separators, case rules, and notions of
-existence.
+## The remote-mode context is spoken
 
-Two small labels got their sentences back along the way. A tab with neither a name nor
-a folder used to be labelled with nothing at all — the one label a screen reader cannot
-tell from its neighbour — and reads "New session" now. `/status` says the folder was
-"chosen by the Hermes running this session" rather than printing `Folder:` followed by
-nothing.
+The dialog's only explanation of its remote shape — the session will run on another
+machine, so folders on this computer do not apply — was a StaticText, and no screen
+reader announces a StaticText when a dialog opens. The person landed on the name field
+having heard none of the context that makes the dialog's shape make sense. The one
+sentence that explains it is now spoken the moment the dialog opens, before the field
+takes the focus. A local dialog says nothing extra, which is its own guard.
 
-## A session keeps the name it was given
+## A refusal is said once
 
-The name reached the tab at creation, and then the first message took it away: a
-conversation is normally named after its first message, and nothing checked whether
-this one already had a name of its own. Sending "start" to a session named for its
-subject left the tab called "start" — and with Hermes the two names then disagreed
-about the same conversation, since a name given at creation is stored with
-`title_source='user'` and is not overwritten by the automatic one. The name was the
-only thing the person chose, and nothing could get it back.
+A folder the dialog could not use was announced explicitly and then shown in a modal
+dialog, which announces the same sentence again — the duplicate-speech class the
+backend-selection announcement was removed for. The refusal is now said by the dialog
+that asks for a correction, and nothing more.
 
-A name belongs to one conversation, so it is dropped wherever the tab becomes a
-different one — clearing it, reopening a Hermes conversation, restoring one from disk,
-or changing backend once a conversation exists — but not before the first message,
-where there is nothing to leave behind and a name typed seconds ago must survive
-picking a backend. Whitespace counts as no name, so a tab cannot end up with a blank
-label. The fix lives where the label is recomputed, not in the label function, which
-was correct all along; each of the five changes has a test that fails without it, and
-an unnamed session is still named by its first message.
+## The suite is hermetic again, and fully green
 
-## Transport fakes can no longer lie about being connected
+The official Hermes installer sets `HERMES_HOME` persistently, and two test fixtures
+that point every history store at a throwaway home never cleared it — so on a machine
+where the installer has run, fifteen history tests and one settings-file test answered
+with the machine's own conversations instead of the ones the tests had built. The
+fixtures now delete `HERMES_HOME` the way they already delete `CODEX_HOME` and the
+opencode variables, and the suite is green with `-W error` for the first time since
+Hermes was installed here.
 
-The contract harness closes the thread this contributor opened with the Hermes backend:
-every transport fake in the suite now runs against the real `Transport` semantics. The
-distinction it enforces is the one a single `None` cannot make: a stream that has ended
-must turn `connected()` False within a time budget, while a peer that is merely quiet
-— a Hermes in the middle of a long turn — stays connected, and fakes declare which
-they are. The registry is walked structurally rather than by name, so the next fake
-fails at write time instead of on a runner in another country. It found its first
-unregistered fake on its own first run, and it caught itself silently skipping on
-Linux — a guard disappearing where it is needed most, because a missing wx module
-raises `BaseException`, not `Exception`. Four fakes claimed connection after their
-stream ran out and six let `send()` succeed after `close()`; all of them now end their
-stream and refuse writes the way real pipes and sockets do.
+One real leak surfaced by the same standard: the Hermes login path caught an
+`HTTPError` without closing the response body it carries, which warns "Implicitly
+cleaning up" when it is collected — a failure under `-W error`, and an open response
+stream in real use until then. It is closed now, deterministically: the test that
+exposed it passes every run instead of one in six.
 
 ## Verification
 
-39 new tests across the two PRs (13 for the harness, 26 for the naming work), all
-written failing-first and each with its negative control. Full suite: **1061 passed,
-3 skipped** at the release commit, ruff, format and mypy clean, both startup smokes
-clean. Repo CI was green on Windows, Linux and macOS for both PRs before merging.
+Five new tests, all failing-first against the three dialog findings. Full suite:
+**1084 passed, 3 skipped, zero failures** with `-W error` — the first fully green run
+on this machine since the Hermes install. ruff, format and mypy clean; both startup
+smokes clean.
