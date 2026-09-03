@@ -33,6 +33,11 @@ from agent_backends import BACKENDS, settings_files
 def home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    # The Hermes entry honours HERMES_HOME, and its official installer sets it
+    # persistently: on a machine with Hermes installed, the inherited value
+    # would make the real config.yaml answer "present" instead of the files
+    # the test itself created. Same class as the CODEX_HOME deletion above.
+    monkeypatch.delenv("HERMES_HOME", raising=False)
     return tmp_path
 
 

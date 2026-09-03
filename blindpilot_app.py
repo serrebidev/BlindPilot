@@ -4466,14 +4466,17 @@ class NewSessionDialog(wx.Dialog):
         rows = wx.BoxSizer(wx.VERTICAL)
 
         if self._remote_label:
-            intro = wx.StaticText(
-                self,
-                label=(
-                    f"This session will run on {self._remote_label}, "
-                    "so folders on this computer do not apply to it."
-                ),
+            intro_text = (
+                f"This session will run on {self._remote_label}, "
+                "so folders on this computer do not apply to it."
             )
+            intro = wx.StaticText(self, label=intro_text)
             rows.Add(intro, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            # A StaticText is never announced when a dialog opens: the user
+            # lands on the name field having heard none of the context that
+            # makes the dialog's shape make sense. Say the one sentence that
+            # explains it, now, before the dialog takes the focus.
+            announce(intro_text)
 
         # The name goes first in remote mode because it is the only field that
         # can be answered from here, and tab order is the order of usefulness.
@@ -4483,7 +4486,7 @@ class NewSessionDialog(wx.Dialog):
         self.name_box.SetMinSize(wx.Size(420, -1))
         name_help = wx.StaticText(
             self,
-            label="Leave it empty to let Hermes name it after your first message.",
+            label="Leave it empty to let the first message name it.",
         )
 
         folder_caption = (
@@ -4588,7 +4591,9 @@ class NewSessionDialog(wx.Dialog):
         event.Skip()
 
     def _reject(self, message: str) -> None:
-        announce(message)
+        # The modal below announces the message itself when it opens, so an
+        # explicit announce here would say the same sentence twice -- the
+        # duplicate-speech class removed elsewhere in this application.
         with wx.MessageDialog(self, message, "New Session", style=wx.OK | wx.ICON_WARNING) as warn:
             warn.ShowModal()
         self.folder_box.SetFocus()
