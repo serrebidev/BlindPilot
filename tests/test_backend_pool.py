@@ -210,3 +210,63 @@ def test_a_collected_panel_does_not_keep_its_process_registered():
     del panel
     gc.collect()
     assert pool.held_count() == 0
+
+
+def test_a_process_idle_past_the_limit_is_reaped():
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    held = backend_pool.HeldProcess(handle, _adapter(), now=lambda: 0.0)
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, held)
+    assert pool.reap(now=901.0, idle_limit=900.0) == [key]
+    assert handle.stops == 1
+    assert pool.take(key) is None
+
+
+def test_a_process_used_recently_is_left_alone():
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    pool.keep(
+        backend_pool.pool_key("codex"),
+        backend_pool.HeldProcess(handle, _adapter(), now=lambda: 0.0),
+    )
+    assert pool.reap(now=899.0, idle_limit=900.0) == []
+    assert handle.stops == 0
+    pool.drop_all()
+
+
+def test_reaping_one_tab_leaves_a_busy_tab_running():
+    pool = backend_pool.BackendPool()
+    idle_panel, busy_panel = _Panel(), _Panel()
+    idle_handle, busy_handle = _FakeHandle(), _FakeHandle()
+    pool.keep(
+        backend_pool.pool_key("claude", idle_panel),
+        backend_pool.HeldProcess(idle_handle, _adapter(), now=lambda: 0.0),
+    )
+    pool.keep(
+        backend_pool.pool_key("claude", busy_panel),
+        backend_pool.HeldProcess(busy_handle, _adapter(), now=lambda: 900.0),
+    )
+    reaped = pool.reap(now=901.0, idle_limit=900.0)
+    assert reaped == [backend_pool.pool_key("claude", idle_panel)]
+    assert idle_handle.stops == 1
+    assert busy_handle.stops == 0
+    pool.drop_all()
+
+
+def test_a_reap_is_announced_so_the_next_cold_start_is_never_a_surprise():
+    """A user who cannot see a spinner infers a hang from silence. The reap is
+    the reason the next prompt is slow, so it has to be sayable."""
+    said: list[str] = []
+    pool = backend_pool.BackendPool()
+    pool.on_reap = said.append
+    pool.keep(
+        backend_pool.pool_key("codex"),
+        backend_pool.HeldProcess(_FakeHandle(), _adapter(), now=lambda: 0.0),
+    )
+    pool.reap(now=901.0, idle_limit=900.0)
+    assert said == ["codex"]
+
+
+def test_the_idle_limit_is_fifteen_minutes():
+    assert backend_pool._HELD_IDLE_SECONDS == 900.0

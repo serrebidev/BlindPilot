@@ -20,6 +20,12 @@ import weakref
 from typing import Callable, NamedTuple, Optional
 
 
+# How long a held process may sit unused before it is stopped. Long enough
+# that an active conversation is always warm; short enough that a laptop left
+# open overnight is not holding an app-server and its MCP children.
+_HELD_IDLE_SECONDS = 900.0
+
+
 class Adapter(NamedTuple):
     """What a backend must say about its process, and nothing more.
 
@@ -129,6 +135,10 @@ class BackendPool:
         self._per_panel: "weakref.WeakKeyDictionary[object, dict[str, HeldProcess]]" = (
             weakref.WeakKeyDictionary()
         )
+        # Told the backend name of each reaped process, so the window can say
+        # why the next prompt in that tab starts cold. Set by the window; the
+        # pool itself must not import wx or speak.
+        self.on_reap: Optional[Callable[[str], None]] = None
 
     def _slot(self, key: tuple) -> tuple[Optional[dict], str]:
         """The dict a key lives in and the name within it, or (None, name)."""
@@ -201,6 +211,34 @@ class BackendPool:
     def held_count(self) -> int:
         with self._lock:
             return len(self._shared) + sum(len(slot) for slot in self._per_panel.values())
+
+    def reap(self, now: float, idle_limit: float = _HELD_IDLE_SECONDS) -> list:
+        """Stop every process idle longer than the limit. Returns their keys.
+
+        Takes ``now`` rather than reading the clock so a fifteen-minute rule
+        can be tested in a suite whose per-test timeout is sixty seconds.
+        """
+        expired: list[tuple[tuple, HeldProcess]] = []
+        with self._lock:
+            for backend, held in list(self._shared.items()):
+                if held.idle_seconds(now) > idle_limit:
+                    del self._shared[backend]
+                    expired.append((pool_key(backend), held))
+            for panel, slot in list(self._per_panel.items()):
+                for backend, held in list(slot.items()):
+                    if held.idle_seconds(now) > idle_limit:
+                        del slot[backend]
+                        expired.append((pool_key(backend, panel), held))
+        announce = self.on_reap
+        for key, held in expired:
+            held.stop()
+            if announce is not None:
+                try:
+                    announce(key[0])
+                except Exception:
+                    # Narration failing must not strand the sweep.
+                    pass
+        return [key for key, _held in expired]
 
 
 _pool: Optional[BackendPool] = None
