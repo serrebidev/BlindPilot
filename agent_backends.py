@@ -1499,6 +1499,49 @@ _CODEX_LAST_WORDS_SECONDS = 1.0
 # (_CANCEL_JOIN_SECONDS, 3.0), leaving the rest for the join that follows.
 _CODEX_INTERRUPT_VERIFY_SECONDS = 1.5
 
+# How long a turn waits on its inbox before looking at its own cancelled flag.
+# Short enough that Stop is answered promptly, long enough that a quiet turn
+# is not a spin.
+_CODEX_POLL_SECONDS = 0.1
+
+# How many messages are kept for a thread nobody is reading yet. A turn
+# subscribes a fraction of a second after `thread/start` answers, so this only
+# has to cover that gap; the cap is what stops a thread whose turn never came
+# back growing without bound in a process that now outlives every turn.
+_CODEX_BUFFER_LIMIT = 512
+
+
+class _Closed:
+    """What the reader puts in every inbox when the app-server's stdout ends.
+
+    A turn blocked on its queue has to be woken by something; `None` is a
+    value the protocol could plausibly carry, so this is a type of its own.
+    """
+
+
+_CODEX_CLOSED = _Closed()
+
+
+def _offer(listener: "queue.Queue[object]", message: object) -> None:
+    """Put a message in a queue, dropping the oldest rather than blocking.
+
+    The reader serves every tab. Blocking it on one conversation's backlog
+    would stop all of them, so a full buffer loses its oldest message instead.
+    """
+    try:
+        listener.put_nowait(message)
+        return
+    except queue.Full:
+        pass
+    try:
+        listener.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        listener.put_nowait(message)
+    except queue.Full:
+        pass
+
 
 class CodexServer:
     """One ``codex app-server`` process, shared by every tab using Codex.
@@ -1521,7 +1564,43 @@ class CodexServer:
         self._state_lock = threading.Lock()
         self._next_id = 10
         # request id -> the queue the waiting turn is reading
-        self._waiting: dict[int, "queue.Queue"] = {}
+        self._waiting: dict[int, "queue.Queue[object]"] = {}
+        # threadId -> the queue that conversation's turn is reading. Created
+        # by the reader on first sight, so a notification that arrives between
+        # `thread/start` answering and the turn subscribing is buffered rather
+        # than dropped.
+        self._threads: dict[str, "queue.Queue[object]"] = {}
+        # turnId -> an event the reader sets when that turn completes. This is
+        # what `confirm_interrupt` waits on, off the turn's own thread.
+        self._turns: dict[str, threading.Event] = {}
+        self._stderr: list[str] = []
+        self._readers: list[threading.Thread] = []
+        self._stderr_reader: Optional[threading.Thread] = None
+        self._closed = False
+        self._read_error = ""
+
+    # ----- lifetime -----
+
+    def start_readers(self) -> None:
+        """Read this process's stdout and stderr for as long as it lives.
+
+        One thread per pipe per *process*, not per turn: the app-server
+        multiplexes, so a turn that read stdout itself would swallow every
+        other tab's notifications.
+        """
+        if getattr(self.proc, "stdout", None) is not None:
+            reader = threading.Thread(target=self._read_stdout, name="codex-stdout", daemon=True)
+            self._readers.append(reader)
+            reader.start()
+        else:
+            self._close("")
+        if getattr(self.proc, "stderr", None) is not None:
+            stderr_reader = threading.Thread(
+                target=self._read_stderr, name="codex-stderr", daemon=True
+            )
+            self._stderr_reader = stderr_reader
+            self._readers.append(stderr_reader)
+            stderr_reader.start()
 
     def alive(self) -> bool:
         poll = getattr(self.proc, "poll", None)
@@ -1545,19 +1624,209 @@ class CodexServer:
         except (OSError, ValueError):
             return False
 
+    # ----- routing -----
+
+    def inbox(self) -> "queue.Queue[object]":
+        """A queue for one turn to read.
+
+        Unbounded, because a turn's own answer text must never be dropped to
+        make room for more of it. Empty until `expect` or `attach` says what
+        should arrive in it; one of those has to be called before it is read,
+        because they are also what wakes a reader of a server already closed.
+        """
+        return queue.Queue()
+
+    def expect(self, request_id: int, listener: "queue.Queue[object]") -> None:
+        """Send this request's reply to that queue. Register before sending."""
+        with self._state_lock:
+            closed = self._closed
+            if not closed:
+                self._waiting[request_id] = listener
+        if closed:
+            _offer(listener, _CODEX_CLOSED)
+
+    def unexpect(self, request_ids: Sequence[int]) -> None:
+        with self._state_lock:
+            for request_id in request_ids:
+                self._waiting.pop(request_id, None)
+
+    def attach(self, thread_id: str, listener: "queue.Queue[object]") -> None:
+        """Read this conversation's notifications from that queue.
+
+        Anything the reader buffered for the thread before now is moved across
+        first, in the order it arrived: those are the messages sent between
+        `thread/start` answering and this call.
+        """
+        if not thread_id:
+            return
+        with self._state_lock:
+            closed = self._closed
+            buffered = self._threads.get(thread_id)
+            self._threads[thread_id] = listener
+            if buffered is not None and buffered is not listener:
+                while True:
+                    try:
+                        listener.put_nowait(buffered.get_nowait())
+                    except queue.Empty:
+                        break
+        if closed:
+            # Whatever was buffered still went first: a server that died with
+            # something to say should say it before it is reported dead.
+            _offer(listener, _CODEX_CLOSED)
+
+    def detach(self, thread_id: str, listener: "queue.Queue[object]") -> None:
+        """Stop reading a conversation, without disturbing a newer reader."""
+        with self._state_lock:
+            if self._threads.get(thread_id) is listener:
+                del self._threads[thread_id]
+
+    def watch_turn(self, turn_id: str) -> threading.Event:
+        """The event the reader sets when this turn completes."""
+        with self._state_lock:
+            done = self._turns.get(turn_id)
+            if done is None:
+                done = threading.Event()
+                self._turns[turn_id] = done
+            if self._closed:
+                done.set()
+            return done
+
+    def forget_turn(self, turn_id: str) -> None:
+        with self._state_lock:
+            self._turns.pop(turn_id, None)
+
+    def read_error(self) -> str:
+        """Why the reader stopped, if it stopped on an error rather than EOF."""
+        with self._state_lock:
+            return self._read_error
+
+    def stderr_lines(self) -> list[str]:
+        return list(self._stderr)
+
+    def await_last_words(self, timeout: float) -> None:
+        """Let the final line of stderr land before a turn reports the death."""
+        reader = self._stderr_reader
+        if reader is not None:
+            reader.join(timeout=timeout)
+
+    def _read_stdout(self) -> None:
+        stdout = getattr(self.proc, "stdout", None)
+        if stdout is None:
+            self._close("")
+            return
+        try:
+            for raw in stdout:
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(message, dict):
+                    self._route(message)
+        except Exception as exc:
+            # Whatever broke the pipe is the reason every turn on this server
+            # is about to end, so it is carried rather than lost to a thread
+            # nobody joins.
+            self._close(f"BlindPilot stopped reading Codex: {exc}")
+            return
+        self._close("")
+
+    def _read_stderr(self) -> None:
+        stderr = getattr(self.proc, "stderr", None)
+        if stderr is None:
+            return
+        try:
+            for line in stderr:
+                if line.strip():
+                    self._stderr.append(line.strip())
+        except Exception:
+            # stderr is only ever read for the reason a turn failed; failing
+            # to read it must not become a second failure of its own.
+            pass
+
+    def _route(self, message: dict) -> None:
+        method = message.get("method")
+        if method is None:
+            # A reply. Only the turn that asked wants it.
+            request_id = message.get("id")
+            waiting = None
+            if isinstance(request_id, int):
+                with self._state_lock:
+                    waiting = self._waiting.pop(request_id, None)
+            if waiting is not None:
+                _offer(waiting, message)
+            return
+        params = message.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        if method == "turn/completed":
+            turn = params.get("turn")
+            turn_id = str((turn or {}).get("id") or "") if isinstance(turn, dict) else ""
+            with self._state_lock:
+                done = self._turns.get(turn_id)
+            if done is not None:
+                done.set()
+        thread_id = str(params.get("threadId") or "")
+        with self._state_lock:
+            if self._closed:
+                return
+            if thread_id:
+                listener = self._threads.get(thread_id)
+                if listener is None:
+                    listener = queue.Queue(maxsize=_CODEX_BUFFER_LIMIT)
+                    self._threads[thread_id] = listener
+            elif len(self._threads) == 1:
+                # `threadId` is required on every notification and every server
+                # request this worker acts on (checked against the app server's
+                # own `generate-json-schema` for 0.149.1). What is left without
+                # one is process-wide -- `configWarning`, `thread/started` --
+                # and with a single conversation open there is no ambiguity
+                # about who should hear it. With more than one there is, so an
+                # unnamed message is dropped rather than told to the wrong tab.
+                listener = next(iter(self._threads.values()))
+            else:
+                return
+            _offer(listener, message)
+
+    def _close(self, error: str) -> None:
+        """Wake everyone waiting on this server and say why, once."""
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._read_error = error
+            listeners = list(self._waiting.values()) + list(self._threads.values())
+            # Replies can no longer arrive, so nothing is waiting for one. The
+            # per-thread buffers are kept: a turn that has not subscribed yet
+            # should still be handed what its conversation said before the end.
+            self._waiting.clear()
+            # stdout has ended, so this process is finished with every turn it
+            # was running. Saying so lets a cancel racing the death answer at
+            # once instead of spending its whole verify budget on a pipe that
+            # will never speak again.
+            turns = list(self._turns.values())
+        for listener in listeners:
+            _offer(listener, _CODEX_CLOSED)
+        for done in turns:
+            done.set()
+
     def confirm_interrupt(self, thread_id: str, turn_id: str, timeout: float) -> bool:
         """Wait for Codex to say the turn stopped. Overridden in tests.
 
-        The real implementation waits on the reader thread reporting a
-        turn/completed for this turn id; until Task 7 wires that reader up,
-        nothing confirms and this returns False -- which is the safe answer.
+        This runs on the thread that called `cancel`, not the turn's own, so
+        it must not read the message loop: it waits on the event the shared
+        reader sets when it sees `turn/completed` for this turn id. Returning
+        False means nothing confirmed, which is what makes "interrupt, verify,
+        abandon the thread if unsure" a decision rather than a guess.
         """
-        return False
+        return self.watch_turn(turn_id).wait(timeout)
 
     def interrupt(self, thread_id: str, turn_id: str, timeout: float) -> bool:
         """Ask Codex to stop this turn and say whether it confirmed."""
         if not thread_id or not turn_id:
             return False
+        # Registered before the send, so a completion that arrives the instant
+        # the interrupt lands is not missed.
+        self.watch_turn(turn_id)
         sent = self.send(
             {
                 "method": "turn/interrupt",
@@ -1571,6 +1840,7 @@ class CodexServer:
 
     def stop(self) -> None:
         end_process_group(self.proc, timeout=2)
+        self._close("")
 
 
 def _start_codex_server() -> CodexServer:
@@ -1596,7 +1866,9 @@ def _start_codex_server() -> CodexServer:
         **own_group_kwargs(),
         **no_window_kwargs(),
     )
-    return CodexServer(proc)
+    server = CodexServer(proc)
+    server.start_readers()
+    return server
 
 
 def codex_adapter() -> backend_pool.Adapter:
@@ -1657,9 +1929,13 @@ class CodexWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
-        self._proc: Optional[subprocess.Popen[str]] = None
+        # The turn borrows a process it does not own: the pool starts it, the
+        # pool stops it, and several tabs may be reading the same one.
+        self._server: Optional[CodexServer] = None
+        self._held: object = None
+        self._inbox: Optional["queue.Queue[object]"] = None
+        self._expected: list[int] = []
         self._cancelled = False
-        self._write_lock = threading.Lock()
         self._accepting_input = threading.Event()
         self._thread_id = session_id or ""
         self._turn_id = ""
@@ -1669,27 +1945,36 @@ class CodexWorker(threading.Thread):
         self._assistant_streams: dict[str, list[str]] = {}
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
-        self._stderr: list[str] = []
-        self._stderr_reader: Optional[threading.Thread] = None
         self._failed = False
+
+    @property
+    def _stderr_lines(self) -> list[str]:
+        """What the shared server has said on stderr, newest last.
+
+        The list belongs to the process now rather than the turn, because one
+        process outlives many turns and is read by one thread for all of them.
+        It cannot be called `_stderr`: `threading.Thread` keeps a copy of the
+        real `sys.stderr` under that name, to report a thread that dies.
+        """
+        server = self._server
+        return server.stderr_lines() if server is not None else []
 
     def accepting_input(self) -> bool:
         return self._accepting_input.is_set() and not self._cancelled
 
     def _send(self, message: dict) -> bool:
-        proc = self._proc
-        if not proc or not proc.stdin:
+        server = self._server
+        if server is None:
             return False
-        try:
-            data = json.dumps(message, ensure_ascii=False) + "\n"
-            with self._write_lock:
-                proc.stdin.write(data)
-                proc.stdin.flush()
-            return True
-        except (OSError, ValueError):
-            return False
+        return server.send(message)
 
     def _next_id(self) -> int:
+        # Ids are the server's, not the turn's: several tabs write to one
+        # stdin, and two turns numbering from ten would each be handed the
+        # other's replies.
+        server = self._server
+        if server is not None:
+            return server.next_id()
         self._request_id += 1
         return self._request_id
 
@@ -1719,9 +2004,9 @@ class CodexWorker(threading.Thread):
                     "params": {"threadId": self._thread_id, "turnId": self._turn_id},
                 }
             )
-        proc = self._proc
-        if proc and proc.poll() is None:
-            end_process_group(proc)
+        # No kill here any more: the app-server is shared, and ending it would
+        # end every other tab's conversation with it. Task 8 decides what to
+        # do when the interrupt is not confirmed.
 
     def _fail(self, message: str) -> None:
         """Report why the turn ended, once.
@@ -1753,10 +2038,25 @@ class CodexWorker(threading.Thread):
             self._fail(f"BlindPilot stopped reading Codex: {exc}")
         finally:
             self._accepting_input.clear()
-            proc = self._proc
-            if proc and proc.poll() is None:
-                end_process_group(proc, timeout=2)
+            # The process belongs to the pool now, not to this turn. It is
+            # stopped when the conversation goes away, when it is found dead,
+            # or when the reaper decides nobody is using it. All the turn
+            # gives back is its place in the server's routing tables.
+            self._release()
             self._on_done()
+
+    def _release(self) -> None:
+        """Stop the shared reader delivering to a turn that has ended."""
+        server = self._server
+        if server is None:
+            return
+        if self._turn_id:
+            server.forget_turn(self._turn_id)
+        server.unexpect(self._expected)
+        self._expected = []
+        inbox = self._inbox
+        if inbox is not None:
+            server.detach(self._thread_id, inbox)
 
     @staticmethod
     def _policy(mode: str) -> tuple[str, dict]:
@@ -1776,54 +2076,31 @@ class CodexWorker(threading.Thread):
         if self._compact and not self._session_id:
             self._fail("There is no Codex conversation to compact yet")
             return
-        try:
-            server_binary = _codex_app_server_binary(binary)
-            self._proc = subprocess.Popen(
-                [server_binary, *_CODEX_QUESTION_ARGS, "app-server", "--stdio"],
-                cwd=self._cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                encoding="utf-8",
-                errors="replace",
-                env=subprocess_env(server_binary),
-                # npm's `codex` is a Node launcher that runs the real Codex as
-                # a child of its own; stopping only the launcher leaves that
-                # child holding the app-server session.
-                **own_group_kwargs(),
-                **no_window_kwargs(),
-            )
-        except OSError as exc:
-            self._fail(f"Failed to launch Codex: {exc}")
-            return
-
-        if self._proc.stderr:
-            self._stderr_reader = threading.Thread(
-                target=self._read_stderr, name="codex-stderr", daemon=True
-            )
-            self._stderr_reader.start()
-
-        init_id = self._next_id()
-        self._send(
-            {
-                "method": "initialize",
-                "id": init_id,
-                "params": {
-                    "clientInfo": {
-                        "name": "blindpilot",
-                        "title": "BlindPilot",
-                        "version": "0.3.0",
-                    },
-                    # request_user_input is still marked experimental in the
-                    # app-server protocol, and Codex only sends experimental
-                    # requests to a client that asked for them.
-                    "capabilities": {"experimentalApi": True},
-                },
-            }
-        )
-        self._send({"method": "initialized", "params": {}})
+        key = backend_pool.pool_key(BACKEND_CODEX)
+        shared = backend_pool.pool()
+        held = shared.take(key)
+        if held is None:
+            try:
+                started = _start_codex_server()
+            except OSError as exc:
+                self._fail(f"Failed to launch Codex: {exc}")
+                return
+            held = backend_pool.HeldProcess(started, codex_adapter())
+            self._server = started
+            # The handshake belongs to the process, not the turn: a reused
+            # server has already been initialized and would refuse a second.
+            if not self._handshake():
+                detail = self._why_it_died("Codex did not answer the initialize handshake")
+                self._server = None
+                held.stop()
+                self._fail(detail)
+                return
+        shared.keep(key, held)
+        self._held = held
+        server = cast(CodexServer, held.handle)
+        self._server = server
+        inbox = server.inbox()
+        self._inbox = inbox
 
         thread_request = self._next_id()
         if self._session_id:
@@ -1848,19 +2125,24 @@ class CodexWorker(threading.Thread):
             if self._model:
                 params["model"] = self._model
             request = {"method": "thread/start", "id": thread_request, "params": params}
+        self._expect(thread_request)
         self._send(request)
 
         turn_request = 0
         compact_request = 0
         started_notified = False
-        assert self._proc.stdout is not None
-        for raw in self._proc.stdout:
+        while True:
             if self._cancelled:
                 return
             try:
-                message = json.loads(raw)
-            except ValueError:
+                queued = inbox.get(timeout=_CODEX_POLL_SECONDS)
+            except queue.Empty:
                 continue
+            if queued is _CODEX_CLOSED:
+                break
+            if not isinstance(queued, dict):
+                continue
+            message: dict = queued
 
             if message.get("id") == thread_request:
                 error = message.get("error")
@@ -1872,12 +2154,17 @@ class CodexWorker(threading.Thread):
                 if not self._thread_id:
                     self._fail("Codex did not return a session id")
                     return
+                # Subscribe before asking for anything else: from here on the
+                # shared reader has a conversation to route to, and whatever
+                # it buffered while the id was still unknown comes across too.
+                server.attach(self._thread_id, inbox)
                 self._on_session(self._thread_id)
                 if self._compact:
                     # Compaction is not a message: it answers immediately with
                     # an empty result and then runs a turn of its own, whose
                     # notifications the loop below already understands.
                     compact_request = self._next_id()
+                    self._expect(compact_request)
                     self._send(
                         {
                             "method": "thread/compact/start",
@@ -1899,6 +2186,7 @@ class CodexWorker(threading.Thread):
                 if self._effort:
                     params["effort"] = self._effort
                 turn_request = self._next_id()
+                self._expect(turn_request)
                 self._send({"method": "turn/start", "id": turn_request, "params": params})
                 continue
 
@@ -1917,6 +2205,7 @@ class CodexWorker(threading.Thread):
                     return
                 turn = (message.get("result") or {}).get("turn") or {}
                 self._turn_id = str(turn.get("id") or "")
+                self._watch_turn()
                 self._accepting_input.set()
                 if not started_notified:
                     self._on_started()
@@ -1932,6 +2221,7 @@ class CodexWorker(threading.Thread):
             if method == "turn/started":
                 turn = params.get("turn") or {}
                 self._turn_id = str(turn.get("id") or self._turn_id)
+                self._watch_turn()
                 self._accepting_input.set()
                 if not started_notified:
                     self._on_started()
@@ -1987,32 +2277,72 @@ class CodexWorker(threading.Thread):
                 return
 
         if not self._cancelled:
-            self._await_last_words()
-            detail = "\n".join(self._stderr[-10:]).strip()
-            self._fail(detail or "Codex app server closed before the turn completed")
+            self._fail(self._why_it_died("Codex app server closed before the turn completed"))
+
+    def _handshake(self) -> bool:
+        """Introduce BlindPilot to a freshly started app-server, once.
+
+        This is the process's handshake, not the turn's: a server taken back
+        out of the pool has already been through it, and a second `initialize`
+        is not something the protocol offers.
+        """
+        sent = self._send(
+            {
+                "method": "initialize",
+                "id": self._next_id(),
+                "params": {
+                    "clientInfo": {
+                        "name": "blindpilot",
+                        "title": "BlindPilot",
+                        "version": "0.3.0",
+                    },
+                    # request_user_input is still marked experimental in the
+                    # app-server protocol, and Codex only sends experimental
+                    # requests to a client that asked for them.
+                    "capabilities": {"experimentalApi": True},
+                },
+            }
+        )
+        return sent and self._send({"method": "initialized", "params": {}})
+
+    def _expect(self, request_id: int) -> None:
+        """Have the shared reader deliver this request's reply to this turn."""
+        server, inbox = self._server, self._inbox
+        if server is None or inbox is None:
+            return
+        self._expected.append(request_id)
+        server.expect(request_id, inbox)
+
+    def _watch_turn(self) -> None:
+        """Let a cancel on another thread find out when this turn stops."""
+        server = self._server
+        if server is not None and self._turn_id:
+            server.watch_turn(self._turn_id)
+
+    def _why_it_died(self, fallback: str) -> str:
+        """The best account available of why the app-server stopped talking.
+
+        stderr is a different pipe read by a different thread, and the line
+        worth having - the panic, the unauthorized, the out of memory - is the
+        last one written, which is exactly the one still in flight. Everything
+        earlier is already in the list, so the race did not lose noise, it lost
+        the reason, and it lost it differently each time.
+        """
+        self._await_last_words()
+        detail = "\n".join(self._stderr_lines[-10:]).strip()
+        if detail:
+            return detail
+        server = self._server
+        return (server.read_error() if server is not None else "") or fallback
 
     def _await_last_words(self) -> None:
         """Let the final line of stderr land before reporting why Codex died.
 
-        Reaching here means stdout hit EOF. stderr is a different pipe read by
-        a different thread, and the line worth having - the panic, the
-        unauthorized, the out of memory - is the last one written, which is
-        exactly the one still in flight. Everything earlier is already in the
-        list, so the race did not lose noise, it lost the reason, and it lost
-        it differently each time.
-
         Bounded, because a pipe that never closes must not hold the turn open.
         """
-        reader = self._stderr_reader
-        if reader is not None:
-            reader.join(timeout=_CODEX_LAST_WORDS_SECONDS)
-
-    def _read_stderr(self) -> None:
-        if not self._proc or not self._proc.stderr:
-            return
-        for line in self._proc.stderr:
-            if line.strip():
-                self._stderr.append(line.strip())
+        server = self._server
+        if server is not None:
+            server.await_last_words(_CODEX_LAST_WORDS_SECONDS)
 
     @staticmethod
     def _error_text(error: object, fallback: str) -> str:

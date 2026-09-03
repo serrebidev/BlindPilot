@@ -42,6 +42,28 @@ def diagnostics_stay_out_of_the_real_log(monkeypatch):
         shutil.rmtree(logs, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def no_backend_process_outlives_its_test():
+    """Empty the shared pool around every test.
+
+    Backends hold their process across turns now, so a test that drives a
+    worker leaves its stand-in in a process-wide registry. The next test to
+    ask for that backend would be handed the previous test's fake instead of
+    starting its own - and with `pytest-randomly` shuffling the order, which
+    test that is changes run to run.
+    """
+    try:
+        import backend_pool
+    except Exception:
+        yield
+        return
+    backend_pool.pool().drop_all()
+    try:
+        yield
+    finally:
+        backend_pool.pool().drop_all()
+
+
 @pytest.fixture
 def tmp_path() -> Path:
     """Use ordinary workspace ACLs instead of pytest's restrictive Windows ACL."""
