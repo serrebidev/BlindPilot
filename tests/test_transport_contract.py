@@ -108,6 +108,9 @@ FAKES: list[tuple[str, str, str, bool]] = [
     # Found by test_every_fake_in_the_suite_is_registered, not by reading the
     # files: the registry check earned its place on its first run.
     ("test_long_turn_connection", "_DeadAfterConnect", "kl()", False),
+    # Found by test_every_fake_in_the_suite_is_registered on the very next
+    # change after it was written: a new fake in the remote-session tests.
+    ("test_hermes_remote_new_session", "_CreateReply", 'kl("/srv/app")', True),
 ]
 
 REAL: list[tuple[str, object, bool]] = [

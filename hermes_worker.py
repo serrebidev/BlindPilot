@@ -158,6 +158,25 @@ def _size_text(size: int) -> str:
     return f"{size} bytes"
 
 
+def _same_directory(left: str, right: str) -> bool:
+    """Whether two directory strings name the same place, as best we can tell.
+
+    Deliberately textual: one of the two comes from ANOTHER machine, so
+    ``os.path.samefile`` cannot be asked -- the path may not exist here at all,
+    and a Windows client comparing against a Linux server has neither the same
+    separator nor the same case rules. Slashes are unified and a trailing one
+    dropped so ``/srv/app`` and ``/srv/app/`` do not read as a relocation, and
+    the comparison is case-insensitive because a Windows path that came back
+    unchanged may differ only in case.
+    """
+
+    def flatten(value: str) -> str:
+        text = (value or "").strip().replace("\\", "/").rstrip("/")
+        return text.casefold()
+
+    return flatten(left) == flatten(right)
+
+
 def check_attachment(path: str) -> int:
     """Size of an attachment, or ``AttachmentError`` saying why it cannot go.
 
@@ -399,6 +418,7 @@ class HermesWorker(threading.Thread):
         held: Optional[HeldConnection] = None,
         attachments: Optional[Sequence[str]] = None,
         resume_only: bool = False,
+        session_title: str = "",
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -427,6 +447,9 @@ class HermesWorker(threading.Thread):
         # "high". An earlier version of this adapter dropped the value on the
         # grounds that the protocol had no such control; it does.
         self._effort = effort
+        # A name typed in the New Session dialog, sent on session.create only.
+        # Empty means "let Hermes name it from the first message".
+        self._session_title = (session_title or "").strip()
         self._compact = compact
         self._remote_url = remote_url
         self._remote_token = remote_token
@@ -854,6 +877,20 @@ class HermesWorker(threading.Thread):
             self._on_failed("Hermes did not return a session id")
             return False
         self._on_session(stored or self._live_session)
+        # Say where the conversation actually started, when that is not where
+        # it was asked to start. A remote Hermes validates the folder against
+        # its OWN filesystem and, finding nothing, silently uses its own
+        # directory -- measured: a Windows path sent to a Linux Hermes returned
+        # a clean OK and a stored cwd of '/home/ubuntu'. Nothing said so, and
+        # the tab was left named after a folder the session was never in. This
+        # is the only moment the truth is available, because session.create
+        # reports the resolved directory in its ``info``.
+        landed = str(((result.get("info") or {}).get("cwd")) or "")
+        if landed and self._cwd and not _same_directory(landed, self._cwd):
+            self._on_activity(
+                "note",
+                f"Hermes could not use {self._cwd}, so this conversation is running in {landed}.",
+            )
         return True
 
     def _session_params(self) -> dict:
@@ -875,6 +912,15 @@ class HermesWorker(threading.Thread):
             # Hermes validates this itself and ignores a level it does not
             # know, so a stale saved value cannot break a turn.
             params["reasoning_effort"] = self._effort
+        if self._session_title:
+            # A name the user typed in the New Session dialog. Hermes stores it
+            # with title_source='user' and does NOT let its own automatic title
+            # overwrite it -- measured on a live gateway, read back from
+            # state.db after a completed turn: a session created with a title
+            # kept it, while one created without came back named by the model.
+            # Omitted when empty, which is how a conversation gets that
+            # automatic name instead.
+            params["title"] = self._session_title
         yolo = _MODE_TO_YOLO.get(self._permission_mode)
         if yolo is not None:
             params["yolo"] = yolo
