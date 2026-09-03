@@ -278,7 +278,7 @@ def announce(text: str, urgent: bool = False) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.20.7"
+APP_VERSION = "0.20.8"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1966,6 +1966,94 @@ _FREEBUFF_SLASH_COMMANDS: list[tuple[str, str]] = [
 ]
 
 
+# Hermes' own commands. Curated rather than complete: it ships about 120, and
+# the ones left out are terminal drawing and input controls (/redraw, /mouse,
+# /density, the status-bar toggles) that do nothing in a window read by a
+# screen reader, plus the aliases of commands already listed under their real
+# name. The picker is a discovery aid, not the limit -- the Hermes worker asks
+# Hermes itself what it recognises, so a command missing from this list, a
+# skill, a bundle, or one a plugin adds can still be typed and will run.
+_HERMES_SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/agents", "Show active agents and running tasks"),
+    ("/approvals", "Show or set the persistent dangerous-command approval mode"),
+    ("/bg", "Run a prompt in a separate background session"),
+    ("/blueprint", "Set up an automation from a blueprint template"),
+    ("/branch", "Branch the current session (explore a different path)"),
+    (
+        "/browser",
+        "Connect browser tools to your live Chromium-family browser via CDP, or switch to Browser Use mode",
+    ),
+    ("/bundles", "List skill bundles (aliases /<name> for multiple skills)"),
+    ("/codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models"),
+    ("/config", "Show current configuration"),
+    (
+        "/context",
+        "Show detailed context window view with usage gauge, category breakdown, compression stats, and throughput",
+    ),
+    ("/cron", "Manage scheduled tasks"),
+    ("/curator", "Background skill maintenance (status, run, pin, archive, list-archived)"),
+    ("/debug", "Upload debug report (system info + logs) and get shareable links"),
+    ("/diff", "Show git changes in the working directory"),
+    ("/egress", "Show Docker egress proxy status"),
+    ("/export", "Export a profile (config, skills, theme) to a shareable archive"),
+    (
+        "/fast",
+        "Fast mode — OpenAI Priority Processing / Anthropic Fast Mode (normal/fast/auto/cold)",
+    ),
+    ("/gateway", "Show gateway/messaging platform status"),
+    ("/goal", "Set a standing goal Hermes works on across turns until achieved"),
+    ("/handoff", "Hand off this session to a messaging platform (Telegram, Discord, etc.)"),
+    ("/help", "Show available commands (/help skills lists skill commands, /help <text> filters)"),
+    ("/history", "Show conversation history"),
+    ("/import", "Import a shared profile archive as a new profile"),
+    ("/init", "Generate or update AGENTS.md project instructions from a repo scan"),
+    ("/insights", "Show usage insights and analytics"),
+    ("/journey", "Open the learning journey timeline"),
+    ("/kanban", "Multi-profile collaboration board (tasks, links, comments)"),
+    ("/learn", "Learn a reusable skill from anything you describe (dirs, URLs, this chat, notes)"),
+    ("/logs", "Show recent gateway log lines"),
+    ("/loop", "Re-run a prompt on a recurring interval in this session"),
+    ("/memory", "Review pending memory writes / toggle the approval gate"),
+    (
+        "/moa",
+        "Run one prompt through the default Mixture of Agents preset, then restore your model",
+    ),
+    ("/personality", "Set a predefined personality"),
+    ("/plan", "Write a markdown implementation plan to .hermes/plans/ without executing anything"),
+    ("/platforms", "Show gateway/messaging platform status"),
+    ("/plugins", "List installed plugins and their status"),
+    ("/profile", "Show active profile name and home directory"),
+    ("/reasoning", "Manage reasoning effort and display"),
+    ("/refine", "Review this conversation now and save lessons to memory/skills"),
+    ("/reload-mcp", "Reload MCP servers from config"),
+    ("/reload-skills", "Re-scan ~/.hermes/skills/ for newly installed or removed skills"),
+    ("/retry", "Retry the last message (resend to agent)"),
+    ("/review", "Spawn an independent subagent to review the work just discussed (PR, code, docs)"),
+    (
+        "/rollback",
+        "List or restore filesystem checkpoints (restores keep your hand-edits; --all overrides)",
+    ),
+    ("/save", "Export the current conversation (bare /save shows usage)"),
+    ("/sessions", "Browse and resume previous sessions"),
+    ("/skills", "Search, install, inspect, or manage skills"),
+    ("/snapshot", "Create or restore state snapshots of Hermes config/state"),
+    ("/steer", "Inject a message after the next tool call without interrupting"),
+    ("/stop", "Kill all running background processes"),
+    ("/subscription", "View your Nous plan and change it in the browser"),
+    ("/title", "Set a title for the current session"),
+    ("/tools", "Manage tools: /tools [list|disable|enable] [name...]"),
+    ("/toolsets", "List available toolsets"),
+    ("/topup", "Show your Nous balance and manage billing on the portal"),
+    ("/undo", "Back up N user turns and re-prompt (default 1)"),
+    ("/update", "Update Hermes Agent to the latest version"),
+    ("/usage", "Show token usage and rate limits; `reset` redeems a banked Codex limit reset"),
+    ("/version", "Show Hermes Agent version"),
+    ("/whoami", "Show your slash command access (admin / user)"),
+    ("/worktree", "Show, list, create, or prune isolated git worktrees"),
+    ("/yolo", "Toggle YOLO mode (skip all dangerous command approvals)"),
+]
+
+
 def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list[tuple[str, str]]:
     commands = list(_BLINDPILOT_SLASH_COMMANDS)
     backend = normalize_backend(backend)
@@ -1973,6 +2061,8 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
         commands.extend(_CLAUDE_SLASH_COMMANDS)
     elif backend == BACKEND_FREEBUFF:
         commands.extend(_FREEBUFF_SLASH_COMMANDS)
+    elif backend == BACKEND_HERMES:
+        commands.extend(_HERMES_SLASH_COMMANDS)
     elif backend == BACKEND_OPENCODE:
         commands.extend(_OPENCODE_SLASH_COMMANDS)
         # Whatever this directory's opencode actually offers, which is its two

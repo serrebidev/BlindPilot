@@ -33,6 +33,15 @@ def fake_profile(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", "")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     monkeypatch.setattr(hermes_backend.platform, "system", lambda: "Windows")
+    # Nothing named "hermes" on PATH, which is the whole premise: a process
+    # that was already running when the installer finished has neither
+    # HERMES_HOME nor the new bin directory in its environment. Without this
+    # the fake profile was only half a fake -- discovery starts at
+    # shutil.which, so on a machine that HAS Hermes installed these tests
+    # found the real launcher and failed, and on CI they passed for the
+    # accidental reason that no launcher was there to find. Either way they
+    # were not testing the layout they name.
+    monkeypatch.setattr(hermes_backend.shutil, "which", lambda _name: None)
     return home, local
 
 
