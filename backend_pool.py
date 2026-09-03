@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, NamedTuple
+import weakref
+from typing import Callable, NamedTuple, Optional
 
 
 class Adapter(NamedTuple):
@@ -93,3 +94,123 @@ class HeldProcess:
 
     def idle_seconds(self, now: float) -> float:
         return max(0.0, now - self._touched)
+
+
+# The panel half of a key for a backend whose one process serves every tab.
+_SHARED = None
+
+
+def pool_key(backend: str, panel: object = None) -> tuple:
+    """The registry key for this backend, in the shape its protocol wants.
+
+    Codex and opencode multiplex several conversations through one process, so
+    the panel is left out and every tab shares. Claude, Hermes and FreeBuff run
+    one conversation per process, so the panel is what separates them.
+
+    The panel -- the SessionPanel object itself -- is the only stable
+    per-conversation identity. `cwd` is not unique, because `/btw` opens a
+    second tab in the same directory; and `session_id` does not exist yet when
+    the first turn of a conversation starts.
+    """
+    return (backend, panel)
+
+
+class BackendPool:
+    """Which backend process belongs to which conversation, and for how long."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # Process-wide backends: one entry per backend, for the whole app.
+        self._shared: dict[str, HeldProcess] = {}
+        # Per-conversation backends. Weak on the panel so a tab destroyed
+        # without a teardown cannot pin its process for the life of the app.
+        # This is a backstop, not the mechanism: collection is not prompt, so
+        # the enumerated drop sites remain the contract.
+        self._per_panel: "weakref.WeakKeyDictionary[object, dict[str, HeldProcess]]" = (
+            weakref.WeakKeyDictionary()
+        )
+
+    def _slot(self, key: tuple) -> tuple[Optional[dict], str]:
+        """The dict a key lives in and the name within it, or (None, name)."""
+        backend, panel = key
+        if panel is _SHARED:
+            return self._shared, backend
+        return self._per_panel.get(panel), backend
+
+    def take(self, key: tuple) -> Optional[HeldProcess]:
+        """The process for this key if it can still serve a turn, else None.
+
+        A process found dead is discarded here rather than handed on, so the
+        caller's only job is to start a new one when this returns None.
+        """
+        with self._lock:
+            slot, name = self._slot(key)
+            held = slot.get(name) if slot is not None else None
+            if held is None:
+                return None
+            if not held.alive():
+                del slot[name]  # type: ignore[index, union-attr]
+                dead = held
+            else:
+                held.touch()
+                return held
+        dead.stop()
+        return None
+
+    def keep(self, key: tuple, held: HeldProcess) -> None:
+        """Hand a process back at the end of a turn."""
+        backend, panel = key
+        stale: Optional[HeldProcess] = None
+        with self._lock:
+            if panel is _SHARED:
+                stale = self._shared.get(backend)
+                self._shared[backend] = held
+            else:
+                slot = self._per_panel.get(panel)
+                if slot is None:
+                    slot = {}
+                    self._per_panel[panel] = slot
+                stale = slot.get(backend)
+                slot[backend] = held
+            if stale is held:
+                stale = None
+        if stale is not None:
+            stale.stop()
+
+    def drop(self, key: tuple) -> None:
+        """Stop this key's process and forget it. Safe on a key never held."""
+        with self._lock:
+            slot, name = self._slot(key)
+            held = slot.pop(name, None) if slot is not None else None
+        if held is not None:
+            held.stop()
+
+    def drop_all(self) -> None:
+        """Stop everything -- at quit, and before an update replaces a CLI."""
+        with self._lock:
+            everything = list(self._shared.values())
+            self._shared.clear()
+            for slot in list(self._per_panel.values()):
+                everything.extend(slot.values())
+                slot.clear()
+        for held in everything:
+            # One backend that throws on the way down must not strand the
+            # rest; HeldProcess.stop already swallows, this is belt and braces.
+            held.stop()
+
+    def held_count(self) -> int:
+        with self._lock:
+            return len(self._shared) + sum(len(slot) for slot in self._per_panel.values())
+
+
+_pool: Optional[BackendPool] = None
+_POOL_LOCK = threading.Lock()
+
+
+def pool() -> BackendPool:
+    """The shared pool, created on first use."""
+    global _pool
+    with _POOL_LOCK:
+        if _pool is None:
+            _pool = BackendPool()
+        return _pool
