@@ -2099,6 +2099,10 @@ class CodexWorker(threading.Thread):
         # has been named or because this turn has stopped looking. A cancel on
         # another thread waits on it rather than polling.
         self._turn_id_known = threading.Event()
+        # Set when this turn has ended of its own accord. A cancel that lost
+        # the race to a finishing turn has nothing to interrupt, and must not
+        # read the silence that follows as Codex ignoring it.
+        self._finished = threading.Event()
         # The turn id currently registered with the server, so the registration
         # is given back exactly once.
         self._watched = ""
@@ -2179,8 +2183,19 @@ class CodexWorker(threading.Thread):
         naming the turn and then the verify, which together fit inside the
         teardown budget with room for the join that follows.
         """
+        # Read before the flag is set, so that this only ever means "the turn
+        # had already ended when Stop was pressed" and never "the turn ended
+        # because of this cancel".
+        finished = self._finished.is_set()
         self._cancelled = True
         self._accepting_input.clear()
+        if finished:
+            # The answer landed while Stop was on its way. There is nothing to
+            # interrupt, and waiting for a confirmation of it would spend the
+            # whole verify budget and then give up a perfectly good thread:
+            # `_release` has already handed back the watch whose completion
+            # the reader set, so a fresh one would never be set at all.
+            return
         server = self._server
         thread_id = self._thread_id
         if server is None or not thread_id:
@@ -2236,6 +2251,10 @@ class CodexWorker(threading.Thread):
             self._fail(f"BlindPilot stopped reading Codex: {exc}")
         finally:
             self._accepting_input.clear()
+            # This turn is over, however it ended. Read by `cancel` before it
+            # interrupts anything, because the watch it would wait on is about
+            # to be given back below.
+            self._finished.set()
             # Nothing more will be read, so no further name can be learned. A
             # cancel racing the end of the turn stops waiting for one rather
             # than spending its whole grace on a thread that has gone.
@@ -2670,6 +2689,13 @@ class CodexWorker(threading.Thread):
                     # The server has gone, so the turn has gone with it.
                     return
                 if not isinstance(queued, dict) or queued.get("id") != turn_request:
+                    continue
+                if queued.get("method") is not None:
+                    # A request from Codex, not the reply to ours. Its ids come
+                    # from the other direction's namespace and both counters
+                    # start small, so one can carry the number this turn is
+                    # waiting on; read as the reply it would name no turn and
+                    # end the search early.
                     continue
                 if queued.get("error"):
                     # Codex refused the turn, so nothing is running to name and

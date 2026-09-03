@@ -1226,7 +1226,12 @@ def test_cancelling_never_kills_the_server_the_other_tabs_are_using():
     per-turn process could afford would end them all to stop one.
     """
     killed: list[object] = []
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     server = agent_backends.CodexServer(_FakeProc())
+    # Held in the pool, as a real one is. Dropping it there stops it just as
+    # surely as killing it here, and a stand-in that was never in the pool
+    # cannot tell the two apart: `drop` on a key nobody holds does nothing.
+    backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
     _confirming(server, False)
     worker = _stoppable(server)
     original = agent_backends.end_process_group
@@ -1238,6 +1243,10 @@ def test_cancelling_never_kills_the_server_the_other_tabs_are_using():
 
     assert killed == [], "cancelling one tab stopped the server every tab shares"
     assert server.proc.killed is False
+    held = backend_pool.pool().take(key)
+    assert held is not None and held.handle is server, (
+        "the server was taken out of the pool, which stops it for every tab"
+    )
 
 
 def test_cancelling_before_anything_was_asked_of_codex_is_harmless():
@@ -1323,19 +1332,82 @@ def test_a_turn_codex_refused_leaves_the_thread_alone():
     assert worker.abandoned_thread == ""
 
 
-def test_a_cancel_does_not_wait_for_a_turn_that_has_already_ended():
-    """`run` closes the door on its way out, so nothing waits on a dead thread."""
+def test_a_cancel_does_not_wait_on_a_turn_that_left_without_looking():
+    """A turn can end by a route that never reaches the search for its name.
+
+    A failure, or a server that stopped talking, leaves by a different door
+    from the one Stop opens. `run` closes the door on its way out either way,
+    so a cancel is not left waiting for a name nobody is looking for.
+    """
     server = agent_backends.CodexServer(_FakeProc())
     worker = _stoppable(server, turn_id="")
-    worker._do_run = lambda: None
-    worker.run()
 
-    started = time.monotonic()
-    worker.cancel()
-    took = time.monotonic() - started
+    def leave_when_stopped():
+        deadline = time.monotonic() + 5
+        while not worker._cancelled and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+    worker._do_run = leave_when_stopped
+    running = threading.Thread(target=worker.run, daemon=True)
+    running.start()
+    try:
+        started = time.monotonic()
+        worker.cancel()
+        took = time.monotonic() - started
+    finally:
+        running.join(timeout=5)
 
     assert took < agent_backends._CODEX_TURN_ID_GRACE_SECONDS, (
         f"a cancel spent {took:.2f}s waiting for a turn that had gone"
+    )
+
+
+class _StillOpenAfterTheAnswer(_ScriptedProc):
+    """An app server that is still running once the answer has arrived.
+
+    `_ScriptedProc`'s stdout ends with the turn, which closes the server and
+    sets every watch on it -- hiding the very wait this is about, because a
+    closed server confirms an interrupt instantly.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.done = threading.Event()
+        self.stdout = self._answer_then_wait()
+
+    def _answer_then_wait(self):
+        yield from self._script()
+        self.done.wait(10)
+
+
+def test_a_cancel_that_arrives_after_the_answer_leaves_the_thread_alone(monkeypatch):
+    """Stop pressed as the answer lands must not give up a healthy thread.
+
+    The window is not microscopic: `_on_stop` disables the buttons, closes the
+    question dialog and announces "Stopping" before the cancel thread is even
+    started. And by then `run` has given back the watch whose completion the
+    reader had already set, so an interrupt sent now would wait on a fresh
+    event nobody will ever set -- the whole verify budget spent, and then a
+    finished conversation resumed from its rollout for nothing.
+    """
+    proc = _StillOpenAfterTheAnswer()
+    try:
+        worker, completed, failures, _activity = _turn(proc, monkeypatch)
+        assert completed == ["hello"] and not failures, "the turn did not finish first"
+
+        started = time.monotonic()
+        worker.cancel()
+        took = time.monotonic() - started
+    finally:
+        proc.done.set()
+
+    assert took < agent_backends._CODEX_INTERRUPT_VERIFY_SECONDS, (
+        f"a cancel spent {took:.2f}s waiting on a turn that had already ended"
+    )
+    assert worker.abandoned_thread == "", "a finished conversation was given up"
+    sent = [json.loads(line) for line in proc.stdin.written]
+    assert [m for m in sent if m.get("method") == "turn/interrupt"] == [], (
+        "a turn that had already ended was asked to stop"
     )
 
 
@@ -1421,4 +1493,89 @@ def test_a_turn_stopped_before_it_was_named_is_still_stopped(monkeypatch):
         f"the orphaned turn was left running: {sent}"
     )
     assert worker.abandoned_thread == "", "Codex confirmed the stop, so the thread is fine"
+    assert proc.killed is False
+
+
+def test_a_server_request_is_not_mistaken_for_the_reply_naming_the_turn():
+    """Codex's own requests carry ids from the other direction's namespace.
+
+    Both counters start small, so one of them can wear the number this turn is
+    waiting on. Read as the reply it would name no turn, end the search there,
+    and give up a thread that could have been interrupted properly.
+    """
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _stoppable(server, turn_id="")
+    inbox = server.inbox()
+    inbox.put({"method": "item/commandExecution/approval", "id": 42, "params": {}})
+    inbox.put({"id": 42, "result": {"turn": {"id": "turn-9"}}})
+
+    worker._name_the_stopped_turn(inbox, 42)
+
+    assert worker._turn_id == "turn-9", "a request from Codex was read as our own reply"
+
+
+class _CompactionStoppedEarly(_ScriptedProc):
+    """A compaction cancelled before the turn it runs has announced itself."""
+
+    def __init__(self, cancel, is_cancelled) -> None:
+        super().__init__()
+        self._cancel = cancel
+        self._is_cancelled = is_cancelled
+        self.cancelling: threading.Thread | None = None
+        self.stdout = self._compact_script()
+
+    def _compact_script(self):
+        resume = self._asked("thread/resume")
+        yield json.dumps({"id": resume["id"], "result": {"thread": {"id": "thread-1"}}})
+        compact = self._asked("thread/compact/start")
+        # The reply is empty by protocol: nothing but the compaction turn's own
+        # notifications will ever name it, and Stop lands before any arrive.
+        yield json.dumps({"id": compact["id"], "result": {}})
+        self.cancelling = threading.Thread(target=self._cancel, daemon=True)
+        self.cancelling.start()
+        deadline = time.monotonic() + 5
+        while not self._is_cancelled() and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+
+def test_a_compaction_stopped_before_its_turn_is_named_gives_up_the_thread(monkeypatch):
+    """The one path that always abandons, because it can never name its turn.
+
+    `thread/compact/start` answers empty, so until the compaction turn speaks
+    for itself there is nothing to interrupt. Carrying on in the conversation
+    regardless would answer the next prompt from a history that does not say
+    what the compaction went on to do.
+    """
+    later: list = []
+    proc = _CompactionStoppedEarly(
+        lambda: later[0].cancel(), lambda: bool(later and later[0]._cancelled)
+    )
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _b: "codex")
+    monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda b: b)
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _b: {})
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: proc)
+    worker = agent_backends.CodexWorker(
+        "",
+        "thread-1",
+        ".",
+        "default",
+        compact=True,
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _v: None,
+        on_complete=lambda _v: None,
+        on_failed=lambda _v: None,
+        on_done=lambda: None,
+    )
+    later.append(worker)
+
+    worker.run()
+    assert proc.cancelling is not None
+    proc.cancelling.join(timeout=5)
+
+    assert worker.abandoned_thread == "thread-1", "a compaction nobody can name was trusted"
+    sent = [json.loads(line) for line in proc.stdin.written]
+    assert [m for m in sent if m.get("method") == "turn/interrupt"] == [], (
+        "an interrupt was sent naming no turn"
+    )
     assert proc.killed is False
