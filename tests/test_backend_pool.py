@@ -190,7 +190,8 @@ def test_drop_all_stops_everything_including_a_process_that_raises():
     angry = _adapter()._replace(stop=explode)
     calm = _FakeHandle()
     pool.keep(backend_pool.pool_key("codex"), backend_pool.HeldProcess(_FakeHandle(), angry))
-    pool.keep(backend_pool.pool_key("claude", _Panel()), backend_pool.HeldProcess(calm, _adapter()))
+    panel = _Panel()
+    pool.keep(backend_pool.pool_key("claude", panel), backend_pool.HeldProcess(calm, _adapter()))
     pool.drop_all()
     assert calm.stops == 1
     assert pool.held_count() == 0
