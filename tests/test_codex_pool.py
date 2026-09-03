@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -121,29 +122,78 @@ def test_an_interrupt_codex_never_confirms_is_reported_unconfirmed():
     assert server.interrupt("thread-1", "turn-1", 0.3) is False
     waited = time.monotonic() - started
 
-    assert waited >= 0.3, f"it gave up after {waited:.3f}s without waiting to be sure"
+    # Not the whole 0.3 to the microsecond: Windows' clock granularity means a
+    # wait of exactly the budget can be measured a hair short of it. The
+    # distinction being drawn is against an implementation that waits not at all.
+    assert waited >= 0.25, f"it gave up after {waited:.3f}s without waiting to be sure"
     sent = [json.loads(line) for line in proc.stdin.written]
     assert any(message.get("method") == "turn/interrupt" for message in sent)
 
 
-def test_a_notification_is_kept_for_a_thread_nobody_is_reading_yet():
-    """thread/start answers a fraction before its turn subscribes.
+def test_nothing_said_the_instant_a_thread_starts_can_fall_between_the_two():
+    """The gap between thread/start answering and its turn subscribing.
 
-    Anything the app server sends in that gap belongs to the turn about to
-    start, so it is buffered rather than dropped — otherwise a turn silently
-    loses whatever Codex said first.
+    There is none: the reply names the conversation, and the one reader binds
+    it to the asking turn's queue before it hands that reply on. Everything
+    arrives on one stdout read by one thread, so a notification for the new
+    conversation can only be a later message - by which time the binding is
+    already there. Here the notification is the very next line.
     """
-    early = {"method": "item/started", "params": {"threadId": "thread-1", "item": {}}}
-    proc = _FakeProc([json.dumps(early)])
+    reply = {"id": 11, "result": {"thread": {"id": "thread-1"}}}
+    straight_after = {
+        "method": "item/started",
+        "params": {"threadId": "thread-1", "turnId": "turn-1", "item": {}},
+    }
+    proc = _FakeProc([json.dumps(reply), json.dumps(straight_after)])
     server = agent_backends.CodexServer(proc)
-    server.start_readers()
-    for reader in server._readers:
-        reader.join(timeout=5)
-
     inbox = server.inbox()
-    server.attach("thread-1", inbox)
+    server.expect_thread(11, inbox)
+    server.start_readers()
 
-    assert inbox.get(timeout=5) == early
+    assert inbox.get(timeout=5) == reply
+    assert inbox.get(timeout=5) == straight_after
+
+
+def test_what_a_finished_turn_says_on_its_way_out_is_not_kept_for_the_next_one():
+    """Stop is answered a moment later, and by then nobody is listening.
+
+    Codex goes on producing for a few hundred milliseconds after an interrupt
+    is sent. Keeping those messages for whoever reads the conversation next
+    hands the following turn the previous turn's ending to act on.
+    """
+    proc = _FakeProc()
+    server = agent_backends.CodexServer(proc)
+    first = server.inbox()
+    server.attach("thread-1", first)
+    server.detach("thread-1", first)
+
+    server._route({"method": "item/completed", "params": {"threadId": "thread-1", "item": {}}})
+
+    assert server._threads == {}, "a conversation nobody is reading was kept anyway"
+    second = server.inbox()
+    server.attach("thread-1", second)
+    assert second.empty(), "the next turn was handed the last turn's leftovers"
+
+
+def test_only_the_tabs_actually_reading_count_towards_ambiguity():
+    """The unnamed-message fallback must not be confused by a stale entry.
+
+    `configWarning` carries no threadId. With one conversation being read there
+    is no doubt who should hear it, and a conversation that has been released
+    must not make it look as though there were two.
+    """
+    warning = {"method": "configWarning", "params": {"summary": "check your config"}}
+    proc = _FakeProc()
+    server = agent_backends.CodexServer(proc)
+    gone = server.inbox()
+    server.attach("thread-1", gone)
+    server.detach("thread-1", gone)
+    live = server.inbox()
+    server.attach("thread-2", live)
+
+    server._route(warning)
+
+    assert live.get(timeout=5) == warning
 
 
 def test_a_reply_goes_to_the_turn_that_asked_and_not_to_another_tab():
@@ -391,3 +441,259 @@ def test_a_turn_borrows_the_server_and_leaves_it_running(monkeypatch):
     assert [message.get("method") for message in sent].count("initialize") == 1
     # And the turn gave its place in the routing tables back on the way out.
     assert held.handle._threads == {}
+
+
+class _ProcWithLeftovers(_FakeProc):
+    """The app server as it is a moment after Stop, when the next prompt lands.
+
+    Turn 1 was interrupted. Codex honours that a few hundred milliseconds
+    later, by which time the person has typed again and turn 2 is resuming the
+    same conversation. So turn 1's trailing output arrives around turn 2's
+    thread/resume: some of it before the resume is answered, some after.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stdout = self._script()
+
+    def _asked(self, method: str, timeout: float = 10.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            for line in list(self.stdin.written):
+                message = json.loads(line)
+                if message.get("method") == method:
+                    return message
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the worker never sent {method}")
+            time.sleep(0.005)
+
+    @staticmethod
+    def _leftovers_of_turn_one() -> list[str]:
+        return [
+            json.dumps(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {"id": "m0", "type": "agentMessage", "text": "half a thought"},
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {"id": "turn-1", "status": "interrupted"},
+                    },
+                }
+            ),
+        ]
+
+    def _script(self):
+        resume = self._asked("thread/resume")
+        # Turn 1's ending, arriving while nobody is reading the conversation.
+        yield from self._leftovers_of_turn_one()
+        yield json.dumps({"id": resume["id"], "result": {"thread": {"id": "thread-1"}}})
+        # And the rest of it, now that turn 2 is reading.
+        yield from self._leftovers_of_turn_one()
+        turn = self._asked("turn/start")
+        yield json.dumps({"id": turn["id"], "result": {"turn": {"id": "turn-2"}}})
+        yield json.dumps(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-2",
+                    "itemId": "m1",
+                    "delta": "the answer",
+                },
+            }
+        )
+        yield json.dumps(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-2", "status": "completed"},
+                },
+            }
+        )
+
+
+def _turn(proc, monkeypatch, session_id=None, prompt="hello"):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _b: "codex")
+    monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda b: b)
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _b: {})
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: proc)
+    completed: list[str] = []
+    failures: list[str] = []
+    activity: list[tuple] = []
+    worker = agent_backends.CodexWorker(
+        prompt,
+        session_id,
+        ".",
+        "default",
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda kind, value: activity.append((kind, value)),
+        on_complete=completed.append,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+    worker.run()
+    return worker, completed, failures, activity
+
+
+def test_a_turn_is_not_failed_by_what_the_turn_before_it_said_on_its_way_out(monkeypatch):
+    """The bug this guards: every Stop poisoned the next message in that tab.
+
+    Stop detached the conversation, Codex's trailing `turn/completed` for the
+    interrupted turn was kept for whoever read it next, and turn 2 acted on it
+    - failing instantly with "Codex turn was interrupted" before it had said
+    anything at all. Retrying worked, so it read as a random glitch; for a
+    person who cannot see a spinner that is the worst shape a failure can take.
+    """
+    proc = _ProcWithLeftovers()
+
+    _worker, completed, failures, activity = _turn(proc, monkeypatch, session_id="thread-1")
+
+    assert failures == [], f"the leftovers of the interrupted turn failed this one: {failures}"
+    assert completed == ["the answer"]
+    assert ("assistant", "half a thought") not in activity, "turn 1's output was spoken in turn 2"
+
+
+def test_two_first_turns_at_once_start_one_server_and_neither_is_killed(monkeypatch):
+    """Two tabs sending their first Codex message together.
+
+    Both used to find the pool empty, both launched a server, and the second
+    one handed back displaced - and stopped - the first, killing a live turn
+    with "Codex app server closed before the turn completed".
+    """
+    started: list[agent_backends.CodexServer] = []
+    barrier = threading.Barrier(2)
+
+    def slow_start() -> agent_backends.CodexServer:
+        server = agent_backends.CodexServer(_FakeProc())
+        time.sleep(0.05)
+        started.append(server)
+        return server
+
+    monkeypatch.setattr(agent_backends, "_start_codex_server", slow_start)
+    borrowed: list = []
+
+    def borrow() -> None:
+        worker = agent_backends.CodexWorker(
+            "hello",
+            None,
+            ".",
+            "default",
+            on_session=lambda _s: None,
+            on_started=lambda: None,
+            on_activity=lambda _k, _v: None,
+            on_complete=lambda _v: None,
+            on_failed=lambda _v: None,
+            on_done=lambda: None,
+        )
+        barrier.wait(timeout=10)
+        borrowed.append(worker._borrow_server())
+
+    threads = [threading.Thread(target=borrow, daemon=True) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+        assert not thread.is_alive()
+
+    assert len(started) == 1, f"{len(started)} app servers were started for two first turns"
+    assert borrowed[0] is borrowed[1], "the two tabs were given different servers"
+    assert not started[0].proc.killed, "the one live server was stopped mid-turn"
+
+
+def test_a_server_that_cannot_start_a_conversation_does_not_serve_the_next_turn(monkeypatch):
+    """A broken app server must not fail every prompt for the next quarter hour.
+
+    The per-turn process this replaces got a fresh start each time; a held one
+    that answers `thread/start` with an error has to be let go the same way.
+    """
+
+    class _RefusesToStart(_FakeProc):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stdout = self._script()
+
+        def _script(self):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                for line in list(self.stdin.written):
+                    message = json.loads(line)
+                    if message.get("method") == "thread/start":
+                        yield json.dumps(
+                            {"id": message["id"], "error": {"message": "no conversation for you"}}
+                        )
+                        return
+                time.sleep(0.005)
+
+    proc = _RefusesToStart()
+    _worker, _completed, failures, _activity = _turn(proc, monkeypatch)
+
+    assert failures == ["no conversation for you"]
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    assert backend_pool.pool().take(key) is None, "the broken server was left for the next turn"
+
+
+def test_a_conversation_being_read_is_never_dropped_by_another_tabs_failure():
+    """One tab's bad session id must not end another tab's live turn."""
+    server = agent_backends.CodexServer(_FakeProc())
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
+    server.attach("someone-elses-thread", server.inbox())
+
+    worker = agent_backends.CodexWorker(
+        "hello",
+        "no-such-thread",
+        ".",
+        "default",
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _v: None,
+        on_complete=lambda _v: None,
+        on_failed=lambda _v: None,
+        on_done=lambda: None,
+    )
+    worker._server = server
+    worker._discard_server()
+
+    assert backend_pool.pool().take(key) is not None, "a tab mid-turn had its server taken away"
+
+
+def test_the_watch_on_a_turn_goes_when_the_last_waiter_lets_go():
+    """One event per interrupted turn, kept for ever, is a leak in a process
+    that now outlives thousands of turns."""
+    server = agent_backends.CodexServer(_FakeProc())
+
+    server.watch_turn("turn-1")
+    server.watch_turn("turn-1")
+    server.forget_turn("turn-1")
+    assert server._turns, "the second waiter was left with nothing to wait on"
+    server.forget_turn("turn-1")
+    assert server._turns == {}
+
+    # And an interrupt, which is the caller with no turn of its own to tidy up.
+    server.interrupt("thread-1", "turn-2", 0.01)
+    assert server._turns == {}, "an interrupt left its watch behind"
+
+
+def test_a_turn_gives_its_place_back_and_leaves_nothing_behind(monkeypatch):
+    proc = _ScriptedProc()
+    _worker, completed, failures, _activity = _turn(proc, monkeypatch)
+
+    assert not failures and completed == ["hello"]
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    held = backend_pool.pool().take(key)
+    assert held is not None
+    assert held.handle._threads == {}, "the conversation was left registered"
+    assert held.handle._turns == {}, "the turn's completion watch was left behind"
+    assert held.handle._waiting == {}, "a reply the turn asked for is still expected"
+    assert held.handle._thread_replies == set()
