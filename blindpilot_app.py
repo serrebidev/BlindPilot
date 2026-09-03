@@ -5878,6 +5878,12 @@ class SessionPanel(wx.Panel):
 
         selected_backend = self.selected_backend()
         if selected_backend != self._session_backend:
+            if self._session_id:
+                # A conversation existed here and is being left behind, so the
+                # name given to it is not the new one's name -- same reasoning
+                # as in ``clear_conversation``. Before the first message there
+                # is nothing to leave behind, and the name still applies.
+                self._session_title = ""
             self._session_id = None
             # A held Hermes connection belongs to the conversation being left.
             self._drop_held_hermes()
@@ -5902,11 +5908,33 @@ class SessionPanel(wx.Panel):
             summary = self._attachment_summary()
             row_text = f"{send_text}\n{summary}" if send_text else summary
         self._turns.append(Turn(prompt=prompt))
-        if len(self._turns) == 1:
-            # A conversation is named by its first message — that is the title
-            # Recent Conversations lists it under — so the tab holding it takes
-            # the same name the moment there is one. Attachment paths are left
-            # out: the title has to be the words the person typed.
+        if len(self._turns) == 1 and not str(getattr(self, "_session_title", "") or "").strip():
+            # A conversation with no name of its own is named by its first
+            # message — that is the title Recent Conversations lists it under —
+            # so the tab holding it takes the same name the moment there is one.
+            # Attachment paths are left out: the title has to be the words the
+            # person typed.
+            #
+            # A name typed in the New Session dialog is NOT replaced here. That
+            # name is the one thing about this conversation the person chose,
+            # and overwriting it with the words of the first message discards it
+            # with nothing to get it back from -- the reported defect: a session
+            # named for its subject, sent "start", and called "start" from then
+            # on.
+            #
+            # With Hermes the two names would also disagree: it stores this one
+            # with title_source='user' and does not overwrite it, so the tab
+            # would say one thing and Hermes Conversations another about the
+            # same conversation. For a CLI backend the name stays a label on
+            # this tab -- the transcript on disk is titled by the tool that
+            # wrote it, which this app does not author.
+            #
+            # Read through getattr for the same reason as in
+            # ``_hermes_worker_extra``: this method is driven on stand-in panels
+            # that do not set every attribute, and an AttributeError here would
+            # refuse a send rather than mislabel a tab. Whitespace counts as no
+            # name, or a tab could end up with a blank label -- the one label a
+            # screen reader cannot tell from its neighbour.
             self._on_title(self, make_title(prompt))
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
@@ -6134,6 +6162,13 @@ class SessionPanel(wx.Panel):
             return
         self._session_id = None
         self._drop_held_hermes()
+        # The name from the New Session dialog belonged to the conversation
+        # just abandoned. Keeping it would hand that name to the NEXT
+        # conversation's session.create -- two conversations called the same
+        # thing, only one of which the person named -- and would keep this tab
+        # from taking the name of the first message, which is all a nameless
+        # conversation has.
+        self._session_title = ""
         self._turns = []
         self._rows = []
         self._displayed = []
@@ -6186,6 +6221,10 @@ class SessionPanel(wx.Panel):
         # The tab is now a different conversation, so any connection held for
         # the previous one must not carry the next message.
         self._drop_held_hermes()
+        # ...and a name typed for the previous one is not this conversation's
+        # name either: the restored conversation has a title of its own, put on
+        # the tab below.
+        self._session_title = ""
         self._session_backend = normalize_backend(entry.backend)
         self._turns = [Turn(prompt=turn.prompt, response=turn.response) for turn in turns]
         self._rows = []
@@ -6241,6 +6280,9 @@ class SessionPanel(wx.Panel):
         # not carry the next message.
         self._session_id = session_id
         self._drop_held_hermes()
+        # This tab is now a conversation Hermes already named; a name typed for
+        # whatever was here before is not it.
+        self._session_title = ""
         self._session_backend = BACKEND_HERMES
         self._turns = []
         self._rows = []
