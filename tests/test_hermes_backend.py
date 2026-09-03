@@ -72,22 +72,35 @@ def _worker(**overrides) -> HermesWorker:
 
 
 class _FakeTransport:
-    """A transport that replays scripted frames, so no Hermes is needed."""
+    """A transport that replays scripted frames, so no Hermes is needed.
+
+    Its stream ENDS when the script runs out, the way a real pipe or socket
+    does, and ``connected()`` then answers False — see
+    tests/transport_contract.py for why a fake that stays "connected but
+    silent, for ever" hid two cross-platform defects in this file's own tests.
+    """
 
     def __init__(self, frames: list[dict]) -> None:
         self.frames = list(frames)
         self.sent: list[dict] = []
         self.closed = False
         # Held connections ask whether a transport can carry another turn. A
-        # scripted one can until it is closed.
+        # scripted one can until its frames run out or it is closed.
         self.alive = True
 
     def send(self, message: dict) -> bool:
+        if not self.connected():
+            # A real transport cannot write to a peer that has gone: both
+            # StdioTransport and WebSocketTransport answer False here.
+            return False
         self.sent.append(message)
         return True
 
     def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
-        return self.frames.pop(0) if self.frames else None
+        if self.frames:
+            return self.frames.pop(0)
+        self.alive = False
+        return None
 
     def close(self) -> None:
         self.closed = True

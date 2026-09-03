@@ -44,25 +44,35 @@ def _callbacks() -> dict:
 
 
 class _FakeTransport:
-    """Replays scripted replies and records what was sent."""
+    """Replays scripted replies and records what was sent.
+
+    Its stream ends when the replies run out, like a real pipe — see
+    tests/transport_contract.py.
+    """
 
     def __init__(self, replies: list[dict] | None = None) -> None:
         self.replies = list(replies or [])
         self.sent: list[dict] = []
         self.closed = False
+        self.alive = True
 
     def send(self, message: dict) -> bool:
+        if not self.connected():
+            return False
         self.sent.append(message)
         return True
 
     def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
-        return self.replies.pop(0) if self.replies else None
+        if self.replies:
+            return self.replies.pop(0)
+        self.alive = False
+        return None
 
     def close(self) -> None:
         self.closed = True
 
     def connected(self) -> bool:
-        return not self.closed
+        return self.alive and not self.closed
 
     def failure_detail(self) -> str:
         return "fake transport ended"

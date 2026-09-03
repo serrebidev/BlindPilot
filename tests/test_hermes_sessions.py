@@ -51,6 +51,9 @@ class _FakeTransport:
         self.started = True
 
     def send(self, message: dict) -> bool:
+        if not self.connected():
+            # A real transport cannot write to a peer that has gone.
+            return False
         self.sent.append(message)
         return True
 
