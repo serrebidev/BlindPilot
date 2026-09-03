@@ -1510,7 +1510,15 @@ class CodexServer:
 
     def __init__(self, proc: object) -> None:
         self.proc = proc
-        self._lock = threading.Lock()
+        # Two locks, never held together. `_write_lock` guards only the
+        # stdin write+flush pair, so a wedged app-server blocking on flush
+        # cannot also block every other tab's `next_id()`. `_state_lock`
+        # guards only in-process bookkeeping (the id counter, and later the
+        # reply-routing table) -- Task 7 registers a reply queue before
+        # sending, and taking the same lock `send` uses for I/O there would
+        # self-deadlock.
+        self._write_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._next_id = 10
         # request id -> the queue the waiting turn is reading
         self._waiting: dict[int, "queue.Queue"] = {}
@@ -1520,7 +1528,7 @@ class CodexServer:
         return poll is not None and poll() is None
 
     def next_id(self) -> int:
-        with self._lock:
+        with self._state_lock:
             self._next_id += 1
             return self._next_id
 
@@ -1530,7 +1538,7 @@ class CodexServer:
             return False
         try:
             data = json.dumps(message, ensure_ascii=False) + "\n"
-            with self._lock:
+            with self._write_lock:
                 stdin.write(data)
                 stdin.flush()
             return True

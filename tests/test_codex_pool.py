@@ -91,6 +91,33 @@ def test_the_verify_budget_is_half_the_teardown_budget():
 
     assert agent_backends._CODEX_INTERRUPT_VERIFY_SECONDS == 1.5
     assert agent_backends._CODEX_INTERRUPT_VERIFY_SECONDS < blindpilot_app._CANCEL_JOIN_SECONDS
+    # Pin the relationship the name claims, not just the current numbers: if
+    # _CANCEL_JOIN_SECONDS moved, the "half" the docstring promises should
+    # move with it rather than silently drift apart while both assertions
+    # above kept passing.
+    assert agent_backends._CODEX_INTERRUPT_VERIFY_SECONDS == blindpilot_app._CANCEL_JOIN_SECONDS / 2
+
+
+def test_an_interrupt_with_no_thread_id_sends_nothing():
+    proc = _FakeProc()
+    server = agent_backends.CodexServer(proc)
+    assert server.interrupt("", "turn-1", 0.01) is False
+    assert proc.stdin.written == []
+
+
+def test_an_interrupt_with_no_turn_id_sends_nothing():
+    proc = _FakeProc()
+    server = agent_backends.CodexServer(proc)
+    assert server.interrupt("thread-1", "", 0.01) is False
+    assert proc.stdin.written == []
+
+
+def test_an_interrupt_that_cannot_be_sent_is_reported_unconfirmed():
+    """A dead stdin means the message never reached Codex, so nothing to confirm."""
+    proc = _FakeProc()
+    proc.stdin = None
+    server = agent_backends.CodexServer(proc)
+    assert server.interrupt("thread-1", "turn-1", 0.01) is False
 
 
 def test_the_codex_held_process_satisfies_the_pool_contract():
