@@ -8800,6 +8800,16 @@ class MainFrame(wx.Frame):
         self.notebook.SetName("Session pages")
         self.notebook.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_tab_changed)
 
+        # A backend left idle for a quarter of an hour is let go, so an
+        # abandoned tab is not holding an app-server and its MCP children all
+        # afternoon. The reaper is what notices; _announce_reap is what makes
+        # it audible, because the next prompt in that tab then pays a cold
+        # start, and an unexplained pause is how a hang sounds. CallAfter
+        # because the sweep runs on a thread of its own and narration has to
+        # happen on the window's.
+        backend_pool.pool().on_reap = lambda backend: wx.CallAfter(self._announce_reap, backend)
+        backend_pool.start_reaper()
+
         root_sizer.Add(picker_row, 0, wx.EXPAND | wx.ALL, 8)
         root_sizer.Add(self.tab_switcher, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
         root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 4)
@@ -8859,6 +8869,22 @@ class MainFrame(wx.Frame):
         self._set_app_mode(self._app_mode, announce_change=False)
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
+
+    def _announce_reap(self, backend: str) -> None:
+        """Say that an idle backend was let go, and that the next turn restarts it.
+
+        Goes through the visible page's own `_say` rather than adding a
+        narration path of its own: that method already decides that only the
+        visible tab speaks, and mirrors the line to the status bar either way,
+        so nothing is lost when it declines to speak.
+        """
+        page = self.notebook.GetCurrentPage()
+        say = getattr(page, "_say", None)
+        if say is None:
+            # Mid-teardown, or a page that is not a session. Nothing to say to.
+            return
+        label = backend_label(backend)
+        say(f"{label} was idle and has been closed. The next message will restart it.", "tool")
 
     # ----- Tab management -----
     def _on_app_mode_changed(self, event: wx.CommandEvent) -> None:

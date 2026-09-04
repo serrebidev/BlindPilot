@@ -133,3 +133,75 @@ def test_dropping_survives_a_panel_that_never_held_anything():
 def test_quitting_sweeps_the_pool():
     source = inspect.getsource(app.MainFrame._on_close)
     assert "drop_all" in source or "stop_all_held_processes" in source
+
+
+def test_the_window_starts_the_reaper_and_listens_for_it():
+    source = inspect.getsource(app.MainFrame.__init__)
+    assert "start_reaper" in source, "nothing ever reaps an idle backend"
+    assert "on_reap" in source, "a reap would happen silently"
+
+
+def test_the_reap_announcement_names_the_backend_that_restarts():
+    """It goes through SessionPanel._say, which already decides that only the
+    visible tab narrates -- so this adds no second narration path."""
+    said: list[tuple[str, str]] = []
+
+    class _Page:
+        def _say(self, text: str, kind: str = "assistant") -> bool:
+            said.append((text, kind))
+            return True
+
+    class _Notebook:
+        def GetCurrentPage(self):
+            return _Page()
+
+    frame = type("_Frame", (), {"notebook": _Notebook()})()
+    app.MainFrame._announce_reap(frame, "codex")
+    assert said, "a reaped backend was not announced"
+    assert "Codex" in said[0][0]
+
+
+def test_the_reap_announcement_says_what_happens_next():
+    """Naming the backend is not enough: the user has to be told that the
+    delay on the next prompt is a restart, not a hang."""
+    said: list[tuple[str, str]] = []
+
+    class _Page:
+        def _say(self, text: str, kind: str = "assistant") -> bool:
+            said.append((text, kind))
+            return True
+
+    class _Notebook:
+        def GetCurrentPage(self):
+            return _Page()
+
+    frame = type("_Frame", (), {"notebook": _Notebook()})()
+    app.MainFrame._announce_reap(frame, app.BACKEND_CODEX)
+    text, kind = said[0]
+    assert "restart" in text.lower(), f"the next prompt's delay is unexplained: {text!r}"
+    assert kind == "tool", "a line the user did not ask for is activity, not an answer"
+    # Said out loud, mid-work. Jargon from the implementation is not wording.
+    lowered = text.lower()
+    assert "pool" not in lowered and "held" not in lowered and "reap" not in lowered
+
+
+def test_a_reap_with_no_visible_page_is_silent_rather_than_a_crash():
+    """The window can be mid-teardown when the reaper fires."""
+
+    class _Notebook:
+        def GetCurrentPage(self):
+            return None
+
+    frame = type("_Frame", (), {"notebook": _Notebook()})()
+    app.MainFrame._announce_reap(frame, "codex")  # must not raise
+
+
+def test_the_reap_callback_is_marshalled_onto_the_gui_thread():
+    """The reaper sweeps on a thread of its own, and wx narration must not be
+    driven from there. Calling _announce_reap straight from the callback would
+    speak from the wrong thread, which is a crash on Windows, not a warning."""
+    source = inspect.getsource(app.MainFrame.__init__)
+    on_reap = next(line for line in source.splitlines() if "on_reap" in line)
+    assert "CallAfter" in on_reap, (
+        "on_reap runs on the reaper's thread; it has to hand off to the window's"
+    )
