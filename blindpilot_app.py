@@ -58,6 +58,7 @@ from linux_accessibility import announce as _linux_native_announce
 
 import wx
 
+import backend_pool
 import diagnostics
 from app_updater import (
     ReleaseInfo,
@@ -5545,7 +5546,7 @@ class SessionPanel(wx.Panel):
         """Apply the model / effort to every message sent from here on."""
         if self.selected_backend() == BACKEND_FREEBUFF and model != self.model:
             self._session_id = None
-            self._drop_held_hermes()
+            self._drop_held_backends()
             self._announce("FreeBuff model changed; the next message starts a new conversation.")
             # Whatever terminal was waiting was started on the old model, and
             # FreeBuff reads that at launch, so it cannot serve the new one.
@@ -5564,7 +5565,7 @@ class SessionPanel(wx.Panel):
             # next message starts one that really does use the chosen level.
             # The model needs none of this -- /model does reach a live session.
             self._session_id = None
-            self._drop_held_hermes()
+            self._drop_held_backends()
             note = " Hermes fixes the reasoning level per conversation, so this starts a new one."
         self._announce(f"Using {self._model_summary()} from your next message.{note}")
         self.prompt.SetFocus()
@@ -6024,7 +6025,7 @@ class SessionPanel(wx.Panel):
                 self._session_title = ""
             self._session_id = None
             # A held Hermes connection belongs to the conversation being left.
-            self._drop_held_hermes()
+            self._drop_held_backends()
             self._session_backend = selected_backend
             self.model = ""
             self.effort = ""
@@ -6299,7 +6300,7 @@ class SessionPanel(wx.Panel):
             self._announce("Error: Stop the running task before starting a new conversation")
             return
         self._session_id = None
-        self._drop_held_hermes()
+        self._drop_held_backends()
         # The name from the New Session dialog belonged to the conversation
         # just abandoned. Keeping it would hand that name to the NEXT
         # conversation's session.create -- two conversations called the same
@@ -6358,7 +6359,7 @@ class SessionPanel(wx.Panel):
         self._session_id = entry.session_id
         # The tab is now a different conversation, so any connection held for
         # the previous one must not carry the next message.
-        self._drop_held_hermes()
+        self._drop_held_backends()
         # ...and a name typed for the previous one is not this conversation's
         # name either: the restored conversation has a title of its own, put on
         # the tab below.
@@ -6417,7 +6418,7 @@ class SessionPanel(wx.Panel):
         # backend it belongs to. A held connection from the previous one must
         # not carry the next message.
         self._session_id = session_id
-        self._drop_held_hermes()
+        self._drop_held_backends()
         # This tab is now a conversation Hermes already named; a name typed for
         # whatever was here before is not it.
         self._session_title = ""
@@ -6464,18 +6465,28 @@ class SessionPanel(wx.Panel):
             # Steering a turn someone else started is exactly what this is for.
             self.steer_btn.Enable()
 
-    def _drop_held_hermes(self) -> None:
-        """Let go of the held Hermes connection, if this tab has one.
+    def _drop_held_backends(self) -> None:
+        """Let go of every process held for this tab's conversation.
 
-        Called wherever the tab stops being the conversation the connection was
-        opened for: a new conversation, a restored one, a different backend.
-        The connection carries a live session id, so reusing it across that
+        Called wherever the tab stops being the conversation those processes
+        were started for: a new conversation, a restored one, a different
+        backend, a model or effort change that invalidates the session. A
+        process carries the conversation's live ids, so reusing one across that
         boundary would send the next message into the previous conversation.
+
+        Process-wide backends -- Codex, opencode -- are deliberately not
+        dropped here: their one process serves every tab, and this tab
+        abandoning a conversation is not a reason to end four others' work.
         """
-        held = self._held_hermes
+        held = getattr(self, "_held_hermes", None)
         if held is not None:
             held.drop()  # type: ignore[attr-defined]
             self._held_hermes = None
+        shared = backend_pool.pool()
+        for backend in (BACKEND_CLAUDE, BACKEND_HERMES, BACKEND_FREEBUFF):
+            # A key never held is a documented no-op, so this stays correct
+            # while those three backends are still starting fresh each turn.
+            shared.drop(backend_pool.pool_key(backend, self))
 
     def _on_session_started(self, session_id: str) -> None:
         if not self._session_id:
@@ -7038,21 +7049,20 @@ class SessionPanel(wx.Panel):
             # time this panel's widgets may not exist.
             self._dictation_timer.Stop()
             self._dictation_timer = None
-        # The Hermes connection outlives a single turn, so closing the tab is
-        # what closes it. Left open it would hold a session on the server for a
+        # A held backend outlives a single turn, so closing the tab is what
+        # closes it. Left running it would hold a session on the server for a
         # conversation nobody is looking at any more. It goes before the early
         # returns below: a tab with no live turn must still let go of it.
         #
         # Read with getattr because this runs during teardown, on whatever the
         # caller has: a panel closed before its own __init__ finished, and the
         # stand-ins the tab-closing tests drive this path with, both reach here
-        # without the attribute. Raising while shutting a tab down would leave
+        # without the method. Raising while shutting a tab down would leave
         # the turn uncancelled and the window half closed - a worse failure
-        # than a connection this panel never had.
-        held = getattr(self, "_held_hermes", None)
-        if held is not None:
-            held.drop()  # type: ignore[attr-defined]
-            self._held_hermes = None
+        # than a process this panel never had.
+        drop = getattr(self, "_drop_held_backends", None)
+        if drop is not None:
+            drop()
         worker = self._worker
         if worker is None or not worker.is_alive():
             return None
@@ -10151,6 +10161,9 @@ class MainFrame(wx.Frame):
         deadline = time.monotonic() + _CANCEL_JOIN_SECONDS
         for thread in cancelling:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        # Belt and braces over the per-tab teardown above: a shared app-server
+        # belongs to no single tab, so nothing above this stops it.
+        backend_pool.stop_all_held_processes()
         event.Skip()
 
 
