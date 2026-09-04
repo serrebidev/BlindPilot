@@ -36,6 +36,9 @@ def _linux(monkeypatch):
 
 def test_a_cli_does_not_search_the_project_folder_for_programs(monkeypatch):
     _windows(monkeypatch)
+    # The developer's own machine may have this set in the real environment;
+    # the test must establish it from the function, not inherit it.
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
 
     env = agent_backends.subprocess_env(r"C:\tools\claude.exe")
 
@@ -46,6 +49,7 @@ def test_it_is_not_set_where_it_means_nothing(monkeypatch):
     """POSIX never searched the working directory, so the variable would only
     be a puzzle for whoever read the environment next."""
     _linux(monkeypatch)
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
 
     env = agent_backends.subprocess_env("/usr/local/bin/claude")
 

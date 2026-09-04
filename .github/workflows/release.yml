@@ -62,20 +62,21 @@ jobs:
       - name: Compile source
         run: python -m py_compile blind_pilot.py blindpilot_app.py linux_accessibility.py app_updater.py claude_reader.py agent_backends.py markdown_rows.py session_history.py
 
+      - name: Generate application icons
+        # The icon is rendered by a pure-stdlib tool into packaging/, so the
+        # asset is never stale and the build does not depend on a committed
+        # binary. BlindPilot.spec and the Inno installer consume it from there.
+        run: python tools/make_icon.py
+
       - name: Build Windows application
         if: matrix.kind == 'windows'
         shell: pwsh
         run: |
-          # --collect-all winpty, not --hidden-import: pywinpty's ConPTY backend
-          # runs the child inside OpenConsole.exe, and a hidden import collects
-          # only the module and its DLLs. Without that executable no process can
-          # start under a pseudo-terminal, so FreeBuff never runs.
-          #
-          # websocket needs collecting for the same reason: a hidden import of
-          # the package alone leaves out submodules it loads at runtime, and the
-          # remote Hermes backend then reports the package as missing on a
-          # machine that has it. Measured on a packaged build, not assumed.
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --add-data "EarCons;EarCons" --additional-hooks-dir hooks --collect-submodules accessible_output2 --collect-all winpty --collect-all websocket blind_pilot.py
+          # What gets collected (winpty's OpenConsole.exe, websocket's runtime
+          # submodules, accessible_output2's output drivers) and the icon live
+          # in BlindPilot.spec, alongside the version and bundle metadata the
+          # macOS build uses. One spec, both platforms.
+          python -m PyInstaller --noconfirm --clean --additional-hooks-dir hooks BlindPilot.spec
           $startupSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-smoke" -PassThru -Wait
           if ($startupSmoke.ExitCode -ne 0) { throw "Packaged startup smoke test failed: $($startupSmoke.ExitCode)" }
           $guiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-gui-smoke" -PassThru -Wait
@@ -107,7 +108,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name BlindPilot --osx-bundle-identifier com.serrebidev.blindpilot --add-data "EarCons:EarCons" --hidden-import pexpect --collect-all websocket blind_pilot.py
+          python -m PyInstaller --noconfirm --clean --additional-hooks-dir hooks BlindPilot.spec
           codesign --force --deep --sign - dist/BlindPilot.app
           dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-smoke
           dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-gui-smoke

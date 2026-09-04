@@ -1097,6 +1097,11 @@ def blindpilot_config_dir() -> Path:
     if platform.system() == "Windows":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(base) / "BlindPilot"
+    if platform.system() == "Darwin":
+        # The one folder a Mac user looks in. The chat database already lives
+        # here (see accessible_ai.storage.paths), so settings belong beside it
+        # rather than in a Linux-style dot folder.
+        return Path.home() / "Library" / "Application Support" / "BlindPilot"
     return Path.home() / ".config" / "blindpilot"
 
 
@@ -1105,8 +1110,69 @@ def blindpilot_data_dir() -> Path:
     if platform.system() == "Windows":
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "BlindPilot"
+    if platform.system() == "Darwin":
+        # One subtree of Application Support, so the whole app owns one folder
+        # on a Mac -- nothing hidden in ~/.local and ~/.config.
+        return Path.home() / "Library" / "Application Support" / "BlindPilot" / "data"
     data = os.environ.get("XDG_DATA_HOME")
     return (Path(data) if data else Path.home() / ".local" / "share") / "blindpilot"
+
+
+def migrate_macos_legacy_dirs() -> None:
+    """Move an older macOS install's folders into the Application Support home.
+
+    Before BlindPilot knew the platform's conventions it kept config in
+    ``~/.config/blindpilot`` and managed runtimes in ``~/.local/share/
+    blindpilot``, the Linux layout. A Mac update must not strand a user's
+    settings or their installed CLIs out there, so the first launch after the
+    move relocates both -- never overwriting anything already in the new
+    home, and never failing the launch when a move does not go through (the
+    old code keeps reading the old folder then).
+
+    Called at import time, before any settings are read, so the config file
+    is found in its new home from this launch on. Idempotent and a no-op on
+    every other platform.
+    """
+    if platform.system() != "Darwin":
+        return
+    home = Path.home()
+    legacy_config = home / ".config" / "blindpilot"
+    legacy_data = home / ".local" / "share" / "blindpilot"
+    for source, destination in (
+        (legacy_config, blindpilot_config_dir()),
+        (legacy_data, blindpilot_data_dir()),
+    ):
+        _move_dir_contents(source, destination)
+
+
+def _move_dir_contents(source: Path, destination: Path) -> None:
+    """Move the entries of *source* into *destination*, never overwriting.
+
+    Each entry is moved on its own so one failure leaves the rest behind;
+    entries that would collide with something already in the new home are
+    skipped rather than replacing it -- the new copy wins, and the old one
+    stays where it is, readable by any rollback.
+    """
+    try:
+        if not source.is_dir():
+            return
+        destination.mkdir(parents=True, exist_ok=True)
+        for entry in list(source.iterdir()):
+            target = destination / entry.name
+            if target.exists() or target.is_symlink():
+                continue
+            try:
+                shutil.move(str(entry), str(target))
+            except OSError:
+                continue
+        # Only a source left with nothing in it is a source that finished.
+        if not any(source.iterdir()):
+            try:
+                source.rmdir()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _freebuff_choice_path() -> Path:
