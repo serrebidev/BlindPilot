@@ -76,7 +76,7 @@ jobs:
           # submodules, accessible_output2's output drivers) and the icon live
           # in BlindPilot.spec, alongside the version and bundle metadata the
           # macOS build uses. One spec, both platforms.
-          python -m PyInstaller --noconfirm --clean --additional-hooks-dir hooks BlindPilot.spec
+          python -m PyInstaller --noconfirm --clean BlindPilot.spec
           $startupSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-smoke" -PassThru -Wait
           if ($startupSmoke.ExitCode -ne 0) { throw "Packaged startup smoke test failed: $($startupSmoke.ExitCode)" }
           $guiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-gui-smoke" -PassThru -Wait
@@ -108,7 +108,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m PyInstaller --noconfirm --clean --additional-hooks-dir hooks BlindPilot.spec
+          python -m PyInstaller --noconfirm --clean BlindPilot.spec
           codesign --force --deep --sign - dist/BlindPilot.app
           dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-smoke
           dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-gui-smoke

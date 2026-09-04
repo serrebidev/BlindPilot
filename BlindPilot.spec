@@ -65,7 +65,10 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=None,
+    # The hooks directory travels inside the spec: PyInstaller refuses the
+    # --additional-hooks-dir CLI flag once a .spec file is given, and the
+    # workflow builds from the spec.
+    hookspath=[str(spec_dir / "hooks")],
     runtime_hooks=[],
     excludes=[],
     noarchive=False,

@@ -87,6 +87,7 @@ def test_no_migration_outside_macos(darwin_home, monkeypatch):
     assert agent_backends.blindpilot_config_dir() == darwin_home / ".config" / "blindpilot"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Path.home() follows HOME only on POSIX")
 def test_a_partial_failure_leaves_everything_else_in_place(darwin_home, monkeypatch):
     legacy = darwin_home / ".config" / "blindpilot"
     legacy.mkdir(parents=True)

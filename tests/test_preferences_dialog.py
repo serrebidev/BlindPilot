@@ -22,6 +22,21 @@ def wx_app():
         pytest.skip(f"no display for wxPython: {exc}")
 
 
+@pytest.fixture(autouse=True)
+def restore_settings():
+    """Put the global SETTINGS singleton back after every test here.
+
+    Applying the dialog writes through the live process-wide SETTINGS object,
+    and the suite is shuffled randomly, so a test that changes it and leaves
+    it changed breaks whichever test next reads the defaults -- observed as
+    test_sound_cues failing only under some seeds.
+    """
+    before = dict(app.SETTINGS.__dict__)
+    yield
+    app.SETTINGS.__dict__.clear()
+    app.SETTINGS.__dict__.update(before)
+
+
 def _item(label: str, checked: bool = False):
     menu = wx.Menu()
     item = menu.AppendCheckItem(wx.ID_ANY, label)
