@@ -1,56 +1,47 @@
-# BlindPilot 0.20.8
+# BlindPilot 0.20.9
 
 BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
 Code Reader and remains available under the MIT License, with credit to the original
 project throughout the application and documentation.
 
-This release makes the Hermes backend honour the two halves of the conversation it
-was still missing. A Hermes command such as /usage is now run and its report read
-back, instead of being sent to the model as a string of characters; and a turn that
-stops to ask a question — which Hermes does with a clarify request, a sudo request,
-or a secret request — now puts that question in front of the person deciding and
-answers it, instead of announcing the event and then falling silent.
+This release fixes one defect with a wide blast radius: on macOS, every HTTPS request
+BlindPilot made failed to verify a certificate. Checking for updates, downloading
+Node.js, and installing or updating a backend all ended in the same sentence —
+"CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate" — on any Mac that
+had never had python.org's Python installed.
 
-## Commands that run
+## What was actually wrong
 
-A leading slash means nothing to the model endpoint. BlindPilot sends a prompt to
-`prompt.submit`, which does not interpret a slash, while the gateway answers its own
-commands through a separate `slash.exec`. So until now every Hermes command the
-application did not implement itself reached the model as the five or six characters
-it spells: /usage came back as a sentence about usage, /title as a sentence about
-titles. The command picker gains Hermes' own commands, and the worker decides what is
-a command by asking Hermes itself rather than matching against a list compiled into
-the application — Hermes ships about a hundred and twenty, plus whatever skills,
-bundles and plugins are installed, and a frozen list would be wrong the first time a
-skill was added. Anything Hermes does not recognise is still sent to the model as an
-ordinary message, which is the safer of the two wrong answers, so a sentence that
-merely opens with a slash is never swallowed. A command that finishes without
-printing anything still ends the turn out loud, because a turn that says nothing is
-indistinguishable from one that failed.
+None of those three features. PyInstaller freezes the build machine's OpenSSL into the
+application, and OpenSSL looks for its trusted roots at the directory it was compiled
+with. For the macOS release that directory is inside the python.org framework on the
+GitHub runner that builds it: `/Library/Frameworks/Python.framework/Versions/3.12/etc/
+openssl/cert.pem`. It exists on the runner. It exists on nobody else's Mac. So the
+shipped application started life with a trust store holding zero certificates and
+refused every server it was pointed at — which is the correct thing for a program with
+no roots to do, and the reason the error named the certificate rather than the feature.
 
-## Questions that get answered
+## What now happens
 
-Hermes' gateway protocol has three requests that stop the agent until an answer
-arrives — `clarify` for a question with choices, `sudo` for a password, and `secret`
-for a credential — and with `clarify_timeout` at zero they wait with no deadline at
-all. The worker was documented as having no such request, so it announced the event
-and sent nothing back: the window read "Hermes is asking: a question needing the
-terminal" — the fallback wording, reached because a batch clarify carries `questions`
-and the worker only ever looked for `question` — and then went quiet for good. The
-first question a turn asked ended it.
+certifi's root list already ships inside the same application folder. It is now handed
+to OpenSSL when, and only when, the store OpenSSL found for itself is empty. A system
+store with certificates in it is used untouched, because a managed Mac, a Linux
+distribution, or a corporate proxy put them there deliberately, and `SSL_CERT_FILE` is
+honoured on the way through exactly as before.
 
-Now the question, its choices, and whether several answers are wanted all reach the
-person deciding, and the answer goes back to Hermes. A batch is answered one id at a
-time — Hermes releases it only once every question has been locked, so a question the
-person skips is still answered with an empty string rather than leaving the turn
-hanging exactly as it did before. A password or secret is answered with its value but
-never echoed into the transcript, which is read aloud, copied, and saved.
+Verification is never turned off and no check is skipped: an empty store is replaced
+with a real one, not disabled. certifi is also a declared dependency now rather than
+one inherited from httpx, since a module of this application names it directly, and the
+release build must not lose it to a change in somebody else's requirements.
 
 ## Verification
 
-Twenty-five new tests, failing-first, pin the behaviour: both clarify shapes, batch
-locking, multi-select as a JSON array, passwords and secrets under the right key and
-never echoed, command recognition case-insensitively and against the gateway's own
-list, the fallback to an ordinary message when the lookup is refused, and a command
-that finishes silently still ending the turn. The full suite is green under `-W
-error`, and ruff, mypy and the startup smoke tests are clean.
+Eight new tests, failing-first: the empty store falls back to the bundled roots, a
+populated system store is left alone, a build with no bundle still returns a verifying
+context, and both internet-facing modules ask for that store by default. The last of
+them is a sweep of the source that fails if a new `urlopen` is added to either module
+without it — this outage was one call site's default argument, and the next one would
+look the same. The failure itself was reproduced by emptying the trust store, then the
+update check and the Node.js LTS lookup were both run through the fix against GitHub
+and nodejs.org and both answered. The full suite is green under `-W error`, and ruff
+and mypy are clean.

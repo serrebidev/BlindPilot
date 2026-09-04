@@ -59,6 +59,7 @@ from linux_accessibility import announce as _linux_native_announce
 import wx
 
 import diagnostics
+from certificates import open_url
 from app_updater import (
     ReleaseInfo,
     UpdateError,
@@ -278,7 +279,7 @@ def announce(text: str, urgent: bool = False) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.20.8"
+APP_VERSION = "0.20.9"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1140,7 +1141,7 @@ def _automatic_npm_install_available() -> bool:
 
 def _fetch_url_bytes(url: str, timeout: int = 30) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": f"BlindPilot/{APP_VERSION}"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with open_url(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -1221,7 +1222,7 @@ def install_portable_node(log: Callable[[str], None]) -> Optional[str]:
             )
             digest = hashlib.sha256()
             with (
-                urllib.request.urlopen(request, timeout=60) as response,
+                open_url(request, timeout=60) as response,
                 open(archive_path, "wb") as output,
             ):
                 while chunk := response.read(1024 * 1024):

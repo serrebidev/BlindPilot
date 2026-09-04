@@ -22,7 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Protocol
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from certificates import open_url
 
 
 GITHUB_REPOSITORY = "serrebidev/BlindPilot"
@@ -137,6 +139,11 @@ class HttpResponse(Protocol):
 Opener = Callable[..., HttpResponse]
 
 
+def _verified_urlopen(request: Request, timeout: Optional[float] = None) -> HttpResponse:
+    """The real opener: GitHub over a trust store a packaged build still has."""
+    return open_url(request, timeout=timeout)
+
+
 def _read_limited(response: HttpResponse, limit: int) -> bytes:
     chunks: list[bytes] = []
     received = 0
@@ -153,7 +160,7 @@ def _read_limited(response: HttpResponse, limit: int) -> bytes:
 def fetch_latest_release(
     current_version: str,
     *,
-    opener: Opener = urlopen,
+    opener: Opener = _verified_urlopen,
     system: Optional[str] = None,
     machine: Optional[str] = None,
     kind: Optional[str] = None,
@@ -248,7 +255,7 @@ def download_update(
     *,
     progress: Optional[Callable[[int, int], None]] = None,
     cancel: Optional[threading.Event] = None,
-    opener: Opener = urlopen,
+    opener: Opener = _verified_urlopen,
 ) -> Path:
     """Download a release archive and reject it unless SHA-256 matches."""
     if not _allowed_download_url(release.asset_url):

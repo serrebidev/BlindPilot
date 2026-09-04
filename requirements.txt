@@ -10,6 +10,13 @@
 # against. Raising one is a deliberate act with the tests to back it.
 wxPython>=4.2,<5
 httpx>=0.28.1,<0.29
+# The root certificates a packaged build verifies against. It arrives with
+# httpx anyway, but `certificates.py` imports it by name: the frozen OpenSSL
+# looks for its trust store at the build machine's path, finds nothing on
+# anybody else's computer, and this is what stands in. The bound is a year
+# rather than a major - certifi versions by date, and a stale root list is
+# the one dependency whose age is itself the defect.
+certifi>=2025.1.31,<2028
 markdown-it-py>=3,<5
 pyobjc-framework-Cocoa>=10,<12; sys_platform == "darwin"
 accessible-output2>=0.17,<1; sys_platform == "win32"
