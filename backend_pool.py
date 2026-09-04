@@ -52,6 +52,16 @@ class Adapter(NamedTuple):
     the user; it is the signal that this process cannot be trusted for the
     next turn.
 
+    Nothing in production calls this yet -- Codex is the only backend on the
+    pool so far, its own cancel path never goes through the pool, and its
+    adapter's `interrupt` is a hardcoded `lambda _server, _timeout: False`.
+    It is here for opencode, Claude, Hermes, and FreeBuff to use as they
+    migrate. The trap for whoever wires one up: generic code shaped like
+    `if not held.interrupt(t): pool.drop(key)` would drop a server other
+    tabs are still sharing, since an unconfirmed interrupt says nothing about
+    whether anyone else is using the process -- only that this one turn could
+    not be confirmed stopped.
+
     ``busy`` says whether a turn is speaking through the process at this
     moment. Only the backend knows -- Codex counts borrowers on the app-server
     itself -- and without it the reaper measures nothing but how long ago a
@@ -80,6 +90,9 @@ class HeldProcess:
         # stored session id and a separate live one the gateway answers to,
         # and steering by the wrong one fails; the pool carries it without
         # knowing what it is.
+        # Not set by anything yet -- Codex is the only backend on the pool so
+        # far. It is here for opencode, Claude, Hermes, and FreeBuff to use as
+        # they migrate.
         self.binding = binding
         self._adapter = adapter
         self._now = now
@@ -96,6 +109,9 @@ class HeldProcess:
             return False
 
     def interrupt(self, timeout: float) -> bool:
+        """No production caller yet -- see `Adapter.interrupt` for the trap
+        waiting in whatever calls this once a backend other than Codex is on
+        the pool."""
         if self._stopped:
             return False
         try:
@@ -386,6 +402,9 @@ def start_reaper(interval: float = 60.0) -> threading.Thread:
 
 
 def stop_reaper() -> None:
+    """No production caller -- `start_reaper` runs once for the app's whole
+    life, from `MainFrame.__init__`. This exists so tests can tear the
+    sweeping thread down between runs instead of leaking one per test."""
     _reaper_stop.set()
 
 

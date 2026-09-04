@@ -1679,6 +1679,55 @@ def test_the_idle_clock_runs_from_the_end_of_a_codex_turn_not_its_start(monkeypa
     assert backend_pool.pool().reap(now=1741.0, idle_limit=900.0) == [key]
 
 
+def test_a_sweep_between_give_back_and_touch_does_not_reap_a_turn_that_just_ended(
+    monkeypatch,
+):
+    """`_release` gives the borrow back and touches the idle clock in two
+    separate statements, under no lock that would keep a sweep out between
+    them. Touching last left a window where `busy()` had already gone False
+    but the clock still read turn-start: a sweep landing there reaped a
+    server whose turn had legitimately run the whole idle window, right as it
+    finished -- costing the next prompt a cold start and, worse, telling the
+    user Codex had been sitting idle when it had just been working. Touching
+    first closes the window: by the time `busy()` can go False, the clock
+    already reads "just used"."""
+    clock = [0.0]
+    server = agent_backends.CodexServer(_FakeProc())
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    held = backend_pool.HeldProcess(server, agent_backends.codex_adapter(), now=lambda: clock[0])
+    backend_pool.pool().keep(key, held)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+
+    worker = _bare_worker()
+    assert worker._borrow_server() is held
+
+    # A turn that used the whole idle window before answering -- legitimate,
+    # not abandoned.
+    clock[0] = 900.5
+
+    # A sweep landing between `give_back` and `touch`, simulated by
+    # interposing it at the instant `give_back` returns: that is where a real
+    # reaper thread could interleave, since `_release` holds no lock across
+    # the two statements.
+    swept: list[list[tuple]] = []
+    real_give_back = server.give_back
+
+    def give_back_then_a_sweep_lands() -> None:
+        real_give_back()
+        swept.append(backend_pool.pool().reap(now=clock[0], idle_limit=900.0))
+
+    monkeypatch.setattr(server, "give_back", give_back_then_a_sweep_lands)
+
+    worker._release()
+
+    assert swept == [[]], (
+        "a sweep between give_back and touch reaped a server whose turn had "
+        "just finished a legitimately long run"
+    )
+    assert server.proc.killed is False
+    assert backend_pool.pool().take(key) is held, "the server should still be held after release"
+
+
 # ----- a turn given up is a turn the next one has to recognise -----
 
 

@@ -694,7 +694,11 @@ def test_backend_processes_are_launched_without_a_console_window():
         assert agent_backends.no_window_kwargs() == {}
 
 
-def test_codex_app_server_is_spawned_with_the_no_window_flag(monkeypatch):
+def test_a_worker_that_fails_to_launch_codex_reports_why(monkeypatch):
+    """The launch-flag assertion this test used to be named for is now
+    covered by test_codex_pool.py's tests of `_start_codex_server` directly;
+    what is still only checked here is the message a worker's `on_failed`
+    gets when the launch it asked the pool for raises."""
     captured: dict = {}
 
     def fake_popen(_args, **kwargs):

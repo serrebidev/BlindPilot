@@ -7,6 +7,14 @@ workers.
 Hermes lives in ``hermes_backend.py`` and ``hermes_worker.py``, imported
 on demand so a machine without Hermes pays nothing for it.
 
+Codex's app-server used to be started fresh for every turn and killed at the
+end of it. It is now owned by ``backend_pool``: one process shared by every
+tab, held across turns instead of torn down between them, so a conversation
+does not pay the app-server's start-up -- and, where MCP servers are
+configured, all of their child processes' start-up too -- on every message.
+``backend_pool.py`` decides how long that process lives; what is here says
+only how to start, check, and stop it.
+
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 Based on the original Claude Code Reader application by doubletaponair:
 https://github.com/doubletaponair/claude-code-reader
@@ -1814,7 +1822,11 @@ class CodexServer:
             _offer(listener, _CODEX_CLOSED)
 
     def detach(self, thread_id: str, listener: "queue.Queue[object]") -> None:
-        """Stop reading a conversation, without disturbing a newer reader."""
+        """Stop reading a conversation, without disturbing a newer reader.
+
+        No production caller -- `_release` uses `detach_listener` below,
+        which does not need the id. Only a test calls this one directly.
+        """
         with self._state_lock:
             if self._threads.get(thread_id) is listener:
                 del self._threads[thread_id]
@@ -2453,16 +2465,21 @@ class CodexWorker(threading.Thread):
             # By identity: a turn cancelled before it read the reply that named
             # its conversation never learned the id to detach by.
             server.detach_listener(inbox)
+        held = self._held
+        if held is not None:
+            # Touched before the borrow is given back, so `busy()` cannot go
+            # false while the clock still reads turn-start: a reaper sweep
+            # landing between these two statements must see either a still
+            # busy server or a freshly touched one, never idle-since-the-
+            # start-of-a-turn-that-just-finished. The idle clock is time with
+            # NO turn, so it starts here rather than when the turn began.
+            # Started at the take instead, a turn that ran for fourteen
+            # minutes was reaped a minute after it answered -- while the next
+            # prompt was being typed.
+            held.touch()
         if self._borrowed:
             self._borrowed = False
             server.give_back()
-        held = self._held
-        if held is not None:
-            # The idle clock is time with NO turn, so it starts here rather
-            # than when the turn began. Started at the take instead, a turn
-            # that ran for fourteen minutes was reaped a minute after it
-            # answered -- while the next prompt was being typed.
-            held.touch()
 
     def _borrow_server(self) -> Optional[backend_pool.HeldProcess]:
         """The app-server this turn will speak through, or None having failed.
