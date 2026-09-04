@@ -42,6 +42,13 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # opencode honours these, and a developer machine may well set them.
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("OPENCODE_DATA", raising=False)
+    # The Hermes reader honours HERMES_HOME too, and its official installer
+    # sets it persistently -- so on a machine where Hermes has ever been
+    # installed, the inherited value points every one of these tests at the
+    # REAL store instead of the throwaway home they build. Measured: after the
+    # installer ran here, 15 tests in this file answered with the machine's own
+    # conversations. The override test below sets it back on purpose.
+    monkeypatch.delenv("HERMES_HOME", raising=False)
     return tmp_path
 
 

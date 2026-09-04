@@ -12,12 +12,15 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 import os
+import re
 import threading
 import time
 from typing import Callable, Optional, Sequence
 
+from agent_backends import AskQuestions, Question, QuestionOption, question_summary
 from hermes_backend import (
     StdioTransport,
     Transport,
@@ -60,6 +63,33 @@ def _now() -> float:
 # drop), and without this the turn would sit out the whole idle limit before
 # saying anything -- fifteen minutes of silence that looks exactly like work.
 _CONNECTION_CHECK_SECONDS = 15.0
+
+# A turn that has produced NOTHING for this long gets a one-time diagnosis
+# instead of only the generic still-working notices. Measured on a live
+# gateway: a provider that is rate-limited or out of credits makes Hermes
+# grind through backoff and fallbacks it mostly does not narrate, so the
+# listener cannot tell a real hang from an account problem -- and the two
+# have different remedies. The diagnosis names the likely causes so the
+# remedy is the next thing heard.
+_SILENCE_DIAGNOSTIC_SECONDS = 120.0
+_SILENCE_DIAGNOSTIC_MESSAGE = (
+    "Hermes has been silent for 2 minutes. It may be rate-limited or out of "
+    "credits, or another Hermes session may be using the same account. "
+    "Pick a different model with /model if this continues."
+)
+
+# Hermes decorates some status lines for a terminal: "\u26a0\ufe0f Model fallback: ..."
+# and "\u26a0 Auxiliary title generation failed: ...". A screen reader reads the
+# symbol as "warning sign" before every sentence -- noise on every one of these
+# lines -- so the decoration is dropped and the words kept.
+_LEADING_SYMBOLS_RE = re.compile(r"^[\W_]+\s*")
+
+
+def _clean_status_text(text: str) -> str:
+    """A status line without the terminal decorations that prefix it."""
+    stripped = text.strip()
+    return _LEADING_SYMBOLS_RE.sub("", stripped) or stripped
+
 
 # Hermes advertises its permission surface as slash commands and config rather
 # than per-turn flags, so BlindPilot's picker maps onto the closest Hermes
@@ -205,6 +235,67 @@ def _first_text(*candidates: object) -> str:
         if isinstance(candidate, str) and candidate.strip():
             return candidate
     return ""
+
+
+def _clarify_questions(payload: dict) -> list[Question]:
+    """Hermes' clarify payload, in either shape, as questions the window asks.
+
+    Hermes emits two different payloads on the one event. A single question
+    carries ``question`` and ``choices`` at the top level, and is answered by
+    request id alone. A batch carries ``questions``, each entry with its own
+    ``qid``, and is answered with one reply per qid. Reading only the first
+    shape is what left a real question showing as the fallback wording, with
+    the choices Hermes offered never reaching the person deciding.
+    """
+    batch = payload.get("questions")
+    if isinstance(batch, list) and batch:
+        found = []
+        for entry in batch:
+            if not isinstance(entry, dict):
+                continue
+            question = _clarify_question(entry, str(entry.get("qid") or ""))
+            if question is not None:
+                found.append(question)
+        if found:
+            return found
+    single = _clarify_question(payload, "")
+    return [single] if single is not None else []
+
+
+def _clarify_question(entry: dict, qid: str) -> Optional[Question]:
+    """One clarify entry as a question, or None when it carries no text."""
+    asked = _first_text(entry.get("question"), entry.get("prompt"), entry.get("message"))
+    if not asked:
+        return None
+    choices = entry.get("choices")
+    options = tuple(
+        QuestionOption(str(choice).strip())
+        for choice in (choices if isinstance(choices, list) else [])
+        if str(choice).strip()
+    )
+    return Question(
+        question=asked,
+        options=options,
+        # Hermes only honours multi-select where it offered choices to select
+        # between, so neither does this -- a free-text question marked
+        # multi-select would offer a checkbox list with nothing in it.
+        multi_select=bool(entry.get("multi_select")) and bool(options),
+        id=qid,
+    )
+
+
+def _clarify_answer(question: Question, chosen: Sequence[str]) -> str:
+    """One answer in the form Hermes' clarify tool parses.
+
+    Multi-select goes as a JSON array. The tool accepts a JSON array or a
+    comma-separated string, and only the array survives an answer that itself
+    contains a comma -- which the free-text row makes possible for any
+    question, not just the ones whose own choices contain one.
+    """
+    picked = [str(value) for value in chosen if str(value).strip()]
+    if not picked:
+        return ""
+    return json.dumps(picked) if question.multi_select else picked[0]
 
 
 # Hermes' ``thinking.delta`` carries its terminal spinner - a kawaii face and a
@@ -425,13 +516,15 @@ class HermesWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
-        # Every backend the window drives is handed this, because four of them
-        # can pause a turn to ask a multiple-choice question. Hermes' gateway
-        # protocol has no such request, so the callback is accepted and never
-        # called -- accepted rather than omitted, because the window passes it
-        # unconditionally and a worker that refused it would fail every turn
-        # with a TypeError the moment the caller stopped special-casing us.
-        on_question: Optional[Callable[..., object]] = None,
+        # Every backend the window drives is handed this, because they can all
+        # pause a turn to ask. Hermes was documented here as having no such
+        # request in its protocol; it has three -- ``clarify.request`` for a
+        # question with choices, ``sudo.request`` for a password, and
+        # ``secret.request`` for a credential -- and each of them blocks the
+        # agent until an answer arrives, with no deadline at all when Hermes'
+        # ``clarify_timeout`` is zero. Leaving this uncalled did not mean the
+        # question went unanswered; it meant the turn ended there.
+        on_question: Optional[AskQuestions] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -524,6 +617,10 @@ class HermesWorker(threading.Thread):
         # it is quiet ON. "Still working on terminal" tells a listener the run
         # is alive and where it is; "still working" only tells them the first.
         self._last_step = ""
+        # Whether the silence diagnosis has been spoken. One per turn: once the
+        # listener has been told what a quiet turn is probably waiting on,
+        # repeating the same sentence every minute is noise, not news.
+        self._silence_diagnosed = False
 
     # -- public surface the window drives ---------------------------------
 
@@ -927,6 +1024,10 @@ class HermesWorker(threading.Thread):
         return params
 
     def _run_turn(self) -> None:
+        command = self._as_slash_command()
+        if command is not None:
+            self._run_slash_command(command)
+            return
         text = self._prompt
         if self._attachments:
             uploaded = self._upload_attachments()
@@ -958,6 +1059,97 @@ class HermesWorker(threading.Thread):
         self._accepting_input.set()
         self._on_started()
         self._consume_turn()
+
+    def _as_slash_command(self) -> Optional[str]:
+        """The prompt, if Hermes would recognise it as one of its commands.
+
+        Hermes is ASKED rather than matched against a list held here. It has
+        about 120 built-in commands plus whatever skills, bundles and plugins
+        are installed, and both halves move: a list compiled into BlindPilot
+        would be wrong the first time a skill was installed, and would answer
+        "/whatever" by sending those characters to the model as a message --
+        which is what used to happen to every Hermes command that BlindPilot
+        did not implement itself.
+
+        Anything Hermes does not recognise stays an ordinary message, so a
+        sentence that happens to open with a slash is not swallowed. Same rule
+        the opencode adapter follows, for the same reason.
+        """
+        text = self._prompt.strip()
+        if not text.startswith("/") or self._attachments:
+            return None
+        # Split on any whitespace: a command can be followed by its arguments
+        # on the same line or on the next one.
+        name = text[1:].split(None, 1)[0] if text[1:].split(None, 1) else ""
+        if not name:
+            return None
+        request_id = self._next_id()
+        transport = self._transport
+        if transport is None:
+            return None
+        transport.send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "complete.slash",
+                "params": {"text": "/" + name},
+            }
+        )
+        reply = self._await_response(request_id, 30.0)
+        if reply is None or isinstance(reply.get("error"), dict):
+            # No answer is not a licence to guess. Sending it as a message is
+            # the older behaviour and the safer of the two wrong answers: the
+            # model reads it, rather than the turn dying on a command that may
+            # not exist.
+            return None
+        items = (reply.get("result") or {}).get("items")
+        known = {
+            str(item.get("text") or "").strip().lstrip("/").lower()
+            for item in (items if isinstance(items, list) else [])
+            if isinstance(item, dict)
+        }
+        return text if name.lower() in known else None
+
+    def _run_slash_command(self, text: str) -> None:
+        """Run one of Hermes' own commands and read its output back.
+
+        ``slash.exec`` answers with the command's output rather than starting a
+        turn, so there is no stream to consume and no completion event coming:
+        the reply IS the end of this turn.
+        """
+        self._on_activity("tool", f"Running Hermes command {text.split()[0]}")
+        request_id = self._next_id()
+        transport = self._transport
+        if transport is None:
+            return
+        transport.send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "slash.exec",
+                # The parameter is "command"; a frame carrying "text" instead
+                # is answered with "empty command" (error 4004).
+                "params": {"session_id": self._live_session, "command": text},
+            }
+        )
+        # Generous: /update downloads a release, /init scans a repository, and
+        # /skills can reach the network. None of them stream progress.
+        reply = self._await_response(request_id, 600.0)
+        if reply is None:
+            if not self._cancelled:
+                detail = transport.failure_detail()
+                self._on_failed(detail or f"Hermes did not answer {text.split()[0]}")
+            return
+        error = reply.get("error")
+        if isinstance(error, dict):
+            self._on_failed(self._error_text(error, f"Hermes could not run {text.split()[0]}"))
+            return
+        result = reply.get("result")
+        output = str((result or {}).get("output") or "").strip() if isinstance(result, dict) else ""
+        # A command that did its work silently still has to end out loud: a
+        # turn that finishes with nothing said is indistinguishable from one
+        # that failed.
+        self._on_complete(output or f"{text.split()[0]} finished with no output.")
 
     def _upload_attachments(self) -> Optional[list[tuple[str, str]]]:
         """Send each attached file's bytes to Hermes, before the prompt goes out.
@@ -1123,6 +1315,15 @@ class HermesWorker(threading.Thread):
                 if not transport.connected():
                     self._on_failed(transport.failure_detail())
                     return
+            # Absolute silence gets a diagnosis, once, instead of only the
+            # generic notices. Measured: the most common reason a live Hermes
+            # produces nothing is a rate-limited or credit-exhausted provider,
+            # which it grinds through with backoff and fallbacks the gateway
+            # mostly does not narrate -- indistinguishable from a hang until
+            # the listener is told what it probably is.
+            if quiet >= _SILENCE_DIAGNOSTIC_SECONDS and not self._silence_diagnosed:
+                self._silence_diagnosed = True
+                self._on_activity("tool", _SILENCE_DIAGNOSTIC_MESSAGE)
             if quiet >= next_notice:
                 next_notice = quiet + _PROGRESS_NOTICE_SECONDS
                 self._announce_still_working(quiet)
@@ -1198,11 +1399,28 @@ class HermesWorker(threading.Thread):
             # free up context, and so on. Ignoring it is what left a long turn
             # with nothing to say for itself, so it becomes a row like any other
             # step -- and it is remembered, so a turn that then goes quiet can
-            # say what it went quiet on.
+            # say what it went quiet on. The \u26a0\ufe0f / \u26a0 prefixes Hermes draws
+            # for a terminal are dropped: a screen reader reads them as
+            # "warning sign", which precedes nearly every one of these lines.
             text = _first_text(payload.get("text"), payload.get("kind"))
             if text:
                 kind = str(payload.get("kind") or "")
                 label = "Summarising the conversation" if kind == "compacting" else text
+                label = _clean_status_text(label)
+                self._last_step = label
+                self._on_activity("tool", label)
+            return None
+
+        if event == "notification.show":
+            # The gateway's own account of why nothing has happened yet: the
+            # agent is still building (tool discovery, model setup) and the
+            # message will be sent as soon as it is ready. Dropping it left a
+            # slow start sounding exactly like a hang, so it becomes a row like
+            # any other step -- and it is remembered, so the still-working
+            # notice can say what the wait is FOR.
+            text = _first_text(payload.get("text"), payload.get("message"))
+            if text:
+                label = _clean_status_text(text)
                 self._last_step = label
                 self._on_activity("tool", label)
             return None
@@ -1222,13 +1440,12 @@ class HermesWorker(threading.Thread):
             self._answer_approval(payload)
             return None
 
-        if event in ("clarify.request", "sudo.request", "secret.request"):
-            question = _first_text(
-                payload.get("question"), payload.get("prompt"), payload.get("message")
-            )
-            self._on_activity(
-                "tool", f"Hermes is asking: {question or 'a question needing the terminal'}"
-            )
+        if event == "clarify.request":
+            self._answer_clarify(payload)
+            return None
+
+        if event in ("sudo.request", "secret.request"):
+            self._answer_secret(event, payload)
             return None
 
         if event == "message.complete":
@@ -1303,6 +1520,76 @@ class HermesWorker(threading.Thread):
         elif len(detail) > _RESULT_MAX_CHARS:
             detail = detail[:_RESULT_MAX_CHARS] + " […truncated]"
         self._on_activity("result", f"{name}: {detail}")
+
+    def _answer_clarify(self, payload: dict) -> None:
+        """Put Hermes' question in front of the user, and answer it.
+
+        Before this, the turn simply stopped here. The event was announced as
+        "Hermes is asking: a question needing the terminal" -- the fallback
+        wording, because a batch clarify carries ``questions`` and not
+        ``question``, so nothing was ever read out of it -- and then nothing
+        further happened, because nothing sent ``clarify.respond``. Hermes
+        waits on that answer with no deadline at all when its
+        ``clarify_timeout`` is zero, so any turn that asked anything was over.
+
+        The window already hands every worker an ``on_question`` callback, and
+        four other backends use it. Hermes was documented here as having "no
+        such request" in its protocol. It has three.
+        """
+        request_id = str(payload.get("request_id") or "")
+        questions = _clarify_questions(payload)
+        if not request_id or not questions:
+            return
+        answers = self._on_question(questions) if self._on_question else None
+        self._on_activity("tool", question_summary(questions, answers))
+        self._send_clarify_answers(request_id, questions, answers)
+
+    def _send_clarify_answers(
+        self,
+        request_id: str,
+        questions: Sequence[Question],
+        answers: Optional[list[list[str]]],
+    ) -> None:
+        """One ``clarify.respond`` per question -- answered or not.
+
+        A question the user skipped is still answered, with an empty string.
+        Hermes releases a batch only once EVERY question id has been locked,
+        so staying silent about one leaves the turn hanging exactly as it did
+        before; and an empty answer is already how Hermes records "the user
+        said nothing" -- its own tool result spells it ``"user_response": ""``.
+        """
+        for index, question in enumerate(questions):
+            chosen = answers[index] if answers is not None and index < len(answers) else []
+            params = {"request_id": request_id, "answer": _clarify_answer(question, chosen)}
+            if question.id:
+                # Batch shape: Hermes keys the answers by the question's own id
+                # and ignores a reply that does not carry one.
+                params["question_id"] = question.id
+            self._request("clarify.respond", params)
+
+    def _answer_secret(self, event: str, payload: dict) -> None:
+        """Answer a password or secret request rather than stall on it.
+
+        Asked with ``secret`` set, so the transcript records THAT it was
+        answered without echoing the value: these rows are read aloud, copied
+        and saved. A request the user declines is still answered, with an
+        empty string, because Hermes blocks the turn until something arrives.
+        """
+        request_id = str(payload.get("request_id") or "")
+        if not request_id:
+            return
+        sudo = event == "sudo.request"
+        asked = _first_text(
+            payload.get("question"), payload.get("prompt"), payload.get("message")
+        ) or ("Hermes needs the administrator password" if sudo else "Hermes needs a secret value")
+        question = Question(question=asked, secret=True)
+        answers = self._on_question([question]) if self._on_question else None
+        self._on_activity("tool", question_summary([question], answers))
+        given = answers[0][0] if answers and answers[0] else ""
+        self._request(
+            "sudo.respond" if sudo else "secret.respond",
+            {"request_id": request_id, "password" if sudo else "value": given},
+        )
 
     def _answer_approval(self, payload: dict) -> None:
         request_id = payload.get("request_id")

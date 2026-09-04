@@ -543,6 +543,11 @@ def mint_ws_ticket(url: str, username: str, password: str) -> str:
             {"provider": "basic", "username": username, "password": password},
         )
     except urllib.error.HTTPError as exc:
+        # An HTTPError carries its response body, and one left open warns
+        # "Implicitly cleaning up" when it is collected -- under ``-W error``
+        # that is a failure, and in real use it holds the response stream
+        # until then. Close it before the exception turns into a message.
+        exc.close()
         if exc.code in (401, 403):
             raise OSError(f"Hermes at {base} rejected that username and password.") from exc
         raise OSError(f"Could not sign in to Hermes at {base}: HTTP {exc.code}") from exc

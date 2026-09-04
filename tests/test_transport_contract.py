@@ -111,6 +111,12 @@ FAKES: list[tuple[str, str, str, bool]] = [
     # Found by test_every_fake_in_the_suite_is_registered on the very next
     # change after it was written: a new fake in the remote-session tests.
     ("test_hermes_remote_new_session", "_CreateReply", 'kl("/srv/app")', True),
+    # The questions and slash-command tests. The first models a Hermes waiting
+    # on the answer to a question it asked -- connected, and saying nothing
+    # until it gets one -- so its stream does not end; the second replays a
+    # script and ends like a pipe when it runs out.
+    ("test_hermes_questions", "_RecordingTransport", "kl()", False),
+    ("test_hermes_slash", "_ScriptedTransport", "kl([])", True),
 ]
 
 REAL: list[tuple[str, object, bool]] = [
