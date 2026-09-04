@@ -11,6 +11,10 @@ dist/
 dist_new/
 build/
 *.spec
+# BlindPilot.spec is source, not a build artefact: the release workflow
+# builds every platform from it and the README links to it, so it must be
+# tracked even though PyInstaller's generated .spec files are not.
+!BlindPilot.spec
 NVIDIA Corporation/
 artifacts/
 .release-setup/

@@ -57,9 +57,11 @@ from typing import Callable, List, Optional, Sequence
 from linux_accessibility import announce as _linux_native_announce
 
 import wx
+from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
 import diagnostics
+from certificates import open_url
 from app_updater import (
     ReleaseInfo,
     UpdateError,
@@ -90,6 +92,7 @@ from agent_backends import (
     backend_status,
     blindpilot_config_dir,
     blindpilot_data_dir,
+    migrate_macos_legacy_dirs,
     codex_model_options,
     compaction_request,
     discard_freebuff_prewarm,
@@ -279,7 +282,7 @@ def announce(text: str, urgent: bool = False) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.20.8"
+APP_VERSION = "0.21.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1141,7 +1144,7 @@ def _automatic_npm_install_available() -> bool:
 
 def _fetch_url_bytes(url: str, timeout: int = 30) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": f"BlindPilot/{APP_VERSION}"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with open_url(request, timeout=timeout) as response:
         return response.read()
 
 
@@ -1222,7 +1225,7 @@ def install_portable_node(log: Callable[[str], None]) -> Optional[str]:
             )
             digest = hashlib.sha256()
             with (
-                urllib.request.urlopen(request, timeout=60) as response,
+                open_url(request, timeout=60) as response,
                 open(archive_path, "wb") as output,
             ):
                 while chunk := response.read(1024 * 1024):
@@ -2296,10 +2299,29 @@ def create_desktop_shortcut() -> str:
     """Put a BlindPilot shortcut on the desktop. Returns where it was written.
 
     An unpacked copy never went through an installer, so nothing has offered it
-    a shortcut; this is how it gets one. Raises OSError with a readable reason.
+    a shortcut; this is how it gets one. On Windows it is a .lnk; on macOS it
+    is a symlink to the application bundle, which Finder shows as an alias and
+    doubles as a launcher. Raises OSError with a readable reason.
     """
+    if platform.system() == "Darwin":
+        bundle = _mac_bundle_dir()
+        if bundle is None:
+            raise OSError("A shortcut can only point at a packaged BlindPilot.")
+        desktop = Path.home() / "Desktop"
+        if not desktop.is_dir():
+            raise OSError("The desktop folder could not be found.")
+        link = desktop / APP_NAME
+        try:
+            if link.exists() or link.is_symlink():
+                if link.is_dir() and not link.is_symlink():
+                    raise OSError(f"{link} is a folder and was not replaced.")
+                link.unlink()
+            os.symlink(str(bundle), str(link))
+        except OSError as exc:
+            raise OSError(f"The desktop shortcut could not be created: {exc}") from exc
+        return str(link)
     if platform.system() != "Windows":
-        raise OSError("Desktop shortcuts are created on Windows only.")
+        raise OSError("Desktop shortcuts are created on Windows and macOS only.")
     target = Path(sys.executable).resolve()
     if not getattr(sys, "frozen", False):
         raise OSError("A shortcut can only point at a packaged BlindPilot.")
@@ -2572,6 +2594,12 @@ class _Settings:
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         _save_config(cfg)
 
+
+# Before any setting is read: an install that predates the macOS conventions
+# keeps its files in ~/.config and ~/.local/share, and they belong in
+# ~/Library/Application Support. The move is on the import path because
+# `SETTINGS` immediately below reads config.json to build itself.
+migrate_macos_legacy_dirs()
 
 SETTINGS = _Settings()
 
@@ -8509,6 +8537,202 @@ class RemoteHermesDialog(wx.Dialog):
         REMOTE_HERMES.save()
 
 
+def _chord(chord: str) -> str:
+    """Spell a chord the way this platform reads it.
+
+    A note written in parentheses is literal text: wxWidgets renders it as
+    written, and a screen reader reads it as written, so on macOS it must say
+    Cmd rather than Ctrl. Tabular accelerators (the ``\tCtrl+...`` form) are
+    deliberately left alone: wxWidgets' Mac port converts those itself, both
+    on screen and in what it recognises as the Command key.
+    """
+    return chord.replace("Ctrl", "Cmd") if platform.system() == "Darwin" else chord
+
+
+def _tab_chord_notes() -> tuple[str, str]:
+    """The parenthesised chord notes for Next/Previous Session, per platform.
+
+    Ctrl+Tab cannot work on macOS: wxWidgets maps Ctrl to Command there, and
+    Cmd+Tab belongs to the system application switcher and never reaches the
+    app. The chords the frame's accelerator table actually carries on macOS
+    are Cmd+Shift+]/[, and the menu -- which is where anybody learns a chord --
+    must say so.
+    """
+    if platform.system() == "Darwin":
+        return "(Cmd+Shift+])", "(Cmd+Shift+[)"
+    return "(Ctrl+Tab)", "(Ctrl+Shift+Tab)"
+
+
+class PreferencesDialog(wx.Dialog):
+    """Every setting that lives in the Options menu, in one dialog.
+
+    The menu is the source of truth on every platform; this is the same state
+    as a form, reachable on macOS from the application menu (Preferences…,
+    Cmd+,), which wxWidgets automatically moves a wx.ID_PREFERENCES item to.
+    Nothing is changed here -- the dialog only collects the choices, and the
+    frame applies them through the same switches the menu items use, so the
+    two can never disagree.
+    """
+
+    def __init__(self, parent: wx.Window) -> None:
+        super().__init__(parent, title="BlindPilot Preferences", size=wx.Size(620, -1))
+        panel = wx.Panel(self)
+        root = wx.BoxSizer(wx.VERTICAL)
+
+        narration_choices = [label.replace("&", "") for _key, label, _help in NARRATION_MODES]
+        self._narration_box = wx.RadioBox(
+            panel,
+            label="Narration",
+            choices=narration_choices,
+            majorDimension=1,
+            style=wx.RA_SPECIFY_ROWS,
+        )
+        self._narration_box.SetSelection(0 if SETTINGS.narration == NARRATION_EVERYTHING else 1)
+        root.Add(self._narration_box, 0, wx.EXPAND | wx.ALL, 8)
+
+        self._live_rows = wx.CheckBox(panel, label="Show live activity in the list")
+        self._live_rows.SetValue(SETTINGS.live_rows)
+        self._speak_live = wx.CheckBox(panel, label="Speak activity aloud")
+        self._speak_live.SetValue(SETTINGS.speak_live)
+        self._thinking = wx.CheckBox(panel, label="Include the backend's reasoning")
+        self._thinking.SetValue(SETTINGS.show_thinking)
+        self._text_view = wx.CheckBox(panel, label="Responses as a read-only text field")
+        self._text_view.SetValue(SETTINGS.text_view)
+        for check in (
+            self._live_rows,
+            self._speak_live,
+            self._thinking,
+            self._text_view,
+        ):
+            root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, 8)
+        self._sounds = wx.CheckBox(panel, label="Play sound cues")
+        self._sounds.SetValue(SETTINGS.sounds_enabled)
+        root.Add(self._sounds, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        cues_box = wx.BoxSizer(wx.VERTICAL)
+        self._cue_checks: dict[str, wx.CheckBox] = {}
+        for cue, label, _help in SOUND_CUES:
+            check = wx.CheckBox(panel, label=label.replace("&", ""))
+            check.SetValue(SETTINGS.sound_cues.get(cue, True))
+            self._cue_checks[cue] = check
+            cues_box.Add(check, 0, wx.LEFT, 24)
+        root.Add(cues_box, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._sounds.Bind(wx.EVT_CHECKBOX, lambda _e: self._sync_sound_checks())
+        self._sync_sound_checks()
+
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, 8)
+        cue_choices = [
+            "Working sound: continuous",
+            f"Working sound: every N seconds ({CUE_SECONDS_MIN}-{CUE_SECONDS_MAX})",
+            "Working sound: off",
+        ]
+        self._cue_box = wx.RadioBox(
+            panel,
+            label="Working sound",
+            choices=cue_choices,
+            majorDimension=1,
+            style=wx.RA_SPECIFY_ROWS,
+        )
+        self._cue_box.SetSelection(
+            {
+                CUE_LOOP: 0,
+                CUE_PERIODIC: 1,
+                CUE_OFF: 2,
+            }[SETTINGS.progress_cue]
+        )
+        root.Add(self._cue_box, 0, wx.EXPAND | wx.ALL, 8)
+        interval_row = wx.BoxSizer(wx.HORIZONTAL)
+        interval_row.Add(
+            wx.StaticText(panel, label="Seconds between working sounds:"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.LEFT,
+            8,
+        )
+        self._interval = wx.SpinCtrl(
+            panel,
+            min=CUE_SECONDS_MIN,
+            max=CUE_SECONDS_MAX,
+            initial=SETTINGS.progress_cue_seconds,
+        )
+        interval_row.Add(self._interval, 0, wx.LEFT, 8)
+        root.Add(interval_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        self._cue_box.Bind(wx.EVT_RADIOBOX, lambda _e: self._sync_interval())
+        self._sync_interval()
+
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, 8)
+        self._updates = wx.CheckBox(panel, label="Check for updates at startup")
+        self._updates.SetValue(bool(_load_config().get("check_for_updates_at_startup", True)))
+        root.Add(self._updates, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        # The buttons must be born on the panel: the sizer lives on the panel,
+        # so the widgets it manages have to be children of it, and a standard
+        # button sizer places them the way the platform expects (on macOS, OK
+        # on the right). Enter closes-without-applying rather than firing OK,
+        # because this dialog is reached from a keyboard and the choices are
+        # not made yet.
+        buttons = wx.StdDialogButtonSizer()
+        ok_button = wx.Button(panel, wx.ID_OK, "OK")
+        cancel_button = wx.Button(panel, wx.ID_CANCEL, "Cancel")
+        cancel_button.SetDefault()
+        buttons.AddButton(ok_button)
+        buttons.AddButton(cancel_button)
+        buttons.Realize()
+        root.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        panel.SetSizer(root)
+        root.Fit(self)
+        self.CentreOnParent()
+
+    def _sync_sound_checks(self) -> None:
+        enabled = self._sounds.GetValue()
+        for check in self._cue_checks.values():
+            check.Enable(enabled)
+
+    def _sync_interval(self) -> None:
+        self._interval.Enable(self._cue_box.GetSelection() == 1)
+
+    def narration_selection(self) -> str:
+        return (
+            NARRATION_EVERYTHING if self._narration_box.GetSelection() == 0 else NARRATION_KEEP_UP
+        )
+
+    @property
+    def live_rows(self) -> bool:
+        return self._live_rows.GetValue()
+
+    @property
+    def speak_live(self) -> bool:
+        return self._speak_live.GetValue()
+
+    @property
+    def show_thinking(self) -> bool:
+        return self._thinking.GetValue()
+
+    @property
+    def text_view(self) -> bool:
+        return self._text_view.GetValue()
+
+    @property
+    def sounds_enabled(self) -> bool:
+        return self._sounds.GetValue()
+
+    @property
+    def sound_cues(self) -> dict[str, bool]:
+        return {cue: check.GetValue() for cue, check in self._cue_checks.items()}
+
+    @property
+    def progress_cue(self) -> str:
+        return (CUE_LOOP, CUE_PERIODIC, CUE_OFF)[self._cue_box.GetSelection()]
+
+    @property
+    def progress_interval(self) -> int:
+        return _valid_cue_seconds(self._interval.GetValue())
+
+    @property
+    def check_updates_startup(self) -> bool:
+        return self._updates.GetValue()
+
+
 class MainFrame(wx.Frame):
     def __init__(self, initial_cwd: str):
         super().__init__(None, title=APP_NAME, size=wx.Size(900, 760))
@@ -8612,6 +8836,12 @@ class MainFrame(wx.Frame):
             wx.ID_ANY,
             "Re&mote Hermes...",
             "Drive a Hermes running on another computer instead of the one installed here",
+        )
+        options_menu.AppendSeparator()
+        preferences_item = options_menu.Append(
+            wx.ID_PREFERENCES,
+            "&Preferences…\tCtrl+,",
+            "Open every Options-menu setting in one dialog",
         )
         self._rows_item.Check(SETTINGS.live_rows)
         self._speak_item.Check(SETTINGS.speak_live)
@@ -8751,6 +8981,7 @@ class MainFrame(wx.Frame):
             lambda _e: self._show_chat_diagnostics(),
             self._chat_diagnostics_item,
         )
+        self.Bind(wx.EVT_MENU, lambda _e: self._show_preferences(), preferences_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._open_log_folder(), logs_item)
         self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
@@ -9131,17 +9362,99 @@ class MainFrame(wx.Frame):
             _save_config(cfg)
         self._set_backend(chosen)
 
+    def _show_preferences(self) -> None:
+        """Open the Preferences dialog (Cmd+, on macOS).
+
+        wxWidgets relocates a wx.ID_PREFERENCES item into the macOS application
+        menu automatically; the dialog itself is the same settings the Options
+        menu carries, applied through the same store.
+        """
+        dialog = PreferencesDialog(self)
+        try:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            self._apply_preferences(dialog)
+        finally:
+            dialog.Destroy()
+
+    def _apply_preferences(self, dialog: PreferencesDialog) -> None:
+        """Put the dialog's choices into the settings store and the menus.
+
+        The menu items keep their checkmarks in step, because the menu and the
+        dialog describe one set of settings, and a menu that lied about what
+        was set would undo a screen reader user's trust in what they hear.
+        """
+        SETTINGS.narration = dialog.narration_selection()
+        SETTINGS.live_rows = dialog.live_rows
+        SETTINGS.speak_live = dialog.speak_live
+        SETTINGS.show_thinking = dialog.show_thinking
+        SETTINGS.sounds_enabled = dialog.sounds_enabled
+        SETTINGS.sound_cues = dict(dialog.sound_cues)
+        SETTINGS.text_view = dialog.text_view
+        SETTINGS.progress_cue = dialog.progress_cue
+        SETTINGS.progress_cue_seconds = dialog.progress_interval
+        changed_text_view = SETTINGS.text_view != self._text_view_item.IsChecked()
+        SETTINGS.save()
+
+        self._rows_item.Check(SETTINGS.live_rows)
+        self._speak_item.Check(SETTINGS.speak_live)
+        self._thinking_item.Check(SETTINGS.show_thinking)
+        self._sounds_item.Check(SETTINGS.sounds_enabled)
+        self._text_view_item.Check(SETTINGS.text_view)
+        for mode, item in getattr(self, "_narration_items", {}).items():
+            item.Check(mode == SETTINGS.narration)
+        for cue, item in getattr(self, "_sound_cue_items", {}).items():
+            item.Check(SETTINGS.sound_cues.get(cue, True))
+            item.Enable(SETTINGS.sounds_enabled)
+        self._cue_loop_item.Check(SETTINGS.progress_cue == CUE_LOOP)
+        self._cue_periodic_item.Check(SETTINGS.progress_cue == CUE_PERIODIC)
+        self._cue_off_item.Check(SETTINGS.progress_cue == CUE_OFF)
+
+        self.earcons.set_enabled(SETTINGS.sounds_enabled)
+        self.earcons.set_cues(SETTINGS.sound_cues)
+        if SETTINGS.progress_cue != CUE_OFF and self._turn_in_flight():
+            self.earcons.start_progress()
+        else:
+            self.earcons.stop_progress()
+        if changed_text_view:
+            for i in range(self.notebook.GetPageCount()):
+                page = self.notebook.GetPage(i)
+                if isinstance(page, SessionPanel):
+                    page.apply_view_mode()
+
+        cfg = _load_config()
+        cfg["check_for_updates_at_startup"] = dialog.check_updates_startup
+        _save_config(cfg)
+        self._automatic_updates_item.Check(dialog.check_updates_startup)
+        self._announce_setting("Preferences applied")
+
     def _show_about(self) -> None:
-        wx.MessageBox(
-            f"{APP_NAME} {APP_VERSION}\n\n"
-            "An accessible desktop frontend for Claude Code, Codex, and FreeBuff.\n\n"
+        description = (
+            "An accessible desktop frontend for Claude Code, Codex, FreeBuff, "
+            "opencode, and Hermes.\n\n"
             f"{ORIGINAL_APP_CREDIT}\n"
             "BlindPilot preserves and extends its accessibility-first work.\n\n"
-            "Licensed under the MIT License. See LICENSE and CREDITS.md.",
-            f"About {APP_NAME}",
-            wx.OK | wx.ICON_INFORMATION,
-            self,
+            "Licensed under the MIT License. See LICENSE and CREDITS.md."
         )
+        # The native About panel on macOS carries the app icon and the name
+        # from the bundle, which is what a Mac user expects. Where the native
+        # panel is unavailable it falls back to a plain message box.
+        try:
+            import wx.adv
+
+            info = wx.adv.AboutDialogInfo()
+            info.SetName(APP_NAME)
+            info.SetVersion(APP_VERSION)
+            info.SetDescription(description)
+            info.SetCopyright("Copyright (c) 2026 doubletaponair and BlindPilot contributors")
+            wx.adv.AboutBox(info, self)
+        except Exception:
+            wx.MessageBox(
+                f"{APP_NAME} {APP_VERSION}\n\n{description}",
+                f"About {APP_NAME}",
+                wx.OK | wx.ICON_INFORMATION,
+                self,
+            )
 
     def _check_for_updates(self, silent: bool = False) -> None:
         """Query GitHub off the GUI thread and present an accessible result."""
@@ -9413,7 +9726,9 @@ class MainFrame(wx.Frame):
         )
         add(
             menu,
-            "&Model and Effort…	Ctrl+M",
+            # Deliberately not Ctrl+M: on macOS that chord is the system's
+            # Minimize, which lives in the Window menu. Ctrl+Shift+E is free.
+            "&Model and Effort…	Ctrl+Shift+E",
             "Choose the model and effort level this conversation runs at",
             self._model_active,
         )
@@ -9471,7 +9786,10 @@ class MainFrame(wx.Frame):
         )
         add(
             menu,
-            "&Recent Conversations…	Ctrl+H",
+            # Deliberately not Ctrl+H: on macOS that chord is the system's
+            # Hide BlindPilot, which the application menu wins.
+            # Ctrl+Shift+H is free.
+            "&Recent Conversations…	Ctrl+Shift+H",
             "Reopen a past conversation and carry on with it",
             self._open_history,
         )
@@ -9488,15 +9806,16 @@ class MainFrame(wx.Frame):
             self._side_chat_active,
         )
         menu.AppendSeparator()
+        next_note, prev_note = _tab_chord_notes()
         add(
             menu,
-            "Ne&xt Session (Ctrl+Tab)",
+            f"Ne&xt Session {next_note}",
             "Move to the next conversation tab",
             lambda: self._cycle_tab(+1),
         )
         add(
             menu,
-            "Previo&us Session (Ctrl+Shift+Tab)",
+            f"Previo&us Session {prev_note}",
             "Move to the previous conversation tab",
             lambda: self._cycle_tab(-1),
         )
@@ -9544,13 +9863,13 @@ class MainFrame(wx.Frame):
         )
         add(
             menu,
-            "&Attach Files… (Ctrl+Shift+A)",
+            f"&Attach Files… ({_chord('Ctrl+Shift+A')})",
             "Attach files to the next message",
             self._attach_active,
         )
         add(
             menu,
-            "S&lash Command… (Ctrl+/)",
+            f"S&lash Command… ({_chord('Ctrl+/')})",
             "Pick one of this backend's slash commands from a list",
             self._slash_active,
         )
@@ -9577,7 +9896,7 @@ class MainFrame(wx.Frame):
         )
         add(
             menu,
-            "&Jump to Latest Response (Ctrl+R)",
+            f"&Jump to Latest Response ({_chord('Ctrl+R')})",
             "Move to the newest response, then back through the ones before it",
             self._jump_to_latest_response,
         )
@@ -9699,7 +10018,7 @@ class MainFrame(wx.Frame):
             )
 
     def _model_active(self) -> None:
-        """Pick the model and effort for the active tab (Ctrl+M)."""
+        """Pick the model and effort for the active tab (Ctrl+Shift+E)."""
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_model_dialog()
@@ -9989,7 +10308,7 @@ class MainFrame(wx.Frame):
         return self._projects_folder or os.getcwd()
 
     def _open_history(self) -> None:
-        """Reopen a past conversation in a new tab (Ctrl+H)."""
+        """Reopen a past conversation in a new tab (Ctrl+Shift+H)."""
         dlg = HistoryDialog(self, backend=self._backend, cwd=self._history_cwd())
         try:
             if dlg.ShowModal() != wx.ID_OK:
@@ -10403,6 +10722,10 @@ def main() -> int:
     keep_bundle_off_child_path()
     activate_managed_cli_paths()
     app = wx.App(False)
+    # The application menu on macOS reads the display name; without this it
+    # says "Python" when BlindPilot is run from source.
+    app.SetAppName(APP_NAME)
+    app.SetAppDisplayName(APP_NAME)
 
     cfg = _load_config()
     reserve_console_if_needed(cfg.get("backend"), gui_startup_smoke)

@@ -62,6 +62,12 @@ def test_gui_startup_smoke_skips_first_run_wizard(monkeypatch):
         def MainLoop(self) -> None:
             events.append("main-loop")
 
+        def SetAppName(self, name: str) -> None:
+            events.append(("app-name", name))
+
+        def SetAppDisplayName(self, name: str) -> None:
+            events.append(("app-display-name", name))
+
     class FakeFrame:
         def __init__(self, *, initial_cwd: str) -> None:
             events.append(("frame", initial_cwd))
@@ -227,6 +233,12 @@ def test_a_startup_check_does_not_take_focus_from_whoever_is_working(monkeypatch
     class FakeApp:
         def MainLoop(self) -> None:
             events.append("main-loop")
+
+        def SetAppName(self, name: str) -> None:
+            events.append(("app-name", name))
+
+        def SetAppDisplayName(self, name: str) -> None:
+            events.append(("app-display-name", name))
 
     class FakeFrame:
         def __init__(self, *, initial_cwd: str) -> None:

@@ -38,13 +38,13 @@ BlindPilot is based on the original **[Claude Code Reader](https://github.com/do
 
 Every action is in the menu bar. Only moving focus is chord-only: **Ctrl+L** to the prompt, **Ctrl+1** to **Ctrl+9** to a tab.
 
-**File** — New Session (**Ctrl+T**), Recent Conversations (**Ctrl+H**), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (**Ctrl+W**), Quit (**Ctrl+Q**).
+**File** — New Session (**Ctrl+T**), Recent Conversations (**Ctrl+Shift+H**), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (**Ctrl+W**), Quit (**Ctrl+Q**).
 
 **Conversation** — Stop Task (**Ctrl+.**), Attach Files (**Ctrl+Shift+A**), Slash Command (**Ctrl+/**), Compact Conversation (**Ctrl+Shift+K**), Start New Conversation (**Ctrl+Shift+N**), Find in Responses (**Ctrl+F**), Jump to Latest Response (**Ctrl+R**).
 
-**Model** — Backend (one radio item per CLI), Model and Effort (**Ctrl+M**), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Manage Backends, Connect a Provider.
+**Model** — Backend (one radio item per CLI), Model and Effort (**Ctrl+Shift+E**), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Manage Backends, Connect a Provider.
 
-**Options** — Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Silent until the response mode.
+**Options** — Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Silent until the response mode, Preferences. On macOS, Preferences lives where every Mac app keeps it — in the application menu, on **Cmd+,** — and wxWidgets moves it there for you.
 
 **Chat** — Accounts, Conversation profiles, Refresh models, History view, Diagnostics. Greyed out until you switch the Mode combo box to Chat.
 
@@ -57,19 +57,21 @@ Backend, Permission Mode and Narration are radio items because the choices are e
 ## Keyboard
 
 - **Ctrl+L** focus the prompt, **Ctrl+T** open a session, **Ctrl+W** close it.
-- **Ctrl+H** reopen a past conversation.
+- **Ctrl+Shift+H** reopen a past conversation.
 - **Ctrl+G** list the conversations Hermes knows, and join one that is running.
 - **Ctrl+Shift+K** compact this conversation, **Ctrl+Shift+N** start a fresh one.
 - **Ctrl+F** search responses, **Ctrl+R** jump to the latest.
-- **Ctrl+M** choose the model and reasoning effort for this conversation.
+- **Ctrl+Shift+E** choose the model and reasoning effort for this conversation.
 - **Ctrl+/** slash commands, **Ctrl+.** stop the running task.
 - **Ctrl+Shift+A** attach files, **Ctrl+Shift+M** cycle permission modes.
 - **Ctrl+Tab** and **Ctrl+Shift+Tab** move between session tabs, as do **Ctrl+Shift+]** and
-  **Ctrl+Shift+[**; **Ctrl+1** to **Ctrl+9** jump straight to one.
+  **Ctrl+Shift+[**; **Ctrl+1** to **Ctrl+9** jump straight to one. On macOS the tab
+  chords are **Cmd+Shift+]** and **Cmd+Shift+[**, because Cmd+Tab belongs to the
+  system's application switcher and never reaches the app.
 - **Up** from the prompt's first line enters the newest response. At either end,
   arrow keys stay in the responses; press **Tab** to move to the prompt.
 
-On macOS the same accelerators map to Command where appropriate.
+On macOS the same accelerators map to Command where appropriate. Two chords are deliberately different there: Ctrl+H would be the system's Hide BlindPilot, so Recent Conversations is Ctrl+Shift+H everywhere, and Ctrl+M would be the system's Minimize, so Model and Effort is Ctrl+Shift+E everywhere. The chords BlindPilot owns that stay free of macOS's system shortcuts are spoken as **Cmd** in the menu labels.
 
 ## Chat mode
 
@@ -122,7 +124,7 @@ For a version-by-version history, see the [changelog](CHANGELOG.md).
 
 Download `BlindPilot-macOS-arm64.zip` for Apple Silicon or `BlindPilot-macOS-x64.zip` for Intel. The macOS builds are ad-hoc signed but not notarized, so first launch may need approval in System Settings under Privacy & Security.
 
-Settings live in `%APPDATA%\BlindPilot\config.json` on Windows and `~/.config/blindpilot/config.json` elsewhere. An existing Claude Code Reader configuration is imported once and never modified.
+Settings live in `%APPDATA%\BlindPilot\config.json` on Windows, `~/Library/Application Support/BlindPilot` on macOS, and `~/.config/blindpilot` elsewhere. An install that predates the macOS move has its settings and managed CLI installs relocated there once on the first new launch; nothing already in the new home is overwritten. An existing Claude Code Reader configuration is imported once and never modified.
 
 ## Set up a backend
 
@@ -220,7 +222,7 @@ python -m pip install -r requirements-build.txt
 pyinstaller --onedir --windowed --name BlindPilot --add-data "EarCons;EarCons" --additional-hooks-dir hooks blind_pilot.py
 ```
 
-The one-directory layout is what lets the verified updater replace the application after it exits. The Windows installer is built from [`installer/BlindPilot.iss`](installer/BlindPilot.iss). Pushing a `v*` tag runs [.github/workflows/release.yml](.github/workflows/release.yml), which tests startup and the full suite, then publishes the Windows installer, the Windows x64 archive, and both macOS archives with SHA-256 files.
+The one-directory layout is what lets the verified updater replace the application after it exits, and [`BlindPilot.spec`](BlindPilot.spec) is what both platforms build from, so the packaged metadata cannot drift from the workflow: the bundle identifier, the version read out of `APP_VERSION`, the minimum macOS version, and the application icon (generated by [`tools/make_icon.py`](tools/make_icon.py) into `packaging/`). The Windows installer is built from [`installer/BlindPilot.iss`](installer/BlindPilot.iss). Pushing a `v*` tag runs [.github/workflows/release.yml](.github/workflows/release.yml), which tests startup and the full suite, then publishes the Windows installer, the Windows x64 archive, and both macOS archives with SHA-256 files.
 
 Before opening a pull request:
 

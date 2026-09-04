@@ -1,56 +1,73 @@
-# BlindPilot 0.20.8
+# BlindPilot 0.21.0
 
-BlindPilot is an accessible desktop reader for AI coding agents. It is based on Claude
-Code Reader and remains available under the MIT License, with credit to the original
-project throughout the application and documentation.
+BlindPilot is an accessible desktop front end for AI coding agents, built with
+native wxPython controls so NVDA, JAWS, and VoiceOver read the application
+itself. It is based on Claude Code Reader and remains available under the MIT
+License, with credit to the original project throughout.
 
-This release makes the Hermes backend honour the two halves of the conversation it
-was still missing. A Hermes command such as /usage is now run and its report read
-back, instead of being sent to the model as a string of characters; and a turn that
-stops to ask a question — which Hermes does with a clarify request, a sudo request,
-or a secret request — now puts that question in front of the person deciding and
-answers it, instead of announcing the event and then falling silent.
+This release makes the app feel like a Mac app instead of one that merely runs
+on a Mac.
 
-## Commands that run
+## The shortcuts that were wrong
 
-A leading slash means nothing to the model endpoint. BlindPilot sends a prompt to
-`prompt.submit`, which does not interpret a slash, while the gateway answers its own
-commands through a separate `slash.exec`. So until now every Hermes command the
-application did not implement itself reached the model as the five or six characters
-it spells: /usage came back as a sentence about usage, /title as a sentence about
-titles. The command picker gains Hermes' own commands, and the worker decides what is
-a command by asking Hermes itself rather than matching against a list compiled into
-the application — Hermes ships about a hundred and twenty, plus whatever skills,
-bundles and plugins are installed, and a frozen list would be wrong the first time a
-skill was added. Anything Hermes does not recognise is still sent to the model as an
-ordinary message, which is the safer of the two wrong answers, so a sentence that
-merely opens with a slash is never swallowed. A command that finishes without
-printing anything still ends the turn out loud, because a turn that says nothing is
-indistinguishable from one that failed.
+The chords BlindPilot owns that wxWidgets already mapped to Command (Cmd+T,
+Cmd+W, Cmd+F, Cmd+Q, Cmd+Shift+A, Cmd+/, Cmd+R, Cmd+Shift+]/[) were fine. Three
+were not, all because menu accelerators are written as Ctrl and turned into
+Command at runtime:
 
-## Questions that get answered
+- **Ctrl+H** — Recent Conversations — became the system's **Hide BlindPilot**,
+  which lives in the application menu and wins. A VoiceOver user pressing the
+  documented chord had the whole app vanish. It is now **Ctrl+Shift+H**.
+- **Ctrl+M** — Model and Effort — became the system's **Minimize**. It is now
+  **Ctrl+Shift+E**.
+- **Ctrl+Tab** to switch sessions became Cmd+Tab, which belongs to the system
+  application switcher and never reached the app at all. The menu now names the
+  chords that actually work: **Cmd+Shift+]** and **Cmd+Shift+[** on macOS.
 
-Hermes' gateway protocol has three requests that stop the agent until an answer
-arrives — `clarify` for a question with choices, `sudo` for a password, and `secret`
-for a credential — and with `clarify_timeout` at zero they wait with no deadline at
-all. The worker was documented as having no such request, so it announced the event
-and sent nothing back: the window read "Hermes is asking: a question needing the
-terminal" — the fallback wording, reached because a batch clarify carries `questions`
-and the worker only ever looked for `question` — and then went quiet for good. The
-first question a turn asked ended it.
+The menu labels that are read aloud as literal text — Attach Files, Slash
+Command, Jump to Latest Response — now say **Cmd** on macOS instead of telling
+you a Control chord you do not have.
 
-Now the question, its choices, and whether several answers are wanted all reach the
-person deciding, and the answer goes back to Hermes. A batch is answered one id at a
-time — Hermes releases it only once every question has been locked, so a question the
-person skips is still answered with an empty string rather than leaving the turn
-hanging exactly as it did before. A password or secret is answered with its value but
-never echoed into the transcript, which is read aloud, copied, and saved.
+## Settings live where a Mac user looks
+
+Settings used to sit in the Linux-style `~/.config/blindpilot` and managed
+CLIs in `~/.local/share/blindpilot`, while the chat database lived in the
+native `~/Library/Application Support/BlindPilot`. Everything now lives in one
+place: `~/Library/Application Support/BlindPilot`. On the first launch of this
+version, an older install's files are moved there once — entry by entry, never
+overwriting anything already present, and never failing to start if a move
+does not go through.
+
+## Preferences… at Cmd+,
+
+The application menu now has a **Preferences…** item (Cmd+,), the way every
+Mac app does. It opens one dialog holding every Options-menu setting — live
+activity, speaking, narration mode, reasoning, the four sound cues and the
+working-sound interval, the read-only text view, and update checks — applied
+through the same switches the menu items use, so the menu and the dialog can
+never disagree.
+
+## A finished product in every sense
+
+- **About** uses the native macOS About panel with the app's name and icon.
+- The application menu reads "BlindPilot" even when run from source.
+- **Create Desktop Shortcut** now works on macOS, instead of reporting that
+  shortcuts are a Windows thing.
+- The app has an icon for the first time — a gradient tile with a white
+  prompt chevron, rendered by `tools/make_icon.py` (pure standard library,
+  no image dependency) into `.icns` and `.ico`.
+- `BlindPilot.spec` now builds every platform and carries the bundle
+  identifier, the version, `LSMinimumSystemVersion` 10.15, the icon, and all
+  the per-platform hidden imports, so Get Info describes a finished product
+  and the release workflow no longer names PyInstaller flags by hand.
 
 ## Verification
 
-Twenty-five new tests, failing-first, pin the behaviour: both clarify shapes, batch
-locking, multi-select as a JSON array, passwords and secrets under the right key and
-never echoed, command recognition case-insensitively and against the gateway's own
-list, the fallback to an ordinary message when the lookup is refused, and a command
-that finishes silently still ending the turn. The full suite is green under `-W
-error`, and ruff, mypy and the startup smoke tests are clean.
+The full suite is green under `-W error` — 1131 passed, 8 skipped — including
+new tests for the macOS directory migration (fake platform, runs everywhere),
+the Preferences dialog read/apply/enable behaviour, and the platform-aware
+menu labels. ruff check and ruff format are clean, and the packaged startup
+smoke test passes. Two tests were made hermetic along the way: the startup
+tests' fake application object gained the app-name methods, and a
+Windows-searching environment variable that was sitting in a developer's real
+environment no longer leaks into the POSIX test.

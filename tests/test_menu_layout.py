@@ -141,12 +141,13 @@ def test_a_shortcut_only_command_now_says_its_own_chord(frame, item, chord):
     The chord is written into the label rather than after a tab, because a tab
     would register a second menu accelerator for a key the frame's own
     accelerator table already carries — the same reason Next Session spells
-    Ctrl+Tab out in words.
+    Ctrl+Tab out in words. On macOS the literal text says Cmd, because the
+    screen reader reads it as written and the chord really is Command there.
     """
     labels = _labels(app.MainFrame._build_conversation_menu(frame))
     line = next(text for text in labels if item in text)
 
-    assert chord in line
+    assert chord in line or chord.replace("Ctrl", "Cmd") in line
 
 
 def test_opening_a_side_chat_uses_the_folder_of_the_visible_tab():
