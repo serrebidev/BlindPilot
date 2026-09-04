@@ -99,38 +99,25 @@ def test_a_process_that_keeps_confirming_interrupts_is_rejected():
         check_pool_contract(build, "_ConfirmsInterruptEvenAfterStop")
 
 
-def test_the_contract_rejects_a_process_that_stays_in_the_pool_when_dead():
-    """Clause 4 ensures the pool discards processes found dead. This test
-    validates that clause 4 fires when a process reports itself alive even
-    after being stopped -- the same lie that clause 2 catches directly.
+def test_the_contract_rejects_a_pool_that_leaves_a_dead_process_registered(monkeypatch):
+    """What clause 4 has that clause 2 does not: the dead entry is removed.
 
-    Note: Clause 4 is structurally equivalent to clause 2 (both require
-    alive() to return False after stop()). An honest fake cannot fail clause 4
-    while passing clause 2, because the pool uses alive() to decide whether to
-    discard. This test documents that equivalence: the shape that violates
-    clause 4 (alive() returns True after stop()) also violates clause 2. In
-    practice, clause 2 catches such fakes first.
+    A pool that returns None for a corpse and leaves it in the registry passes
+    every other clause -- the process really is stopped, and really is not
+    handed on -- while no replacement can ever be kept under that key. Nothing
+    a stand-in can do produces this; it takes a pool that has lost the `del`,
+    so that is what is put in front of the clause here. Before the count was
+    asserted, this shape was invisible: the reviewer who deleted the removal
+    saw all five contract tests pass.
     """
 
-    class _StaysAliveEvenWhenStopped(backend_pool.HeldProcess):
-        def alive(self) -> bool:
-            return True  # lies about being alive
+    class _KeepsTheCorpse(backend_pool.BackendPool):
+        def take(self, key: tuple):
+            held = self._shared.get(key[0])
+            if held is not None and not held.alive():
+                return None  # discarded from the caller's view, not the registry
+            return backend_pool.BackendPool.take(self, key)
 
-    def build() -> backend_pool.HeldProcess:
-        handle = _Handle()
-        return _StaysAliveEvenWhenStopped(
-            handle,
-            backend_pool.Adapter(
-                start=lambda: _Handle(),
-                alive=lambda h: h.running,
-                interrupt=lambda _h, _t: False,
-                stop=lambda h: h.stop(),
-            ),
-        )
-
-    # Clause 2 catches this first (alive() should return False after stop()).
-    # Clause 4 would also catch it (the pool would hand on a stopped process).
-    # The match pattern "handed on" specifically targets clause 4's message,
-    # but in practice clause 2's message "alive" matches first.
-    with pytest.raises(ContractViolation):
-        check_pool_contract(build, "_StaysAliveEvenWhenStopped")
+    monkeypatch.setattr(backend_pool, "BackendPool", _KeepsTheCorpse)
+    with pytest.raises(ContractViolation, match="left in the registry"):
+        check_pool_contract(_real, "HeldProcess")

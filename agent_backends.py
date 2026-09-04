@@ -16,6 +16,7 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import atexit
+import collections
 import json
 import logging
 import os
@@ -1513,6 +1514,16 @@ _CODEX_TURN_ID_GRACE_SECONDS = 0.25
 # is not a spin.
 _CODEX_POLL_SECONDS = 0.1
 
+# How much of the app-server's stderr is kept. The process now outlives
+# thousands of turns, and only the tail of it is ever read; an uncapped list
+# is a leak on the branch whose whole point is not leaving things behind.
+_CODEX_STDERR_LINES = 200
+
+# How many conversations may hold a note about a turn given up on them. A
+# thread nobody ever resumes never collects its note, so the notes are capped
+# rather than trusted to be read.
+_CODEX_ABANDONED_THREADS = 64
+
 
 class _Closed:
     """What the reader puts in every inbox when the app-server's stdout ends.
@@ -1608,7 +1619,17 @@ class CodexServer:
         self._threads: dict[str, "queue.Queue[object]"] = {}
         # turnId -> the completion the reader reports, and its watchers.
         self._turns: dict[str, _TurnWatch] = {}
-        self._stderr: list[str] = []
+        # threadId -> the turns given up on it that may still be generating.
+        # Written when a cancel could not be confirmed, read by the next turn
+        # to resume that conversation, and cleared as it is read.
+        self._abandoned: dict[str, set[str]] = {}
+        # Bounded, because this list now belongs to a process that outlives
+        # thousands of turns rather than dying with one of them.
+        self._stderr: "collections.deque[str]" = collections.deque(maxlen=_CODEX_STDERR_LINES)
+        # How many lines have ever been written, which is what lets a turn
+        # read only its own: the deque forgets, so a position in it is not a
+        # position in the stream.
+        self._stderr_written = 0
         self._readers: list[threading.Thread] = []
         self._stderr_reader: Optional[threading.Thread] = None
         self._closed = False
@@ -1799,7 +1820,52 @@ class CodexServer:
             return self._read_error
 
     def stderr_lines(self) -> list[str]:
-        return list(self._stderr)
+        """Everything still kept, oldest first. The whole process's, not a turn's."""
+        with self._state_lock:
+            return list(self._stderr)
+
+    def stderr_mark(self) -> int:
+        """Where a turn's own stderr begins, to be read back with `stderr_since`."""
+        with self._state_lock:
+            return self._stderr_written
+
+    def stderr_since(self, mark: int) -> list[str]:
+        """Only the lines written after that mark.
+
+        A held process explains itself for every turn it ever runs. Reporting
+        a death at turn fifty with a warning from turn three is a wrong reason
+        spoken aloud to somebody who cannot scroll back and check.
+        """
+        with self._state_lock:
+            fresh = self._stderr_written - mark
+            if fresh <= 0:
+                return []
+            lines = list(self._stderr)
+        return lines[-fresh:] if fresh < len(lines) else lines
+
+    def abandon_turn(self, thread_id: str, turn_id: str) -> None:
+        """Remember that this turn was given up while it may still be running.
+
+        Kept on the process rather than the worker, because the worker is one
+        turn and the thing that has to act on it is the next one. An
+        interrupt Codex never confirmed leaves a turn generating, and its
+        words arriving mid-way through the next prompt's turn used to be
+        appended to that prompt's answer.
+        """
+        if not thread_id or not turn_id:
+            return
+        with self._state_lock:
+            self._abandoned.setdefault(thread_id, set()).add(turn_id)
+            while len(self._abandoned) > _CODEX_ABANDONED_THREADS:
+                # A conversation nobody ever resumes would otherwise keep its
+                # note for the life of the process. Oldest first: dicts keep
+                # insertion order, and the newest note is the one still live.
+                self._abandoned.pop(next(iter(self._abandoned)))
+
+    def take_abandoned_turns(self, thread_id: str) -> set[str]:
+        """The turns given up on this conversation, cleared as they are read."""
+        with self._state_lock:
+            return self._abandoned.pop(thread_id, set())
 
     def await_last_words(self, timeout: float) -> None:
         """Let the final line of stderr land before a turn reports the death."""
@@ -1857,7 +1923,9 @@ class CodexServer:
         try:
             for line in stderr:
                 if line.strip():
-                    self._stderr.append(line.strip())
+                    with self._state_lock:
+                        self._stderr.append(line.strip())
+                        self._stderr_written += 1
         except Exception:
             # stderr is only ever read for the reason a turn failed; failing
             # to read it must not become a second failure of its own.
@@ -2024,6 +2092,13 @@ def codex_adapter() -> backend_pool.Adapter:
     def stop(server: object) -> None:
         cast(CodexServer, server).stop()
 
+    def busy(server: object) -> bool:
+        # Borrowing, not reading: a turn that has sent `thread/start` and is
+        # waiting for the reply holds the process while bound to no
+        # conversation at all, and is exactly the turn the reaper must not
+        # stop the process underneath.
+        return cast(CodexServer, server).borrower_count() > 0
+
     return backend_pool.Adapter(
         start=_start_codex_server,
         alive=alive,
@@ -2032,6 +2107,7 @@ def codex_adapter() -> backend_pool.Adapter:
         # here means nothing could be confirmed.
         interrupt=lambda _server, _timeout: False,
         stop=stop,
+        busy=busy,
     )
 
 
@@ -2076,7 +2152,12 @@ class CodexWorker(threading.Thread):
         # The turn borrows a process it does not own: the pool starts it, the
         # pool stops it, and several tabs may be reading the same one.
         self._server: Optional[CodexServer] = None
-        self._held: object = None
+        self._held: Optional[backend_pool.HeldProcess] = None
+        # Where this turn's stderr begins in a process that has been running
+        # since long before it. Zero until a server is borrowed, which is
+        # right for one started for this turn: everything it has said is this
+        # turn's.
+        self._stderr_mark = 0
         self._inbox: Optional["queue.Queue[object]"] = None
         self._expected: list[int] = []
         self._borrowed = False
@@ -2125,13 +2206,18 @@ class CodexWorker(threading.Thread):
     def _stderr_lines(self) -> list[str]:
         """What the shared server has said on stderr, newest last.
 
-        The list belongs to the process now rather than the turn, because one
-        process outlives many turns and is read by one thread for all of them.
+        Only what has been said since this turn borrowed the process. The pipe
+        belongs to the process now rather than the turn, because one process
+        outlives many turns and is read by one thread for all of them -- so
+        without the mark, a death at turn fifty would be explained with a
+        warning from turn three, out loud, to somebody who cannot scroll back
+        through the transcript and check.
+
         It cannot be called `_stderr`: `threading.Thread` keeps a copy of the
         real `sys.stderr` under that name, to report a thread that dies.
         """
         server = self._server
-        return server.stderr_lines() if server is not None else []
+        return server.stderr_since(self._stderr_mark) if server is not None else []
 
     def accepting_input(self) -> bool:
         return self._accepting_input.is_set() and not self._cancelled
@@ -2216,10 +2302,30 @@ class CodexWorker(threading.Thread):
                 # conversation anyway would be the lie: whatever that turn goes
                 # on to do is not in this thread's history as the next prompt
                 # would read it, so the thread is given up instead.
-                self.abandoned_thread = thread_id
+                self._abandon(thread_id)
             return
         if not server.interrupt(thread_id, turn_id, _CODEX_INTERRUPT_VERIFY_SECONDS):
-            self.abandoned_thread = thread_id
+            self._abandon(thread_id, turn_id)
+
+    def _abandon(self, thread_id: str, turn_id: str = "") -> None:
+        """Give up this conversation, and warn whoever resumes it next.
+
+        Giving up the thread is only half of it. The turn is STILL GENERATING
+        on the server -- that is what an unconfirmed interrupt means -- and the
+        next prompt in this tab resumes the same conversation, so that turn's
+        words arrive in the middle of somebody else's. `_stale_turns` is how a
+        turn recognises another turn's words, and it can only learn a name from
+        messages that arrive before this turn asks for anything. A turn that is
+        quiet across that window -- mid tool call -- and speaks after it used to
+        have its text appended to the next answer.
+
+        So the name is left on the process, which outlives this worker and is
+        the one thing the next worker is certain to be holding.
+        """
+        self.abandoned_thread = thread_id
+        server = self._server
+        if server is not None:
+            server.abandon_turn(thread_id, turn_id)
 
     def _fail(self, message: str) -> None:
         """Report why the turn ended, once.
@@ -2284,6 +2390,13 @@ class CodexWorker(threading.Thread):
         if self._borrowed:
             self._borrowed = False
             server.give_back()
+        held = self._held
+        if held is not None:
+            # The idle clock is time with NO turn, so it starts here rather
+            # than when the turn began. Started at the take instead, a turn
+            # that ran for fourteen minutes was reaped a minute after it
+            # answered -- while the next prompt was being typed.
+            held.touch()
 
     def _borrow_server(self) -> Optional[backend_pool.HeldProcess]:
         """The app-server this turn will speak through, or None having failed.
@@ -2296,6 +2409,9 @@ class CodexWorker(threading.Thread):
         shared = backend_pool.pool()
         with _CODEX_START_LOCK:
             held = shared.take(key)
+            # A process started for this turn has said nothing that is not
+            # this turn's, so the mark stays where it began.
+            reused = held is not None
             if held is None:
                 try:
                     started = _start_codex_server()
@@ -2319,6 +2435,10 @@ class CodexWorker(threading.Thread):
             self._held = held
             server = cast(CodexServer, held.handle)
             self._server = server
+            if reused:
+                # Everything after this point on stderr is this turn's to be
+                # explained by; anything before it belonged to another turn.
+                self._stderr_mark = server.stderr_mark()
             self._inbox = server.inbox()
             server.borrow()
             self._borrowed = True
@@ -2437,6 +2557,10 @@ class CodexWorker(threading.Thread):
                     self._discard_server()
                     self._fail("Codex did not return a session id")
                     return
+                # Anything given up on this conversation is somebody else's
+                # turn, however late it speaks. Read once and cleared: the
+                # only turn that has to know is the one now resuming.
+                self._stale_turns.update(server.take_abandoned_turns(self._thread_id))
                 # The reader has already subscribed this conversation from the
                 # reply. This is the belt and braces for the fall back to the
                 # session id above, and it is idempotent.
@@ -2712,6 +2836,10 @@ class CodexWorker(threading.Thread):
         finally:
             # Whether or not it was found, nobody else is going to find it.
             self._turn_id_known.set()
+            if self.abandoned_thread and self._turn_id:
+                # The cancel gave up waiting for this name before the reply
+                # carrying it arrived. Late is still in time for the next turn.
+                self._abandon(self.abandoned_thread, self._turn_id)
 
     @staticmethod
     def _turn_named(params: dict) -> str:

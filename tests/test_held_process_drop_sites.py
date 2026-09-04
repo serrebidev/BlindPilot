@@ -212,3 +212,46 @@ def test_the_reap_callback_is_marshalled_onto_the_gui_thread():
     assert "CallAfter" in on_reap, (
         "on_reap runs on the reaper's thread; it has to hand off to the window's"
     )
+
+
+def test_a_backend_found_dead_is_announced_as_a_restart_not_as_an_idle_close():
+    """The spec is explicit that a process found dead on `take` is restarted
+    out loud, never silently. It is the more surprising of the two: the idle
+    reap follows a rule, while a crash, an out-of-memory kill or a laptop
+    sleeping costs the next prompt about four seconds with nothing said."""
+    said: list[tuple[str, str]] = []
+
+    class _Page:
+        def _say(self, text: str, kind: str = "assistant") -> bool:
+            said.append((text, kind))
+            return True
+
+    class _Notebook:
+        def GetCurrentPage(self):
+            return _Page()
+
+    frame = type("_Frame", (), {"notebook": _Notebook()})()
+    app.MainFrame._announce_reap(frame, app.BACKEND_CODEX, backend_pool.REAP_DIED)
+
+    text, kind = said[0]
+    lowered = text.lower()
+    assert "Codex" in text
+    assert "idle" not in lowered, f"a backend that crashed was described as idle: {text!r}"
+    assert "restart" in lowered, f"the wait the next prompt is in for is unexplained: {text!r}"
+    # Same property the idle line is pinned on: a kind outside `_ALWAYS_SPOKEN`
+    # is dropped unspoken in keep-up narration, which is the mode where a
+    # silent four seconds is most likely to be read as a hang.
+    assert kind in app._ALWAYS_SPOKEN, (
+        f"kind {kind!r} is not spoken in keep-up narration, so the restart it "
+        f"explains would still arrive in silence; _ALWAYS_SPOKEN is {app._ALWAYS_SPOKEN}"
+    )
+    assert "pool" not in lowered and "held" not in lowered and "reap" not in lowered
+
+
+def test_the_window_is_told_why_a_backend_went_not_only_which_one():
+    """A callback that carried only the name could not tell the two apart."""
+    source = inspect.getsource(app.MainFrame.__init__)
+    on_reap = next(line for line in source.splitlines() if "on_reap" in line)
+    assert on_reap.count(",") >= 2, (
+        f"the reap callback carries no reason, so a death cannot be said differently: {on_reap!r}"
+    )

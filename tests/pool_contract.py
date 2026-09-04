@@ -50,6 +50,13 @@ def check_a_stopped_process_confirms_no_interrupt(
 def check_the_pool_replaces_it_once_dead(
     build: Callable[[], backend_pool.HeldProcess], who: str
 ) -> None:
+    """Not handed on, AND not left in the registry.
+
+    Refusing to hand a corpse to the next turn is clause 2's ground, reached
+    through the pool. What is only this clause's is the removal: an entry that
+    stays behind is one a replacement cannot be kept under, so every prompt
+    after it would start a process the pool then forgets.
+    """
     pool = backend_pool.BackendPool()
     held = build()
     key = backend_pool.pool_key("contract")
@@ -58,6 +65,10 @@ def check_the_pool_replaces_it_once_dead(
     try:
         if pool.take(key) is not None:
             raise ContractViolation(f"{who}: the pool handed on a stopped process")
+        if pool.held_count() != 0:
+            raise ContractViolation(
+                f"{who}: a dead process was left in the registry, so nothing can replace it"
+            )
     finally:
         pool.drop_all()
 

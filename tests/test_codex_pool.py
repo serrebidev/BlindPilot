@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 from pathlib import Path
@@ -1579,3 +1580,300 @@ def test_a_compaction_stopped_before_its_turn_is_named_gives_up_the_thread(monke
         "an interrupt was sent naming no turn"
     )
     assert proc.killed is False
+
+
+# ----- a held process is never stopped underneath a live turn -----
+
+
+class _StderrPipe:
+    """A stderr the test writes to and the server's own reader thread reads."""
+
+    def __init__(self) -> None:
+        self._lines: "queue.Queue[str | None]" = queue.Queue()
+
+    def say(self, line: str) -> None:
+        self._lines.put(line + "\n")
+
+    def close(self) -> None:
+        self._lines.put(None)
+
+    def __iter__(self) -> "_StderrPipe":
+        return self
+
+    def __next__(self) -> str:
+        line = self._lines.get()
+        if line is None:
+            raise StopIteration
+        return line
+
+
+def _until(ready, what: str, timeout: float = 10.0) -> None:
+    """Poll with a deadline, the way the rest of this suite waits."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ready():
+            return
+        time.sleep(0.005)
+    raise AssertionError(what)
+
+
+def test_a_server_says_it_is_busy_for_exactly_as_long_as_a_turn_holds_it():
+    """What the reaper has to ask before it stops anything."""
+    server = agent_backends.CodexServer(_FakeProc())
+    adapter = agent_backends.codex_adapter()
+
+    assert adapter.busy(server) is False
+    server.borrow()
+    assert adapter.busy(server) is True
+    server.borrow()
+    server.give_back()
+    assert adapter.busy(server) is True, "one tab finishing let go on behalf of another"
+    server.give_back()
+    assert adapter.busy(server) is False
+
+
+def test_a_sweep_never_stops_the_app_server_a_turn_is_speaking_through(monkeypatch):
+    """The critical one. The idle clock ran from when a turn STARTED, so any
+    Codex turn still going a quarter of an hour later was reaped -- and the
+    server is shared, so every other tab's turn ended with it, all of its MCP
+    children went, and BlindPilot announced the backend had been idle."""
+    server = agent_backends.CodexServer(_FakeProc())
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    worker = _bare_worker()
+    assert worker._borrow_server() is not None
+
+    # A turn that has been running far longer than the idle limit: a long
+    # agentic run, or one waiting on a question nobody is at the desk to answer.
+    long_after = time.monotonic() + 100_000.0
+    assert backend_pool.pool().reap(now=long_after, idle_limit=900.0) == [], (
+        "a live turn's app-server was reaped, ending every tab's turn with it"
+    )
+    assert server.proc.killed is False
+
+    # And once nobody is holding it, the same sweep does let it go.
+    worker._release()
+    assert backend_pool.pool().reap(now=long_after, idle_limit=900.0) == [key]
+
+
+def test_the_idle_clock_runs_from_the_end_of_a_codex_turn_not_its_start(monkeypatch):
+    """Idle is time with no turn. Measured from the take instead, a
+    fourteen-minute turn was reaped sixty seconds after it answered -- which
+    is exactly when the follow-up prompt is being typed."""
+    clock = [0.0]
+    server = agent_backends.CodexServer(_FakeProc())
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    held = backend_pool.HeldProcess(server, agent_backends.codex_adapter(), now=lambda: clock[0])
+    backend_pool.pool().keep(key, held)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+
+    worker = _bare_worker()
+    assert worker._borrow_server() is held
+    clock[0] = 840.0  # fourteen minutes of turn
+    worker._release()
+
+    assert backend_pool.pool().reap(now=901.0, idle_limit=900.0) == [], (
+        "the server was let go a minute after the turn ended, while the next prompt was typed"
+    )
+    assert server.proc.killed is False
+    assert backend_pool.pool().reap(now=1741.0, idle_limit=900.0) == [key]
+
+
+# ----- a turn given up is a turn the next one has to recognise -----
+
+
+def test_an_unconfirmed_interrupt_leaves_the_turns_name_for_whoever_resumes_it():
+    """Abandoning the thread is only half of it: the turn is still generating,
+    and the next prompt resumes the same conversation."""
+    server = agent_backends.CodexServer(_FakeProc())
+    _confirming(server, False)
+    worker = _stoppable(server)
+
+    worker.cancel()
+
+    assert worker.abandoned_thread == "thread-1"
+    assert server.take_abandoned_turns("thread-1") == {"turn-1"}
+    assert server.take_abandoned_turns("thread-1") == set(), "the note was not cleared once read"
+
+
+def test_a_confirmed_interrupt_leaves_no_warning_behind():
+    """Codex said the turn stopped, so nothing is left of it to recognise."""
+    server = agent_backends.CodexServer(_FakeProc())
+    _confirming(server, True)
+    worker = _stoppable(server)
+
+    worker.cancel()
+
+    assert server.take_abandoned_turns("thread-1") == set()
+
+
+def test_a_name_learned_after_the_cancel_gave_up_waiting_is_still_left_behind():
+    """The cancel's grace is a quarter of a second. The reply can be later
+    than that and the turn it names is still running."""
+    server = agent_backends.CodexServer(_FakeProc())
+    worker = _stoppable(server, turn_id="")
+    worker._turn_id_known.set()  # nothing to name when Stop was pressed
+    worker.cancel()
+    assert worker.abandoned_thread == "thread-1"
+
+    inbox = server.inbox()
+    inbox.put({"id": 42, "result": {"turn": {"id": "turn-late"}}})
+    worker._name_the_stopped_turn(inbox, 42)
+
+    assert server.take_abandoned_turns("thread-1") == {"turn-late"}
+
+
+def test_notes_about_conversations_nobody_resumes_do_not_pile_up():
+    """A thread that is never resumed never collects its note."""
+    server = agent_backends.CodexServer(_FakeProc())
+    total = agent_backends._CODEX_ABANDONED_THREADS + 10
+    for n in range(total):
+        server.abandon_turn(f"thread-{n}", f"turn-{n}")
+
+    assert len(server._abandoned) == agent_backends._CODEX_ABANDONED_THREADS
+    assert server.take_abandoned_turns(f"thread-{total - 1}") == {f"turn-{total - 1}"}
+
+
+class _SpeaksForAnAbandonedTurn(_FakeProc):
+    """The turn that was given up, speaking where nothing can place it.
+
+    It was mid tool call when the last prompt was stopped, so it said nothing
+    before the next turn asked for a turn of its own -- which is the only
+    window `_stale_turns` can learn a name from by position. Then it speaks,
+    while the next turn is still waiting to be told its own turn's id, and
+    everything after that mark is admitted as this turn's.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stdout = self._script()
+
+    def _asked(self, method: str, timeout: float = 10.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            for line in list(self.stdin.written):
+                message = json.loads(line)
+                if message.get("method") == method:
+                    return message
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the worker never sent {method}")
+            time.sleep(0.005)
+
+    def _script(self):
+        resume = self._asked("thread/resume")
+        yield json.dumps({"id": resume["id"], "result": {"thread": {"id": "thread-1"}}})
+        turn = self._asked("turn/start")
+        yield json.dumps(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-old",
+                    "item": {
+                        "id": "m0",
+                        "type": "agentMessage",
+                        "text": "what the abandoned turn was doing",
+                    },
+                },
+            }
+        )
+        yield json.dumps({"id": turn["id"], "result": {"turn": {"id": "turn-2"}}})
+        yield json.dumps(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-2",
+                    "itemId": "m1",
+                    "delta": "the answer",
+                },
+            }
+        )
+        yield json.dumps(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-2", "status": "completed"},
+                },
+            }
+        )
+
+
+def test_the_words_of_an_abandoned_turn_never_reach_the_next_prompts_answer(monkeypatch):
+    """What `abandoned_thread` is for, made to actually do it.
+
+    The flag recorded that a conversation had been given up and nothing read
+    it. Meanwhile the given-up turn was still running on the shared server,
+    and anything it said between the next turn's `turn/start` and the reply
+    naming that turn was appended to the next turn's answer -- words the agent
+    never said, read out to somebody with nothing on screen to contradict it.
+    """
+    proc = _SpeaksForAnAbandonedTurn()
+    server = agent_backends.CodexServer(proc)
+    server.start_readers()
+    server.abandon_turn("thread-1", "turn-old")
+    key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
+    backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
+
+    _worker, completed, failures, activity = _turn(proc, monkeypatch, session_id="thread-1")
+
+    assert failures == [], failures
+    assert completed == ["the answer"], "the abandoned turn's words got into the answer"
+    spoken = [value for kind, value in activity if kind == "assistant"]
+    assert "what the abandoned turn was doing" not in spoken
+
+
+# ----- stderr belongs to the process, the reason belongs to the turn -----
+
+
+def test_a_death_is_explained_by_this_turns_stderr_and_not_an_earlier_turns(monkeypatch):
+    """The list used to live and die with one turn. Held across fifty of them,
+    a death was explained with a warning from turn three -- a wrong reason,
+    spoken aloud, to somebody who cannot scroll back and check."""
+    monkeypatch.setattr(agent_backends, "_CODEX_LAST_WORDS_SECONDS", 0.05)
+    pipe = _StderrPipe()
+    proc = _FakeProc()
+    proc.stderr = pipe
+    server = agent_backends.CodexServer(proc)
+    server.start_readers()
+    try:
+        pipe.say("a warning from three turns ago")
+        _until(lambda: server.stderr_lines() == ["a warning from three turns ago"], "not read")
+
+        worker = _bare_worker()
+        worker._server = server
+        worker._stderr_mark = server.stderr_mark()  # this turn borrows it here
+
+        assert worker._why_it_died("Codex app server closed") == "Codex app server closed", (
+            "an old turn's warning was reported as the reason this turn died"
+        )
+
+        pipe.say("thread 'main' panicked")
+        _until(lambda: len(server.stderr_lines()) == 2, "the panic was never read")
+        assert worker._why_it_died("Codex app server closed") == "thread 'main' panicked"
+    finally:
+        pipe.close()
+        server.await_last_words(5)
+
+
+def test_the_stderr_of_a_process_that_outlives_thousands_of_turns_is_capped():
+    """Uncapped, on the branch whose whole thesis is not leaving things behind."""
+    pipe = _StderrPipe()
+    proc = _FakeProc()
+    proc.stderr = pipe
+    server = agent_backends.CodexServer(proc)
+    server.start_readers()
+    total = agent_backends._CODEX_STDERR_LINES + 50
+    for n in range(total):
+        pipe.say(f"line {n}")
+    pipe.close()
+    server.await_last_words(10)
+
+    lines = server.stderr_lines()
+    assert len(lines) == agent_backends._CODEX_STDERR_LINES, f"kept {len(lines)} lines"
+    assert lines[-1] == f"line {total - 1}", "the newest line, which is the one that says why"
+    # A turn whose own output overran the cap gets what is left of it, not a
+    # slice of somebody else's.
+    assert server.stderr_since(total - 10) == [f"line {n}" for n in range(total - 10, total)]
+    assert server.stderr_since(total) == []

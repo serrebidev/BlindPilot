@@ -27,6 +27,23 @@ from typing import Callable, NamedTuple, Optional
 _HELD_IDLE_SECONDS = 900.0
 
 
+# Why a process was let go, for the sentence the window says about it. The
+# two are not the same event to somebody listening: one was announced by a
+# rule they can predict, the other happened to them.
+REAP_IDLE = "idle"
+REAP_DIED = "died"
+
+
+def _never_busy(_handle: object) -> bool:
+    """The default for a backend that does not yet count who is using it.
+
+    False, not True: it is what every backend did before there was anything to
+    ask, so an adapter that has not been taught the question keeps its present
+    behaviour rather than quietly becoming un-reapable for ever.
+    """
+    return False
+
+
 class Adapter(NamedTuple):
     """What a backend must say about its process, and nothing more.
 
@@ -34,12 +51,18 @@ class Adapter(NamedTuple):
     within the timeout. An unconfirmed interrupt is not a failure to report to
     the user; it is the signal that this process cannot be trusted for the
     next turn.
+
+    ``busy`` says whether a turn is speaking through the process at this
+    moment. Only the backend knows -- Codex counts borrowers on the app-server
+    itself -- and without it the reaper measures nothing but how long ago a
+    turn STARTED, which is not what "idle" means.
     """
 
     start: Callable[[], object]
     alive: Callable[[object], bool]
     interrupt: Callable[[object, float], bool]
     stop: Callable[[object], None]
+    busy: Callable[[object], bool] = _never_busy
 
 
 class HeldProcess:
@@ -82,6 +105,26 @@ class HeldProcess:
             # True here would hand the next turn a process still working on
             # the last one.
             return False
+
+    def busy(self) -> bool:
+        """Whether a turn is running through this process right now.
+
+        The idle clock alone cannot answer this. It is set when a turn takes
+        the process and again when the turn hands it back, so a turn that has
+        been running for longer than the idle limit -- a long agentic run, or
+        one waiting on an approval dialog nobody is at the desk to answer --
+        looks exactly like a process nobody wants. Stopping a shared
+        app-server there does not end one turn; it ends every tab's.
+        """
+        if self._stopped:
+            return False
+        try:
+            return bool(self._adapter.busy(self.handle))
+        except Exception:
+            # Nothing is known about who holds it. The answer that leaves a
+            # process running costs one process; the other one ends live
+            # turns in tabs that never asked for anything.
+            return True
 
     def stop(self) -> None:
         """Stop the process. Safe to call again; only the first call acts."""
@@ -136,10 +179,10 @@ class BackendPool:
         self._per_panel: "weakref.WeakKeyDictionary[object, dict[str, HeldProcess]]" = (
             weakref.WeakKeyDictionary()
         )
-        # Told the backend name of each reaped process, so the window can say
-        # why the next prompt in that tab starts cold. Set by the window; the
-        # pool itself must not import wx or speak.
-        self.on_reap: Optional[Callable[[str], None]] = None
+        # Told the backend name of each process let go, and why, so the
+        # window can say what the next prompt in that tab is waiting for. Set
+        # by the window; the pool itself must not import wx or speak.
+        self.on_reap: Optional[Callable[[str, str], None]] = None
 
     def _slot(self, key: tuple) -> tuple[Optional[dict], str]:
         """The dict a key lives in and the name within it, or (None, name)."""
@@ -152,7 +195,9 @@ class BackendPool:
         """The process for this key if it can still serve a turn, else None.
 
         A process found dead is discarded here rather than handed on, so the
-        caller's only job is to start a new one when this returns None.
+        caller's only job is to start a new one when this returns None. That
+        is said out loud: a backend that was killed while the laptop slept
+        costs the next prompt a cold start, and silence is how a hang sounds.
         """
         with self._lock:
             slot, name = self._slot(key)
@@ -166,11 +211,29 @@ class BackendPool:
                 held.touch()
                 return held
         dead.stop()
+        self._announce(key[0], REAP_DIED)
         return None
+
+    def _announce(self, backend: str, reason: str) -> None:
+        """Say a process was let go. Never a reason for the caller to fail."""
+        announce = self.on_reap
+        if announce is None:
+            return
+        try:
+            announce(backend, reason)
+        except Exception:
+            # Narration failing must not strand a sweep or fail a turn that
+            # is about to start a replacement perfectly well.
+            pass
 
     def keep(self, key: tuple, held: HeldProcess) -> None:
         """Hand a process back at the end of a turn."""
         backend, panel = key
+        # Idle is time with no turn, so the clock starts when the turn ENDS.
+        # Measured from the start instead, a fourteen-minute turn was reaped
+        # sixty seconds after it finished -- while the follow-up prompt was
+        # being typed.
+        held.touch()
         stale: Optional[HeldProcess] = None
         with self._lock:
             if panel is _SHARED:
@@ -218,28 +281,60 @@ class BackendPool:
 
         Takes ``now`` rather than reading the clock so a fifteen-minute rule
         can be tested in a suite whose per-test timeout is sixty seconds.
+
+        A process serving a turn is never reaped, however long that turn has
+        been running. The idle clock cannot tell a long agentic run, or a turn
+        waiting on a question nobody is at the desk to answer, from a process
+        nobody wants -- and for a shared app-server the difference is every
+        other tab's turn ending too.
+
+        In three passes rather than one, so the backend is asked whether it is
+        busy with no lock held: the answer comes from the backend's own state,
+        and the pool holding its registry lock across a call into a backend is
+        how a lock order gets inverted. Anything used between the passes is
+        left alone, because taking a process touches it and the second pass
+        checks the clock again against the same entry.
         """
-        expired: list[tuple[tuple, HeldProcess]] = []
+        candidates = self._idle(now, idle_limit)
+        unused = [(key, held) for key, held in candidates if not held.busy()]
+        expired = self._forget(unused, now, idle_limit)
+        for key, held in expired:
+            held.stop()
+            self._announce(key[0], REAP_IDLE)
+        return [key for key, _held in expired]
+
+    def _idle(self, now: float, idle_limit: float) -> list[tuple[tuple, HeldProcess]]:
+        """Everything whose idle clock has run out, without judging it yet."""
+        found: list[tuple[tuple, HeldProcess]] = []
         with self._lock:
             for backend, held in list(self._shared.items()):
                 if held.idle_seconds(now) > idle_limit:
-                    del self._shared[backend]
-                    expired.append((pool_key(backend), held))
+                    found.append((pool_key(backend), held))
             for panel, slot in list(self._per_panel.items()):
                 for backend, held in list(slot.items()):
                     if held.idle_seconds(now) > idle_limit:
-                        del slot[backend]
-                        expired.append((pool_key(backend, panel), held))
-        announce = self.on_reap
-        for key, held in expired:
-            held.stop()
-            if announce is not None:
-                try:
-                    announce(key[0])
-                except Exception:
-                    # Narration failing must not strand the sweep.
-                    pass
-        return [key for key, _held in expired]
+                        found.append((pool_key(backend, panel), held))
+        return found
+
+    def _forget(
+        self, candidates: list[tuple[tuple, HeldProcess]], now: float, idle_limit: float
+    ) -> list[tuple[tuple, HeldProcess]]:
+        """Take these out of the registry, unless they were used meanwhile."""
+        gone: list[tuple[tuple, HeldProcess]] = []
+        with self._lock:
+            for key, held in candidates:
+                slot, name = self._slot(key)
+                if slot is None or slot.get(name) is not held:
+                    # Dropped, or replaced by a newer process, since the sweep
+                    # looked. Either way this key is not this object's any more.
+                    continue
+                if held.idle_seconds(now) <= idle_limit:
+                    # A turn took it while the sweep was asking, and taking
+                    # touches it. It is in use, not idle.
+                    continue
+                del slot[name]
+                gone.append((key, held))
+        return gone
 
 
 _pool: Optional[BackendPool] = None

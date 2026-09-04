@@ -15,6 +15,8 @@ class _FakeHandle:
         self.confirms = confirms
         self.stops = 0
         self.interrupts = 0
+        # How many turns are speaking through it, as a real backend counts.
+        self.borrowers = 0
 
     def stop(self) -> None:
         self.stops += 1
@@ -31,6 +33,7 @@ def _adapter() -> backend_pool.Adapter:
         alive=lambda handle: handle.running,
         interrupt=interrupt,
         stop=lambda handle: handle.stop(),
+        busy=lambda handle: handle.borrowers > 0,
     )
 
 
@@ -235,7 +238,10 @@ def test_a_process_used_recently_is_left_alone():
     pool.drop_all()
 
 
-def test_reaping_one_tab_leaves_a_busy_tab_running():
+def test_reaping_one_tab_leaves_a_recently_used_tab_running():
+    """Recently used, which is not the same thing as running a turn: this is
+    the idle clock on its own. A tab with a turn actually in flight is
+    `test_a_process_serving_a_turn_is_never_reaped_however_long_the_turn_runs`."""
     pool = backend_pool.BackendPool()
     idle_panel, busy_panel = _Panel(), _Panel()
     idle_handle, busy_handle = _FakeHandle(), _FakeHandle()
@@ -257,15 +263,15 @@ def test_reaping_one_tab_leaves_a_busy_tab_running():
 def test_a_reap_is_announced_so_the_next_cold_start_is_never_a_surprise():
     """A user who cannot see a spinner infers a hang from silence. The reap is
     the reason the next prompt is slow, so it has to be sayable."""
-    said: list[str] = []
+    said: list[tuple[str, str]] = []
     pool = backend_pool.BackendPool()
-    pool.on_reap = said.append
+    pool.on_reap = lambda backend, why: said.append((backend, why))
     pool.keep(
         backend_pool.pool_key("codex"),
         backend_pool.HeldProcess(_FakeHandle(), _adapter(), now=lambda: 0.0),
     )
     pool.reap(now=901.0, idle_limit=900.0)
-    assert said == ["codex"]
+    assert said == [("codex", backend_pool.REAP_IDLE)]
 
 
 def test_the_idle_limit_is_fifteen_minutes():
@@ -321,3 +327,141 @@ def test_the_reaper_runs_on_a_daemon_thread():
 
 def test_the_shared_pool_is_the_same_object_every_time():
     assert backend_pool.pool() is backend_pool.pool()
+
+
+def test_a_process_serving_a_turn_is_never_reaped_however_long_the_turn_runs():
+    """The one that killed live turns: the idle clock ran from the START of a
+    turn, so a turn still going a quarter of an hour later -- a long agentic
+    run, or one waiting on an approval dialog while the user is away from the
+    desk -- had its process stopped underneath it. For a shared app-server
+    that ends every other tab's turn at the same time."""
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    held = backend_pool.HeldProcess(handle, _adapter(), now=lambda: 0.0)
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, held)
+    handle.borrowers = 1  # a turn is speaking through it right now
+
+    assert pool.reap(now=100_000.0, idle_limit=900.0) == [], "a live turn was reaped"
+    assert handle.stops == 0
+    assert pool.take(key) is held, "the process was taken from the turn using it"
+
+    # And once the turn has let go, the same sweep does reap it -- so the
+    # assertion above is about the borrow and not about the clock.
+    handle.borrowers = 0
+    assert pool.reap(now=100_000.0, idle_limit=900.0) == [key]
+    assert handle.stops == 1
+
+
+def test_a_backend_that_cannot_say_whether_it_is_busy_is_left_alone():
+    """The answer that costs one process, rather than the one that ends turns
+    in tabs that never asked for anything."""
+    pool = backend_pool.BackendPool()
+
+    def boom(_handle: object) -> bool:
+        raise OSError("the pipe went")
+
+    handle = _FakeHandle()
+    pool.keep(
+        backend_pool.pool_key("codex"),
+        backend_pool.HeldProcess(handle, _adapter()._replace(busy=boom), now=lambda: 0.0),
+    )
+    assert pool.reap(now=901.0, idle_limit=900.0) == []
+    assert handle.stops == 0
+    pool.drop_all()
+
+
+def test_a_backend_that_never_learned_the_question_is_reaped_as_before():
+    """`busy` has a default, because four backends supply their own later."""
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    plain = backend_pool.Adapter(
+        start=lambda: _FakeHandle(),
+        alive=lambda h: h.running,
+        interrupt=lambda _h, _t: True,
+        stop=lambda h: h.stop(),
+    )
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, backend_pool.HeldProcess(handle, plain, now=lambda: 0.0))
+    assert pool.reap(now=901.0, idle_limit=900.0) == [key]
+    assert handle.stops == 1
+
+
+def test_the_idle_clock_starts_when_a_turn_ends_not_when_it_begins():
+    """A fourteen-minute turn used to be reaped sixty seconds after it
+    answered -- which is exactly when the follow-up prompt is being typed."""
+    clock = [0.0]
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    held = backend_pool.HeldProcess(handle, _adapter(), now=lambda: clock[0])
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, held)  # the turn begins
+    clock[0] = 840.0
+    pool.keep(key, held)  # and fourteen minutes later it hands the process back
+
+    assert pool.reap(now=901.0, idle_limit=900.0) == [], (
+        "a process handed back a minute ago was reaped as idle for a quarter of an hour"
+    )
+    assert handle.stops == 0
+    assert pool.reap(now=1741.0, idle_limit=900.0) == [key]
+
+
+def test_a_process_used_while_the_sweep_was_asking_is_not_reaped():
+    """Whether anyone is busy is asked with no lock held, so a turn can start
+    between the two passes. Taking touches, and the second pass checks again."""
+    clock = [0.0]
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    key = backend_pool.pool_key("codex")
+    held = backend_pool.HeldProcess(handle, _adapter(), now=lambda: clock[0])
+    pool.keep(key, held)
+
+    def busy(_handle: object) -> bool:
+        clock[0] = 901.0  # a turn takes it while the sweep is asking
+        pool.take(key)
+        return False
+
+    held._adapter = held._adapter._replace(busy=busy)
+    assert pool.reap(now=901.0, idle_limit=900.0) == []
+    assert handle.stops == 0
+    pool.drop_all()
+
+
+def test_a_backend_found_dead_is_announced_rather_than_restarted_in_silence():
+    """The reap is spoken; a death found on take used to cost the next prompt
+    four seconds of silence, on the path where nothing warned in advance."""
+    said: list[tuple[str, str]] = []
+    pool = backend_pool.BackendPool()
+    pool.on_reap = lambda backend, why: said.append((backend, why))
+    handle = _FakeHandle()
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, backend_pool.HeldProcess(handle, _adapter()))
+
+    handle.running = False  # killed while the laptop slept
+    assert pool.take(key) is None
+    assert said == [("codex", backend_pool.REAP_DIED)], (
+        "a backend that had to be restarted said nothing about it"
+    )
+
+
+def test_a_key_nobody_held_says_nothing_when_it_is_taken():
+    """The first turn of the session is not a restart, and must not sound like one."""
+    said: list[tuple[str, str]] = []
+    pool = backend_pool.BackendPool()
+    pool.on_reap = lambda backend, why: said.append((backend, why))
+    assert pool.take(backend_pool.pool_key("codex")) is None
+    assert said == []
+
+
+def test_narration_that_throws_does_not_fail_the_turn_that_found_it_dead():
+    pool = backend_pool.BackendPool()
+
+    def boom(_backend: str, _why: str) -> None:
+        raise RuntimeError("no window")
+
+    pool.on_reap = boom
+    handle = _FakeHandle()
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, backend_pool.HeldProcess(handle, _adapter()))
+    handle.running = False
+    assert pool.take(key) is None

@@ -8804,10 +8804,13 @@ class MainFrame(wx.Frame):
         # abandoned tab is not holding an app-server and its MCP children all
         # afternoon. The reaper is what notices; _announce_reap is what makes
         # it audible, because the next prompt in that tab then pays a cold
-        # start, and an unexplained pause is how a hang sounds. CallAfter
-        # because the sweep runs on a thread of its own and narration has to
-        # happen on the window's.
-        backend_pool.pool().on_reap = lambda backend: wx.CallAfter(self._announce_reap, backend)
+        # start, and an unexplained pause is how a hang sounds. The same goes
+        # for a process found dead when the next prompt reaches for it, which
+        # is the more surprising of the two: nothing warned in advance.
+        # CallAfter because the pool speaks from whichever thread noticed --
+        # the sweep's, or a turn's -- and narration belongs to the window's.
+        backends = backend_pool.pool()
+        backends.on_reap = lambda name, why: wx.CallAfter(self._announce_reap, name, why)
         backend_pool.start_reaper()
 
         root_sizer.Add(picker_row, 0, wx.EXPAND | wx.ALL, 8)
@@ -8870,8 +8873,14 @@ class MainFrame(wx.Frame):
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
 
-    def _announce_reap(self, backend: str) -> None:
-        """Say that an idle backend was let go, and that the next turn restarts it.
+    def _announce_reap(self, backend: str, reason: str = backend_pool.REAP_IDLE) -> None:
+        """Say that a backend was let go, and that the next turn restarts it.
+
+        Two things happen to a held process and they are not the same event to
+        somebody listening. One was let go by a rule, before anything was
+        asked of it. The other was found already gone -- crashed, run out of
+        memory, or killed while the laptop slept -- by the prompt that is
+        waiting on it right now, with no warning at all.
 
         Goes through the visible page's own `_say` rather than adding a
         narration path of its own: that method already decides that only the
@@ -8890,6 +8899,9 @@ class MainFrame(wx.Frame):
             # Mid-teardown, or a page that is not a session. Nothing to say to.
             return
         label = backend_label(backend)
+        if reason == backend_pool.REAP_DIED:
+            say(f"{label} had stopped running. Restarting it, which takes a moment.", "notice")
+            return
         say(f"{label} was idle and has been closed. The next message will restart it.", "notice")
 
     # ----- Tab management -----
