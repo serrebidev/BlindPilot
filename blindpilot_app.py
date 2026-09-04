@@ -8877,6 +8877,12 @@ class MainFrame(wx.Frame):
         narration path of its own: that method already decides that only the
         visible tab speaks, and mirrors the line to the status bar either way,
         so nothing is lost when it declines to speak.
+
+        The kind is "notice" -- BlindPilot speaking for itself, which is what
+        `_ALWAYS_SPOKEN` exists for. Any other kind is dropped in keep-up
+        narration, and keep-up is the mode where an unexplained pause on the
+        next message is least likely to be waited out and most likely to be
+        read as a hang.
         """
         page = self.notebook.GetCurrentPage()
         say = getattr(page, "_say", None)
@@ -8884,7 +8890,7 @@ class MainFrame(wx.Frame):
             # Mid-teardown, or a page that is not a session. Nothing to say to.
             return
         label = backend_label(backend)
-        say(f"{label} was idle and has been closed. The next message will restart it.", "tool")
+        say(f"{label} was idle and has been closed. The next message will restart it.", "notice")
 
     # ----- Tab management -----
     def _on_app_mode_changed(self, event: wx.CommandEvent) -> None:

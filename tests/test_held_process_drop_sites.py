@@ -179,7 +179,14 @@ def test_the_reap_announcement_says_what_happens_next():
     app.MainFrame._announce_reap(frame, app.BACKEND_CODEX)
     text, kind = said[0]
     assert "restart" in text.lower(), f"the next prompt's delay is unexplained: {text!r}"
-    assert kind == "tool", "a line the user did not ask for is activity, not an answer"
+    # Pinned against the tuple, not a literal: a kind outside it is dropped
+    # unspoken in keep-up narration (blindpilot_app.py:6715), which is the one
+    # mode where a silent cold start is most likely to be read as a hang. If
+    # the tuple is ever narrowed, this must fail rather than quietly go mute.
+    assert kind in app._ALWAYS_SPOKEN, (
+        f"kind {kind!r} is not spoken in keep-up narration, so the cold start "
+        f"it explains would still arrive in silence; _ALWAYS_SPOKEN is {app._ALWAYS_SPOKEN}"
+    )
     # Said out loud, mid-work. Jargon from the implementation is not wording.
     lowered = text.lower()
     assert "pool" not in lowered and "held" not in lowered and "reap" not in lowered
