@@ -511,3 +511,28 @@ def test_a_replay_worker_never_submits_a_prompt(monkeypatch):
     worker._do_run()
 
     assert [m.get("method") for m in transport.sent] == ["session.resume"]
+
+
+def test_catalog_keeps_the_good_rows_when_one_is_malformed(monkeypatch):
+    """One row with a non-numeric count used to abort the whole list."""
+    _catalog_transport(
+        monkeypatch,
+        [
+            _ready(),
+            _reply(
+                1,
+                {
+                    "sessions": [
+                        {"id": "bad", "message_count": "n/a", "started_at": "yesterday"},
+                        {"id": "good", "message_count": 3, "started_at": 1.0},
+                    ]
+                },
+            ),
+            _reply(2, {"sessions": []}),
+        ],
+    )
+
+    sessions, _live, error = hermes_session_catalog(remote_url="ws://host:9119/api/ws")
+
+    assert error == ""
+    assert [s["id"] for s in sessions] == ["good"]

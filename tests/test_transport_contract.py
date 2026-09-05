@@ -99,6 +99,8 @@ FAKES: list[tuple[str, str, str, bool]] = [
     ("test_hermes_sessions", "_FakeTransport", "kl([])", True),
     ("test_hermes_model_selection", "_CatalogTransport", "kl({})", True),
     ("test_hermes_model_selection", "_ChatterTransport", "kl()", False),
+    # Replays the frames of a reused turn and ends like a pipe when they run out.
+    ("test_hermes_model_selection", "_ReplyTransport", "kl([])", True),
     (
         "test_long_turn_connection",
         "_ScriptedTransport",

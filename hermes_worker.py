@@ -91,6 +91,14 @@ def _clean_status_text(text: str) -> str:
     return _LEADING_SYMBOLS_RE.sub("", stripped) or stripped
 
 
+def _how_long(seconds: float) -> str:
+    """A wait in words a listener can take in, to the minute."""
+    minutes = int(seconds // 60)
+    if not minutes:
+        return "under a minute"
+    return f"{minutes} minute{'' if minutes == 1 else 's'}"
+
+
 # Hermes advertises its permission surface as slash commands and config rather
 # than per-turn flags, so BlindPilot's picker maps onto the closest Hermes
 # behaviour: whether this session may act without asking.
@@ -386,17 +394,8 @@ def _describe_tool_result(result: object) -> str:
     return str(result).strip()
 
 
-# When a replayed transcript's last turn is still running, the attach worker
-# consumes events until it ends, exactly like a live turn. Same timeouts, same
-# narration, for the same reason: silence at a screen reader is the worst
-# failure mode this loop can produce.
-_REPLAY_READ_SETTINGS = True
-
-
 def _message_text(message: dict) -> str:
     """The display text of one transcript message, whichever shape it arrived in."""
-    if not isinstance(message, dict):
-        return ""
     text = message.get("text")
     if isinstance(text, str) and text.strip():
         return text
@@ -458,6 +457,10 @@ class HeldConnection:
     def __init__(self) -> None:
         self._transport: Optional[Transport] = None
         self._live_session = ""
+        # The picker row the live session was last known to run, so the next
+        # turn only asks for a switch when the pick has changed. Empty means
+        # unknown, which the next turn treats as changed.
+        self.model = ""
 
     def take(self) -> tuple[Optional[Transport], str]:
         """The connection to reuse and the live session id it was bound to.
@@ -473,14 +476,16 @@ class HeldConnection:
             return None, ""
         return transport, self._live_session
 
-    def keep(self, transport: Optional[Transport], live_session: str) -> None:
+    def keep(self, transport: Optional[Transport], live_session: str, model: str = "") -> None:
         self._transport = transport
         self._live_session = live_session
+        self.model = model
 
     def drop(self) -> None:
         transport = self._transport
         self._transport = None
         self._live_session = ""
+        self.model = ""
         if transport is not None:
             transport.close()
 
@@ -516,14 +521,8 @@ class HermesWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
-        # Every backend the window drives is handed this, because they can all
-        # pause a turn to ask. Hermes was documented here as having no such
-        # request in its protocol; it has three -- ``clarify.request`` for a
-        # question with choices, ``sudo.request`` for a password, and
-        # ``secret.request`` for a credential -- and each of them blocks the
-        # agent until an answer arrives, with no deadline at all when Hermes'
-        # ``clarify_timeout`` is zero. Leaving this uncalled did not mean the
-        # question went unanswered; it meant the turn ended there.
+        # Answers Hermes' clarify, sudo and secret requests, each of which
+        # blocks the agent until a reply arrives.
         on_question: Optional[AskQuestions] = None,
     ) -> None:
         super().__init__(daemon=True)
@@ -532,13 +531,8 @@ class HermesWorker(threading.Thread):
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._model = model
-        # Hermes takes the reasoning effort as a per-session override on
-        # session.create, which it applies WITHOUT touching the profile's
-        # config -- so picking one here changes this conversation and nothing
-        # else. Measured: a session created with "low" reads back "low" while
-        # a session created in the same second without one reads the profile's
-        # "high". An earlier version of this adapter dropped the value on the
-        # grounds that the protocol had no such control; it does.
+        # A per-session override on session.create. It changes this
+        # conversation only, never the profile's own setting.
         self._effort = effort
         # A name typed in the New Session dialog, sent on session.create only.
         # Empty means "let Hermes name it from the first message".
@@ -589,10 +583,19 @@ class HermesWorker(threading.Thread):
         self._on_complete = counted_complete
         self._on_failed = on_failed
         self._on_done = on_done
-        # Kept so the accessor below can answer honestly rather than by guess.
+        # Called by the clarify and secret handlers; None means answer empty.
         self._on_question = on_question
         self._transport: Optional[Transport] = None
         self._cancelled = False
+        # Set when the turn's end arrives while a reply is still awaited, so
+        # the caller waiting on that reply does not report a second ending.
+        self._ended = False
+        # Set only by a turn that ended the way it should. Anything else, the
+        # idle limit, an error event, a refused prompt, may leave the server
+        # still working, and its late frames must not reach the next worker.
+        self._clean_end = False
+        # The picker row the live session is known to run; see HeldConnection.
+        self._session_model = ""
         self._accepting_input = threading.Event()
         self._request_id = 100
         self._gateway_session = session_id or ""
@@ -655,7 +658,10 @@ class HermesWorker(threading.Thread):
         if self._held is not None:
             self._held.drop()
         transport = self._transport
-        if transport is not None:
+        # Closing a local gateway can wait two seconds on the process. While
+        # the worker thread is running that wait is its job; run() closes on
+        # its way out as soon as it sees the cancellation.
+        if transport is not None and not self.is_alive():
             transport.close()
 
     def run(self) -> None:
@@ -665,16 +671,22 @@ class HermesWorker(threading.Thread):
             self._accepting_input.clear()
             transport = self._transport
             # Hand the connection back for the next turn instead of closing it,
-            # unless the turn was cancelled or the connection did not survive.
+            # unless the turn was cancelled, ended abnormally, or the
+            # connection did not survive.
             keep = (
                 self._held is not None
                 and not self._cancelled
+                and self._clean_end
                 and transport is not None
                 and transport.connected()
                 and bool(self._live_session)
             )
             if keep:
-                self._held.keep(transport, self._live_session)  # type: ignore[union-attr]
+                self._held.keep(transport, self._live_session, self._session_model)  # type: ignore[union-attr]
+                if self._cancelled:
+                    # cancel() ran between the check above and the hand-over
+                    # and left the close to this thread.
+                    self._held.drop()  # type: ignore[union-attr]
             elif transport is not None:
                 transport.close()
                 if self._held is not None:
@@ -687,29 +699,74 @@ class HermesWorker(threading.Thread):
         self._request_id += 1
         return self._request_id
 
-    def _request(self, method: str, params: dict) -> bool:
+    def _send(self, method: str, params: dict) -> Optional[int]:
+        """Send one request. Returns the id to await, or None when it could not go."""
         transport = self._transport
         if transport is None:
-            return False
-        return transport.send(
-            {"jsonrpc": "2.0", "id": self._next_id(), "method": method, "params": params}
-        )
+            return None
+        request_id = self._next_id()
+        frame = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        return request_id if transport.send(frame) else None
 
-    def _await_response(self, request_id: int, timeout: float) -> Optional[dict]:
-        """Wait for one reply, handling the events that arrive alongside it."""
-        waited = 0.0
-        while waited < timeout and not self._cancelled:
+    def _request(self, method: str, params: dict) -> bool:
+        return self._send(method, params) is not None
+
+    def _await_frame(self, wanted: Callable[[dict], bool], timeout: float) -> Optional[dict]:
+        """Wait for a frame ``wanted`` accepts, handling the events around it.
+
+        Timed against the clock rather than by counting empty reads, so a peer
+        that streams frames but never answers still runs out of time. Ends
+        early when the connection is gone or the turn ends first.
+        """
+        deadline = _now() + timeout
+        while _now() < deadline and not self._cancelled:
             transport = self._transport
             if transport is None:
                 return None
             frame = transport.receive(_READ_TIMEOUT)
             if frame is None:
-                waited += _READ_TIMEOUT
+                if not transport.connected():
+                    return None
                 continue
-            if frame.get("id") == request_id:
+            if wanted(frame):
                 return frame
-            self._handle_event(frame)
+            if self._handle_event(frame) is True:
+                # The turn ended with a reply still owed on this connection.
+                # The caller must not report a second ending, and the
+                # connection is not handed on, because that reply lands on
+                # whoever reads it next.
+                self._ended = True
+                self._clean_end = False
+                return None
         return None
+
+    def _await_response(self, request_id: int, timeout: float) -> Optional[dict]:
+        return self._await_frame(lambda frame: frame.get("id") == request_id, timeout)
+
+    def _call(
+        self, method: str, params: dict, timeout: float, no_reply: str, refused: str
+    ) -> Optional[dict]:
+        """Send one request and wait for its result.
+
+        Returns the reply's ``result`` (a dict, possibly empty), or None after
+        reporting the failure. Nothing is reported when the turn was cancelled
+        or ended on its own while the reply was outstanding.
+        """
+        transport = self._transport
+        if transport is None:
+            return None
+        request_id = self._send(method, params)
+        reply = self._await_response(request_id, timeout) if request_id is not None else None
+        if reply is None:
+            if not self._cancelled and not self._ended:
+                self._on_failed(transport.failure_detail() or no_reply)
+            return None
+        error = reply.get("error")
+        if error:
+            self._on_failed(self._error_text(error, refused))
+            return None
+        result = reply.get("result")
+        return result if isinstance(result, dict) else {}
 
     def _open_transport(self) -> bool:
         """Connect, local or remote. Reports its own failure and returns False.
@@ -723,6 +780,7 @@ class HermesWorker(threading.Thread):
             if transport is not None:
                 self._transport = transport
                 self._live_session = live_session
+                self._session_model = self._held.model
                 self._reused = True
                 return True
         if self._remote_url:
@@ -796,8 +854,7 @@ class HermesWorker(threading.Thread):
         user typed. The reply is reported as activity so a wrong model name is
         heard rather than silently ignored.
         """
-        transport = self._transport
-        if transport is None or not self._model:
+        if not self._model or self._model == self._session_model:
             return
         provider, model = split_model_row(self._model)
         command = f"/model {model}"
@@ -805,17 +862,11 @@ class HermesWorker(threading.Thread):
             command += f" --provider {provider}"
         # --session: this conversation's choice, not a new profile default.
         command += " --session"
-        request_id = self._next_id()
-        transport.send(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "slash.exec",
-                # The parameter is "command"; a frame carrying "text" instead is
-                # answered with "empty command" (error 4004).
-                "params": {"session_id": self._live_session, "command": command},
-            }
+        request_id = self._send(
+            "slash.exec", {"session_id": self._live_session, "command": command}
         )
+        if request_id is None:
+            return
         reply = self._await_response(request_id, 60.0)
         if reply is None:
             return
@@ -825,22 +876,14 @@ class HermesWorker(threading.Thread):
                 "tool",
                 f"Hermes refused {command}: {error.get('message') or 'no reason given'}",
             )
+            return
+        self._session_model = self._model
 
     def _wait_for_ready(self) -> bool:
-        deadline = 60.0
-        waited = 0.0
-        while waited < deadline and not self._cancelled:
-            transport = self._transport
-            if transport is None:
-                return False
-            frame = transport.receive(_READ_TIMEOUT)
-            if frame is None:
-                waited += _READ_TIMEOUT
-                continue
-            if self._event_type(frame) == "gateway.ready":
-                return True
-            self._handle_event(frame)
-        if not self._cancelled:
+        ready = self._await_frame(lambda frame: self._event_type(frame) == "gateway.ready", 60.0)
+        if ready is not None:
+            return True
+        if not self._cancelled and not self._ended:
             detail = self._transport.failure_detail() if self._transport else ""
             self._on_failed(detail or "Hermes did not become ready in time")
         return False
@@ -861,42 +904,23 @@ class HermesWorker(threading.Thread):
         one transport per session, so whoever resumed last receives the events.
         The window says so before this worker is started.
         """
-        transport = self._transport
-        if transport is None:
-            return
         target = self._gateway_session
         if not target:
             self._on_failed("There is no conversation id to reopen")
             return
-        request_id = self._next_id()
-        transport.send(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "session.resume",
-                "params": {"session_id": target, "omit_messages": False},
-            }
+        result = self._call(
+            "session.resume",
+            {"session_id": target, "omit_messages": False},
+            120.0,
+            "Hermes did not answer the resume request",
+            "Hermes could not reopen that conversation",
         )
-        reply = self._await_response(request_id, 120.0)
-        if reply is None:
-            if not self._cancelled:
-                detail = transport.failure_detail() if transport else ""
-                self._on_failed(detail or "Hermes did not answer the resume request")
+        if result is None:
             return
-        error = reply.get("error")
-        if error:
-            self._on_failed(self._error_text(error, "Hermes could not reopen that conversation"))
-            return
-        result = reply.get("result") or {}
         self._live_session = str(result.get("session_id") or "")
-        # Which id the window must remember is NOT the one it was handed back
-        # under ``session_id``: that is the per-process handle the gateway
-        # addresses turns with, and it dies with the gateway. The durable id
-        # comes back as ``session_key`` (or ``resumed``), because resume --
-        # unlike session.create -- has no ``stored_session_id`` field.
-        # Measured: without this the tab would store "7e76fdca" and the
-        # conversation would be unreachable after a restart, quietly, while
-        # everything looked fine for the rest of the session.
+        # ``session_id`` is the per-process handle and dies with the gateway.
+        # The durable id comes back as ``session_key`` or ``resumed``, since
+        # resume has no ``stored_session_id`` field.
         stored = str(
             result.get("session_key")
             or result.get("resumed")
@@ -920,51 +944,31 @@ class HermesWorker(threading.Thread):
         # A finished conversation replays silently: nothing is "completed" into
         # the transcript, because there is no new answer -- the window marks
         # the end itself from on_done.
+        self._clean_end = True
         self._on_complete("")
 
     def _ensure_session(self) -> bool:
         """Create a conversation, or reopen the one we were given."""
-        transport = self._transport
-        if transport is None:
-            return False
-        request_id = self._next_id()
         if self._gateway_session:
             # Reopening a stored conversation. Hermes resolves the id through
             # its compression chain, so a conversation that was compacted since
             # it was last seen still lands on the turns written afterwards.
             # ``omit_messages`` keeps it from replaying the whole transcript:
             # BlindPilot already rebuilt those rows from history.
-            transport.send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "method": "session.resume",
-                    "params": {
-                        "session_id": self._gateway_session,
-                        "omit_messages": True,
-                    },
-                }
-            )
+            method = "session.resume"
+            params: dict = {"session_id": self._gateway_session, "omit_messages": True}
         else:
-            transport.send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "method": "session.create",
-                    "params": {"cwd": self._cwd, **self._session_params()},
-                }
-            )
-        reply = self._await_response(request_id, 120.0)
-        if reply is None:
-            if not self._cancelled:
-                detail = self._transport.failure_detail() if self._transport else ""
-                self._on_failed(detail or "Hermes did not answer the session request")
+            method = "session.create"
+            params = {"cwd": self._cwd, **self._session_params()}
+        result = self._call(
+            method,
+            params,
+            120.0,
+            "Hermes did not answer the session request",
+            "Hermes could not start a session",
+        )
+        if result is None:
             return False
-        error = reply.get("error")
-        if error:
-            self._on_failed(self._error_text(error, "Hermes could not start a session"))
-            return False
-        result = reply.get("result") or {}
         # Two ids come back: one for this gateway process and one that survives
         # restarts. The turn is addressed with the first; the second is what
         # BlindPilot stores so the conversation can be reopened later.
@@ -974,14 +978,12 @@ class HermesWorker(threading.Thread):
             self._on_failed("Hermes did not return a session id")
             return False
         self._on_session(stored or self._live_session)
-        # Say where the conversation actually started, when that is not where
-        # it was asked to start. A remote Hermes validates the folder against
-        # its OWN filesystem and, finding nothing, silently uses its own
-        # directory -- measured: a Windows path sent to a Linux Hermes returned
-        # a clean OK and a stored cwd of '/home/ubuntu'. Nothing said so, and
-        # the tab was left named after a folder the session was never in. This
-        # is the only moment the truth is available, because session.create
-        # reports the resolved directory in its ``info``.
+        # session.create carried the pick, so the session runs it. A resumed
+        # session keeps whatever it had, which is not known here.
+        self._session_model = "" if self._gateway_session else self._model
+        # A remote Hermes validates the folder against its own filesystem and,
+        # finding nothing, silently uses its own directory. session.create
+        # reports the resolved directory in ``info``, so say so here.
         landed = str(((result.get("info") or {}).get("cwd")) or "")
         if landed and self._cwd and not _same_directory(landed, self._cwd):
             self._on_activity(
@@ -993,14 +995,9 @@ class HermesWorker(threading.Thread):
     def _session_params(self) -> dict:
         params: dict = {}
         if self._model:
-            # The picker rows are "<provider>:<model>", which Hermes only reads
-            # as a provider prefix when the left side is a name it recognises.
-            # A user-defined provider (any `providers:` / `custom_providers:`
-            # entry -- every Palantir/Foundry endpoint is one) is NOT in that
-            # list, so the whole row was taken as a model name and the provider
-            # silently stayed whatever it was. Sending the two as separate
-            # fields removes the guessing: session.create takes a provider of
-            # its own, and Hermes resolves the endpoint and API mode from it.
+            # Sent as two fields. Hermes reads a "provider:model" prefix only
+            # for providers it ships with, so a user-defined one would be
+            # taken as part of the model name.
             provider, model = split_model_row(self._model)
             params["model"] = model
             if provider:
@@ -1010,11 +1007,7 @@ class HermesWorker(threading.Thread):
             # know, so a stale saved value cannot break a turn.
             params["reasoning_effort"] = self._effort
         if self._session_title:
-            # A name the user typed in the New Session dialog. Hermes stores it
-            # with title_source='user' and does NOT let its own automatic title
-            # overwrite it -- measured on a live gateway, read back from
-            # state.db after a completed turn: a session created with a title
-            # kept it, while one created without came back named by the model.
+            # Hermes keeps a user-given title over its own automatic one.
             # Omitted when empty, which is how a conversation gets that
             # automatic name instead.
             params["title"] = self._session_title
@@ -1034,27 +1027,14 @@ class HermesWorker(threading.Thread):
             if uploaded is None:
                 return
             text = self._prompt_with_attachments(uploaded)
-        request_id = self._next_id()
-        transport = self._transport
-        if transport is None:
-            return
-        transport.send(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "prompt.submit",
-                "params": {"session_id": self._live_session, "text": text},
-            }
+        accepted = self._call(
+            "prompt.submit",
+            {"session_id": self._live_session, "text": text},
+            120.0,
+            "Hermes did not accept the prompt",
+            "Hermes could not start the turn",
         )
-        reply = self._await_response(request_id, 120.0)
-        if reply is None:
-            if not self._cancelled:
-                detail = transport.failure_detail()
-                self._on_failed(detail or "Hermes did not accept the prompt")
-            return
-        error = reply.get("error")
-        if error:
-            self._on_failed(self._error_text(error, "Hermes could not start the turn"))
+        if accepted is None:
             return
         self._accepting_input.set()
         self._on_started()
@@ -1080,22 +1060,12 @@ class HermesWorker(threading.Thread):
             return None
         # Split on any whitespace: a command can be followed by its arguments
         # on the same line or on the next one.
-        name = text[1:].split(None, 1)[0] if text[1:].split(None, 1) else ""
+        words = text[1:].split(None, 1)
+        name = words[0] if words else ""
         if not name:
             return None
-        request_id = self._next_id()
-        transport = self._transport
-        if transport is None:
-            return None
-        transport.send(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "complete.slash",
-                "params": {"text": "/" + name},
-            }
-        )
-        reply = self._await_response(request_id, 30.0)
+        request_id = self._send("complete.slash", {"text": "/" + name})
+        reply = self._await_response(request_id, 30.0) if request_id is not None else None
         if reply is None or isinstance(reply.get("error"), dict):
             # No answer is not a licence to guess. Sending it as a message is
             # the older behaviour and the safer of the two wrong answers: the
@@ -1117,39 +1087,27 @@ class HermesWorker(threading.Thread):
         turn, so there is no stream to consume and no completion event coming:
         the reply IS the end of this turn.
         """
-        self._on_activity("tool", f"Running Hermes command {text.split()[0]}")
-        request_id = self._next_id()
-        transport = self._transport
-        if transport is None:
-            return
-        transport.send(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "slash.exec",
-                # The parameter is "command"; a frame carrying "text" instead
-                # is answered with "empty command" (error 4004).
-                "params": {"session_id": self._live_session, "command": text},
-            }
-        )
-        # Generous: /update downloads a release, /init scans a repository, and
+        name = text.split()[0]
+        self._on_activity("tool", f"Running Hermes command {name}")
+        # The parameter is "command"; a frame carrying "text" instead is
+        # answered with "empty command" (error 4004). The wait is generous
+        # because /update downloads a release, /init scans a repository, and
         # /skills can reach the network. None of them stream progress.
-        reply = self._await_response(request_id, 600.0)
-        if reply is None:
-            if not self._cancelled:
-                detail = transport.failure_detail()
-                self._on_failed(detail or f"Hermes did not answer {text.split()[0]}")
+        result = self._call(
+            "slash.exec",
+            {"session_id": self._live_session, "command": text},
+            600.0,
+            f"Hermes did not answer {name}",
+            f"Hermes could not run {name}",
+        )
+        if result is None:
             return
-        error = reply.get("error")
-        if isinstance(error, dict):
-            self._on_failed(self._error_text(error, f"Hermes could not run {text.split()[0]}"))
-            return
-        result = reply.get("result")
-        output = str((result or {}).get("output") or "").strip() if isinstance(result, dict) else ""
+        output = str(result.get("output") or "").strip()
         # A command that did its work silently still has to end out loud: a
         # turn that finishes with nothing said is indistinguishable from one
         # that failed.
-        self._on_complete(output or f"{text.split()[0]} finished with no output.")
+        self._clean_end = True
+        self._on_complete(output or f"{name} finished with no output.")
 
     def _upload_attachments(self) -> Optional[list[tuple[str, str]]]:
         """Send each attached file's bytes to Hermes, before the prompt goes out.
@@ -1177,36 +1135,18 @@ class HermesWorker(threading.Thread):
                 self._on_failed(f"{display} could not be read: {exc.strerror or exc}")
                 return None
             self._on_activity("tool", f"Sending {display} ({_size_text(size)}) to Hermes")
-            request_id = self._next_id()
-            transport = self._transport
-            if transport is None:
-                return None
-            transport.send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "method": "file.attach",
-                    "params": {
-                        "session_id": self._live_session,
-                        # The name is given separately on purpose: a Linux
-                        # gateway handed "D:\\dir\\report.xlsx" stores one file
-                        # with that whole string as its name.
-                        "name": display,
-                        "data_url": data_url,
-                    },
-                }
+            # The name is given separately on purpose: a Linux gateway handed
+            # "D:\\dir\\report.xlsx" stores one file with that whole string as
+            # its name.
+            result = self._call(
+                "file.attach",
+                {"session_id": self._live_session, "name": display, "data_url": data_url},
+                300.0,
+                f"Hermes did not confirm receiving {display}",
+                f"Hermes could not accept {display}",
             )
-            reply = self._await_response(request_id, 300.0)
-            if reply is None:
-                if not self._cancelled:
-                    detail = transport.failure_detail()
-                    self._on_failed(detail or f"Hermes did not confirm receiving {display}")
+            if result is None:
                 return None
-            error = reply.get("error")
-            if error:
-                self._on_failed(self._error_text(error, f"Hermes could not accept {display}"))
-                return None
-            result = reply.get("result") or {}
             stored = str(result.get("path") or "")
             if not stored:
                 self._on_failed(f"Hermes accepted {display} but did not say where it put it")
@@ -1237,29 +1177,18 @@ class HermesWorker(threading.Thread):
 
     def _run_compaction(self) -> None:
         """Compact in place. Hermes answers when the summary is written."""
-        request_id = self._next_id()
-        transport = self._transport
-        if transport is None:
-            return
-        transport.send(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "session.compress",
-                "params": {"session_id": self._live_session},
-            }
+        result = self._call(
+            "session.compress",
+            {"session_id": self._live_session},
+            600.0,
+            "Hermes did not finish compacting the conversation",
+            "Hermes could not compact",
         )
-        reply = self._await_response(request_id, 600.0)
-        if reply is None:
-            if not self._cancelled:
-                self._on_failed("Hermes did not finish compacting the conversation")
-            return
-        error = reply.get("error")
-        if error:
-            self._on_failed(self._error_text(error, "Hermes could not compact"))
+        if result is None:
             return
         # Compaction produces no answer of its own, so say what happened rather
         # than finishing in silence - a silent end reads as a failed turn.
+        self._clean_end = True
         self._on_complete("Conversation compacted.")
 
     def _consume_turn(self) -> None:
@@ -1283,13 +1212,9 @@ class HermesWorker(threading.Thread):
         loop can do. Frames that produce no row therefore leave the clock
         running.
         """
-        # Timed against the clock rather than by counting read timeouts. The
-        # first attempt at this added up the timeouts of reads that returned
-        # nothing, which is only the same thing when nothing arrives at all: a
-        # steady trickle of content-free frames returned immediately every time,
-        # so the counter never advanced and the announcement never came. The
-        # question being answered is "how long since the listener last heard
-        # anything", and only a clock answers that.
+        # Timed against the clock, not by counting empty reads. A trickle of
+        # content-free frames returns immediately every time, so a counter of
+        # empty reads never advances while the listener hears nothing.
         last_row = _now()
         next_notice = _PROGRESS_NOTICE_SECONDS
         next_check = _CONNECTION_CHECK_SECONDS
@@ -1328,7 +1253,12 @@ class HermesWorker(threading.Thread):
                 next_notice = quiet + _PROGRESS_NOTICE_SECONDS
                 self._announce_still_working(quiet)
             if quiet >= _IDLE_LIMIT:
-                self._on_failed(transport.failure_detail())
+                # The connection was checked above and is open. Nothing closed;
+                # the turn simply produced nothing for the whole limit.
+                self._on_failed(
+                    f"Hermes has been silent for {_how_long(_IDLE_LIMIT)}, "
+                    "so this turn was given up."
+                )
                 return
 
     def _announce_still_working(self, waited: float) -> None:
@@ -1339,8 +1269,7 @@ class HermesWorker(threading.Thread):
         included when there is one, because "still working on terminal" is worth
         far more than "still working".
         """
-        minutes = int(waited // 60)
-        how_long = f"{minutes} minute{'' if minutes == 1 else 's'}" if minutes else "under a minute"
+        how_long = _how_long(waited)
         if self._last_step:
             self._on_activity("tool", f"Still working, {how_long} on {self._last_step}")
         else:
@@ -1434,9 +1363,8 @@ class HermesWorker(threading.Thread):
             return None
 
         if event == "approval.request":
-            # BlindPilot answers approvals through its permission picker rather
-            # than a modal, so an approval that arrives in a mode which cannot
-            # grant it is reported instead of silently blocking the turn.
+            # Approved automatically in the yolo modes and denied in the rest,
+            # with a row saying so either way. Nothing is shown to decide on.
             self._answer_approval(payload)
             return None
 
@@ -1469,8 +1397,8 @@ class HermesWorker(threading.Thread):
         aloud is what makes a run sound broken. At the end of the turn nothing
         more is coming, so ``final`` releases whatever is left as it stands.
 
-        Silent when live rows are switched off in Options -- that setting lives
-        in the window, which drops the activity, so this only spends the work.
+        Always emits. When live rows are switched off in Options the window
+        drops them; that setting is not consulted here.
         """
         pending = "".join(self._answer_parts)[self._streamed :]
         if not pending:
@@ -1524,21 +1452,19 @@ class HermesWorker(threading.Thread):
     def _answer_clarify(self, payload: dict) -> None:
         """Put Hermes' question in front of the user, and answer it.
 
-        Before this, the turn simply stopped here. The event was announced as
-        "Hermes is asking: a question needing the terminal" -- the fallback
-        wording, because a batch clarify carries ``questions`` and not
-        ``question``, so nothing was ever read out of it -- and then nothing
-        further happened, because nothing sent ``clarify.respond``. Hermes
-        waits on that answer with no deadline at all when its
-        ``clarify_timeout`` is zero, so any turn that asked anything was over.
-
-        The window already hands every worker an ``on_question`` callback, and
-        four other backends use it. Hermes was documented here as having "no
-        such request" in its protocol. It has three.
+        Hermes waits on the answer with no deadline at all when its
+        ``clarify_timeout`` is zero, so every request with an id is answered,
+        even one whose question could not be read.
         """
         request_id = str(payload.get("request_id") or "")
+        if not request_id:
+            return
         questions = _clarify_questions(payload)
-        if not request_id or not questions:
+        if not questions:
+            self._on_activity(
+                "tool", "Hermes asked a question that could not be read; it was answered empty."
+            )
+            self._request("clarify.respond", {"request_id": request_id, "answer": ""})
             return
         answers = self._on_question(questions) if self._on_question else None
         self._on_activity("tool", question_summary(questions, answers))
@@ -1637,6 +1563,7 @@ class HermesWorker(threading.Thread):
                 _first_text(payload.get("error"), payload.get("text")) or "Hermes turn failed"
             )
             return True
+        self._clean_end = True
         self._on_complete(answer.strip())
         return True
 

@@ -840,3 +840,144 @@ def test_a_program_holding_one_of_our_libraries_counts_as_a_blocker(tmp_path):
     finally:
         holder.kill()
         holder.wait(timeout=10)
+
+
+def _windows_powershell() -> Path:
+    return (
+        Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows PowerShell")
+def test_the_setup_helper_hands_the_installer_paths_with_spaces_as_one_argument(tmp_path):
+    """Windows PowerShell joins -ArgumentList with spaces and quotes nothing.
+
+    The default install folder is under the user's profile, so any account
+    name with a space split /DIR= in two and the installer went elsewhere.
+    """
+    install_dir = tmp_path / "John Smith" / "BlindPilot"
+    install_dir.mkdir(parents=True)
+    # The helper restarts the app once the installer is done. The stand-in
+    # must leave a trace and the test must wait for it, or the temp folder can
+    # be cleared before Windows Script Host has even read the file, which puts
+    # a "cannot find script file" dialog on the person's screen.
+    restarted = install_dir / "restarted.txt"
+    (install_dir / "BlindPilot.vbs").write_text(
+        'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
+        'fso.CreateTextFile("' + str(restarted) + '", True).Close\r\n'
+        "WScript.Quit 0\r\n",
+        encoding="ascii",
+    )
+    log_dir = tmp_path / "log dir"
+    log_dir.mkdir()
+    log_file = log_dir / "updater.log"
+    status_file = tmp_path / "status.txt"
+    recorded = tmp_path / "installer-args.txt"
+    # The stand-in installer writes each argument it was given on its own line.
+    installer = tmp_path / "Setup.vbs"
+    installer.write_text(
+        'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
+        'Set out = fso.CreateTextFile("' + str(recorded) + '", True)\r\n'
+        "For Each arg In WScript.Arguments\r\n"
+        "    out.WriteLine arg\r\n"
+        "Next\r\n"
+        "out.Close\r\n"
+        "WScript.Quit 0\r\n",
+        encoding="ascii",
+    )
+    helper = tmp_path / "setup-updater.ps1"
+    helper.write_text(app_updater._WINDOWS_SETUP_HELPER, encoding="utf-8-sig")
+
+    result = subprocess.run(
+        [
+            str(_windows_powershell()),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(helper),
+            "-ParentPid",
+            "0",
+            "-Installer",
+            str(installer),
+            "-InstallDir",
+            str(install_dir),
+            "-Executable",
+            "BlindPilot.vbs",
+            "-LogFile",
+            str(log_file),
+            "-StatusFile",
+            str(status_file),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        cwd=tempfile.gettempdir(),
+        timeout=180,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+    detail = result.stdout + result.stderr
+    if status_file.exists():
+        detail += status_file.read_text(encoding="utf-8-sig", errors="replace")
+    assert result.returncode == 0, detail
+    deadline = time.monotonic() + 15
+    while not restarted.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert restarted.exists(), "the helper never restarted the stand-in app"
+    arguments = recorded.read_text(encoding="utf-8", errors="replace").splitlines()
+    assert f"/DIR={install_dir}" in arguments, arguments
+    assert f"/LOG={log_dir / 'updater.setup.log'}" in arguments, arguments
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows PowerShell")
+def test_a_failure_reason_with_accents_survives_the_status_file(tmp_path, monkeypatch):
+    """Set-Content wrote the ANSI code page while pending_failure read UTF-8."""
+    status = tmp_path / "status.txt"
+    log = tmp_path / "Zo\u00eb" / "updater.log"
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        "$LogFile = '" + str(log) + "'\n"
+        "$StatusFile = '"
+        + str(status)
+        + "'\n"
+        + app_updater._WINDOWS_PRELUDE
+        + "\nSave-Failure 'Zo\u00eb could not be updated.'\n",
+        encoding="utf-8-sig",
+    )
+
+    result = subprocess.run(
+        [
+            str(_windows_powershell()),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    monkeypatch.setattr(app_updater, "_status_path", lambda: status)
+    assert app_updater.pending_failure() == ("Zo\u00eb could not be updated.", str(log))
+
+
+def test_a_status_file_with_a_byte_order_mark_reads_cleanly(tmp_path, monkeypatch):
+    status = tmp_path / "status.txt"
+    status.write_text("Zo\u00eb could not be updated.\nC:\\temp\\u.log\n", encoding="utf-8-sig")
+    monkeypatch.setattr(app_updater, "_status_path", lambda: status)
+
+    assert app_updater.pending_failure() == ("Zo\u00eb could not be updated.", "C:\\temp\\u.log")

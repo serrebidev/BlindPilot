@@ -39,6 +39,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence
 
+from certificates import certificate_context
+
 # Hermes' launcher is a plain executable on PATH, but the gateway itself is a
 # Python module inside Hermes' own virtual environment. A GUI cannot rely on
 # either being importable, so both are located on disk instead.
@@ -316,6 +318,7 @@ def wsl_state_db() -> Optional[str]:
             capture_output=True,
             timeout=25,
             **_text_output_kwargs(),
+            **_no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -362,6 +365,7 @@ def wsl_sqlite_query(sql: str, params: "Sequence" = ()) -> "list[dict]":
             capture_output=True,
             timeout=WSL_QUERY_TIMEOUT,
             **_text_output_kwargs(),
+            **_no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -475,11 +479,6 @@ except ImportError:
     # absence must not stop the application starting.
     pass
 
-# Credential names Hermes' WebSocket upgrade accepts from a configured client.
-# "token" is the server's session token; "ticket" is the one-shot ticket minted
-# after a password login, which is what a server reachable from another machine
-# requires. A third name exists for processes Hermes spawns itself and is
-# deliberately not offered here.
 # Credential kinds the remote settings can hold.
 #
 # "token" is the session token of a Hermes bound to the loopback address, where
@@ -496,10 +495,6 @@ REMOTE_CREDENTIALS = ("token", "password")
 # separate from REMOTE_CREDENTIALS: a password is stored in the settings but
 # never sent this way -- it buys a ticket first.
 WS_QUERY_CREDENTIALS = ("token", "ticket")
-
-# How long a minted ticket is valid. Hermes reports 30s; the ticket is used
-# immediately, and this only guards against treating a stale one as usable.
-TICKET_TTL_MARGIN = 5.0
 
 
 def mint_ws_ticket(url: str, username: str, password: str) -> str:
@@ -524,7 +519,12 @@ def mint_ws_ticket(url: str, username: str, password: str) -> str:
             break
     base = base[: -len("/api/ws")] if base.endswith("/api/ws") else base
 
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+    # The packaged build's trust store, not OpenSSL's default, which the frozen
+    # macOS build ships empty.
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=certificate_context()),
+        urllib.request.HTTPCookieProcessor(CookieJar()),
+    )
 
     def _post(path: str, body: Optional[dict]) -> dict:
         data = json.dumps(body).encode() if body is not None else b""
@@ -580,7 +580,13 @@ def remote_ws_url(host: str, port: int = 9119, secure: bool = False) -> str:
     host = host.rstrip("/")
     if host.endswith("/api/ws"):
         host = host[: -len("/api/ws")].rstrip("/")
-    if ":" in host and not host.startswith("["):
+    if host.startswith("[") and "]:" in host:
+        # A bracketed IPv6 address with a port, "[::1]:9119".
+        host, _, given_port = host.rpartition("]:")
+        host += "]"
+        if given_port.isdigit():
+            port = int(given_port)
+    elif ":" in host and not host.startswith("["):
         host, _, given_port = host.rpartition(":")
         if given_port.isdigit():
             port = int(given_port)
@@ -684,6 +690,9 @@ class StdioTransport:
         self._frames_ready = threading.Condition(self._frames_lock)
         self._stderr: list[str] = []
         self._closed = False
+        # cancel() and steer() write from the GUI thread while the worker may
+        # be mid-write of a large frame; two text writers would interleave.
+        self._send_lock = threading.Lock()
 
     def start(self) -> None:
         """Launch the gateway. Raises ``OSError`` if it cannot be started."""
@@ -781,15 +790,18 @@ class StdioTransport:
         if proc is None or proc.stdin is None:
             return False
         try:
-            proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-            proc.stdin.flush()
+            with self._send_lock:
+                proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+                proc.stdin.flush()
         except (OSError, ValueError):
             return False
         return True
 
     def receive(self, timeout: float) -> Optional[dict]:
+        # The wait applies after the stream has closed too. A caller that polls
+        # for frames would otherwise spin at full speed on a dead pipe.
         with self._frames_ready:
-            if not self._frames and not self._closed:
+            if not self._frames:
                 self._frames_ready.wait(timeout)
             if self._frames:
                 return self._frames.pop(0)
@@ -926,6 +938,8 @@ class WebSocketTransport:
                 # from different threads, which the library only supports when
                 # asked to.
                 enable_multithread=True,
+                # The packaged build's trust store; see certificates.py.
+                sslopt={"context": certificate_context()},
             )
         except Exception as exc:  # noqa: BLE001 - any failure is "cannot reach it"
             self._error = str(exc)
@@ -941,16 +955,10 @@ class WebSocketTransport:
         this is not merely a convenience: without it a connection held between
         turns is closed by the server after about half a minute.
 
-        A read that times out is NOT the end of the connection, and telling the
-        two apart is what keeps a long turn alive. The socket carries the
-        connect timeout into every later operation, so a quiet stretch longer
-        than that -- a build, a test run, a model thinking, anything that
-        produces no frame for twenty seconds -- raised a timeout here. Treating
-        it as a dead peer ended this thread, and from then on nobody answered
-        the server's pings, so the server closed a connection that was fine.
-        Measured: the thread died after 21 seconds of quiet even on a loopback
-        server, which does not ping at all, and ``send`` went on reporting
-        success into a socket with no reader behind it.
+        A read that times out is NOT the end of the connection. The socket
+        carries the connect timeout into every later operation, so any quiet
+        stretch longer than that raises a timeout here, and treating it as a
+        dead peer would stop the reader and with it the ping replies.
         """
         ws = self._ws
         if ws is None:
@@ -981,12 +989,9 @@ class WebSocketTransport:
     def send(self, message: dict) -> bool:
         """Write one frame. ``False`` means the peer is gone.
 
-        A dead reading thread counts as gone, even when the socket still accepts
-        bytes. Measured: with the reader stopped, ``send`` reported success and
-        the answer never came, because there was nobody left to read the reply
-        -- a silent loss, which is the worst outcome for a listener who has no
-        way to see that nothing is happening. Refusing here turns it into a
-        message the turn can report.
+        A dead reading thread counts as gone, even when the socket still
+        accepts bytes, because nobody would read the reply. Refusing here
+        turns a silent loss into a message the turn can report.
         """
         if self._ws is None:
             return False
@@ -1050,23 +1055,13 @@ MODEL_QUERY_TIMEOUT = 60.0
 
 # What joins a provider to a model in one picker row.
 #
-# NOT a colon, which is what this used at first and is the form Hermes' own
-# ``/model`` command takes. Hermes reads a colon prefix as a provider only when
-# the left side is a provider name it ships with; a user-defined one -- every
-# `providers:` / `custom_providers:` entry, which is what a Foundry/Palantir
-# endpoint or any self-hosted gateway is -- is not on that list, so the whole
-# row came back as a model name with the provider left untouched. Measured:
-# ``parse_model_input("palantir-gpt:<model>")`` returns the previous provider
-# and ``"palantir-gpt:<model>"`` as the model. That matters because each entry
-# has its own endpoint and API mode (…/openai/v1 with chat_completions vs
-# …/anthropic with anthropic_messages), so a wrong provider is not a label
-# problem -- it is a turn sent to the wrong place.
-#
-# The two halves therefore travel as separate protocol fields, and this
-# separator only ever has to survive a round trip through BlindPilot's own UI
-# and settings. " · " is not a character any provider slug or model id uses,
-# and a screen reader reads the row as two parts rather than running them
-# together.
+# Not a colon. Hermes reads a colon prefix as a provider only when the left
+# side is a provider it ships with; a user-defined one (any `providers:` or
+# `custom_providers:` entry) is not on that list, so the whole row would be
+# taken as a model name and the turn sent to the wrong endpoint. The two
+# halves travel as separate protocol fields instead, and this separator only
+# has to survive BlindPilot's own UI and settings. " · " appears in no
+# provider slug or model id, and a screen reader reads the row as two parts.
 MODEL_ROW_SEPARATOR = " · "
 
 # The reasoning levels Hermes accepts on ``session.create``.
@@ -1112,9 +1107,9 @@ def _model_rows(payload: dict) -> tuple[list[str], str]:
     """Flatten Hermes' provider catalog into picker rows.
 
     Hermes groups models under providers and can have the same model name in
-    more than one of them, so each row is qualified with its provider - which
-    is also the form ``/model`` accepts, meaning a picked row can be sent back
-    unchanged.
+    more than one of them, so each row is qualified with its provider. The
+    row is BlindPilot's own form; ``split_model_row`` takes it apart before
+    anything is sent to Hermes.
     """
     models: list[str] = []
     current = ""
@@ -1151,14 +1146,8 @@ SESSION_DENY_SOURCES = ("kanban", "tool")
 def _ready_or_fail(transport: Transport, deadline_seconds: float) -> str:
     """Wait for the gateway announcement; return "" when ready, else the error.
 
-    A dropped connection ends the wait immediately instead of sitting out the
-    whole deadline. `receive` returning None means "nothing yet", which is
-    ordinary while a gateway starts up -- but on a transport that is no longer
-    connected there is nobody left to announce anything, and spinning for the
-    full sixty seconds only delays telling the user what happened. Worth being
-    explicit about: this loop does not sleep, so on a dead transport it was a
-    busy wait, and the failure it reported was a timeout rather than the real
-    reason the connection ended.
+    A dropped connection ends the wait at once, with the real reason, rather
+    than sitting out the whole deadline and reporting a timeout.
     """
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
@@ -1239,16 +1228,21 @@ def hermes_session_catalog(
                 source = str(row.get("source") or "").strip().lower()
                 if source in SESSION_DENY_SOURCES:
                     continue
-                sessions.append(
-                    {
-                        "id": str(row.get("id") or ""),
-                        "title": str(row.get("title") or ""),
-                        "preview": str(row.get("preview") or ""),
-                        "message_count": int(row.get("message_count") or 0),
-                        "source": source,
-                        "started_at": float(row.get("started_at") or 0),
-                    }
-                )
+                try:
+                    sessions.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "title": str(row.get("title") or ""),
+                            "preview": str(row.get("preview") or ""),
+                            "message_count": int(row.get("message_count") or 0),
+                            "source": source,
+                            "started_at": float(row.get("started_at") or 0),
+                        }
+                    )
+                except (TypeError, ValueError):
+                    # One row with a field that does not parse must not lose
+                    # the whole list.
+                    continue
             break
         if error:
             return [], set(), error
@@ -1293,12 +1287,9 @@ def hermes_model_options(
     effort levels, current model, current effort, error.
 
     Works for a Hermes on this machine and for one reached over the network.
-    That second case used to be refused outright, on the reasoning that a
-    remote Hermes "chooses its model on the machine it runs on" -- which was
-    wrong: ``hermes serve`` carries the SAME JSON-RPC surface over its
-    WebSocket as the local pipe does (its own ws module dispatches through the
-    identical handler table), so ``model.options`` answers either way. The only
-    real difference is that the local path may have to start a gateway first.
+    ``hermes serve`` carries the same JSON-RPC surface over its WebSocket as
+    the local pipe does, so ``model.options`` answers either way. The only
+    difference is that the local path may have to start a gateway first.
     """
     if remote_url:
         transport: Transport = WebSocketTransport(
@@ -1313,20 +1304,13 @@ def hermes_model_options(
     except OSError as exc:
         return [], [], "", "", str(exc)
 
-    deadline = time.monotonic() + MODEL_QUERY_TIMEOUT
     try:
-        ready = False
-        while time.monotonic() < deadline and not ready:
-            frame = transport.receive(0.5)
-            if frame is None:
-                continue
-            params = frame.get("params")
-            if isinstance(params, dict) and params.get("type") == "gateway.ready":
-                ready = True
-        if not ready:
-            return [], [], "", "", "Hermes did not respond in time."
+        problem = _ready_or_fail(transport, MODEL_QUERY_TIMEOUT)
+        if problem:
+            return [], [], "", "", problem
 
         transport.send({"jsonrpc": "2.0", "id": 1, "method": "model.options", "params": {}})
+        deadline = time.monotonic() + MODEL_QUERY_TIMEOUT
         while time.monotonic() < deadline:
             frame = transport.receive(0.5)
             if frame is None:

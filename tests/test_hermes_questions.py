@@ -298,3 +298,18 @@ def test_a_clarify_without_a_request_id_is_left_alone():
     worker = _worker([], sent, [], [["x"]])
     worker._handle_event(_frame("clarify.request", {"question": "Which?"}))
     assert _responses(sent) == []
+
+
+def test_a_clarify_with_no_readable_question_is_still_answered():
+    """Hermes blocks on the answer with no deadline when clarify_timeout is 0.
+
+    A request whose text cannot be read is answered empty and said so, rather
+    than left to hang the turn.
+    """
+    activities: list = []
+    sent: list = []
+    worker = _worker(activities, sent, [], None)
+    worker._handle_event(_frame("clarify.request", {"request_id": "r9"}))
+
+    assert _responses(sent) == [{"request_id": "r9", "answer": ""}]
+    assert activities

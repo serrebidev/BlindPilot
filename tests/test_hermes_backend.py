@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -425,6 +426,33 @@ def test_cancel_asks_hermes_to_stop_before_dropping_the_connection():
 
     assert [m["method"] for m in transport.sent] == ["session.interrupt"]
     assert transport.closed is True
+
+
+def test_cancel_leaves_the_close_to_a_running_worker_thread():
+    """Closing a local gateway can wait two seconds; cancel() runs on the GUI thread."""
+    released = threading.Event()
+    closed_on: list[str] = []
+
+    class _Recording(_FakeTransport):
+        def close(self) -> None:
+            closed_on.append(threading.current_thread().name)
+            super().close()
+
+    transport = _Recording([])
+    worker = _worker()
+    worker._transport = transport
+    worker._live_session = "live-1"
+    worker._gateway_session = "live-1"
+    worker._do_run = lambda: released.wait(5)
+    worker.start()
+
+    worker.cancel()
+    assert transport.closed is False
+    released.set()
+    worker.join(5)
+
+    assert transport.closed is True
+    assert closed_on == [worker.name]
 
 
 # -- compaction -----------------------------------------------------------
@@ -1247,6 +1275,7 @@ def test_a_finished_turn_hands_its_connection_to_the_next_one():
     worker._live_session = "live-1"
     # The turn itself is not under test here, only what happens to the
     # connection once it ends, so the turn is replaced by the state it leaves.
+    worker._clean_end = True
     worker._do_run = lambda: setattr(worker, "_transport", transport)
 
     worker.run()
@@ -1361,3 +1390,193 @@ def test_a_reused_connection_does_not_create_a_second_session():
     assert "session.resume" not in methods
     # It went straight to the work.
     assert "prompt.submit" in methods
+
+
+# -- the reply wait, the turn's end, and the held connection --------------
+
+
+def test_a_turn_that_ends_before_the_reply_reports_one_terminal_callback():
+    """A turn whose end arrives before the awaited reply used to end twice.
+
+    The ending event went to _handle_event, whose "turn over" answer was
+    dropped, so the worker reported the completion and then a failure when
+    the reply never came. Exactly one terminal callback is the property.
+    """
+    from hermes_worker import HeldConnection
+
+    events: list[tuple[str, str]] = []
+    held = HeldConnection()
+    transport = _FakeTransport([_event("message.complete", {"status": "complete", "text": "hi"})])
+    held.keep(transport, "live-1")
+    worker = _worker(
+        on_complete=lambda text: events.append(("complete", text)),
+        on_failed=lambda text: events.append(("failed", text)),
+    )
+    worker._held = held
+
+    worker._do_run()
+
+    assert events == [("complete", "hi")]
+
+
+def test_a_reply_wait_runs_out_by_the_clock_not_by_empty_reads(monkeypatch):
+    """A peer that streams frames but never answers must still time out."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(hermes_worker, "_now", lambda: clock["t"])
+
+    class _Streaming(_FakeTransport):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.reads = 0
+
+        def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
+            self.reads += 1
+            clock["t"] += 0.1
+            if self.reads > 50:
+                # A bound so a failing run ends instead of hanging the suite.
+                self.alive = False
+                return None
+            return _event("message.delta", {"text": "word "})
+
+    worker = _worker()
+    transport = _Streaming()
+    worker._transport = transport
+
+    assert worker._await_response(999, 0.2) is None
+    assert transport.reads < 10, f"{transport.reads} reads for a 0.2 s wait"
+
+
+def test_an_error_event_drops_the_held_connection():
+    """The server-side turn may still be running after an error event.
+
+    Its late frames would land in the next worker, so the connection is only
+    handed on when the turn ended cleanly.
+    """
+    from hermes_worker import HeldConnection
+
+    held = HeldConnection()
+    transport = _FakeTransport(
+        [
+            {"jsonrpc": "2.0", "id": 101, "result": {}},
+            _event("error", {"message": "provider exploded"}),
+        ]
+    )
+    held.keep(transport, "live-1")
+    failed: list[str] = []
+    worker = _worker(on_failed=failed.append)
+    worker._held = held
+
+    worker.run()
+
+    assert failed == ["provider exploded"]
+    assert held.take() == (None, "")
+    assert transport.closed is True
+
+
+def test_a_refused_prompt_drops_the_held_connection():
+    from hermes_worker import HeldConnection
+
+    held = HeldConnection()
+    transport = _FakeTransport([{"jsonrpc": "2.0", "id": 101, "error": {"message": "busy"}}])
+    held.keep(transport, "live-1")
+    worker = _worker()
+    worker._held = held
+
+    worker.run()
+
+    assert held.take() == (None, "")
+
+
+def test_a_closed_stdio_transport_still_waits_on_receive(tmp_path):
+    """A caller polling a dead pipe must not spin at full speed.
+
+    receive used to skip its wait once the stream had closed, so every loop
+    that did not check connected() on each None ran flat out.
+    """
+    transport = hermes_backend.StdioTransport(str(tmp_path))
+    with transport._frames_ready:
+        transport._closed = True
+    started = time.monotonic()
+    for _ in range(10):
+        assert transport.receive(0.05) is None
+    assert time.monotonic() - started >= 0.4
+
+
+def test_a_bracketed_ipv6_host_keeps_its_one_port():
+    assert hermes_backend.remote_ws_url("[::1]:9300") == "ws://[::1]:9300/api/ws"
+    assert hermes_backend.remote_ws_url("[::1]") == "ws://[::1]:9119/api/ws"
+
+
+def test_a_secure_remote_connection_uses_the_packaged_trust_store(monkeypatch):
+    """The frozen macOS build ships an empty OpenSSL store, so wss failed there."""
+    from certificates import certificate_context
+
+    opened = {}
+
+    class _FakeSocket:
+        def recv(self):
+            raise OSError("closed")
+
+        def close(self):
+            return None
+
+    def _fake_create(url, timeout=None, **kwargs):
+        opened["kwargs"] = kwargs
+        return _FakeSocket()
+
+    monkeypatch.setitem(
+        sys.modules, "websocket", types.SimpleNamespace(create_connection=_fake_create)
+    )
+    transport = hermes_backend.WebSocketTransport("wss://box:9119/api/ws", "k", "token", "")
+    transport.start()
+    transport.close()
+
+    assert opened["kwargs"]["sslopt"]["context"] is certificate_context()
+
+
+def test_the_password_login_uses_the_packaged_trust_store(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    from certificates import certificate_context
+
+    handlers: list = []
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            raise urllib.error.URLError("no network in this test")
+
+    def _build(*given):
+        handlers.extend(given)
+        return _Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", _build)
+    raised = False
+    try:
+        hermes_backend.mint_ws_ticket("wss://box:9119/api/ws", "someone", "pw")
+    except OSError:
+        raised = True
+
+    assert raised
+    contexts = [h._context for h in handlers if isinstance(h, urllib.request.HTTPSHandler)]
+    assert contexts == [certificate_context()]
+
+
+def test_the_wsl_history_probes_stay_off_the_screen(monkeypatch):
+    """Every WSL child of the windowed build needs CREATE_NO_WINDOW."""
+    _reset_wsl_cache(monkeypatch)
+    monkeypatch.setattr(hermes_backend, "_WSL_STATE_DB", None, raising=False)
+    monkeypatch.setattr(hermes_backend, "_WSL_STATE_DB_CHECKED", False, raising=False)
+    monkeypatch.setattr(hermes_backend.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(hermes_backend, "wsl_exe", lambda: "wsl.exe")
+    seen: list[dict] = []
+
+    def _run(command, **kwargs):
+        seen.append(kwargs)
+        return _completed("/home/u/.hermes/state.db" if "state.db" in command[-1] else "[]")
+
+    monkeypatch.setattr(hermes_backend.subprocess, "run", _run)
+
+    assert hermes_backend.wsl_sqlite_query("select 1") == []
+    assert len(seen) == 2
+    assert all(kwargs.get("creationflags") == 0x08000000 for kwargs in seen)

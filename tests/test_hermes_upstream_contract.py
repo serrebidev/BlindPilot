@@ -81,32 +81,6 @@ def test_every_worker_accepts_the_same_window_callbacks() -> None:
     assert not missing, f"HermesWorker does not accept: {missing}"
 
 
-def test_hermes_never_calls_the_question_callback() -> None:
-    """Accepting it is not the same as pretending to support it.
-
-    Hermes' gateway protocol has no mid-turn question, and BackendInfo says so.
-    Storing the callback is how the worker stays constructible; calling it would
-    mean inventing a question nobody asked.
-    """
-    calls: list[object] = []
-    worker = HermesWorker(
-        "hello",
-        None,
-        ".",
-        "auto",
-        on_session=_noop,
-        on_started=_noop,
-        on_activity=_noop,
-        on_complete=_noop,
-        on_failed=_noop,
-        on_done=_noop,
-        on_question=lambda *a, **k: calls.append(a),
-    )
-    # Nothing has run the turn, and nothing should have asked anything either.
-    assert calls == []
-    assert worker._on_question is not None
-
-
 def test_hermes_is_registered_everywhere_a_backend_has_to_be() -> None:
     """A merge that resolves a conflict by choosing one side drops Hermes here.
 

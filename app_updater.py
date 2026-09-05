@@ -30,6 +30,9 @@ from certificates import open_url
 GITHUB_REPOSITORY = "serrebidev/BlindPilot"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 MAX_UPDATE_BYTES = 750 * 1024 * 1024
+# Every file the updater leaves in the temp folder starts with this, so
+# sweep_temporary_files can find them.
+TEMPORARY_PREFIX = "BlindPilot-update-"
 _ALLOWED_DOWNLOAD_HOSTS = ("github.com", "githubusercontent.com")
 
 
@@ -263,7 +266,7 @@ def download_update(
     expected = release.sha256 or _checksum_from_sidecar(release, current_version, opener)
     # Keep the published extension: an installer has to stay a .exe to be run.
     suffix = ".exe" if release.asset_name.casefold().endswith(".exe") else ".zip"
-    fd, temporary_name = tempfile.mkstemp(prefix="BlindPilot-update-", suffix=suffix)
+    fd, temporary_name = tempfile.mkstemp(prefix=TEMPORARY_PREFIX, suffix=suffix)
     os.close(fd)
     temporary = Path(temporary_name)
     digest = hashlib.sha256()
@@ -316,9 +319,9 @@ function Write-Log([string]$Message) {
 
 function Save-Failure([string]$Message) {
     # BlindPilot is not running to be told, so the reason is left where its next
-    # start will find it. Without this a failed update is silent forever, which
-    # is exactly how this went unnoticed before.
-    try { Set-Content -LiteralPath $StatusFile -Value @($Message, $LogFile) } catch { }
+    # start will find it. UTF8, because Windows PowerShell's default is the
+    # ANSI code page and the reader expects UTF-8.
+    try { Set-Content -LiteralPath $StatusFile -Value @($Message, $LogFile) -Encoding UTF8 } catch { }
 }
 
 function Get-Blockers([int]$TargetPid, [string]$Folder, [bool]$Deep = $false) {
@@ -686,8 +689,10 @@ try {
         "/NOCANCEL",
         "/CLOSEAPPLICATIONS",
         "/FORCECLOSEAPPLICATIONS",
-        ("/LOG=" + $setupLog),
-        ("/DIR=" + $InstallDir)
+        # Quoted by hand. Windows PowerShell joins this list with spaces and
+        # quotes nothing, so a path with a space arrives as two arguments.
+        ('/LOG="' + $setupLog + '"'),
+        ('/DIR="' + $InstallDir + '"')
     ) -Wait -PassThru
     if ($run.ExitCode -ne 0) {
         throw (Get-InstallerFailure $run.ExitCode $setupLog)
@@ -933,7 +938,6 @@ def macos_install_problem(app_path: Path) -> str:
     return ""
 
 
-TEMPORARY_PREFIX = "BlindPilot-update-"
 STATUS_FILE_NAME = "BlindPilot-update-status.txt"
 
 
@@ -949,7 +953,8 @@ def pending_failure() -> tuple[str, str]:
     the last update did not fail.
     """
     try:
-        lines = _status_path().read_text(encoding="utf-8", errors="replace").splitlines()
+        # utf-8-sig, because Windows PowerShell writes UTF8 with a byte order mark.
+        lines = _status_path().read_text(encoding="utf-8-sig", errors="replace").splitlines()
     except OSError:
         return "", ""
     reason = lines[0].strip() if lines else ""
@@ -991,10 +996,9 @@ def _windows_helper_flags() -> int:
     """Creation flags for a helper that must outlive the process starting it.
 
     DETACHED_PROCESS must never be used here. It leaves PowerShell with no
-    console at all, and Windows PowerShell then exits reporting success without
-    ever running the script — which is why no BlindPilot update since 0.3.0 has
-    installed. CREATE_NO_WINDOW already gives the helper a console of its own
-    that is never shown, which is what was actually wanted.
+    console at all, and Windows PowerShell then exits reporting success
+    without running the script. CREATE_NO_WINDOW gives the helper a console
+    of its own that is never shown.
     """
     return (
         getattr(subprocess, "CREATE_NO_WINDOW", 0)
