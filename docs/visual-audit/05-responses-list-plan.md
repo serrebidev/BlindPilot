@@ -513,7 +513,8 @@ def test_a_row_is_named_by_its_label_and_described_by_its_position():
     acc = cl.RowsAccessible(_FakeList(["first row", "second row", "third row"]))
     assert acc.GetName(0) == (wx.ACC_OK, "Responses")
     assert acc.GetName(2) == (wx.ACC_OK, "second row")
-    assert acc.GetDescription(2) == (wx.ACC_OK, "2 of 3")
+    # The native list speaks no position on NVDA, so neither may this one.
+    assert acc.GetDescription(2) == (wx.ACC_OK, "")
     assert acc.GetDescription(0) == (wx.ACC_OK, "")
 
 
@@ -607,9 +608,9 @@ class RowsAccessible(wx.Accessible):
         return (wx.ACC_OK, rows[childId - 1].label)
 
     def GetDescription(self, childId):
-        if childId == 0:
-            return (wx.ACC_OK, "")
-        return (wx.ACC_OK, f"{childId} of {self._count()}")
+        # Spoken after the name. The native list says nothing here, and the
+        # baseline recording is the contract, so this stays empty.
+        return (wx.ACC_OK, "")
 
     def GetState(self, childId):
         focused = self._ctrl.HasFocus()

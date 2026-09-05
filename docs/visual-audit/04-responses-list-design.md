@@ -25,8 +25,10 @@ native list gives today.
 
 ## What stays the same
 
-- Every string a screen reader hears. Row labels are unchanged, and the
-  position is spoken as "N of M" as it is now.
+- Every string a screen reader hears. Row labels are unchanged. The native
+  list does not speak a position on this NVDA even with position reporting
+  on (recorded 2026-09-05, `nvda-list-before.json`), so the new list does not
+  add one: the accessible description is empty.
 - Every key. Up, Down, Home, End, Ctrl+Up, Ctrl+Down, Enter for Read View,
   the Menu key and context gesture for the row menu, Tab and Shift+Tab out
   of the control, and the search filter.
@@ -106,7 +108,7 @@ indexes; 0 is the list itself.
 |---|---|---|
 | `GetRole` | `wx.ROLE_SYSTEM_LIST` | `wx.ROLE_SYSTEM_LISTITEM` |
 | `GetName` | the control's name | `rows[n-1].label` |
-| `GetDescription` | "" | `f"{n} of {count}"` |
+| `GetDescription` | "" | "" (a position here would be spoken, and the native list speaks none) |
 | `GetState` | focusable, plus focused when the control has focus | selectable and focusable, plus selected and focused for the selected row, plus invisible when scrolled out |
 | `GetLocation` | screen rect of the control | screen rect of the row from `GetItemRect` |
 | `GetChildCount` | row count | not called |
@@ -180,7 +182,7 @@ the position within the filtered list, as now.
 
 Unit, on stubs, no display needed:
 
-- `RowsAccessible` over a fake control: name, description "N of M", role,
+- `RowsAccessible` over a fake control: name, empty description, role,
   states for the selected and unselected row and for the list, `GetFocus`,
   `GetSelections`, `Navigate` at both ends, `HitTest` outside any row.
 - The measure cache: same width hits the cache, a resize clears it, `Set`
