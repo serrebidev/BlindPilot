@@ -2277,6 +2277,12 @@ class CodexWorker(threading.Thread):
         # to name it by: between the two, a turn is running that a cancel
         # cannot address.
         self._turn_requested = False
+        # Held for the instant in which asking for a turn and hearing that this
+        # one was stopped decide which of them happened first. Whoever takes it
+        # first wins outright: either the turn is asked for and the cancel that
+        # follows knows there is something to stop, or the cancel is in and no
+        # turn is ever asked for. Nothing is sent or waited on under it.
+        self._start_gate = threading.Lock()
         # Set once `_turn_id` will not change again -- either because the turn
         # has been named or because this turn has stopped looking. A cancel on
         # another thread waits on it rather than polling.
@@ -2374,7 +2380,15 @@ class CodexWorker(threading.Thread):
         # had already ended when Stop was pressed" and never "the turn ended
         # because of this cancel".
         finished = self._finished.is_set()
-        self._cancelled = True
+        with self._start_gate:
+            # Under the gate, so that a turn about to be asked for either sees
+            # this and is never asked for, or was asked for first and is read
+            # as running below. Between the two there is no third state in
+            # which Codex is starting a turn nobody here knows about.
+            self._cancelled = True
+            server = self._server
+            thread_id = self._thread_id
+            asked_for_a_turn = self._turn_requested
         self._accepting_input.clear()
         if finished:
             # The answer landed while Stop was on its way. There is nothing to
@@ -2383,11 +2397,11 @@ class CodexWorker(threading.Thread):
             # `_release` has already handed back the watch whose completion
             # the reader set, so a fresh one would never be set at all.
             return
-        server = self._server
-        thread_id = self._thread_id
-        if server is None or not thread_id:
-            # Nothing has been asked of Codex about this conversation: a turn
-            # is only ever started after the reply that names its thread.
+        if server is None or not thread_id or not asked_for_a_turn:
+            # No turn of this conversation's has been asked for, and the gate
+            # means none ever will be: the turn reads the flag set above before
+            # it asks. So there is nothing running to stop, and nothing to give
+            # up a perfectly good conversation over.
             return
         turn_id = self._turn_id
         if not turn_id and self._turn_requested:
@@ -2407,6 +2421,35 @@ class CodexWorker(threading.Thread):
             return
         if not server.interrupt(thread_id, turn_id, _CODEX_INTERRUPT_VERIFY_SECONDS):
             self._abandon(thread_id, turn_id)
+
+    def _ask_for_a_turn(self) -> bool:
+        """Commit to starting a turn, unless Stop got here first.
+
+        The reply that names the conversation and the Stop that arrives while
+        this turn is waiting for it are on different threads, and pressing
+        Escape within a second of Send puts them in that order. Reading the
+        reply and asking for a turn anyway leaves the turn running under a tab
+        that has said it stopped -- and, because nothing here has a name to
+        interrupt or give up, leaves its whole answer to arrive in the middle
+        of the next prompt's.
+
+        The cheapest place to close that is before the request goes out. A turn
+        that is never asked for needs no interrupt, and costs the conversation
+        nothing: the next prompt resumes it in the ordinary way rather than
+        paying for a resume from disk it did not need.
+
+        Returning True says the request is going out, so `cancel` from here on
+        finds something running and stops it by the usual route.
+        """
+        with self._start_gate:
+            if self._cancelled:
+                return False
+            # Set before the send, not after the reply: from here on a turn may
+            # be running that a cancel has no name for, and treating that as
+            # "nothing was started" is exactly how one gets left running under
+            # a tab that says it stopped.
+            self._turn_requested = True
+        return True
 
     def _abandon(self, thread_id: str, turn_id: str = "") -> None:
         """Give up this conversation, and warn whoever resumes it next.
@@ -2681,7 +2724,8 @@ class CodexWorker(threading.Thread):
                     # has something to stop -- but the reply to this request is
                     # empty, so nothing but the turn's own notifications will
                     # ever name it.
-                    self._turn_requested = True
+                    if not self._ask_for_a_turn():
+                        return
                     inbox.put(_CODEX_ASKED)
                     self._expect(compact_request)
                     self._send(
@@ -2705,11 +2749,11 @@ class CodexWorker(threading.Thread):
                 if self._effort:
                     params["effort"] = self._effort
                 turn_request = self._next_id()
-                # Set before the send, not after the reply: from here on a turn
-                # may be running that a cancel has no name for, and treating
-                # that as "nothing was started" is exactly how one gets left
-                # running under a tab that says it stopped.
-                self._turn_requested = True
+                if not self._ask_for_a_turn():
+                    # Stopped while waiting to be told this conversation's
+                    # name. Nothing is running yet, and this is the last
+                    # moment at which that is still true.
+                    return
                 inbox.put(_CODEX_ASKED)
                 self._expect(turn_request)
                 self._send({"method": "turn/start", "id": turn_request, "params": params})

@@ -1497,6 +1497,176 @@ def test_a_turn_stopped_before_it_was_named_is_still_stopped(monkeypatch):
     assert proc.killed is False
 
 
+class _StoppedBeforeTheThreadIsNamed(_FakeProc):
+    """Escape lands before the reply that names the conversation.
+
+    The cancel reads an empty thread id -- nothing has been asked about this
+    conversation yet -- while the turn, sitting in the read that reply is about
+    to wake, is one statement away from asking for a turn anyway. So this
+    script holds the reply back until the cancel has landed, then plays
+    whatever the turn does next, and then the next prompt in the same tab.
+
+    Requests are read from where the last one was found rather than from the
+    start, because both turns ask for a `turn/start` and the second must not
+    be answered with the first's id.
+    """
+
+    def __init__(self, cancel, cancelled, gone) -> None:
+        super().__init__()
+        self._cancel = cancel
+        self._cancelled = cancelled
+        self._gone = gone
+        self._read = 0
+        self.cancelling: threading.Thread | None = None
+        self.orphan_started = False
+        self.decided = threading.Event()
+        self.stdout = self._script()
+
+    def _seen(self, method: str) -> dict | None:
+        written = self.stdin.written
+        while self._read < len(written):
+            message = json.loads(written[self._read])
+            self._read += 1
+            if message.get("method") == method:
+                return message
+        return None
+
+    def _asked(self, method: str, timeout: float = 10.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            message = self._seen(method)
+            if message is not None:
+                return message
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the worker never sent {method}")
+            time.sleep(0.005)
+
+    def _asked_before_it_left(self, method: str) -> dict | None:
+        """That request, or None because the turn ended without making it."""
+        last_look = False
+        deadline = time.monotonic() + 10.0
+        while True:
+            message = self._seen(method)
+            if message is not None:
+                return message
+            # Looked at once more after the turn has gone: the request and the
+            # ending can both land between a scan and the check that follows.
+            if last_look or time.monotonic() >= deadline:
+                return None
+            last_look = self._gone()
+            time.sleep(0.005)
+
+    def _until_cancelled(self) -> None:
+        deadline = time.monotonic() + 10.0
+        while not self._cancelled():
+            assert time.monotonic() < deadline, "the cancel never landed"
+            time.sleep(0.005)
+
+    def _script(self):
+        start = self._asked("thread/start")
+        self.cancelling = threading.Thread(target=self._cancel, daemon=True)
+        self.cancelling.start()
+        self._until_cancelled()
+        yield json.dumps({"id": start["id"], "result": {"thread": {"id": "thread-1"}}})
+        orphan = self._asked_before_it_left("turn/start")
+        self.orphan_started = orphan is not None
+        self.decided.set()
+        if orphan is not None:
+            # Codex took the turn and is generating. Only its name was late.
+            yield json.dumps({"id": orphan["id"], "result": {"turn": {"id": "turn-1"}}})
+        # ----- the next prompt in the same tab -----
+        resume = self._asked("thread/resume")
+        yield json.dumps({"id": resume["id"], "result": {"thread": {"id": "thread-1"}}})
+        second = self._asked("turn/start")
+        if orphan is not None:
+            # The stopped turn, still running, finishing its answer into the
+            # middle of somebody else's.
+            yield json.dumps(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {
+                            "id": "m0",
+                            "type": "agentMessage",
+                            "text": "what the stopped turn was saying",
+                        },
+                    },
+                }
+            )
+        yield json.dumps({"id": second["id"], "result": {"turn": {"id": "turn-2"}}})
+        yield json.dumps(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-2",
+                    "itemId": "m1",
+                    "delta": "the answer",
+                },
+            }
+        )
+        yield json.dumps(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-2", "status": "completed"},
+                },
+            }
+        )
+
+
+def test_a_turn_stopped_before_its_thread_was_named_is_not_left_running(monkeypatch):
+    """Escape within a second of Send, against a real Codex, end to end.
+
+    `cancel` saw no thread id and returned on the reasoning that a turn is
+    only ever started after the reply that names its thread -- true, and not
+    the same as nothing being in flight. The turn asked for one the moment
+    that reply landed, so nothing was interrupted, nothing was given up, and
+    the whole of the stopped turn's answer arrived in the next prompt's.
+
+    The poll is stretched so that the reply, and not the timeout, is what
+    wakes the turn: that is the interleaving the live run hit, and at a tenth
+    of a second it is whichever gets there first.
+    """
+    monkeypatch.setattr(agent_backends, "_CODEX_POLL_SECONDS", 5.0)
+    later: list = []
+    proc = _StoppedBeforeTheThreadIsNamed(
+        lambda: later[0].cancel(),
+        lambda: later[0]._cancelled,
+        lambda: later[0]._finished.is_set(),
+    )
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _b: "codex")
+    monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda b: b)
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _b: {})
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: proc)
+    stopped = _bare_worker()
+    later.append(stopped)
+
+    stopped.run()
+    assert proc.cancelling is not None
+    proc.cancelling.join(timeout=5)
+    assert proc.decided.wait(10), "the script never settled whether a turn was started"
+
+    _next_turn, completed, failures, activity = _turn(proc, monkeypatch, session_id="thread-1")
+
+    assert failures == [], failures
+    assert completed == ["the answer"], "the stopped turn's answer was adopted by the next one"
+    spoken = [value for kind, value in activity if kind == "assistant"]
+    assert "what the stopped turn was saying" not in spoken
+    if proc.orphan_started:
+        # A turn that did get started has to have been stopped by name or the
+        # conversation given up; the tab said it stopped either way.
+        sent = [json.loads(line) for line in proc.stdin.written]
+        interrupts = [m for m in sent if m.get("method") == "turn/interrupt"]
+        assert interrupts or stopped.abandoned_thread == "thread-1", (
+            "a turn was started after Stop and neither interrupted nor given up"
+        )
+    assert proc.killed is False
+
+
 def test_a_server_request_is_not_mistaken_for_the_reply_naming_the_turn():
     """Codex's own requests carry ids from the other direction's namespace.
 
