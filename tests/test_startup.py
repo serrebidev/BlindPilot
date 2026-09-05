@@ -297,6 +297,8 @@ def test_the_configured_appearance_is_applied_before_any_window_exists(monkeypat
     import blindpilot_app
 
     events: list[object] = []
+    if not hasattr(blindpilot_app.wx.App, "Appearance"):
+        pytest.skip("this wxPython has no appearance API")
     appearance_enum = blindpilot_app.wx.App.Appearance
     result_enum = blindpilot_app.wx.App.AppearanceResult
 

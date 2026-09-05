@@ -261,6 +261,16 @@ def test_the_appearance_setting_round_trips_through_settings(monkeypatch):
 
 
 def test_appearance_for_maps_the_config_value_to_the_wx_enum():
+    """The enum is read off the running wx, where it exists.
+
+    wxPython gained wx.App.Appearance late; a build without it cannot apply
+    an appearance at all, and main() already notes that and carries on. The
+    mapping is only exercised where the enum exists rather than pretending
+    every build has it.
+    """
+    if not hasattr(wx.App, "Appearance"):
+        pytest.skip("this wxPython has no appearance API")
+    assert wx.App.Appearance.System is not None
     assert app._appearance_for("system") == wx.App.Appearance.System
     assert app._appearance_for("light") == wx.App.Appearance.Light
     assert app._appearance_for("dark") == wx.App.Appearance.Dark
