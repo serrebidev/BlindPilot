@@ -349,9 +349,10 @@ def test_the_chosen_model_is_reached_on_the_marker_less_screen(monkeypatch):
     assert turn.completed == ["Here is the answer."], turn.failures
 
 
-def test_a_dropped_session_logged_mid_turn_ends_the_turn(monkeypatch, tmp_path):
-    """A resumed chat that logs the drop while the turn is running is not
-    waited out either."""
+def test_a_dropped_session_logged_mid_turn_gets_patience_then_ends_the_turn(monkeypatch, tmp_path):
+    """A resumed chat that logs the drop mid-turn is watched for a moment —
+    the session can rejoin on its own — and only a drop that outlasts the
+    patience ends the turn."""
     turn = _Turn()
     worker = _worker(turn, model="z-ai/glm-5.3-flash")
     _stub_cli(monkeypatch)
@@ -397,6 +398,7 @@ def test_a_dropped_session_logged_mid_turn_ends_the_turn(monkeypatch, tmp_path):
     worker._write = write
     monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(spawn))
     monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", 60)
+    monkeypatch.setattr(agent_backends, "_FREEBUFF_DROP_PATIENCE_SECONDS", 0.05)
 
     worker._do_run()
 
@@ -421,3 +423,118 @@ def test_the_run_status_reader_still_recognises_an_ordinary_turn(tmp_path):
 
     (chat / "log.jsonl").write_text(REJOIN_LOG, encoding="utf-8")
     assert _freebuff_run_status(chat) == "disconnected"
+
+
+def _hold_turn_state():
+    """State shared by the boot-hold tests."""
+    return {"sent": False, "phase": 0}
+
+
+def _hold_spawn(worker, state):
+    """A fake terminal that paints a ready composer until the message is
+    typed, then the working and done frames. The composer is up the whole
+    time the hold is deciding — that is the point of the hold: 0.0.168
+    paints it before the boot behind it is finished."""
+
+    def write(text):
+        if text == "do the work":
+            state["sent"] = True
+        return True
+
+    worker._write = write
+
+    def spawn(_args):
+        def read(timeout):
+            if timeout == 0:
+                return ""  # nothing is pending between frames
+            if not state["sent"]:
+                return _frame(READY)
+            state["phase"] += 1
+            return _frame(WORKING) if state["phase"] <= 5 else _frame(DONE)
+
+        return read
+
+    return spawn
+
+
+def _stub_boot_ready(monkeypatch, ready):
+    """Stand in for the boot readiness check, which reads the chat's own log
+    on a real run; ``ready`` says what that log would show."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_freebuff_boot_ready",
+        lambda _cwd, _before, _chat_path, _offset: ready(),
+    )
+    monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", lambda _cwd: {})
+    monkeypatch.setattr(agent_backends, "_freebuff_chat_path", lambda _cwd, _sid: None)
+
+
+def test_the_message_is_held_until_the_boot_reconnects(monkeypatch):
+    """0.0.168 paints its composer before its runtime has reconnected, and a
+    message given to that composer is lost silently. The composer being up
+    therefore does not mean the message goes in: it is held, said out loud,
+    and sent the moment the boot's reconnection is seen."""
+    turn = _Turn()
+    worker = _worker(turn)
+    _stub_cli(monkeypatch)
+    state = _hold_turn_state()
+    checks = {"n": 0}
+
+    def reconnects_after_a_moment():
+        # The reconnection line lands a beat after the composer: a few
+        # readiness checks say no before the log finally says yes.
+        checks["n"] += 1
+        return checks["n"] > 3
+
+    _stub_boot_ready(monkeypatch, reconnects_after_a_moment)
+    monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(_hold_spawn(worker, state)))
+    monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", 60)
+
+    worker._do_run()
+
+    assert turn.completed == ["Here is the answer."], turn.failures
+    assert turn.failures == []
+    assert any("holding the message" in text for _kind, text in turn.activity), turn.activity
+
+
+def test_a_boot_that_never_reconnects_ends_the_hold(monkeypatch):
+    """A hold with no recovery in sight must not become the old silent hour:
+    it says the rejoin words after the startup-silence budget."""
+    turn = _Turn()
+    worker = _worker(turn)
+    _stub_cli(monkeypatch)
+    state = _hold_turn_state()
+    _stub_boot_ready(monkeypatch, lambda: False)
+    monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(_hold_spawn(worker, state)))
+    monkeypatch.setattr(agent_backends, "_FREEBUFF_STARTUP_SILENCE_SECONDS", 0.1)
+    monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", 60)
+
+    worker._do_run()
+
+    assert turn.failures, turn.completed
+    assert "Quit and reopen FreeBuff" in turn.failures[0], turn.failures
+    assert any("holding the message" in text for _kind, text in turn.activity), turn.activity
+
+
+def test_a_normal_boot_does_not_hold_the_message(monkeypatch):
+    """The line the hold watches for — "session over" — is also the first
+    line of every healthy boot, answered within a second by "Reconnection
+    detected". A boot like that sends straight away, with no hold notice."""
+    turn = _Turn()
+    worker = _worker(turn, model="z-ai/glm-5.3-flash")
+    _stub_cli(monkeypatch)
+    state = _hold_turn_state()
+    _stub_boot_ready(monkeypatch, lambda: True)  # the reconnection is in the log
+    monkeypatch.setattr(
+        agent_backends,
+        "freebuff_model_options",
+        lambda: (list(CATALOG), [], CATALOG[0], "", ""),
+    )
+    monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(_hold_spawn(worker, state)))
+    monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", 60)
+
+    worker._do_run()
+
+    assert turn.completed == ["Here is the answer."], turn.failures
+    assert turn.failures == []
+    assert not any("holding the message" in text for _kind, text in turn.activity)
