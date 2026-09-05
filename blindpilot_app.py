@@ -2972,10 +2972,10 @@ def _claude_questions(raw: list) -> tuple[Question, ...]:
 
 
 # How long a CLI that did *not* finish its turn may say nothing before
-# BlindPilot stops waiting for it. Only that case waits: a turn that produced
-# an answer is not waited on at all (see `_reap_in_background`), because the
-# exit code of a process that has already said what it came to say changes
-# nothing anybody hears.
+# BlindPilot stops waiting for it. Only that case waits: a turn that reached
+# its result is not waited on at all (see `_reap_in_background`), because the
+# exit code of a process that has already finished its turn changes nothing
+# anybody hears.
 #
 # Here the wait earns its keep. A CLI that died mid-turn is usually writing the
 # reason to stderr, and that reason is the only thing BlindPilot can offer, so
@@ -3580,6 +3580,19 @@ class ClaudeWorker(threading.Thread):
             elif etype == "result":
                 complete = True
                 still_working = self._background_agents_running(event, still_working)
+                queued = self._count(event.get("queued_turn_count"))
+                if not event.get("is_error") and queued:
+                    # A resumed CLI can have a turn of its own to run first,
+                    # such as the notice about a background command its last
+                    # process left unfinished. That turn's result arrives
+                    # before ours and says nothing. Reading it as the end of
+                    # our turn closed stdin with the prompt still queued
+                    # inside the CLI, and thirty seconds later the CLI was
+                    # stopped and the stop reported as the answer.
+                    logging.getLogger("blindpilot.claude").info(
+                        "result for another turn: %d still queued, reading on", queued
+                    )
+                    continue
                 if not event.get("is_error") and still_working:
                     # The turn is over, the run is not: agents it started in
                     # the background are still going, and what they find comes
@@ -3619,8 +3632,8 @@ class ClaudeWorker(threading.Thread):
                 break
 
         self._close_stdin()
-        if complete and text_parts and not self._cancelled:
-            # The turn answered, so how this process ends cannot change what is
+        if complete and not self._cancelled:
+            # The turn ended, so how this process ends cannot change what is
             # said. It is never waited for and never killed: shutting down means
             # writing the session file the next resume reads and stopping MCP
             # servers rather than cutting them off, and interrupting that to
@@ -3636,6 +3649,13 @@ class ClaudeWorker(threading.Thread):
                 self._on_activity("notice", self._ending_note(rc, detail))
             elif rc is None:
                 self._reap_in_background()
+            if not text_parts:
+                # Completed, with nothing to say. This used to be waited on
+                # for thirty seconds and then killed, and the kill was
+                # reported as the reason the turn failed.
+                self._on_activity(
+                    "notice", "Claude Code finished the turn without saying anything."
+                )
             self._on_complete("\n\n".join(text_parts).strip())
             return
 

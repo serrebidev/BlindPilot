@@ -404,6 +404,65 @@ def test_a_result_without_agent_counts_does_not_end_a_run_still_working():
     assert completed and not failures
 
 
+def test_a_result_for_a_queued_turn_does_not_end_the_run():
+    """The first result on the stream is not always the result of our turn.
+
+    A resumed CLI can have a turn of its own to run first, such as the notice
+    about a background command its previous process left behind. That turn
+    answers with nothing and its result carries the count of turns still
+    queued, ours among them. Reading it as our result closed stdin with the
+    prompt still inside the CLI, and the kill that followed was reported as
+    the answer.
+    """
+
+    def stdout():
+        yield _line({"type": "result", "queued_turn_count": 1})
+        yield _line(ANSWER)
+        yield _line({"type": "result", "queued_turn_count": 0})
+
+    proc = _FakeProc(stdout())
+    _activity, completed, failures, _raised, finished = _drive(proc)
+
+    assert finished
+    assert not failures, failures
+    assert completed == ["the answer"], completed
+    assert not proc.killed
+
+
+class _LingeringProc(_FakeProc):
+    """A CLI that has finished its turn and is slow to exit."""
+
+    def __init__(self, stdout_iter):
+        super().__init__(stdout_iter, returncode=None)
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            time.sleep(timeout or 0)
+            raise subprocess.TimeoutExpired("claude", timeout)
+        return self.returncode
+
+
+def test_a_completed_turn_with_no_answer_is_not_waited_on_and_killed(monkeypatch):
+    """A turn that reached its result without saying anything is over.
+
+    It was treated as a turn that never finished: waited on for thirty
+    seconds, killed, and the kill announced as why the turn failed. The
+    person heard that BlindPilot had stopped Claude Code, over a turn that
+    had ended normally.
+    """
+    import blindpilot_app
+
+    monkeypatch.setattr(blindpilot_app, "_SHUTDOWN_QUIET_SECONDS", 0.2)
+    proc = _LingeringProc(iter([_line(RESULT)]))
+    activity, completed, failures, _raised, finished = _drive(proc)
+
+    assert finished
+    assert not proc.killed, "a finished turn was killed for being slow to exit"
+    assert not failures, failures
+    assert completed == [""], completed
+    assert any("without saying anything" in text for _kind, text in activity), activity
+
+
 def test_an_error_result_arriving_after_an_answer_keeps_the_answer():
     """Waiting for agents made a late error result reachable for the first time.
 
