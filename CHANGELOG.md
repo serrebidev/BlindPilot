@@ -2,6 +2,22 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.21.5 - 2026-09-05
+
+- Stopping Codex or opencode on Windows ends their whole process tree instead of leaving every MCP child orphaned, and the taskkill path is built for Windows separators so the tree kill works wherever it runs.
+- A Codex that cannot resume a conversation costs that tab its session, and the next message starts a new conversation, instead of taking the shared app-server down with it and breaking every other tab.
+- Installing or updating Codex drops the held app-server first, because Windows refuses to overwrite a running exe.
+- A prewarmed FreeBuff terminal nobody claims is closed when its fifteen-minute TTL runs out.
+- A Hermes question with no preset options can now be answered; the text box is offered from the start.
+- Enter on a Hermes conversation dialog's Cancel button opened that conversation instead of doing nothing.
+- A Chat mode that cannot open falls back to Agent mode completely instead of leaving the window half switched, and agent-only commands are greyed out in Chat mode instead of acting on the hidden notebook.
+- A resumed Claude CLI can emit a result for a leftover turn before ours; the worker took that as the end of our turn, closed stdin with the prompt still queued, then killed the CLI after thirty seconds and reported the kill as the answer. It now reads on while turns are still queued.
+- The silent updater quotes the installer's /DIR= and /LOG= paths, so an account name with a space no longer breaks updates, and a failed update's status file survives accented characters.
+- Remote Hermes connections verify certificates through the packaged trust store, and a held connection is dropped after an abnormal end instead of being reused.
+- Chat answers cut off at the model's length limit say so, per-choice OpenRouter errors are raised instead of swallowed, and HTML blocks and markdown tables are read as rows.
+- Tests no longer write into the real %APPDATA%, damaged AccessibleAI databases are skipped without leaving a half copy, and the warning-clean sweep compiles only the repository's own sources.
+- README rewritten without stale claims, CHANGELOG cut from 19,000 words to 4,400 keeping every version, the macOS icon's retina sizes corrected, and the September audit reports kept in docs/code-audit/.
+
 ## v0.21.4 - 2026-09-04
 
 - Codex keeps one app server running for the whole window instead of starting a new process for every message. The first message starts it, later messages and other tabs reuse it, and it is stopped when BlindPilot quits.
