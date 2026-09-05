@@ -4276,7 +4276,13 @@ class FreebuffWorker(threading.Thread):
         except ImportError:
             self._fail("FreeBuff support needs pyte. Reinstall BlindPilot dependencies.")
             return
-        screen = pyte.HistoryScreen(180, 60, history=4000)
+        from freebuff_screen import repaired_history_screen
+
+        # pyte 0.8.2 crashes with "string index out of range" reading a screen
+        # that holds an orphaned wide-character stub -- a redraw that repaints
+        # the lead cell of an emoji or CJK text without its blank filler. See
+        # freebuff_screen.
+        screen = repaired_history_screen(180, 60, history=4000)
         stream = pyte.Stream(screen)
         sent = False
         started = False
@@ -4382,7 +4388,7 @@ class FreebuffWorker(threading.Thread):
                 if replacement is None:
                     return
                 read = replacement
-                screen = pyte.HistoryScreen(180, 60, history=4000)
+                screen = repaired_history_screen(180, 60, history=4000)
                 stream = pyte.Stream(screen)
                 last_visible = ""
                 screen_dirty = False
