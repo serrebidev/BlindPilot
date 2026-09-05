@@ -488,6 +488,55 @@ def test_freebuff_prewarmed_terminal_is_dropped_once_it_is_too_old():
         agent_backends._freebuff_prewarm = None
 
 
+def test_a_prewarm_before_any_model_was_chosen_fits_the_turn_that_follows(monkeypatch):
+    # On a fresh install nothing has recorded a choice. The prewarm was keyed
+    # on "" while the turn resolved to the preferred model, so the waiting
+    # terminal was killed at take every time, and the "" also sent
+    # set_freebuff_model scanning the whole binary under the prewarm lock.
+    monkeypatch.setattr(agent_backends, "_freebuff_prewarm", None)
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
+    monkeypatch.setattr(agent_backends, "_read_freebuff_choice", lambda: "")
+    chosen: list[str] = []
+    monkeypatch.setattr(agent_backends, "set_freebuff_model", chosen.append)
+    monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", lambda _cwd: {})
+    terminal = object()
+    monkeypatch.setattr(
+        agent_backends, "_spawn_freebuff_pty", lambda *_args: (terminal, lambda _timeout: "")
+    )
+
+    agent_backends.prewarm_freebuff(".", None, "")
+    _wait_for(lambda: agent_backends._freebuff_prewarm is not None)
+    try:
+        taken = agent_backends._take_freebuff_prewarm(
+            ".", None, agent_backends.FREEBUFF_PREFERRED_MODEL
+        )
+    finally:
+        agent_backends._freebuff_prewarm = None
+
+    assert taken is not None and taken["pty"] is terminal
+    assert chosen == [agent_backends.FREEBUFF_PREFERRED_MODEL]
+
+
+def test_a_powershell_script_is_not_offered_as_a_cli(monkeypatch, tmp_path):
+    # Popen cannot run a .ps1 (WinError 193), so finding one is worse than
+    # finding nothing: every turn fails instead of the wizard offering to install.
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(agent_backends, "blindpilot_data_dir", lambda: tmp_path / "data")
+    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.setattr(agent_backends.shutil, "which", lambda _name: None)
+    managed, appdata = tmp_path / "data" / "npm", tmp_path / "appdata" / "npm"
+    for folder in (managed, appdata):
+        folder.mkdir(parents=True)
+        (folder / "codex.ps1").write_text("", encoding="utf-8")
+
+    assert agent_backends.find_backend_cli(BACKEND_CODEX) is None
+
+    (appdata / "codex.cmd").write_text("", encoding="utf-8")
+    assert agent_backends.find_backend_cli(BACKEND_CODEX) == str(appdata / "codex.cmd")
+
+
 def test_freebuff_chat_discovery_searches_all_project_buckets(monkeypatch, tmp_path):
     project_root = tmp_path / ".config" / "manicode" / "projects"
     chat = project_root / "different-git-root" / "chats" / "session-id"
@@ -2070,6 +2119,10 @@ def test_stopping_a_child_never_signals_blindpilots_own_group(monkeypatch):
     )
     # getpgid reports our group, not the child's — the child never got one.
     monkeypatch.setattr(agent_backends.os, "getpgid", lambda _pid: 4242, raising=False)
+    # On Windows the tree kill would otherwise run for real against pid 99.
+    monkeypatch.setattr(
+        agent_backends.subprocess, "run", lambda *_a, **_k: SimpleNamespace(returncode=0)
+    )
 
     class Child:
         pid = 99
@@ -2143,6 +2196,9 @@ def test_stopping_a_task_does_not_block_the_window(monkeypatch):
     # opt-in and the callers that used to wait are the only ones that still do.
     monkeypatch.setattr(agent_backends.os, "killpg", lambda *_a: None, raising=False)
     monkeypatch.setattr(agent_backends.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(
+        agent_backends.subprocess, "run", lambda *_a, **_k: SimpleNamespace(returncode=0)
+    )
     waited: list = []
 
     class Child:
@@ -2163,6 +2219,99 @@ def test_stopping_a_task_does_not_block_the_window(monkeypatch):
 
     agent_backends.end_process_group(Child(), timeout=2)
     assert waited == [2]
+
+
+class _Child:
+    """A running child with a pid, as end_process_group sees a Popen."""
+
+    pid = 99
+
+    def __init__(self) -> None:
+        self.killed = False
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_on_windows_a_child_is_stopped_with_its_whole_tree(monkeypatch):
+    # TerminateProcess ends one process. Codex's app-server has a dozen or
+    # more MCP children, and stopping only the parent left every one of them
+    # running in Task Manager with nobody to stop them.
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("SystemRoot", r"C:\Win")
+    ran: list[tuple[list, dict]] = []
+
+    def fake_run(argv, **kwargs):
+        ran.append((argv, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(agent_backends.subprocess, "run", fake_run)
+    child = _Child()
+
+    agent_backends.end_process_group(child)
+
+    ((argv, kwargs),) = ran
+    # The full path: a `taskkill` planted on PATH must not be what runs.
+    assert argv == [r"C:\Win\System32\taskkill.exe", "/T", "/F", "/PID", "99"]
+    assert kwargs.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW
+    assert child.killed, "the parent is still killed directly, in case taskkill missed it"
+
+
+def test_on_windows_a_tree_kill_that_fails_still_kills_the_child(monkeypatch):
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+
+    def broken_run(_argv, **_kwargs):
+        raise OSError("taskkill is missing")
+
+    monkeypatch.setattr(agent_backends.subprocess, "run", broken_run)
+    child = _Child()
+
+    agent_backends.end_process_group(child)
+
+    assert child.killed
+
+
+def test_off_windows_no_tree_kill_is_attempted(monkeypatch):
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(agent_backends.os, "killpg", lambda *_a: None, raising=False)
+    monkeypatch.setattr(agent_backends.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(agent_backends.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(
+        agent_backends.subprocess,
+        "run",
+        lambda *_a, **_k: pytest.fail("taskkill is a Windows tool"),
+    )
+
+    agent_backends.end_process_group(_Child())
+
+
+def test_opencode_is_stopped_with_its_tree_on_windows(monkeypatch):
+    # opencode's terminate-then-wait courtesy is for its SQLite database on
+    # POSIX. On Windows terminate() is TerminateProcess, which asks nothing
+    # and leaves the children, so the tree is ended in one go instead.
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    ran: list[list] = []
+    monkeypatch.setattr(
+        agent_backends.subprocess,
+        "run",
+        lambda argv, **_k: ran.append(argv) or SimpleNamespace(returncode=0),
+    )
+
+    class _Proc(_Child):
+        def terminate(self):
+            pytest.fail("terminate() would end the parent and orphan its children")
+
+    server = agent_backends.OpencodeServer.__new__(agent_backends.OpencodeServer)
+    server._proc = _Proc()
+    server.stop()
+
+    assert ran and ran[0][-1] == "99"
 
 
 # ----- /status -----

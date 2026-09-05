@@ -109,7 +109,7 @@ def _drive(proc, on_activity=None, timeout=10.0):
 
     Returns (activity, completed, failures, raised, finished).
     """
-    import claude_reader
+    import blindpilot_app
 
     activity: list[tuple[str, str]] = []
     completed: list[str] = []
@@ -121,11 +121,11 @@ def _drive(proc, on_activity=None, timeout=10.0):
         if on_activity is not None:
             on_activity(kind, text)
 
-    real_popen, real_find = subprocess.Popen, claude_reader._find_claude
+    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
     subprocess.Popen = lambda *_a, **_k: proc  # type: ignore[assignment]
-    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
+    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
 
-    worker = claude_reader.ClaudeWorker(
+    worker = blindpilot_app.ClaudeWorker(
         "hi",
         None,
         os.getcwd(),
@@ -150,7 +150,7 @@ def _drive(proc, on_activity=None, timeout=10.0):
     finished = not thread.is_alive()
 
     subprocess.Popen = real_popen  # type: ignore[assignment]
-    claude_reader._find_claude = real_find  # type: ignore[assignment]
+    blindpilot_app._find_claude = real_find  # type: ignore[assignment]
     return activity, completed, failures, raised, finished
 
 
