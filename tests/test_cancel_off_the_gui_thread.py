@@ -167,6 +167,8 @@ def _frame_with(pages):
             "GetPage": lambda self, i: pages[i],
         },
     )()
+    # The real helper, over the stub notebook, so quitting sees these pages.
+    frame._session_panels = lambda: app.MainFrame._session_panels(frame)
     return frame
 
 
