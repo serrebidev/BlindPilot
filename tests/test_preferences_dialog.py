@@ -153,6 +153,22 @@ def test_toggling_the_sound_master_switch_disables_the_cue_checks(wx_app):
         dialog.Destroy()
 
 
+def test_the_working_sound_choices_do_not_repeat_the_group_name(wx_app):
+    """The group box already says "Working sound"; three rows each starting
+    with it read as one long item."""
+    dialog = app.PreferencesDialog(None)
+
+    try:
+        choices = [dialog._cue_box.GetString(i) for i in range(dialog._cue_box.GetCount())]
+        assert choices == [
+            "Continuous",
+            f"Every N seconds ({app.CUE_SECONDS_MIN}-{app.CUE_SECONDS_MAX})",
+            "Off",
+        ]
+    finally:
+        dialog.Destroy()
+
+
 def test_the_interval_is_only_editable_for_the_periodic_cue(wx_app):
     dialog = app.PreferencesDialog(None)
 

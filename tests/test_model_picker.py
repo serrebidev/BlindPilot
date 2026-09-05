@@ -228,6 +228,13 @@ def test_the_keep_entry_names_the_current_model():
     assert blindpilot_app._keep_choice("") == "(CLI default)"
 
 
+def test_the_keep_entry_drops_the_backticks_a_cli_puts_round_the_model_name():
+    """A CLI that reports "Current model: `Opus 5`" put literal backticks in
+    the combo box and the sentence above it."""
+    assert blindpilot_app._keep_choice("`Opus 5`") == "(CLI default), currently Opus 5"
+    assert blindpilot_app._plain("`Opus 5`") == "Opus 5"
+
+
 def _worker_command(**kwargs) -> list[str]:
     """Build a worker, let it launch, and return the argv it tried to run."""
     captured: list[list[str]] = []

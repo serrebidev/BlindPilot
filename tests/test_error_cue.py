@@ -45,10 +45,17 @@ def _panel(monkeypatch):
     panel._turns = []
     panel._stream_response = None
     panel._rows = []
+    panel._response_count = 0
     panel._worker = None
     panel._earcons = _Earcons()
     panel.announced: list[tuple] = []
     panel._announce = lambda text, urgent=False: panel.announced.append((text, urgent))
+    panel.refreshed = 0
+
+    def _refresh_list():
+        panel.refreshed += 1
+
+    panel._refresh_list = _refresh_list
     return panel
 
 
@@ -179,6 +186,50 @@ def test_a_failed_turns_prompt_keeps_a_number_of_its_own(monkeypatch):
     app.SessionPanel._on_failed(panel, "the turn stopped")
 
     assert panel._response_count == 3
+
+
+def test_a_failed_turn_leaves_one_error_row_in_the_list(monkeypatch):
+    """The status bar line is overwritten by the next event. The list is what
+    somebody comes back to, and it used to look the same after a failed turn
+    as after a finished one."""
+    panel = _panel(monkeypatch)
+
+    app.SessionPanel._on_failed(panel, "the turn stopped")
+
+    assert [(row.kind, row.label, row.payload) for row in panel._rows] == [
+        ("error", "Error: the turn stopped", "the turn stopped")
+    ]
+    assert panel.refreshed == 1
+
+
+def test_the_error_row_belongs_to_the_response_that_was_streaming(monkeypatch):
+    panel = _panel(monkeypatch)
+    panel._stream_response = 4
+    panel._rows = [app.Row(kind="header", label="Response 4", payload="", response_number=4)]
+
+    app.SessionPanel._on_failed(panel, "the turn stopped")
+
+    assert panel._rows[-1].kind == "error"
+    assert panel._rows[-1].response_number == 4
+    assert panel._stream_response is None
+
+
+def test_the_error_row_changes_nothing_about_what_is_spoken(monkeypatch):
+    """The row is for the eye. The ear gets exactly what it got before."""
+    panel = _panel(monkeypatch)
+
+    app.SessionPanel._on_failed(panel, "the turn stopped")
+
+    assert panel.announced == [("Error: the turn stopped", True)]
+
+
+def test_a_turn_the_user_stopped_leaves_no_error_row(monkeypatch):
+    panel = _panel(monkeypatch)
+    panel._stopping = True
+
+    app.SessionPanel._on_failed(panel, "FreeBuff reported that the response was interrupted")
+
+    assert panel._rows == []
 
 
 def test_a_worker_that_lost_its_session_clears_the_tabs_session_id(monkeypatch):

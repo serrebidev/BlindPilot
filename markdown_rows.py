@@ -114,7 +114,7 @@ class Row:
     # "header" | "prose" | "heading" | "list" | "quote" | "code", plus the
     # live-conversation kinds the GUI adds: "you" (the user's own message),
     # "thinking" (the backend's reasoning), "tool" (a tool it is running), "result"
-    # (that tool's output).
+    # (that tool's output), and "error" (why a turn failed).
     kind: str
     label: str
     payload: str

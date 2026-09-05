@@ -74,8 +74,12 @@ class _Panel(app.SessionPanel):
         self.cwd = cwd
 
 
+def _items(menu) -> list:
+    return [item for item in menu.GetMenuItems() if not item.IsSeparator()]
+
+
 def _labels(menu) -> list[str]:
-    return [item.GetItemLabelText() for item in menu.GetMenuItems() if not item.IsSeparator()]
+    return [item.GetItemLabelText() for item in _items(menu)]
 
 
 FILE_ITEMS = [
@@ -137,19 +141,37 @@ def test_nothing_is_offered_in_both_menus(frame):
         ("Jump to Latest Response", "Ctrl+R"),
     ],
 )
-def test_a_shortcut_only_command_now_says_its_own_chord(frame, item, chord):
+def test_a_shortcut_only_command_says_its_chord_in_the_accelerator_column(frame, item, chord):
     """The menu item is where anybody learns the shortcut exists.
 
-    The chord is written into the label rather than after a tab, because a tab
-    would register a second menu accelerator for a key the frame's own
-    accelerator table already carries — the same reason Next Session spells
-    Ctrl+Tab out in words. On macOS the literal text says Cmd, because the
-    screen reader reads it as written and the chord really is Command there.
+    The chord follows a tab, the same as New Session's Ctrl+T, so every
+    shortcut in a menu is shown one way and wxWidgets registers the key from
+    the label itself. On macOS the tabular Ctrl is shown and bound as Command
+    by wxWidgets, so the label is written with Ctrl everywhere.
     """
-    labels = _labels(app.MainFrame._build_conversation_menu(frame))
-    line = next(text for text in labels if item in text)
+    # The menu owns its items. It has to outlive every call made on them.
+    menu = app.MainFrame._build_conversation_menu(frame)
+    match = next(entry for entry in _items(menu) if item in entry.GetItemLabelText())
 
-    assert chord in line or chord.replace("Ctrl", "Cmd") in line
+    assert match.GetItemLabel().endswith(f"\t{chord}")
+    assert "(" not in match.GetItemLabelText()
+    assert match.GetAccel() is not None
+    del match, menu
+
+
+def test_next_and_previous_session_carry_their_chords_the_same_way(frame):
+    """Ctrl+Tab used to be spelled out in words inside the label because the
+    frame's accelerator table owned it. The menu owns it now, on every
+    platform, with the chord that platform can actually press."""
+    menu = app.MainFrame._build_file_menu(frame)
+    items = {entry.GetItemLabelText(): entry for entry in _items(menu)}
+    next_chord, prev_chord = app._tab_chord_notes()
+
+    assert items["Next Session"].GetItemLabel().endswith(f"\t{next_chord}")
+    assert items["Previous Session"].GetItemLabel().endswith(f"\t{prev_chord}")
+    for label in ("Next Session", "Previous Session"):
+        assert items[label].GetAccel() is not None, label
+    del items, menu
 
 
 def test_opening_a_side_chat_uses_the_folder_of_the_visible_tab():
