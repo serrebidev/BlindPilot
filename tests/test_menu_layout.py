@@ -167,10 +167,17 @@ def test_next_and_previous_session_carry_their_chords_the_same_way(frame):
     items = {entry.GetItemLabelText(): entry for entry in _items(menu)}
     next_chord, prev_chord = app._tab_chord_notes()
 
-    assert items["Next Session"].GetItemLabel().endswith(f"\t{next_chord}")
-    assert items["Previous Session"].GetItemLabel().endswith(f"\t{prev_chord}")
-    for label in ("Next Session", "Previous Session"):
-        assert items[label].GetAccel() is not None, label
+    # The chord has to be discoverable in the menu. Spelled in the label is
+    # one way, and the way Windows shows it; a real accelerator is the other,
+    # because the GTK port rewrites a parsed Tab accelerator out of the label
+    # and then renders the chord itself, and the Mac port turns Ctrl into
+    # Command on the way. The regression this guards -- the chord written out
+    # in words inside the label -- fails the text check on every platform.
+    for name, chord in (("Next Session", next_chord), ("Previous Session", prev_chord)):
+        item = items[name]
+        assert item.GetItemLabelText() == name, name
+        assert item.GetItemLabel().endswith(f"\t{chord}") or item.GetAccel() is not None, name
+        assert item.GetAccel() is not None, name
     del items, menu
 
 
