@@ -23,3 +23,5 @@ artifacts/
 .freebuff/
 .ruff_cache/
 .claude/settings.local.json
+# Scratch config for the visual-audit second instance (docs/visual-audit/README.md)
+docs/visual-audit/sandbox/
