@@ -1,5 +1,10 @@
 target-version = "py310"
 line-length = 100
+# The audit reports and the list plan under docs/ quote code as prose. Ruff
+# formats code blocks inside markdown, and a rewritten sample is no longer
+# the sample the reader was shown.
+extend-exclude = ["docs"]
+
 
 [lint]
 # W is here because of a real escape: an invalid escape sequence reached this

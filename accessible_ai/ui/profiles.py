@@ -21,6 +21,14 @@ from accessible_ai.models import (
 )
 from accessible_ai.storage.database import Database
 
+# Sizer borders in device independent pixels. Every one goes through FromDIP.
+PAD = 8
+PAD_DIALOG = 12
+
+EDITOR_SIZE = wx.Size(760, 700)
+SERVER_TOOLS_HEIGHT = 150
+LIST_DIALOG_SIZE = wx.Size(620, 460)
+
 
 # Each picker offers "leave it alone" first, so a profile that says nothing
 # about a setting is the one a person lands on without choosing anything.
@@ -50,16 +58,18 @@ class ProfileEditorDialog(wx.Dialog):
         super().__init__(
             parent,
             title="Conversation Profile",
-            size=(760, 700),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        self.SetSize(self.FromDIP(EDITOR_SIZE))
         self.db = db
         self.profile = profile or Profile()
         self.accounts = db.list_accounts()
 
         panel = wx.Panel(self)
+        pad = panel.FromDIP(PAD)
+        pad_dialog = panel.FromDIP(PAD_DIALOG)
         outer = wx.BoxSizer(wx.VERTICAL)
-        grid = wx.FlexGridSizer(cols=2, vgap=8, hgap=12)
+        grid = wx.FlexGridSizer(cols=2, vgap=pad, hgap=pad_dialog)
         grid.AddGrowableCol(1, 1)
 
         grid.Add(wx.StaticText(panel, label="Profile name:"), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -163,20 +173,20 @@ class ProfileEditorDialog(wx.Dialog):
         )
         grid.Add(self.pdf_engine, 1, wx.EXPAND)
 
-        outer.Add(grid, 0, wx.EXPAND | wx.ALL, 12)
+        outer.Add(grid, 0, wx.EXPAND | wx.ALL, pad_dialog)
 
         outer.Add(
             wx.StaticText(panel, label="OpenRouter tools the model may call:"),
             0,
             wx.LEFT | wx.RIGHT,
-            12,
+            pad_dialog,
         )
         self.server_tools = wx.CheckListBox(
             panel,
             choices=[
                 f"{label} - {description}" for _name, label, description in OPENROUTER_SERVER_TOOLS
             ],
-            size=(-1, 150),
+            size=wx.Size(-1, panel.FromDIP(SERVER_TOOLS_HEIGHT)),
         )
         self.server_tools.SetName("OpenRouter tools")
         self.server_tools.SetToolTip(
@@ -184,11 +194,11 @@ class ProfileEditorDialog(wx.Dialog):
             "runs on this computer, and nothing stops to ask permission. They apply to "
             "OpenRouter accounts; other providers ignore them."
         )
-        outer.Add(self.server_tools, 0, wx.EXPAND | wx.ALL, 12)
-        outer.Add(wx.StaticText(panel, label="System prompt:"), 0, wx.LEFT | wx.RIGHT, 12)
+        outer.Add(self.server_tools, 0, wx.EXPAND | wx.ALL, pad_dialog)
+        outer.Add(wx.StaticText(panel, label="System prompt:"), 0, wx.LEFT | wx.RIGHT, pad_dialog)
         self.system_prompt = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_RICH2)
         self.system_prompt.SetName("System prompt")
-        outer.Add(self.system_prompt, 1, wx.EXPAND | wx.ALL, 12)
+        outer.Add(self.system_prompt, 1, wx.EXPAND | wx.ALL, pad_dialog)
 
         buttons = wx.StdDialogButtonSizer()
         ok_button = wx.Button(panel, wx.ID_OK)
@@ -197,12 +207,13 @@ class ProfileEditorDialog(wx.Dialog):
         buttons.AddButton(cancel_button)
         buttons.Realize()
         ok_button.SetDefault()
-        outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
         panel.SetSizer(outer)
 
         self.account.Bind(wx.EVT_CHOICE, self.on_account_changed)
         self.Bind(wx.EVT_BUTTON, self.on_ok, id=wx.ID_OK)
         self._load()
+        self.CentreOnParent()
 
     def _load(self) -> None:
         self.name.SetValue(self.profile.name)
@@ -344,32 +355,42 @@ class ProfilesDialog(wx.Dialog):
         super().__init__(
             parent,
             title="Conversation Profiles",
-            size=(620, 460),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        self.SetSize(self.FromDIP(LIST_DIALOG_SIZE))
         self.db = db
         self.profiles: list[Profile] = []
 
         panel = wx.Panel(self)
+        pad = panel.FromDIP(PAD)
+        pad_dialog = panel.FromDIP(PAD_DIALOG)
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(
-            wx.StaticText(panel, label="Conversation profiles:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, 12
+            wx.StaticText(panel, label="Conversation profiles:"),
+            0,
+            wx.LEFT | wx.RIGHT | wx.TOP,
+            pad_dialog,
         )
         self.listbox = wx.ListBox(panel)
         self.listbox.SetName("Conversation profiles")
-        outer.Add(self.listbox, 1, wx.EXPAND | wx.ALL, 12)
+        outer.Add(self.listbox, 1, wx.EXPAND | wx.ALL, pad_dialog)
 
+        # One row. The actions sit on the left; Close goes through the
+        # standard button sizer so it lands where the platform puts it.
         row = wx.BoxSizer(wx.HORIZONTAL)
         add = wx.Button(panel, label="&Add")
         edit = wx.Button(panel, label="&Edit")
         duplicate = wx.Button(panel, label="D&uplicate")
         delete = wx.Button(panel, label="&Delete")
         for button in [add, edit, duplicate, delete]:
-            row.Add(button, 0, wx.RIGHT, 8)
-        outer.Add(row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-
+            row.Add(button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        row.AddStretchSpacer()
         close = wx.Button(panel, wx.ID_CLOSE, "Close")
-        outer.Add(close, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        buttons = wx.StdDialogButtonSizer()
+        buttons.AddButton(close)
+        buttons.Realize()
+        row.Add(buttons, 0, wx.ALIGN_CENTER_VERTICAL)
+        outer.Add(row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
         panel.SetSizer(outer)
 
         add.Bind(wx.EVT_BUTTON, self.on_add)
@@ -377,8 +398,11 @@ class ProfilesDialog(wx.Dialog):
         duplicate.Bind(wx.EVT_BUTTON, self.on_duplicate)
         delete.Bind(wx.EVT_BUTTON, self.on_delete)
         close.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(wx.ID_CLOSE))
+        # Escape presses the Close button, as it does in every other dialog.
+        self.SetEscapeId(wx.ID_CLOSE)
         self.listbox.Bind(wx.EVT_LISTBOX_DCLICK, self.on_edit)
         self.reload()
+        self.CentreOnParent()
 
     def reload(self) -> None:
         self.profiles = self.db.list_profiles()

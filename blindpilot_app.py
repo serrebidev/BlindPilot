@@ -272,6 +272,13 @@ def announce(text: str, urgent: bool = False) -> None:
 
 
 APP_NAME = "BlindPilot"
+# The two spacings every sizer border goes through, always as
+# window.FromDIP(PAD). PAD is the gap between controls and the edge of the
+# main window; PAD_DIALOG is the edge of a dialog and its button row. One
+# pair rather than a value per screen, so a label and the control under it
+# share a left edge.
+PAD = 8
+PAD_DIALOG = 12
 APP_VERSION = "0.21.5"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
@@ -1539,6 +1546,7 @@ PROBE_TTL_SECONDS = 900
 
 def _keep_choice(current: str) -> str:
     """First combo-box entry: pass no flag, and say what that currently means."""
+    current = _plain(current)
     return f"{DEFAULT_CHOICE}, currently {current}" if current else DEFAULT_CHOICE
 
 
@@ -2626,6 +2634,51 @@ def _resource_dir() -> str:
     """
     base = getattr(sys, "_MEIPASS", None)
     return base if base else os.path.dirname(os.path.abspath(__file__))
+
+
+def _app_icon_path() -> Path:
+    """The window icon: packaging/BlindPilot.ico, from source or unpacked by PyInstaller."""
+    return Path(_resource_dir()) / "packaging" / "BlindPilot.ico"
+
+
+def _plain(text: str) -> str:
+    """Text for a label or a list entry, with markdown backticks taken out."""
+    return text.replace("`", "")
+
+
+class WrappedText(wx.StaticText):
+    """A StaticText that can be wrapped again after its label or width changes.
+
+    Wrap writes newlines into the label itself, so wrapping a second time at a
+    wider width would keep the old breaks. This keeps the text as it was set
+    and wraps from that copy every time, so a resizable dialog can reflow its
+    paragraphs on every size event.
+    """
+
+    def __init__(self, parent: wx.Window, label: str = ""):
+        super().__init__(parent, label=label)
+        self._unwrapped = label
+        self._width = 0
+        self._wrapping = False
+
+    def SetLabel(self, label: str) -> None:
+        if self._wrapping:
+            # wxWidgets sets the broken-up text through this same method.
+            super().SetLabel(label)
+            return
+        self._unwrapped = label
+        super().SetLabel(label)
+        if self._width > 0:
+            self.Wrap(self._width)
+
+    def Wrap(self, width: int) -> None:
+        self._width = width
+        self._wrapping = True
+        try:
+            super().SetLabel(self._unwrapped)
+            super().Wrap(width)
+        finally:
+            self._wrapping = False
 
 
 class Earcons:
@@ -3731,42 +3784,51 @@ class SettingsFilesDialog(wx.Dialog):
         super().__init__(
             parent,
             title="Backend Settings",
-            size=wx.Size(780, 480),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
         self._entries = list(settings_files(cwd))
+        pad = self.FromDIP(PAD_DIALOG)
         outer = wx.BoxSizer(wx.VERTICAL)
-        intro = wx.StaticText(
+        self._intro = WrappedText(
             self,
-            label=(
-                "The files each coding agent reads its settings from. "
-                "BlindPilot opens them in your editor; it never changes them."
-            ),
+            "The files each coding agent reads its settings from. "
+            "BlindPilot opens them in your editor; it never changes them.",
         )
-        outer.Add(intro, 0, wx.ALL, 10)
-        outer.Add(wx.StaticText(self, label="Settings &files:"), 0, wx.LEFT | wx.RIGHT, 10)
+        self._intro.Wrap(self.FromDIP(720))
+        outer.Add(self._intro, 0, wx.ALL, pad)
+        outer.Add(wx.StaticText(self, label="Settings &files:"), 0, wx.LEFT | wx.RIGHT, pad)
         self.list_box = wx.ListBox(
             self,
             choices=[_settings_label(entry) for entry in self._entries],
             style=wx.LB_SINGLE,
         )
+        self.list_box.SetMinSize(self.FromDIP(wx.Size(720, 260)))
         if self._entries:
             self.list_box.SetSelection(0)
-        outer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, 10)
+        outer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, pad)
         self.status = wx.StaticText(self, label="")
-        outer.Add(self.status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        outer.Add(self.status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         buttons = wx.BoxSizer(wx.HORIZONTAL)
         open_button = wx.Button(self, wx.ID_ANY, "&Open")
-        buttons.Add(open_button, 0, wx.RIGHT, 8)
+        buttons.Add(open_button, 0, wx.RIGHT, self.FromDIP(PAD))
         buttons.Add(wx.Button(self, wx.ID_CANCEL, "&Close"), 0)
-        outer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
-        self.SetSizer(outer)
+        outer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, pad)
+        self.SetSizerAndFit(outer)
 
         self.Bind(wx.EVT_BUTTON, lambda _event: self._open_selected(), open_button)
         self.Bind(wx.EVT_LISTBOX_DCLICK, lambda _event: self._open_selected(), self.list_box)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.Bind(wx.EVT_SIZE, self._on_size)
         self.list_box.SetFocus()
+        self.CentreOnParent()
+
+    def _on_size(self, event: wx.SizeEvent) -> None:
+        """The dialog can be resized, so the intro follows its width."""
+        event.Skip()
+        width = self.GetClientSize().width - 2 * self.FromDIP(PAD_DIALOG)
+        if width > 0:
+            self._intro.Wrap(width)
 
     def _open_selected(self) -> None:
         index = self.list_box.GetSelection()
@@ -3794,6 +3856,11 @@ class SettingsFilesDialog(wx.Dialog):
         event.Skip()
 
 
+def _monospace_font(window: wx.Window) -> wx.Font:
+    """The platform's fixed-width face at the window's own point size."""
+    return wx.Font(wx.FontInfo(window.GetFont().GetPointSize()).Family(wx.FONTFAMILY_TELETYPE))
+
+
 class ReadView(wx.Dialog):
     """Modal read-only viewer for a single row's payload. Esc closes.
 
@@ -3801,11 +3868,10 @@ class ReadView(wx.Dialog):
     words, and select / copy normally with Ctrl+A / Ctrl+C.
     """
 
-    def __init__(self, parent: wx.Window, text: str, title: str):
+    def __init__(self, parent: wx.Window, text: str, title: str, monospace: bool = False):
         super().__init__(
             parent,
             title=title,
-            size=wx.Size(700, 500),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
 
@@ -3815,14 +3881,20 @@ class ReadView(wx.Dialog):
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP | wx.TE_RICH2,
         )
         viewer.SetName(title)
+        if monospace:
+            # Code keeps its columns only in a fixed-width face. Same point
+            # size as the system font, so nothing else about it changes.
+            viewer.SetFont(_monospace_font(viewer))
+        viewer.SetMinSize(self.FromDIP(wx.Size(660, 440)))
         viewer.SetInsertionPoint(0)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(viewer, 1, wx.EXPAND | wx.ALL, 8)
-        self.SetSizer(sizer)
+        sizer.Add(viewer, 1, wx.EXPAND | wx.ALL, self.FromDIP(PAD_DIALOG))
+        self.SetSizerAndFit(sizer)
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         viewer.SetFocus()
+        self.CentreOnParent()
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
@@ -3854,9 +3926,9 @@ class ModelDialog(wx.Dialog):
     ):
         super().__init__(parent, title="Model")
 
-        current = options.current_model or "unknown"
+        current = _plain(options.current_model) or "unknown"
         if options.current_effort:
-            current = f"{current}, effort {options.current_effort}"
+            current = f"{current}, effort {_plain(options.current_effort)}"
         lines = [f"{backend_name} reports the current model as: {current}."]
         if selected_model or selected_effort:
             lines.append(
@@ -3867,7 +3939,7 @@ class ModelDialog(wx.Dialog):
         if options.error:
             lines.append(options.error)
         summary = wx.StaticText(self, label="\n".join(lines))
-        summary.Wrap(520)
+        summary.Wrap(self.FromDIP(520))
 
         # "Leave it alone" is the first entry in both boxes, and it says what
         # leaving it alone actually means rather than just "(CLI default)".
@@ -3897,7 +3969,7 @@ class ModelDialog(wx.Dialog):
         self.effort_box.SetName("Effort")
         self.effort_box.SetStringSelection(selected_effort or self._effort_keep)
 
-        grid = wx.FlexGridSizer(2, 2, 8, 8)
+        grid = wx.FlexGridSizer(2, 2, self.FromDIP(PAD), self.FromDIP(PAD))
         grid.AddGrowableCol(1, 1)
         grid.Add(model_label, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.model_box, 1, wx.EXPAND)
@@ -3906,15 +3978,17 @@ class ModelDialog(wx.Dialog):
 
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
 
+        pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(summary, 0, wx.ALL, 12)
-        sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
+        sizer.Add(summary, 0, wx.ALL, pad)
+        sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
         if buttons is not None:
-            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+            sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizerAndFit(sizer)
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.model_box.SetFocus()
+        self.CentreOnParent()
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
@@ -3973,6 +4047,11 @@ class QuestionDialog(wx.Dialog):
         self._pickers: list[Optional[wx.Window]] = []
         self._texts: list[wx.TextCtrl] = []
         self._labels: list[wx.StaticText] = []
+        pad = self.FromDIP(PAD_DIALOG)
+        # The typed answer sits one dialog margin further in than its
+        # question, so it reads as belonging to it.
+        indent = 2 * pad
+        wrap = self.FromDIP(560)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         intro = wx.StaticText(
@@ -3982,7 +4061,7 @@ class QuestionDialog(wx.Dialog):
                 f"{'you these questions' if plural else 'you a question'}."
             ),
         )
-        sizer.Add(intro, 0, wx.ALL, 12)
+        sizer.Add(intro, 0, wx.ALL, pad)
 
         for index, question in enumerate(questions):
             title = question.question
@@ -4001,19 +4080,19 @@ class QuestionDialog(wx.Dialog):
                 # could not be answered.
                 picker = None
                 heading = wx.StaticText(self, label=title)
-                heading.Wrap(560)
-                sizer.Add(heading, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+                heading.Wrap(wrap)
+                sizer.Add(heading, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
             elif question.multi_select:
                 # A checked list is what a screen reader reads as "check box,
                 # not checked" per line, which is what "pick as many as you
                 # like" has to sound like.
                 heading = wx.StaticText(self, label=title)
-                heading.Wrap(560)
+                heading.Wrap(wrap)
                 picker = wx.CheckListBox(self, choices=choices)
                 picker.SetName(question.question)
                 picker.Bind(wx.EVT_CHECKLISTBOX, self._on_choice)
-                sizer.Add(heading, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-                sizer.Add(picker, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
+                sizer.Add(heading, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+                sizer.Add(picker, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
             else:
                 picker = wx.RadioBox(
                     self,
@@ -4024,7 +4103,7 @@ class QuestionDialog(wx.Dialog):
                 )
                 picker.SetName(question.question)
                 picker.Bind(wx.EVT_RADIOBOX, self._on_choice)
-                sizer.Add(picker, 0, wx.EXPAND | wx.ALL, 12)
+                sizer.Add(picker, 0, wx.EXPAND | wx.ALL, pad)
             self._pickers.append(picker)
 
             label = wx.StaticText(
@@ -4042,8 +4121,8 @@ class QuestionDialog(wx.Dialog):
             entry.Bind(wx.EVT_TEXT_ENTER, self._on_text_enter)
             label.Show(picker is None)
             entry.Show(picker is None)
-            sizer.Add(label, 0, wx.LEFT | wx.RIGHT, 24)
-            sizer.Add(entry, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 24)
+            sizer.Add(label, 0, wx.LEFT | wx.RIGHT, indent)
+            sizer.Add(entry, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, indent)
             self._labels.append(label)
             self._texts.append(entry)
 
@@ -4055,13 +4134,14 @@ class QuestionDialog(wx.Dialog):
         if isinstance(cancel, wx.Button):
             cancel.SetLabel("&Do not answer")
         if buttons is not None:
-            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+            sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizerAndFit(sizer)
 
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         if self._pickers:
             self._picker_or_text(0).SetFocus()
+        self.CentreOnParent()
 
     def _picker_or_text(self, index: int) -> wx.Window:
         """The control that answers question `index`: its picker, or its box."""
@@ -4185,12 +4265,12 @@ class ConnectDialog(wx.Dialog):
         self._busy = False
 
         self.status = wx.StaticText(self, label="Reading opencode's provider list…")
-        self.status.Wrap(520)
+        self.status.Wrap(self.FromDIP(520))
 
         list_label = wx.StaticText(self, label="&Providers:")
         self.list = wx.ListBox(self, choices=[], style=wx.LB_SINGLE)
         self.list.SetName("Providers")
-        self.list.SetMinSize(wx.Size(420, 260))
+        self.list.SetMinSize(self.FromDIP(wx.Size(420, 260)))
 
         self.connect_btn = wx.Button(self, label="&Connect…")
         self.disconnect_btn = wx.Button(self, label="&Disconnect")
@@ -4199,21 +4279,23 @@ class ConnectDialog(wx.Dialog):
         self.disconnect_btn.Bind(wx.EVT_BUTTON, lambda _e: self._disconnect())
         self.list.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._connect())
 
+        pad = self.FromDIP(PAD_DIALOG)
         buttons = wx.BoxSizer(wx.HORIZONTAL)
-        buttons.Add(self.connect_btn, 0, wx.RIGHT, 8)
-        buttons.Add(self.disconnect_btn, 0, wx.RIGHT, 8)
+        buttons.Add(self.connect_btn, 0, wx.RIGHT, self.FromDIP(PAD))
+        buttons.Add(self.disconnect_btn, 0, wx.RIGHT, self.FromDIP(PAD))
         buttons.Add(close_btn, 0)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(self.status, 0, wx.ALL, 12)
-        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT, 12)
-        sizer.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
-        sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+        sizer.Add(self.status, 0, wx.ALL, pad)
+        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, pad)
         self.SetSizerAndFit(sizer)
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.list.SetFocus()
         self._refresh()
+        self.CentreOnParent()
 
     # ----- the list -----
 
@@ -4266,7 +4348,7 @@ class ConnectDialog(wx.Dialog):
         self.connect_btn.Enable(not busy)
         self.disconnect_btn.Enable(not busy)
         self.status.SetLabel(message)
-        self.status.Wrap(520)
+        self.status.Wrap(self.FromDIP(520))
         self.Layout()
         announce(message)
 
@@ -4554,7 +4636,7 @@ class NewSessionDialog(wx.Dialog):
                 "so folders on this computer do not apply to it."
             )
             intro = wx.StaticText(self, label=intro_text)
-            rows.Add(intro, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            rows.Add(intro, 0, wx.LEFT | wx.RIGHT | wx.TOP, self.FromDIP(PAD_DIALOG))
             # A StaticText is never announced when a dialog opens: the user
             # lands on the name field having heard none of the context that
             # makes the dialog's shape make sense. Say the one sentence that
@@ -4566,7 +4648,7 @@ class NewSessionDialog(wx.Dialog):
         name_label = wx.StaticText(self, label="&Name for this session (optional):")
         self.name_box = wx.TextCtrl(self, value="")
         self.name_box.SetName("Name for this session, optional")
-        self.name_box.SetMinSize(wx.Size(420, -1))
+        self.name_box.SetMinSize(self.FromDIP(wx.Size(420, -1)))
         name_help = wx.StaticText(
             self,
             label="Leave it empty to let the first message name it.",
@@ -4584,10 +4666,10 @@ class NewSessionDialog(wx.Dialog):
             if self._remote_label
             else "Folder for the new session"
         )
-        self.folder_box.SetMinSize(wx.Size(420, -1))
+        self.folder_box.SetMinSize(self.FromDIP(wx.Size(420, -1)))
 
         folder_row = wx.BoxSizer(wx.HORIZONTAL)
-        folder_row.Add(self.folder_box, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        folder_row.Add(self.folder_box, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.FromDIP(PAD))
         if not self._remote_label:
             # No Browse in remote mode: it would open a picker on this machine
             # for a path that has to be valid on another one. An empty control
@@ -4596,22 +4678,23 @@ class NewSessionDialog(wx.Dialog):
             browse_btn.Bind(wx.EVT_BUTTON, lambda _e: self._browse())
             folder_row.Add(browse_btn, 0, wx.ALIGN_CENTER_VERTICAL)
 
+        pad = self.FromDIP(PAD_DIALOG)
         if self._remote_label:
-            rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-            rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
-            rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-            rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-            rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, 12)
+            rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, pad)
         else:
-            rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-            rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, 12)
-            rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-            rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
-            rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+            rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, pad)
+            rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
         if buttons is not None:
-            rows.Add(buttons, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+            rows.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizerAndFit(rows)
 
         # Validate before the dialog closes, so a bad path can be corrected
@@ -4619,6 +4702,7 @@ class NewSessionDialog(wx.Dialog):
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.initial_focus().SetFocus()
+        self.CentreOnParent()
 
     def initial_focus(self) -> wx.Window:
         """The field this dialog opens on: the one this machine can answer.
@@ -4753,29 +4837,32 @@ class HistoryDialog(wx.Dialog):
         if open_button is not None:
             open_button.SetLabel("&Open")
 
-        pickers = wx.FlexGridSizer(2, 2, 8, 8)
+        pad = self.FromDIP(PAD_DIALOG)
+        pickers = wx.FlexGridSizer(2, 2, self.FromDIP(PAD), self.FromDIP(PAD))
         pickers.AddGrowableCol(1, 1)
         pickers.Add(backend_label_text, 0, wx.ALIGN_CENTER_VERTICAL)
-        pickers.Add(self.backend_picker, 0)
+        pickers.Add(self.backend_picker, 1, wx.EXPAND)
         pickers.Add(scope_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        pickers.Add(self.scope_picker, 0)
+        pickers.Add(self.scope_picker, 1, wx.EXPAND)
+        # The list is what gives the dialog its size; Fit then follows it.
+        self.list_box.SetMinSize(self.FromDIP(wx.Size(560, 220)))
 
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(pickers, 0, wx.EXPAND | wx.ALL, 12)
-        sizer.Add(filter_label, 0, wx.LEFT | wx.RIGHT, 12)
-        sizer.Add(self.filter_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
-        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-        sizer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, 12)
-        sizer.Add(self.summary, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        sizer.Add(pickers, 0, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(filter_label, 0, wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(self.filter_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.summary, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         if buttons is not None:
-            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+            sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizerAndFit(sizer)
-        self.SetSize(wx.Size(620, 460))
 
         self.Bind(wx.EVT_BUTTON, lambda _e: self._accept(), id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self._reload()
         self.filter_box.SetFocus()
+        self.CentreOnParent()
 
     # ----- Loading and filtering -----
     def _selected_backend(self) -> Optional[str]:
@@ -4971,22 +5058,25 @@ class HermesSessionsDialog(wx.Dialog):
         if open_button is not None:
             open_button.SetLabel("&Open")
 
+        pad = self.FromDIP(PAD_DIALOG)
+        # The list is what gives the dialog its size; Fit then follows it.
+        self.list_box.SetMinSize(self.FromDIP(wx.Size(580, 240)))
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(filter_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
-        sizer.Add(self.filter_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
-        sizer.Add(self.running_only, 0, wx.ALL, 12)
-        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT, 12)
-        sizer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, 12)
-        sizer.Add(self.summary, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        sizer.Add(filter_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.filter_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(self.running_only, 0, wx.ALL, pad)
+        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.summary, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         if buttons is not None:
-            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+            sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizerAndFit(sizer)
-        self.SetSize(wx.Size(640, 480))
 
         self.Bind(wx.EVT_BUTTON, lambda _e: self._accept(), id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self._reload()
         self.filter_box.SetFocus()
+        self.CentreOnParent()
 
     # ----- Loading and filtering -----
     def _reload(self) -> bool:
@@ -5236,7 +5326,7 @@ class SessionPanel(wx.Panel):
         self._prompt_text = ""
         self._dictation_pending = ""
         char_h = self.prompt.GetCharHeight()
-        self.prompt.SetMinSize(wx.Size(-1, char_h * 5 + 8))
+        self.prompt.SetMinSize(wx.Size(-1, char_h * 5 + self.FromDIP(PAD)))
 
         # Bottom row: Send, Attach, then the Permission mode picker — one line.
         self.send_btn = wx.Button(self, label="Send")
@@ -5276,24 +5366,30 @@ class SessionPanel(wx.Panel):
         self.mode_picker.Bind(wx.EVT_CHOICE, self._on_mode_choice)
         self.mode_picker.Bind(wx.EVT_KEY_DOWN, self._on_mode_key)
 
+        pad = self.FromDIP(PAD)
+        # Buttons that act on the same thing sit a control gap apart; the
+        # groups (run, message, mode) sit a dialog margin apart.
+        group_gap = self.FromDIP(PAD_DIALOG)
         bottom_row = wx.BoxSizer(wx.HORIZONTAL)
-        bottom_row.Add(self.send_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        bottom_row.Add(self.steer_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        bottom_row.Add(self.stop_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
-        bottom_row.Add(self.attach_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        bottom_row.Add(self.slash_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 16)
-        bottom_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        bottom_row.Add(self.send_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        bottom_row.Add(self.steer_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        bottom_row.Add(self.stop_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
+        bottom_row.Add(self.attach_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        bottom_row.Add(self.slash_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
+        bottom_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         bottom_row.Add(self.mode_picker, 0, wx.ALIGN_CENTER_VERTICAL)
 
+        # Labels and the controls under them share one border, so they share
+        # one left edge.
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(self.backend_status, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        sizer.Add(cwd_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        sizer.Add(responses_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        sizer.Add(self.responses, 1, wx.EXPAND | wx.ALL, 6)
-        sizer.Add(self.responses_text, 1, wx.EXPAND | wx.ALL, 6)
-        sizer.Add(prompt_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        sizer.Add(self.prompt, 0, wx.EXPAND | wx.ALL, 6)
-        sizer.Add(bottom_row, 0, wx.ALL, 6)
+        sizer.Add(self.backend_status, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(cwd_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(responses_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.responses, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.responses_text, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(prompt_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.prompt, 0, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(bottom_row, 0, wx.ALL, pad)
         self.SetSizer(sizer)
         self.apply_view_mode()
         self.backend_changed()
@@ -6795,12 +6891,25 @@ class SessionPanel(wx.Panel):
             # that never opened. Spend that number on it, or the next turn
             # takes the same one and the two prompts copy as one response.
             self._response_count = max(self._response_count, self._rows[-1].response_number)
-        self._stream_response = None
         if getattr(self._worker, "lost_session", False):
             # Codex could not resume this conversation, so the id names
             # nothing. The next message starts a fresh one, as the worker
             # has already said, rather than failing the same way again.
             self._session_id = None
+        # The failure stays in the list as a row of its own. The status bar
+        # line is overwritten by the next event, and a list that looks the
+        # same after a failed turn as after a finished one tells a reader
+        # nothing when they come back to it.
+        self._rows.append(
+            Row(
+                kind="error",
+                label=f"Error: {message}",
+                payload=message,
+                response_number=self._stream_response or self._response_count,
+            )
+        )
+        self._refresh_list()
+        self._stream_response = None
         self._announce(f"Error: {message}", urgent=True)
 
     def _on_worker_finished(self) -> None:
@@ -6967,7 +7076,7 @@ class SessionPanel(wx.Panel):
             return
         row = self._displayed[sel]
         title = row.label if row.kind != "header" else f"Response {row.response_number}"
-        dlg = ReadView(self, row.payload, title)
+        dlg = ReadView(self, row.payload, title, monospace=row.kind == "code")
         try:
             dlg.ShowModal()
         finally:
@@ -7393,9 +7502,11 @@ class SetupWizard(wx.Dialog):
         super().__init__(
             parent,
             title="BlindPilot — Setup",
-            size=wx.Size(580, 400),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        # Sized before the pages are built, so their text wraps to this width.
+        self.SetSize(self.FromDIP(wx.Size(580, 400)))
+        self._paragraphs: list[WrappedText] = []
         self.projects_folder: Optional[str] = initial_projects_folder
         self.backend = normalize_backend(initial_backend)
         self._step = 0
@@ -7427,29 +7538,54 @@ class SetupWizard(wx.Dialog):
         self._back_btn.Bind(wx.EVT_BUTTON, lambda _e: self._go(-1))
         self._next_btn.Bind(wx.EVT_BUTTON, lambda _e: self._go(+1))
 
+        pad = self.FromDIP(PAD_DIALOG)
         nav = wx.BoxSizer(wx.HORIZONTAL)
         nav.Add(self._cancel_btn, 0)
         nav.AddStretchSpacer()
-        nav.Add(self._back_btn, 0, wx.RIGHT, 8)
+        nav.Add(self._back_btn, 0, wx.RIGHT, self.FromDIP(PAD))
         nav.Add(self._next_btn, 0)
 
         root = wx.BoxSizer(wx.VERTICAL)
-        root.Add(self._step_label, 0, wx.ALL, 14)
-        root.Add(self._book, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 14)
-        root.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.TOP, 8)
-        root.Add(nav, 0, wx.EXPAND | wx.ALL, 14)
+        root.Add(self._step_label, 0, wx.ALL, pad)
+        root.Add(self._book, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        root.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.TOP, self.FromDIP(PAD))
+        root.Add(nav, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizer(root)
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.Bind(wx.EVT_CLOSE, self._on_wizard_close)
+        self.Bind(wx.EVT_SIZE, self._on_size)
         self._show_step(0)
+        self.CentreOnParent()
+
+    # ---- text that follows the dialog's width ----
+
+    def _wrap_width(self) -> int:
+        """How wide a paragraph on a page may be: the dialog less its margins."""
+        width = self.GetClientSize().width - 2 * self.FromDIP(PAD_DIALOG + PAD)
+        return width if width > self.FromDIP(200) else self.FromDIP(520)
+
+    def _paragraph(self, parent: wx.Window, label: str = "") -> WrappedText:
+        """A page paragraph, wrapped to the dialog and rewrapped as it resizes."""
+        text = WrappedText(parent, label)
+        text.Wrap(self._wrap_width())
+        self._paragraphs.append(text)
+        return text
+
+    def _on_size(self, event: wx.SizeEvent) -> None:
+        event.Skip()
+        width = self._wrap_width()
+        for text in self._paragraphs:
+            text.Wrap(width)
+        for page in self._pages:
+            page.Layout()
 
     # ---- page builders ----
 
     def _make_welcome(self) -> wx.Panel:
         p = wx.Panel(self._book)
         # Every label the backend changes is set by _refresh_backend_copy.
-        self._welcome_text = wx.StaticText(p, label="")
+        self._welcome_text = self._paragraph(p)
         backend_label_widget = wx.StaticText(p, label="&Backend:")
         self._setup_backend_picker = wx.Choice(
             p, choices=[BACKEND_LABELS[value] for value in BACKEND_IDS]
@@ -7457,21 +7593,20 @@ class SetupWizard(wx.Dialog):
         self._setup_backend_picker.SetName("Backend")
         self._setup_backend_picker.SetSelection(BACKEND_IDS.index(self.backend))
         self._setup_backend_picker.Bind(wx.EVT_CHOICE, self._on_backend_choice)
+        pad = self.FromDIP(PAD)
         picker_row = wx.BoxSizer(wx.HORIZONTAL)
-        picker_row.Add(backend_label_widget, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        picker_row.Add(backend_label_widget, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         picker_row.Add(self._setup_backend_picker, 1)
         s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(self._welcome_text, 0, wx.ALL, 8)
-        s.Add(picker_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        s.Add(self._welcome_text, 0, wx.ALL, pad)
+        s.Add(picker_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
         p.SetSizer(s)
         return p
 
     def _make_cli(self) -> wx.Panel:
         p = wx.Panel(self._book)
-        self._cli_status = wx.StaticText(p, label="Checking for Claude Code…")
-        self._cli_status.Wrap(520)
-        self._cli_detail = wx.StaticText(p, label="")
-        self._cli_detail.Wrap(520)
+        self._cli_status = self._paragraph(p, "Checking for Claude Code…")
+        self._cli_detail = self._paragraph(p)
 
         self._cli_install_btn = wx.Button(p, label="Install backend")
         self._cli_install_btn.Bind(wx.EVT_BUTTON, lambda _e: self._install_cli())
@@ -7493,27 +7628,29 @@ class SetupWizard(wx.Dialog):
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP,
         )
         self._cli_log.SetName("Installer output")
+        # Installer output is columns of text; a fixed-width face keeps them.
+        self._cli_log.SetFont(_monospace_font(self._cli_log))
         self._cli_log.Hide()
 
+        pad = self.FromDIP(PAD)
         btns = wx.BoxSizer(wx.HORIZONTAL)
-        btns.Add(self._cli_install_btn, 0, wx.RIGHT, 8)
-        btns.Add(self._cli_update_btn, 0, wx.RIGHT, 8)
-        btns.Add(self._cli_path_btn, 0, wx.RIGHT, 8)
+        btns.Add(self._cli_install_btn, 0, wx.RIGHT, pad)
+        btns.Add(self._cli_update_btn, 0, wx.RIGHT, pad)
+        btns.Add(self._cli_path_btn, 0, wx.RIGHT, pad)
         btns.Add(self._cli_check_btn, 0)
 
         s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(self._cli_status, 0, wx.ALL, 8)
-        s.Add(self._cli_detail, 0, wx.LEFT | wx.BOTTOM, 8)
-        s.Add(btns, 0, wx.LEFT | wx.BOTTOM, 8)
-        s.Add(self._cli_log, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        s.Add(self._cli_status, 0, wx.ALL, pad)
+        s.Add(self._cli_detail, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        s.Add(btns, 0, wx.LEFT | wx.BOTTOM, pad)
+        s.Add(self._cli_log, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         p.SetSizer(s)
         return p
 
     def _make_signin(self) -> wx.Panel:
         p = wx.Panel(self._book)
-        self._signin_intro = wx.StaticText(p, label="")
-        self._signin_status = wx.StaticText(p, label="")
-        self._signin_status.Wrap(520)
+        self._signin_intro = self._paragraph(p)
+        self._signin_status = self._paragraph(p)
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
         self._signin_btn = wx.Button(p, label="Sign In")
         self._signin_btn.Bind(wx.EVT_BUTTON, lambda _e: self._do_login())
@@ -7526,42 +7663,41 @@ class SetupWizard(wx.Dialog):
         self._open_page_btn = wx.Button(p, label="Open Sign-in Page")
         self._open_page_btn.Bind(wx.EVT_BUTTON, lambda _e: self._open_sign_in_page())
         self._open_page_btn.Disable()
-        btn_row.Add(self._signin_btn, 0, wx.RIGHT, 12)
-        btn_row.Add(self._already_btn, 0, wx.RIGHT, 12)
+        pad = self.FromDIP(PAD)
+        btn_row.Add(self._signin_btn, 0, wx.RIGHT, pad)
+        btn_row.Add(self._already_btn, 0, wx.RIGHT, pad)
         btn_row.Add(self._open_page_btn, 0)
         s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(self._signin_intro, 0, wx.ALL, 8)
-        s.Add(self._signin_status, 0, wx.LEFT | wx.BOTTOM, 8)
-        s.Add(btn_row, 0, wx.LEFT, 8)
+        s.Add(self._signin_intro, 0, wx.ALL, pad)
+        s.Add(self._signin_status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        s.Add(btn_row, 0, wx.LEFT, pad)
         p.SetSizer(s)
         return p
 
     def _make_projects(self) -> wx.Panel:
         p = wx.Panel(self._book)
-        intro = wx.StaticText(
+        intro = self._paragraph(
             p,
-            label=(
-                "Choose the folder that holds your projects, if you have one. "
-                "New Session browses from there.\n\n"
-                "You can skip this and set it later under File, Set Projects Folder."
-            ),
+            "Choose the folder that holds your projects, if you have one. "
+            "New Session browses from there.\n\n"
+            "You can skip this and set it later under File, Set Projects Folder.",
         )
-        intro.Wrap(520)
         self._proj_label = wx.StaticText(p, label=self._proj_display())
         choose_btn = wx.Button(p, label="Choose Folder…")
         choose_btn.Bind(wx.EVT_BUTTON, lambda _e: self._pick_folder())
+        pad = self.FromDIP(PAD)
         s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(intro, 0, wx.ALL, 8)
-        s.Add(self._proj_label, 0, wx.LEFT | wx.BOTTOM, 8)
-        s.Add(choose_btn, 0, wx.LEFT, 8)
+        s.Add(intro, 0, wx.ALL, pad)
+        s.Add(self._proj_label, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        s.Add(choose_btn, 0, wx.LEFT, pad)
         p.SetSizer(s)
         return p
 
     def _make_done(self) -> wx.Panel:
         p = wx.Panel(self._book)
-        self._done_text = wx.StaticText(p, label="")
+        self._done_text = self._paragraph(p)
         s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(self._done_text, 0, wx.ALL, 8)
+        s.Add(self._done_text, 0, wx.ALL, self.FromDIP(PAD))
         p.SetSizer(s)
         return p
 
@@ -7583,7 +7719,6 @@ class SetupWizard(wx.Dialog):
             "in, and can set your projects folder.\n\n"
             "You can change backends later under Model, Backend."
         )
-        self._welcome_text.Wrap(520)
         self._cli_install_btn.SetLabel(f"Install {label}")
         self._cli_update_btn.SetLabel(f"Update {label}")
         if self.backend == BACKEND_OPENCODE:
@@ -7607,7 +7742,6 @@ class SetupWizard(wx.Dialog):
                 "In. Otherwise choose Sign In and finish in the browser or terminal "
                 "that opens."
             )
-        self._signin_intro.Wrap(520)
         limitations = ""
         if not info.supports_model:
             limitations += f"\n{label} manages model selection in its own terminal UI."
@@ -7624,7 +7758,6 @@ class SetupWizard(wx.Dialog):
             f"slash commands, {_chord('Ctrl+period')} stops a task."
             f"{limitations}\n\nChoose Finish."
         )
-        self._done_text.Wrap(520)
         for page in self._pages:
             page.Layout()
 
@@ -7783,7 +7916,6 @@ class SetupWizard(wx.Dialog):
             self._cli_check_btn.Show()
             self._next_btn.Enable(False)
 
-        self._cli_detail.Wrap(520)
         self._pages[1].Layout()
         self.Layout()
         announce(" ".join(filter(None, (self._cli_status.GetLabel(), hint))))
@@ -7880,7 +8012,6 @@ class SetupWizard(wx.Dialog):
             self._cli_path_btn.Hide()
             self._cli_check_btn.Show()
             self._next_btn.Enable(False)
-        self._cli_detail.Wrap(520)
         self._pages[1].Layout()
         self.Layout()
         announce(" ".join(filter(None, (self._cli_status.GetLabel(), hint))))
@@ -8191,7 +8322,6 @@ class SetupWizard(wx.Dialog):
         if not self:
             return
         self._signin_status.SetLabel(text)
-        self._signin_status.Wrap(520)
         self._pages[2].Layout()
         self.Layout()
         announce(text)
@@ -8321,20 +8451,30 @@ class RemoteHermesDialog(wx.Dialog):
                 "Hermes elsewhere; start it there with 'hermes serve'."
             ),
         )
-        intro.Wrap(520)
+        intro.Wrap(self.FromDIP(520))
 
+        # Tooltips carry the same explanations the labels, hints and the intro
+        # already give a screen reader, for whoever hovers instead.
         self._enabled = wx.CheckBox(self, label="&Use a Hermes on another computer")
         self._enabled.SetValue(REMOTE_HERMES.enabled)
+        self._enabled.SetToolTip(
+            "Off runs the Hermes installed on this computer. On connects to a Hermes elsewhere."
+        )
 
         host_label = wx.StaticText(self, label="Computer &name or address:")
         self._host = wx.TextCtrl(self, value=REMOTE_HERMES.host)
         self._host.SetHint("for example: my-server, or 100.64.0.5")
+        self._host.SetToolTip(
+            "The computer running hermes serve, for example: my-server, or 100.64.0.5"
+        )
 
         port_label = wx.StaticText(self, label="&Port:")
         self._port = wx.SpinCtrl(self, min=1, max=65535, initial=REMOTE_HERMES.port)
+        self._port.SetToolTip("The port hermes serve listens on")
 
         self._secure = wx.CheckBox(self, label="Connect over &TLS (wss)")
         self._secure.SetValue(REMOTE_HERMES.secure)
+        self._secure.SetToolTip("Connect over TLS (wss) rather than plain ws")
 
         credential_label = wx.StaticText(self, label="Sign in &with:")
         self._credential = wx.Choice(
@@ -8346,25 +8486,34 @@ class RemoteHermesDialog(wx.Dialog):
         )
         self._credential.SetSelection(0 if REMOTE_HERMES.credential == "token" else 1)
         self._credential.Bind(wx.EVT_CHOICE, lambda _e: self._sync_credential_fields())
+        self._credential.SetToolTip(
+            "Sign in with a session token from the same computer, "
+            "or a username and password from another computer"
+        )
 
         user_label = wx.StaticText(self, label="&Username:")
         self._user = wx.TextCtrl(self, value=REMOTE_HERMES.username)
+        self._user.SetToolTip("Only needed when signing in with a password")
 
         key_label = wx.StaticText(self, label="&Key or password:")
         # Not masked: a screen-reader user has to be able to review what was
         # pasted, and a session token is a machine-generated string nobody
         # types from memory. It is stored in a file of its own either way.
         self._key = wx.TextCtrl(self, value=REMOTE_HERMES.key)
+        self._key.SetToolTip("The session token, or the password for the username above")
 
         self._status = wx.StaticText(self, label=REMOTE_HERMES.describe())
-        self._status.Wrap(520)
+        self._status.Wrap(self.FromDIP(520))
 
         self._test_btn = wx.Button(self, label="&Test connection")
         self._test_btn.Bind(wx.EVT_BUTTON, lambda _e: self._test())
+        self._test_btn.SetToolTip(
+            "Try the address now, so a mistake is found here and not mid-turn"
+        )
 
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
 
-        grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
+        grid = wx.FlexGridSizer(cols=2, vgap=self.FromDIP(PAD), hgap=self.FromDIP(PAD))
         grid.AddGrowableCol(1, 1)
         for label, control in (
             (host_label, self._host),
@@ -8376,17 +8525,19 @@ class RemoteHermesDialog(wx.Dialog):
             grid.Add(label, 0, wx.ALIGN_CENTER_VERTICAL)
             grid.Add(control, 1, wx.EXPAND)
 
+        pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(intro, 0, wx.ALL, 10)
-        sizer.Add(self._enabled, 0, wx.LEFT | wx.BOTTOM, 10)
-        sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
-        sizer.Add(self._secure, 0, wx.ALL, 10)
-        sizer.Add(self._test_btn, 0, wx.LEFT | wx.BOTTOM, 10)
-        sizer.Add(self._status, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
-        sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, 10)
+        sizer.Add(intro, 0, wx.ALL, pad)
+        sizer.Add(self._enabled, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        sizer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(self._secure, 0, wx.ALL, pad)
+        sizer.Add(self._test_btn, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        sizer.Add(self._status, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizerAndFit(sizer)
         self._sync_credential_fields()
         self._host.SetFocus()
+        self.CentreOnParent()
 
     def _credential_name(self) -> str:
         return "token" if self._credential.GetSelection() == 0 else "password"
@@ -8398,7 +8549,7 @@ class RemoteHermesDialog(wx.Dialog):
 
     def _say(self, text: str) -> None:
         self._status.SetLabel(text)
-        self._status.Wrap(520)
+        self._status.Wrap(self.FromDIP(520))
         self.Layout()
         announce(text)
 
@@ -8483,17 +8634,17 @@ def _chord(chord: str) -> str:
 
 
 def _tab_chord_notes() -> tuple[str, str]:
-    """The parenthesised chord notes for Next/Previous Session, per platform.
+    """The menu accelerators for Next/Previous Session, per platform.
 
     Ctrl+Tab cannot work on macOS: wxWidgets maps Ctrl to Command there, and
     Cmd+Tab belongs to the system application switcher and never reaches the
-    app. The chords the frame's accelerator table actually carries on macOS
-    are Cmd+Shift+]/[, and the menu -- which is where anybody learns a chord --
-    must say so.
+    app. The chords are Cmd+Shift+]/[ there, and the menu, which is where
+    anybody learns a chord, must say so. Written with Ctrl in the tabular
+    form, which wxWidgets' Mac port shows and registers as Command.
     """
     if platform.system() == "Darwin":
-        return "(Cmd+Shift+])", "(Cmd+Shift+[)"
-    return "(Ctrl+Tab)", "(Ctrl+Shift+Tab)"
+        return "Ctrl+Shift+]", "Ctrl+Shift+["
+    return "Ctrl+Tab", "Ctrl+Shift+Tab"
 
 
 class PreferencesDialog(wx.Dialog):
@@ -8508,8 +8659,9 @@ class PreferencesDialog(wx.Dialog):
     """
 
     def __init__(self, parent: wx.Window) -> None:
-        super().__init__(parent, title="BlindPilot Preferences", size=wx.Size(620, -1))
+        super().__init__(parent, title="BlindPilot Preferences")
         panel = wx.Panel(self)
+        pad = self.FromDIP(PAD_DIALOG)
         root = wx.BoxSizer(wx.VERTICAL)
 
         narration_choices = [label.replace("&", "") for _key, label, _help in NARRATION_MODES]
@@ -8521,7 +8673,7 @@ class PreferencesDialog(wx.Dialog):
             style=wx.RA_SPECIFY_ROWS,
         )
         self._narration_box.SetSelection(0 if SETTINGS.narration == NARRATION_EVERYTHING else 1)
-        root.Add(self._narration_box, 0, wx.EXPAND | wx.ALL, 8)
+        root.Add(self._narration_box, 0, wx.EXPAND | wx.ALL, pad)
 
         self._live_rows = wx.CheckBox(panel, label="Show live activity in the list")
         self._live_rows.SetValue(SETTINGS.live_rows)
@@ -8537,28 +8689,32 @@ class PreferencesDialog(wx.Dialog):
             self._thinking,
             self._text_view,
         ):
-            root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+            root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
-        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, 8)
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, pad)
         self._sounds = wx.CheckBox(panel, label="Play sound cues")
         self._sounds.SetValue(SETTINGS.sounds_enabled)
-        root.Add(self._sounds, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        root.Add(self._sounds, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        # The cues sit one dialog margin further in than the box that turns
+        # them all on, and the same distance apart as the boxes above them.
         cues_box = wx.BoxSizer(wx.VERTICAL)
         self._cue_checks: dict[str, wx.CheckBox] = {}
         for cue, label, _help in SOUND_CUES:
             check = wx.CheckBox(panel, label=label.replace("&", ""))
             check.SetValue(SETTINGS.sound_cues.get(cue, True))
             self._cue_checks[cue] = check
-            cues_box.Add(check, 0, wx.LEFT, 24)
-        root.Add(cues_box, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+            cues_box.Add(check, 0, wx.LEFT | wx.TOP, pad)
+        root.Add(cues_box, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self._sounds.Bind(wx.EVT_CHECKBOX, lambda _e: self._sync_sound_checks())
         self._sync_sound_checks()
 
-        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, 8)
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, pad)
+        # The group box already says "Working sound"; the choices do not
+        # repeat it.
         cue_choices = [
-            "Working sound: continuous",
-            f"Working sound: every N seconds ({CUE_SECONDS_MIN}-{CUE_SECONDS_MAX})",
-            "Working sound: off",
+            "Continuous",
+            f"Every N seconds ({CUE_SECONDS_MIN}-{CUE_SECONDS_MAX})",
+            "Off",
         ]
         self._cue_box = wx.RadioBox(
             panel,
@@ -8574,13 +8730,13 @@ class PreferencesDialog(wx.Dialog):
                 CUE_OFF: 2,
             }[SETTINGS.progress_cue]
         )
-        root.Add(self._cue_box, 0, wx.EXPAND | wx.ALL, 8)
+        root.Add(self._cue_box, 0, wx.EXPAND | wx.ALL, pad)
         interval_row = wx.BoxSizer(wx.HORIZONTAL)
         interval_row.Add(
             wx.StaticText(panel, label="Seconds between working sounds:"),
             0,
-            wx.ALIGN_CENTER_VERTICAL | wx.LEFT,
-            8,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            self.FromDIP(PAD),
         )
         self._interval = wx.SpinCtrl(
             panel,
@@ -8588,15 +8744,15 @@ class PreferencesDialog(wx.Dialog):
             max=CUE_SECONDS_MAX,
             initial=SETTINGS.progress_cue_seconds,
         )
-        interval_row.Add(self._interval, 0, wx.LEFT, 8)
-        root.Add(interval_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        interval_row.Add(self._interval, 0)
+        root.Add(interval_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self._cue_box.Bind(wx.EVT_RADIOBOX, lambda _e: self._sync_interval())
         self._sync_interval()
 
-        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, 8)
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, pad)
         self._updates = wx.CheckBox(panel, label="Check for updates at startup")
         self._updates.SetValue(bool(_load_config().get("check_for_updates_at_startup", True)))
-        root.Add(self._updates, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        root.Add(self._updates, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         # The buttons must be born on the panel: the sizer lives on the panel,
         # so the widgets it manages have to be children of it, and a standard
@@ -8611,7 +8767,7 @@ class PreferencesDialog(wx.Dialog):
         buttons.AddButton(ok_button)
         buttons.AddButton(cancel_button)
         buttons.Realize()
-        root.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        root.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         panel.SetSizer(root)
         root.Fit(self)
         self.CentreOnParent()
@@ -8668,7 +8824,15 @@ class PreferencesDialog(wx.Dialog):
 
 class MainFrame(wx.Frame):
     def __init__(self, initial_cwd: str):
-        super().__init__(None, title=APP_NAME, size=wx.Size(900, 760))
+        super().__init__(None, title=APP_NAME)
+        self.SetSize(self.FromDIP(wx.Size(900, 760)))
+        # Below this the tab strip, prompt and button row start to overlap.
+        self.SetMinSize(self.FromDIP(wx.Size(640, 480)))
+        # The window icon, which the title bar, the taskbar when run from
+        # source, Alt+Tab and every dialog take from the frame.
+        icon_path = _app_icon_path()
+        if icon_path.exists():
+            self.SetIcons(wx.IconBundle(str(icon_path)))
 
         # Shared audio cues (send / in-progress loop / received).
         self.earcons = Earcons(
@@ -8947,7 +9111,7 @@ class MainFrame(wx.Frame):
         self.mode_combo.SetToolTip("Choose coding-agent sessions or provider chat")
         self.mode_combo.Bind(wx.EVT_COMBOBOX, self._on_app_mode_changed)
         self.mode_combo.Bind(wx.EVT_KEY_DOWN, self._on_mode_combo_key)
-        picker_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        picker_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.FromDIP(PAD))
         picker_row.Add(self.mode_combo, 0, wx.ALIGN_CENTER_VERTICAL)
 
         # This is an intentional, keyboard-focusable native tab strip. Its
@@ -8956,6 +9120,8 @@ class MainFrame(wx.Frame):
         # "tab control" merely because focus entered a conversation page.
         self.tab_switcher = wx.Notebook(root, style=wx.NB_TOP)
         self.tab_switcher.SetName("Session tabs")
+        # A first guess at the strip's height; _fit_tab_strip measures the
+        # real one once a tab exists.
         self.tab_switcher.SetMinSize(wx.Size(-1, root.FromDIP(38)))
         self.tab_switcher.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_tab_switcher_changed)
         self._syncing_tab_switcher = False
@@ -8982,36 +9148,39 @@ class MainFrame(wx.Frame):
         backends.on_reap = lambda name, why: wx.CallAfter(self._announce_reap, name, why)
         backend_pool.start_reaper()
 
-        root_sizer.Add(picker_row, 0, wx.EXPAND | wx.ALL, 8)
-        root_sizer.Add(self.tab_switcher, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
-        root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 4)
+        pad = self.FromDIP(PAD)
+        root_sizer.Add(picker_row, 0, wx.EXPAND | wx.ALL, pad)
+        root_sizer.Add(self.tab_switcher, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        root_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, pad)
         root.SetSizer(root_sizer)
 
         self.statusbar = self.CreateStatusBar()
         self._set_status_text("Ready")
 
-        # Shortcuts. Cmd+L / Cmd+F focus the active tab's prompt / search.
-        # Ctrl+Tab and Ctrl+Shift+Tab move between tabs, which is what every
-        # other tabbed application does; Cmd+Shift+] and Cmd+Shift+[ do the
-        # same and are what a Mac user reaches for. Cmd+1..9 jump straight to
-        # tab N. Tab shortcuts have to live in the accelerator table rather
-        # than on a menu item: Windows menus will not accept Tab as an
-        # accelerator key, so a tab-prefixed label would be shown and never
-        # fire. The menu items below therefore name the chord in their text.
+        # Shortcuts. Cmd+L focuses the active tab's prompt, Cmd+Shift+M cycles
+        # its permission mode, and Cmd+1..9 jump straight to tab N; none of
+        # those has a menu item. Ctrl+Tab and Ctrl+Shift+Tab move between
+        # tabs, which is what every other tabbed application does; Cmd+Shift+]
+        # and Cmd+Shift+[ do the same and are what a Mac user reaches for.
+        # Those four, Cmd+Shift+A and Cmd+R do have menu items, which show the
+        # chord in the accelerator column and register it too. They stay in
+        # this table as well because the items are greyed out in Chat mode
+        # while the chords keep working there (a disabled item's accelerator
+        # never fires). A key is translated once, by whichever table sees it
+        # first, so nothing fires twice. Slash Command is the menu's alone:
+        # its handler does nothing in Chat mode either way.
         id_focus_prompt = wx.NewIdRef()
         id_next_tab = wx.NewIdRef()
         id_prev_tab = wx.NewIdRef()
         id_cycle_mode = wx.NewIdRef()
         id_attach = wx.NewIdRef()
         id_jump_response = wx.NewIdRef()
-        id_slash = wx.NewIdRef()
         self.Bind(wx.EVT_MENU, lambda _e: self._focus_active("prompt"), id=id_focus_prompt)
         self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(+1), id=id_next_tab)
         self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(-1), id=id_prev_tab)
         self.Bind(wx.EVT_MENU, lambda _e: self._cycle_mode_active(), id=id_cycle_mode)
         self.Bind(wx.EVT_MENU, lambda _e: self._attach_active(), id=id_attach)
         self.Bind(wx.EVT_MENU, lambda _e: self._jump_to_latest_response(), id=id_jump_response)
-        self.Bind(wx.EVT_MENU, lambda _e: self._slash_active(), id=id_slash)
 
         accel_entries = [
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("L"), id_focus_prompt),
@@ -9022,7 +9191,6 @@ class MainFrame(wx.Frame):
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("M"), id_cycle_mode),
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("A"), id_attach),
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("R"), id_jump_response),
-            wx.AcceleratorEntry(wx.ACCEL_CMD, ord("/"), id_slash),
         ]
         self._tab_jump_ids: list[wx.WindowIDRef] = []
         for n in range(1, 10):
@@ -9038,9 +9206,30 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_CHAR_HOOK, self._on_agent_char_hook)
 
         self._add_session(initial_cwd)
+        self._fit_tab_strip()
         self._set_app_mode(self._app_mode, announce_change=False)
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
+
+    def _fit_tab_strip(self) -> None:
+        """Shrink the tab strip to its tab row, so no empty page shows under it.
+
+        A native notebook always draws a frame around its page, and with
+        nothing on the pages that frame was a bordered band under the tabs.
+        The page's offset inside the control is the height of the tab row,
+        and what lies below the page is the frame; both are measured rather
+        than guessed, so the height follows the font and the DPI.
+        """
+        if self.tab_switcher.GetPageCount() == 0:
+            return
+        # One layout so the page has its real size to measure against.
+        self.SendSizeEvent()
+        page = self.tab_switcher.GetPage(0)
+        below = (
+            self.tab_switcher.GetClientSize().height - page.GetPosition().y - page.GetSize().height
+        )
+        self.tab_switcher.SetMinSize(wx.Size(-1, page.GetPosition().y + max(below, 0)))
+        self._root.Layout()
 
     def _announce_reap(self, backend: str, reason: str = backend_pool.REAP_IDLE) -> None:
         """Say that a backend was let go, and that the next turn restarts it.
@@ -9181,7 +9370,7 @@ class MainFrame(wx.Frame):
         self.chat_panel.refresh_models_item = self._chat_refresh_item
         self.chat_panel.history_list_view_item = self._chat_history_list_item
         self.chat_panel.history_text_view_item = self._chat_history_text_item
-        self._root_sizer.Add(self.chat_panel, 1, wx.EXPAND | wx.ALL, 4)
+        self._root_sizer.Add(self.chat_panel, 1, wx.EXPAND | wx.ALL, self.FromDIP(PAD))
         self.chat_panel.Hide()
         return self.chat_panel
 
@@ -9381,6 +9570,9 @@ class MainFrame(wx.Frame):
             info.SetVersion(APP_VERSION)
             info.SetDescription(description)
             info.SetCopyright("Copyright (c) 2026 doubletaponair and BlindPilot contributors")
+            # No icon on purpose. Giving AboutDialogInfo one makes wx use its
+            # own generic dialog instead of the native message box, and a
+            # message box reads its whole text aloud the moment it opens.
             wx.adv.AboutBox(info, self)
         except Exception:
             wx.MessageBox(
@@ -9519,8 +9711,17 @@ class MainFrame(wx.Frame):
             count = self.notebook.GetPageCount()
             while self.tab_switcher.GetPageCount() > count:
                 self.tab_switcher.DeletePage(self.tab_switcher.GetPageCount() - 1)
+            added = False
             while self.tab_switcher.GetPageCount() < count:
                 self.tab_switcher.AddPage(wx.Panel(self.tab_switcher), "")
+                added = True
+            if added:
+                # A page added after the first sits at its default size in
+                # the control's top-left corner until the control is next
+                # sized, and with the strip cut down to its tab row that
+                # corner is the first tab. A size event puts every page in
+                # the (empty) page area straight away.
+                self.tab_switcher.SendSizeEvent()
             for index in range(count):
                 label = self.notebook.GetPageText(index)
                 if self.tab_switcher.GetPageText(index) != label:
@@ -9654,16 +9855,16 @@ class MainFrame(wx.Frame):
             self._side_chat_active,
         )
         menu.AppendSeparator()
-        next_note, prev_note = _tab_chord_notes()
+        next_chord, prev_chord = _tab_chord_notes()
         add(
             menu,
-            f"Ne&xt Session {next_note}",
+            f"Ne&xt Session\t{next_chord}",
             "Move to the next conversation tab",
             lambda: self._cycle_tab(+1),
         )
         add(
             menu,
-            f"Previo&us Session {prev_note}",
+            f"Previo&us Session\t{prev_chord}",
             "Move to the previous conversation tab",
             lambda: self._cycle_tab(-1),
         )
@@ -9711,13 +9912,13 @@ class MainFrame(wx.Frame):
         )
         add(
             menu,
-            f"&Attach Files… ({_chord('Ctrl+Shift+A')})",
+            "&Attach Files…\tCtrl+Shift+A",
             "Attach files to the next message",
             self._attach_active,
         )
         add(
             menu,
-            f"S&lash Command… ({_chord('Ctrl+/')})",
+            "S&lash Command…\tCtrl+/",
             "Pick one of this backend's slash commands from a list",
             self._slash_active,
         )
@@ -9744,7 +9945,7 @@ class MainFrame(wx.Frame):
         )
         add(
             menu,
-            f"&Jump to Latest Response ({_chord('Ctrl+R')})",
+            "&Jump to Latest Response\tCtrl+R",
             "Move to the newest response, then back through the ones before it",
             self._jump_to_latest_response,
         )

@@ -28,6 +28,9 @@ DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
+; The installer's own icon, so the downloaded setup.exe shows the app
+; rather than Inno Setup's stock picture. Relative to this file, like LicenseFile.
+SetupIconFile=..\packaging\BlindPilot.ico
 OutputDir={#MyOutputDir}
 OutputBaseFilename=BlindPilot-Setup-x64
 Compression=lzma2/ultra64

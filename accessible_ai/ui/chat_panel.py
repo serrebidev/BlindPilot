@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 MAX_TOTAL_ATTACHMENT_BYTES = 100 * 1024 * 1024
 RESPONSE_ANNOUNCEMENT_INTERVAL_MS = 300
 
+# Sizer borders in device independent pixels. Every one goes through FromDIP.
+PAD = 8
+PAD_DIALOG = 12
+
+MESSAGE_INPUT_HEIGHT = 90
+ATTACHMENT_LIST_HEIGHT = 62
+EDIT_DIALOG_SIZE = wx.Size(650, 450)
+EDIT_DIALOG_MIN_SIZE = wx.Size(500, 300)
+
 
 class _ActionState:
     """Small MenuItem-compatible state holder used by the embedded panel."""
@@ -115,9 +124,12 @@ class ChatPanel(wx.Panel):
 
     def _build_ui(self) -> None:
         panel = self
+        # One border for every row, so the pickers, the boxes and both
+        # button rows share a left edge.
+        pad = panel.FromDIP(PAD)
         outer = wx.BoxSizer(wx.VERTICAL)
 
-        selectors = wx.FlexGridSizer(cols=4, vgap=6, hgap=8)
+        selectors = wx.FlexGridSizer(cols=4, vgap=pad, hgap=pad)
         selectors.AddGrowableCol(1, 1)
         selectors.AddGrowableCol(3, 1)
 
@@ -131,41 +143,49 @@ class ChatPanel(wx.Panel):
         self.account_choice.SetName("Account")
         selectors.Add(self.account_choice, 1, wx.EXPAND)
 
-        outer.Add(selectors, 0, wx.EXPAND | wx.ALL, 10)
+        outer.Add(selectors, 0, wx.EXPAND | wx.ALL, pad)
 
         transcript_label = wx.StaticText(panel, label="History:")
-        outer.Add(transcript_label, 0, wx.LEFT | wx.RIGHT, 10)
+        outer.Add(transcript_label, 0, wx.LEFT | wx.RIGHT, pad)
         self.history_list = wx.ListBox(panel, style=wx.LB_SINGLE)
         self.history_list.SetName("History")
-        outer.Add(self.history_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        outer.Add(self.history_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self.transcript = wx.TextCtrl(
             panel,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
         )
         self.transcript.SetName("History")
-        outer.Add(self.transcript, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        outer.Add(self.transcript, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self.transcript.Hide()
 
         input_label = wx.StaticText(panel, label="Message:")
-        outer.Add(input_label, 0, wx.LEFT | wx.RIGHT, 10)
-        self.message_input = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_RICH2, size=(-1, 90))
+        outer.Add(input_label, 0, wx.LEFT | wx.RIGHT, pad)
+        self.message_input = wx.TextCtrl(
+            panel,
+            style=wx.TE_MULTILINE | wx.TE_RICH2,
+            size=wx.Size(-1, panel.FromDIP(MESSAGE_INPUT_HEIGHT)),
+        )
         self.message_input.SetName("Message")
-        outer.Add(self.message_input, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        outer.Add(self.message_input, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         model_row = wx.BoxSizer(wx.HORIZONTAL)
         model_row.Add(
-            wx.StaticText(panel, label="Model:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8
+            wx.StaticText(panel, label="Model:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad
         )
         self.model_combo = wx.ComboBox(panel, style=wx.CB_DROPDOWN)
         self.model_combo.SetName("Model")
         model_row.Add(self.model_combo, 1, wx.EXPAND)
-        outer.Add(model_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        outer.Add(model_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self.model_combo.MoveAfterInTabOrder(self.message_input)
 
         self.attachment_label = wx.StaticText(panel, label="Attachments:")
-        outer.Add(self.attachment_label, 0, wx.LEFT | wx.RIGHT, 10)
-        self.attachment_list = wx.ListBox(panel, style=wx.LB_EXTENDED, size=(-1, 62))
-        outer.Add(self.attachment_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+        outer.Add(self.attachment_label, 0, wx.LEFT | wx.RIGHT, pad)
+        self.attachment_list = wx.ListBox(
+            panel,
+            style=wx.LB_EXTENDED,
+            size=wx.Size(-1, panel.FromDIP(ATTACHMENT_LIST_HEIGHT)),
+        )
+        outer.Add(self.attachment_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self.attachment_label.Hide()
         self.attachment_list.Hide()
 
@@ -175,10 +195,10 @@ class ChatPanel(wx.Panel):
         self.clear_files_button = wx.Button(panel, label="&Clear all")
         self.remove_files_button.Disable()
         self.clear_files_button.Disable()
-        attachment_row.Add(self.add_files_button, 0, wx.RIGHT, 8)
-        attachment_row.Add(self.remove_files_button, 0, wx.RIGHT, 8)
+        attachment_row.Add(self.add_files_button, 0, wx.RIGHT, pad)
+        attachment_row.Add(self.remove_files_button, 0, wx.RIGHT, pad)
         attachment_row.Add(self.clear_files_button, 0)
-        outer.Add(attachment_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        outer.Add(attachment_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         button_row = wx.BoxSizer(wx.HORIZONTAL)
         self.send_button = wx.Button(panel, label="&Send")
@@ -187,11 +207,11 @@ class ChatPanel(wx.Panel):
         self.new_button = wx.Button(panel, label="&New conversation")
         self.regenerate_button.Disable()
         self.stop_button.Disable()
-        button_row.Add(self.send_button, 0, wx.RIGHT, 8)
-        button_row.Add(self.regenerate_button, 0, wx.RIGHT, 8)
-        button_row.Add(self.stop_button, 0, wx.RIGHT, 8)
+        button_row.Add(self.send_button, 0, wx.RIGHT, pad)
+        button_row.Add(self.regenerate_button, 0, wx.RIGHT, pad)
+        button_row.Add(self.stop_button, 0, wx.RIGHT, pad)
         button_row.Add(self.new_button, 0)
-        outer.Add(button_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        outer.Add(button_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
 
         panel.SetSizer(outer)
 
@@ -388,23 +408,24 @@ class ChatPanel(wx.Panel):
 
     def _prompt_for_history_edit(self, entry: Message) -> str | None:
         label = self._history_role_label(entry.role)
-        dialog = wx.Dialog(self, title=f"Edit {label}", size=(650, 450))
+        dialog = wx.Dialog(self, title=f"Edit {label}", size=self.FromDIP(EDIT_DIALOG_SIZE))
+        pad_dialog = dialog.FromDIP(PAD_DIALOG)
         outer = wx.BoxSizer(wx.VERTICAL)
         outer.Add(
             wx.StaticText(dialog, label=f"{label} text:"),
             0,
             wx.LEFT | wx.TOP | wx.RIGHT,
-            10,
+            pad_dialog,
         )
         text = wx.TextCtrl(dialog, style=wx.TE_MULTILINE | wx.TE_RICH2)
         text.SetName(f"{label} text")
         text.SetValue(entry.content)
-        outer.Add(text, 1, wx.EXPAND | wx.LEFT | wx.TOP | wx.RIGHT, 10)
+        outer.Add(text, 1, wx.EXPAND | wx.LEFT | wx.TOP | wx.RIGHT, pad_dialog)
         buttons = dialog.CreateSeparatedButtonSizer(wx.OK | wx.CANCEL)
         if buttons is not None:
-            outer.Add(buttons, 0, wx.EXPAND | wx.ALL, 10)
+            outer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad_dialog)
         dialog.SetSizer(outer)
-        dialog.SetMinSize((500, 300))
+        dialog.SetMinSize(dialog.FromDIP(EDIT_DIALOG_MIN_SIZE))
         dialog.CentreOnParent()
         text.SetFocus()
         try:

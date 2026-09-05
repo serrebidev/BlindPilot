@@ -959,7 +959,10 @@ def test_a_failed_turns_prompt_is_not_grouped_into_the_next_response(monkeypatch
     app.SessionPanel._on_failed(panel, "the backend went away")
     app.SessionPanel._add_your_message(panel, "second")
 
-    numbers = [row.response_number for row in panel._rows]
+    # The failure leaves a row of its own between the two prompts; it is the
+    # prompts whose numbers must differ.
+    assert [row.kind for row in panel._rows] == ["you", "error", "you"]
+    numbers = [row.response_number for row in panel._rows if row.kind == "you"]
     assert numbers[0] != numbers[1], numbers
 
 
