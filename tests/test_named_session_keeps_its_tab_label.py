@@ -222,7 +222,7 @@ def test_starting_a_new_conversation_drops_the_name() -> None:
     _send(panel)
     panel._run_in_progress = lambda: False
     panel._worker = None
-    panel._drop_held_hermes = lambda: None
+    panel._drop_held_backends = lambda: None
 
     app.SessionPanel.clear_conversation(panel)
     panel.titles.clear()
@@ -236,7 +236,7 @@ def test_switching_backend_mid_conversation_drops_the_name() -> None:
     """Leaving a conversation behind by changing backend is the same boundary
     as clearing it."""
     panel = _panel("Radio pipeline", session_id="hermes-1")
-    panel._drop_held_hermes = lambda: None
+    panel._drop_held_backends = lambda: None
     panel.selected_backend = lambda: app.BACKEND_CLAUDE
 
     _send(panel)
@@ -250,7 +250,7 @@ def test_switching_backend_before_the_first_message_keeps_the_name() -> None:
     nothing to leave behind, so a name typed seconds ago must survive picking
     a different backend."""
     panel = _panel("Radio pipeline", session_id=None)
-    panel._drop_held_hermes = lambda: None
+    panel._drop_held_backends = lambda: None
     panel.selected_backend = lambda: app.BACKEND_CLAUDE
 
     _send(panel)
@@ -265,7 +265,7 @@ def test_reopening_a_hermes_conversation_drops_the_name() -> None:
     if the tab were later cleared, and would send a title on a resume that
     does not take one."""
     panel = _panel("Radio pipeline")
-    panel._drop_held_hermes = lambda: None
+    panel._drop_held_backends = lambda: None
     panel.backend_changed = lambda: None
     panel.stop_btn = _Button()
     panel._worker = None
@@ -285,7 +285,7 @@ def test_restoring_a_past_conversation_drops_the_name() -> None:
     """Ctrl+H in a named tab: same boundary, a conversation with a title of
     its own."""
     panel = _panel("Radio pipeline")
-    panel._drop_held_hermes = lambda: None
+    panel._drop_held_backends = lambda: None
     panel.backend_changed = lambda: None
     entry = app.HistoryEntry(
         backend=app.BACKEND_CLAUDE,

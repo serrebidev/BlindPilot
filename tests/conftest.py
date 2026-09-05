@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import backend_pool
+
 
 @pytest.fixture(autouse=True)
 def diagnostics_stay_out_of_the_real_log(monkeypatch):
@@ -40,6 +42,36 @@ def diagnostics_stay_out_of_the_real_log(monkeypatch):
         # to delete a file faulthandler is still holding.
         diagnostics.stop_logging()
         shutil.rmtree(logs, ignore_errors=True)
+
+
+def _forget_every_held_process() -> None:
+    """Stop everything the pool is holding and start it again from nothing.
+
+    Replacing the singleton rather than only draining it, because a pool
+    carries more than its processes: `on_reap` is a callback the window
+    installs, and `drop_all` leaves it in place.
+    """
+    running = backend_pool._pool
+    if running is not None:
+        running.drop_all()
+    backend_pool._pool = None
+
+
+@pytest.fixture(autouse=True)
+def no_backend_process_outlives_its_test():
+    """Empty the shared pool around every test.
+
+    Backends hold their process across turns now, so a test that drives a
+    worker leaves its stand-in in a process-wide registry. The next test to
+    ask for that backend would be handed the previous test's fake instead of
+    starting its own - and with `pytest-randomly` shuffling the order, which
+    test that is changes run to run.
+    """
+    _forget_every_held_process()
+    try:
+        yield
+    finally:
+        _forget_every_held_process()
 
 
 @pytest.fixture

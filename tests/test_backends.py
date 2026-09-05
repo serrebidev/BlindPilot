@@ -694,7 +694,11 @@ def test_backend_processes_are_launched_without_a_console_window():
         assert agent_backends.no_window_kwargs() == {}
 
 
-def test_codex_app_server_is_spawned_with_the_no_window_flag(monkeypatch):
+def test_a_worker_that_fails_to_launch_codex_reports_why(monkeypatch):
+    """The launch-flag assertion this test used to be named for is now
+    covered by test_codex_pool.py's tests of `_start_codex_server` directly;
+    what is still only checked here is the message a worker's `on_failed`
+    gets when the launch it asked the pool for raises."""
     captured: dict = {}
 
     def fake_popen(_args, **kwargs):
@@ -834,10 +838,12 @@ def test_freebuff_narrates_only_finished_sentences():
 class _ScriptedCodexServer:
     """A stand-in app server that answers whatever the worker actually asks.
 
-    Its stdout is a generator, so each line is produced only when the worker
-    reads it — by which point the request that line replies to has already been
-    written. That is what lets the script assert on real ordering rather than
-    on a fixed transcript.
+    Its stdout is a generator, and each line waits for the request it replies
+    to actually to have been written. That is what lets the script assert on
+    real ordering rather than on a fixed transcript. The wait is what a plain
+    lookup used to be: the app server is now read by a thread of its own,
+    started with the process, which reaches for the first line before the
+    worker has had a chance to ask for anything.
     """
 
     def __init__(self, thread_id: str = "thread-1") -> None:
@@ -861,11 +867,15 @@ class _ScriptedCodexServer:
     def methods(self) -> list[str]:
         return [message.get("method", "") for message in self.sent]
 
-    def _last(self, method: str) -> dict:
-        for message in reversed(self.sent):
-            if message.get("method") == method:
-                return message
-        raise AssertionError(f"the worker never sent {method}: {self.methods()}")
+    def _last(self, method: str, timeout: float = 10.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            for message in reversed(list(self.sent)):
+                if message.get("method") == method:
+                    return message
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the worker never sent {method}: {self.methods()}")
+            time.sleep(0.005)
 
     def _script(self):
         resume = self._last("thread/resume")
