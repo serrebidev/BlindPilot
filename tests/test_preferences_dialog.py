@@ -14,48 +14,27 @@ import blindpilot_app as app
 wx = pytest.importorskip("wx")
 
 
-# What `_apply_preferences` writes. `sound_cues` is a dict, so it is copied
-# rather than aliased - restoring the same object would restore nothing.
-_APPLIED_SETTINGS = (
-    "narration",
-    "live_rows",
-    "speak_live",
-    "show_thinking",
-    "sounds_enabled",
-    "sound_cues",
-    "text_view",
-    "progress_cue",
-    "progress_cue_seconds",
-)
-
-
-@pytest.fixture(autouse=True)
-def settings_survive_this_file():
-    """Put the global settings back, whatever these tests do to them.
-
-    `_apply_preferences` writes to the one real `SETTINGS` object, so a test
-    that applies a dialog leaves every one of those values changed for whoever
-    runs next. That is not hypothetical: applying a dialog with the working cue
-    off left `progress_cue` off, and `Earcons.start_progress` reads it, so
-    `test_sound_cues.py` failed whenever the shuffle put this file first -
-    a failure in a file that had done nothing wrong. Autouse rather than opt-in,
-    because the next test added here will not remember to ask for it.
-    """
-    before = {name: getattr(app.SETTINGS, name) for name in _APPLIED_SETTINGS}
-    before["sound_cues"] = dict(before["sound_cues"])
-    try:
-        yield
-    finally:
-        for name, value in before.items():
-            setattr(app.SETTINGS, name, value)
-
-
 @pytest.fixture(scope="module")
 def wx_app():
     try:
         return wx.App(False)
     except Exception as exc:  # pragma: no cover - depends on the machine
         pytest.skip(f"no display for wxPython: {exc}")
+
+
+@pytest.fixture(autouse=True)
+def restore_settings():
+    """Put the global SETTINGS singleton back after every test here.
+
+    Applying the dialog writes through the live process-wide SETTINGS object,
+    and the suite is shuffled randomly, so a test that changes it and leaves
+    it changed breaks whichever test next reads the defaults -- observed as
+    test_sound_cues failing only under some seeds.
+    """
+    before = dict(app.SETTINGS.__dict__)
+    yield
+    app.SETTINGS.__dict__.clear()
+    app.SETTINGS.__dict__.update(before)
 
 
 def _item(label: str, checked: bool = False):

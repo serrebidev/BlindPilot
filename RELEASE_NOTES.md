@@ -1,73 +1,54 @@
-# BlindPilot 0.21.0
+# BlindPilot 0.21.2
 
 BlindPilot is an accessible desktop front end for AI coding agents, built with
 native wxPython controls so NVDA, JAWS, and VoiceOver read the application
 itself. It is based on Claude Code Reader and remains available under the MIT
 License, with credit to the original project throughout.
 
-This release makes the app feel like a Mac app instead of one that merely runs
-on a Mac.
+This release fixes a regression in 0.21.1: FreeBuff's own boot line ended a
+turn that had not started, so the first message after launching the app died
+one second in with "FreeBuff dropped its session…" when nothing was wrong.
 
-## The shortcuts that were wrong
+## What was actually happening
 
-The chords BlindPilot owns that wxWidgets already mapped to Command (Cmd+T,
-Cmd+W, Cmd+F, Cmd+Q, Cmd+Shift+A, Cmd+/, Cmd+R, Cmd+Shift+]/[) were fine. Three
-were not, all because menu accelerators are written as Ctrl and turned into
-Command at runtime:
+The 0.21.1 drop detection failed a turn the instant "Freebuff session over;
+holding queued messages until rejoin" appeared in the chat log. The logs of
+both the working and the failing chats told the real story, and it is the
+opposite reading:
 
-- **Ctrl+H** — Recent Conversations — became the system's **Hide BlindPilot**,
-  which lives in the application menu and wins. A VoiceOver user pressing the
-  documented chord had the whole app vanish. It is now **Ctrl+Shift+H**.
-- **Ctrl+M** — Model and Effort — became the system's **Minimize**. It is now
-  **Ctrl+Shift+E**.
-- **Ctrl+Tab** to switch sessions became Cmd+Tab, which belongs to the system
-  application switcher and never reached the app at all. The menu now names the
-  chords that actually work: **Cmd+Shift+]** and **Cmd+Shift+[** on macOS.
+- **"Session over" is the first line of every healthy boot.** FreeBuff 0.0.168
+  opens each new chat with it, logs "Reconnection detected" within half a
+  second, and delivers anything queued. A working chat at 01:05:39 shows the
+  whole sequence, ending in "Start agent … glm-5-3-flash" — the message ran on
+  GLM exactly as chosen. 0.21.1 killed such turns one second in and stopped
+  listening.
+- **The message is genuinely lost when it is typed too early.** A message
+  given to FreeBuff's composer before the runtime behind it has reconnected is
+  discarded silently: the chat log records no send at all. The composer being
+  painted is not the same as the session being live.
 
-The menu labels that are read aloud as literal text — Attach Files, Slash
-Command, Jump to Latest Response — now say **Cmd** on macOS instead of telling
-you a Control chord you do not have.
+## What changed
 
-## Settings live where a Mac user looks
-
-Settings used to sit in the Linux-style `~/.config/blindpilot` and managed
-CLIs in `~/.local/share/blindpilot`, while the chat database lived in the
-native `~/Library/Application Support/BlindPilot`. Everything now lives in one
-place: `~/Library/Application Support/BlindPilot`. On the first launch of this
-version, an older install's files are moved there once — entry by entry, never
-overwriting anything already present, and never failing to start if a move
-does not go through.
-
-## Preferences… at Cmd+,
-
-The application menu now has a **Preferences…** item (Cmd+,), the way every
-Mac app does. It opens one dialog holding every Options-menu setting — live
-activity, speaking, narration mode, reasoning, the four sound cues and the
-working-sound interval, the read-only text view, and update checks — applied
-through the same switches the menu items use, so the menu and the dialog can
-never disagree.
-
-## A finished product in every sense
-
-- **About** uses the native macOS About panel with the app's name and icon.
-- The application menu reads "BlindPilot" even when run from source.
-- **Create Desktop Shortcut** now works on macOS, instead of reporting that
-  shortcuts are a Windows thing.
-- The app has an icon for the first time — a gradient tile with a white
-  prompt chevron, rendered by `tools/make_icon.py` (pure standard library,
-  no image dependency) into `.icns` and `.ico`.
-- `BlindPilot.spec` now builds every platform and carries the bundle
-  identifier, the version, `LSMinimumSystemVersion` 10.15, the icon, and all
-  the per-platform hidden imports, so Get Info describes a finished product
-  and the release workflow no longer names PyInstaller flags by hand.
+- **The message is held until the boot is live.** The composer appearing no
+  longer triggers the send. The worker reads FreeBuff's chat log and types the
+  message only once a "Reconnection detected" line has answered the boot's
+  "session over". A one-time "FreeBuff is still starting; holding the message
+  until it is ready" is said while it waits. A boot that never reconnects ends
+  the hold after the startup-silence budget with the 0.21.1 remedy — the right
+  words for a session that is genuinely gone.
+- **A mid-turn drop gets thirty seconds of patience** instead of failing on
+  sight: the session can rejoin on its own, so the drop is announced, watched,
+  and only ends the turn if nothing answers it. The watch is cancelled the
+  moment the reconnection lands.
+- **Drop detection reads the log in order.** "Session over" only means a drop
+  when no later "Reconnection detected" or "Start agent" line answers it — the
+  last word the log has on the session is what counts.
 
 ## Verification
 
-The full suite is green under `-W error` — 1131 passed, 8 skipped — including
-new tests for the macOS directory migration (fake platform, runs everywhere),
-the Preferences dialog read/apply/enable behaviour, and the platform-aware
-menu labels. ruff check and ruff format are clean, and the packaged startup
-smoke test passes. Two tests were made hermetic along the way: the startup
-tests' fake application object gained the app-name methods, and a
-Windows-searching environment variable that was sitting in a developer's real
-environment no longer leaks into the POSIX test.
+`tests/test_freebuff_session_drop.py` grew to fifteen tests: the hold
+releasing on a late reconnection, a hold that never reconnects ending with the
+remedy, a normal boot sending with no hold at all, the patience window on a
+mid-turn drop, and every 0.21.1 reading kept. The full suite is green under
+`-W error` — 1147 passed, 8 skipped — in both the fixed and the shuffled test
+order; ruff check and ruff format are clean.

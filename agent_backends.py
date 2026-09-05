@@ -1448,6 +1448,18 @@ def _freebuff_picker_options(visible: str, models: list[str]) -> tuple[list[str]
     on screen and not in this list does not cost that model, it costs every
     model below it. Matching therefore has to recognise every row the picker
     can move to, or recognise none of them.
+
+    FreeBuff 0.0.168 stopped drawing the focus marker altogether: the welcome
+    screen opens with the highlight on the recommended card and no ``›``
+    anywhere, so a reader that insists on the marker finds no focused row and
+    the message is lost. When no row is marked, the content row of the first
+    painted card is taken as the focused one — the highlight starts on the
+    first card on both the welcome screen and the expanded list. A model card
+    opens with a ``┌─┐`` top and its name on the row below, which the
+    advertising boxes below the cards do not share; the position is only
+    claimed when that first row was itself matched, so a catalog that has
+    lost the very first model still reports no focus rather than a wrong one.
+    Releases that draw the marker never reach this.
     """
     # Longest first, so a model whose id is a prefix of another's cannot claim
     # the longer one's row.
@@ -1468,6 +1480,17 @@ def _freebuff_picker_options(visible: str, models: list[str]) -> tuple[list[str]
         options.append(matched)
         if "›" in raw or re.search(r"(?:^|│)\s*>\s*", raw):
             focused = len(options) - 1
+    if focused < 0 and options:
+        lines = [line.strip() for line in visible.splitlines()]
+        first_top = next(
+            (index for index, line in enumerate(lines) if re.fullmatch(r"┌─+┐", line)),
+            -1,
+        )
+        if first_top >= 0 and first_top + 1 < len(lines):
+            row = _freebuff_display_key(lines[first_top + 1])
+            matched = next((model for model, key in keyed if key and key in row), "")
+            if matched and matched in options:
+                focused = 0
     return options, focused
 
 
@@ -3194,6 +3217,13 @@ _FREEBUFF_INTERRUPTED = "[response interrupted]"
 # message that is never sent.
 _FREEBUFF_PICKER_RE = re.compile(r"(?i)RECOMMENDED|Start coding for free|See all \d+ models?")
 
+# Either phrase means the full model list is already on screen. 0.0.168 opens
+# on the expanded list and says "Show fewer"; earlier releases opened on a
+# recommended card with a "See all N models" entry. Navigating straight to a
+# model is only correct on the expanded screen — on the collapsed one the
+# first Down moves to that entry instead.
+_FREEBUFF_PICKER_EXPANDED_RE = re.compile(r"(?i)show fewer|see all \d+ models?")
+
 _FREEBUFF_QUESTION_MARKER = "Some questions for you"
 
 # A question in that box: collapsed (right-pointing) or open (down-pointing),
@@ -3327,6 +3357,12 @@ _FREEBUFF_MAX_LAG_SECONDS = 0.4
 _FREEBUFF_TURN_SECONDS = 60 * 60
 
 _FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
+
+# How long a mid-turn drop is listened to before it is called. A session can
+# rejoin on its own — the reconnection lands within a second when it does —
+# and a turn abandoned at the first word of trouble would throw away work that
+# a moment of patience would have saved.
+_FREEBUFF_DROP_PATIENCE_SECONDS = 30.0
 
 # Sentence-ending punctuation, or the end of a paragraph, either of which is a
 # place a listener expects the reading to stop. The definition lives in
@@ -3552,20 +3588,118 @@ def _freebuff_chat_stamp(chat: Optional[Path]) -> tuple:
 
 
 def _freebuff_run_status(chat: Optional[Path], offset: int = 0) -> str:
-    """Return complete/cancelled from FreeBuff's authoritative per-chat log."""
+    """Return complete/cancelled/disconnected from FreeBuff's per-chat log.
+
+    "session over" alone is not a drop: 0.0.168 opens every new chat with
+    "Freebuff session over; holding queued messages until rejoin" and then
+    reconnects within a second. A drop is a "session over" that no later
+    "Reconnection detected" or "Start agent" line answers, so the reader
+    walks the lines in order and only reports what is still pending at the
+    end. Complete and cancelled stay whole-log readings, since a turn that
+    finished is finished however the session ended afterwards.
+    """
     if chat is None:
         return ""
-    try:
-        with (chat / "log.jsonl").open("rb") as handle:
-            handle.seek(max(0, offset))
-            tail = handle.read().decode("utf-8", "replace")
-    except OSError:
+    tail = _freebuff_log_tail(chat, offset)
+    if not tail:
         return ""
     if "Agent run cancelled by user" in tail:
         return "cancelled"
     if "Main prompt finished" in tail:
         return "complete"
+    if _freebuff_log_pending_drop(tail):
+        return "disconnected"
     return ""
+
+
+def _freebuff_log_pending_drop(tail: str) -> bool:
+    """Whether a log's last word on the session is a drop nobody answered.
+
+    The lines are walked in order: "session over" opens a pending drop and a
+    later "Reconnection detected" or "Start agent" closes it. What is left
+    pending at the end is the session's state right now.
+    """
+    pending = False
+    for line in tail.splitlines():
+        if "session over" in line:
+            pending = True
+        elif "Reconnection detected" in line or "Start agent" in line:
+            pending = False
+    return pending
+
+
+def _freebuff_log_tail(chat: Path, offset: int = 0) -> str:
+    """The per-chat log from ``offset`` on, decoded lossily."""
+    try:
+        with (chat / "log.jsonl").open("rb") as handle:
+            handle.seek(max(0, offset))
+            return handle.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+# Said once, in the same words, wherever a genuine drop is noticed: a turn
+# accepted and then never answered, on a session that logged "session over"
+# and never reconnected.
+_FREEBUFF_REJOIN_MESSAGE = (
+    "FreeBuff dropped its session and is holding the message until it rejoins, "
+    "but nothing is answering. Quit and reopen FreeBuff, then send the message again."
+)
+
+
+def _freebuff_boot_ready(
+    cwd: str, before: dict[str, float], chat_path: Optional[Path], log_offset: int
+) -> bool:
+    """Whether FreeBuff's chat runtime has reconnected and can take a message.
+
+    0.0.168 paints its composer before it has finished starting, and a message
+    given to that composer is lost silently: the chat log records no send at
+    all. The recovery is visible only in the chat's own log, which opens with
+    "session over" and gains a "Reconnection detected" line within a second —
+    so a message is held until that line arrives. For a conversation this
+    launch created, the whole log is read and recovery must be seen; for a
+    resumed one, only the lines written since the launch started are read, and
+    nothing new to read means an ordinary continuation rather than a hold. A
+    launch that has created no chat yet is taken as ready, because there is
+    nothing to wait for and never sending would lose the message anyway.
+    """
+    target = chat_path
+    if target is None:
+        after = _freebuff_chat_dirs(cwd)
+        new_ids = set(after) - set(before)
+        if not new_ids:
+            return True
+        target = _freebuff_chat_path(cwd, max(new_ids, key=lambda chat_id: after[chat_id]))
+        if target is None:
+            return True
+        tail = _freebuff_log_tail(target, 0)
+        if not tail.strip():
+            # A chat folder with nothing logged yet is a boot still in
+            # progress; the recovery line arrives moments later.
+            return False
+        return not _freebuff_log_pending_drop(tail)
+    return not _freebuff_log_pending_drop(_freebuff_log_tail(target, log_offset))
+
+
+def _freebuff_dropped_new_chat(before: dict[str, float], cwd: str) -> bool:
+    """Whether a chat created during this launch is waiting on a dead session.
+
+    "session over" is also the first line of a healthy boot, so the question
+    is not whether it was logged but whether anything ever answered it. Only
+    chats created during this launch are consulted: a drop logged by an
+    earlier session must not fail this one.
+    """
+    after = _freebuff_chat_dirs(cwd)
+    new_ids = set(after) - set(before)
+    if not new_ids:
+        return False
+    target = _freebuff_chat_path(cwd, max(new_ids, key=lambda chat_id: after[chat_id]))
+    if target is None:
+        return False
+    tail = _freebuff_log_tail(target, 0)
+    if not tail.strip():
+        return False
+    return _freebuff_log_pending_drop(tail)
 
 
 def _freebuff_launch_failure(visible: str) -> str:
@@ -3876,7 +4010,12 @@ class FreebuffWorker(threading.Thread):
     activity rows and resumes the chat id FreeBuff creates on the next turn.
     """
 
-    _PROMPT_RE = re.compile(r"(?mi)(?:^\s*[›>]\s*$|Enter a coding task or / for commands)")
+    # The quoted form is drawn first on the composer in 0.0.168, before the
+    # caption has scrolled in; matching it means readiness is seen at once
+    # instead of after a silence long enough to look like a hang.
+    _PROMPT_RE = re.compile(
+        r"(?mi)(?:^\s*[›>]\s*$|Enter a coding task or / for commands|Describe your task)"
+    )
     _BUSY_RE = re.compile(
         r"(?mi)(?:thinking(?:\.\.\.|…)|working(?:\.\.\.|…)|■\s*Esc|Esc\s+to\s+(?:stop|interrupt))"
     )
@@ -4064,6 +4203,11 @@ class FreebuffWorker(threading.Thread):
         structured_answer_id = ""
         chat_stamp: tuple = ()
         run_status = ""
+        # A mid-turn drop is awaited, not failed on sight — the patience
+        # constant below. And a boot that has not reconnected holds the
+        # message rather than feeding it to a composer that would lose it.
+        disconnected_since: Optional[float] = None
+        boot_hold_started: Optional[float] = None
         agent_states: dict[str, str] = {}
         screen_dirty = False
         screen_changed_at = time.monotonic()
@@ -4156,6 +4300,13 @@ class FreebuffWorker(threading.Thread):
                 continue
             if not chunk and self._stream_ended.is_set():
                 if not sent:
+                    # A dropped session closes nothing and prints nothing: the
+                    # composer just never arrives. FreeBuff's log is the only
+                    # place the drop is written down, and it is more use than
+                    # any inference from an empty screen.
+                    if _freebuff_dropped_new_chat(before, self._cwd):
+                        self._fail(_FREEBUFF_REJOIN_MESSAGE)
+                        return
                     # Whatever killed it said so on the terminal before dying —
                     # a missing Node, a failed download, a refused login. That
                     # sentence is the whole of what the person can act on, so
@@ -4193,11 +4344,14 @@ class FreebuffWorker(threading.Thread):
                     self._write("\r")
                     accepted_recommended_model = True
                     continue
-                if not picker_expanded:
+                if not picker_expanded and not _FREEBUFF_PICKER_EXPANDED_RE.search(last_visible):
                     # Move from the recommended card to "See all models" and
                     # open it. The expanded picker is then navigated from its
                     # actual runtime ordering, so model catalog changes do not
-                    # require a BlindPilot update.
+                    # require a BlindPilot update. A release that opens on the
+                    # expanded list already — 0.0.168 shows "Show fewer" under
+                    # the cards — has no such entry, and a Down here would
+                    # walk off the first card and choose the wrong model.
                     self._write("\x1b[B")
                     time.sleep(0.05)
                     self._write("\r")
@@ -4246,6 +4400,22 @@ class FreebuffWorker(threading.Thread):
             if sent and busy:
                 saw_busy = True
             if not sent and at_prompt:
+                # 0.0.168 paints its composer before the runtime behind it has
+                # reconnected, and a message given to that composer is lost
+                # silently: the chat log records no send at all. The boot is
+                # readable in that log, so the message is held here — typed
+                # nowhere — until the log says the session is live.
+                if not _freebuff_boot_ready(self._cwd, before, chat_path, log_offset):
+                    if boot_hold_started is None:
+                        boot_hold_started = time.monotonic()
+                        self._on_activity(
+                            "notice",
+                            "FreeBuff is still starting; holding the message until it is ready",
+                        )
+                    elif time.monotonic() - boot_hold_started >= _FREEBUFF_STARTUP_SILENCE_SECONDS:
+                        self._fail(_FREEBUFF_REJOIN_MESSAGE)
+                        return
+                    continue
                 if not self._submit_text(self._prompt):
                     self._fail("Could not send the prompt to FreeBuff")
                     return
@@ -4265,6 +4435,9 @@ class FreebuffWorker(threading.Thread):
 
             now = time.monotonic()
             if not sent and now - screen_changed_at >= _FREEBUFF_STARTUP_SILENCE_SECONDS:
+                if _freebuff_dropped_new_chat(before, self._cwd):
+                    self._fail(_FREEBUFF_REJOIN_MESSAGE)
+                    return
                 self._fail(
                     _freebuff_startup_silence(last_visible, _FREEBUFF_STARTUP_SILENCE_SECONDS)
                 )
@@ -4321,6 +4494,23 @@ class FreebuffWorker(threading.Thread):
                 if run_status == "cancelled":
                     self._fail("FreeBuff reported that the response was interrupted")
                     return
+                if run_status == "disconnected":
+                    # Not failed on sight: the session can rejoin on its own,
+                    # and a later "Reconnection detected" closes the pending
+                    # drop in the same log walk that found it. Only a drop
+                    # that outlasts the patience ends the turn.
+                    if disconnected_since is None:
+                        disconnected_since = now
+                        self._on_activity(
+                            "notice",
+                            "FreeBuff's session dropped mid-turn; "
+                            "waiting to see whether it rejoins",
+                        )
+                    elif now - disconnected_since >= _FREEBUFF_DROP_PATIENCE_SECONDS:
+                        self._fail(_FREEBUFF_REJOIN_MESSAGE)
+                        return
+                elif disconnected_since is not None:
+                    disconnected_since = None
                 if run_status == "complete":
                     if completion_seen_at is None:
                         completion_seen_at = now
