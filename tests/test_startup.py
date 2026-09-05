@@ -175,47 +175,6 @@ def test_running_from_source_never_touches_the_path(monkeypatch):
     assert os.environ["PATH"] == "/one/place"
 
 
-def test_downloaded_update_schedules_before_forced_close(monkeypatch, tmp_path):
-    import blindpilot_app
-
-    events = []
-    archive = tmp_path / "update.zip"
-    archive.write_bytes(b"verified")
-    release = blindpilot_app.ReleaseInfo(
-        version="9.9.9",
-        tag="v9.9.9",
-        title="Update",
-        notes="",
-        page_url="https://github.com/release",
-        asset_name="BlindPilot-Windows-x64.zip",
-        asset_url="https://github.com/download/update.zip",
-        asset_size=archive.stat().st_size,
-        sha256="0" * 64,
-    )
-
-    class FakeFrame:
-        def _announce_setting(self, message):
-            events.append(("announce", message))
-
-        def _show_update_error(self, message):
-            events.append(("error", message))
-
-        def Close(self, *, force=False):
-            events.append(("close", force))
-
-    monkeypatch.setattr(
-        blindpilot_app,
-        "schedule_install",
-        lambda selected: events.append(("schedule", selected)),
-    )
-
-    blindpilot_app.MainFrame._on_update_downloaded(FakeFrame(), archive, "", release)
-
-    assert events[0] == ("schedule", archive)
-    assert events[-1] == ("close", True)
-    assert not [event for event in events if event[0] == "error"]
-
-
 def test_a_startup_check_does_not_take_focus_from_whoever_is_working(monkeypatch):
     """An automated check must not pull a screen reader off what it was reading.
 

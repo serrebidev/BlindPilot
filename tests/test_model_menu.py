@@ -158,6 +158,7 @@ def test_connect_is_offered_only_where_it_means_something(frame, backend, enable
     stub = type("FrameStub", (), {})()
     stub._connect_item = menu.Append(wx.ID_ANY, "&Connect a Provider…")
     stub._backend = backend
+    stub._app_mode = app.APP_MODE_AGENT
     try:
         app.MainFrame._refresh_connect_item(stub)
 

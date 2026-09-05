@@ -187,3 +187,43 @@ def test_enter_does_not_send_a_question_that_has_no_answer_yet(frame):
         assert ended == [], "a half-filled answer was sent to the backend"
     finally:
         dlg.Destroy()
+
+
+def test_a_question_with_no_choices_offers_only_the_text_box(frame):
+    """A secret or sudo prompt, or a clarify question without choices.
+
+    Before, such a question got a RadioBox whose only entry was "Other". A
+    RadioBox starts with item 0 selected and with one entry the selection can
+    never change, so the EVT_RADIOBOX that shows the text box never fired,
+    and the dialog could not be answered at all. The text box is the whole
+    question here, so it is shown from the start and takes focus.
+    """
+    dlg = _dialog(frame, (Question(question="API key?", secret=True),))
+    try:
+        assert dlg._pickers == [None]
+        assert dlg._texts[0].IsShown()
+        assert dlg._texts[0].GetWindowStyleFlag() & wx.TE_PASSWORD
+        assert dlg._answered() is False
+
+        dlg._texts[0].SetValue("hunter2")
+
+        assert dlg._answered() is True
+        assert dlg.answers() == [["hunter2"]]
+    finally:
+        dlg.Destroy()
+
+
+def test_a_free_text_answer_is_sent_with_enter(frame):
+    dlg = _dialog(frame, (Question(question="Which branch?"),))
+    try:
+        assert not dlg._texts[0].GetWindowStyleFlag() & wx.TE_PASSWORD
+        dlg._texts[0].SetValue("main")
+        ended: list[int] = []
+        dlg.EndModal = ended.append
+
+        _press_enter(dlg._texts[0])
+
+        assert ended == [wx.ID_OK]
+        assert dlg.answers() == [["main"]]
+    finally:
+        dlg.Destroy()

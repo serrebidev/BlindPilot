@@ -36,6 +36,7 @@ class _Panel:
         self.status.append(text)
 
     _copy_message = SessionPanel._copy_message
+    _action_copy_response = SessionPanel._action_copy_response
 
 
 class _Prompt:

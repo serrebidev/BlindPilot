@@ -1,8 +1,8 @@
-"""BlindPilot — accessible wxPython frontend for coding-agent CLIs.
+"""BlindPilot, an accessible wxPython frontend for coding-agent CLIs.
 
 Based on the original Claude Code Reader application. BlindPilot retains the
 original application's accessibility-first design while adding pluggable
-Claude Code, Codex, and FreeBuff backends.
+Claude Code, Codex, FreeBuff, opencode, and Hermes backends.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 SPDX-License-Identifier: MIT
@@ -15,7 +15,7 @@ uses Win32 widgets that NVDA / JAWS handle natively.
 v2 segments each assistant turn into navigable *rows* (a header, one row per
 paragraph / heading / list / quote, and one pristine row per fenced code block)
 via the keystone parser in ``markdown_rows``. The flat list of rows sits above
-the prompt box; arrowing Up from the prompt enters the newest row, while arrow
+the prompt box; Ctrl+Up from the prompt enters the newest row, while arrow
 keys at either end of the list stay in the list. Tab is the only navigation key
 that moves from the responses into the prompt.
 
@@ -66,10 +66,8 @@ from app_updater import (
     ReleaseInfo,
     UpdateError,
     clear_pending_failure,
-    download_update,
     fetch_latest_release,
     pending_failure,
-    schedule_install,
     sweep_temporary_files,
     version_tuple,
 )
@@ -219,17 +217,12 @@ def announce(text: str, urgent: bool = False) -> None:
             # reader is already saying instead of chopping it off.
             _SPEAKER.speak(text, interrupt=False)
         except Exception:
-            # The connection to the reader can drop - NVDA restarting, a JAWS
-            # COM object disconnecting - and the object never recovers. It used
-            # to be kept anyway, so one drop meant silence for the rest of the
-            # session while the menu still said narration was on. Rebuild it
-            # and say this line again, rather than losing every later one too.
+            # The connection drops when NVDA restarts or a JAWS COM object
+            # disconnects, and the object never recovers. Rebuild it and say
+            # this line again, but not more than once per retry window: a
+            # fan-out narrates far faster than a reader restarts.
             now = time.monotonic()
             if now < _speaker_retry_after:
-                # One was built moments ago and this is what became of it.
-                # Scanning for a reader again per line is the cost the throttle
-                # exists to avoid, and a fan-out narrates far faster than a
-                # reader restarts.
                 return
             _speaker_retry_after = now + _SPEAKER_RETRY_SECONDS
             _SPEAKER = _make_speaker()
@@ -237,9 +230,6 @@ def announce(text: str, urgent: bool = False) -> None:
                 try:
                     _SPEAKER.speak(text, interrupt=False)
                 except Exception:
-                    # Built, and no more able to speak than the one it replaced.
-                    # Let it go, so the branch above decides when to look again
-                    # instead of every later line paying two failures and a scan.
                     _SPEAKER = None
         return
     if platform.system() == "Linux" and _linux_announce(text):
@@ -349,12 +339,12 @@ def _login_shell() -> Optional[str]:
 
 
 def _login_shell_which(name: str) -> Optional[str]:
-    """Resolve *name* the way a fresh Terminal window would.
+    """Resolve *name* the way a login shell would.
 
     A GUI app launched from Finder or the Dock inherits a minimal PATH, so this
-    is both how we find a CLI the user can run and how we tell whether their
-    shell startup files would find it. `command -v` is POSIX and also works in
-    fish, so this covers zsh, bash and fish alike.
+    is how a CLI the user can run is found. It runs `$SHELL -l -c`, a login
+    shell that is not interactive, so for zsh it reads .zprofile and not
+    .zshrc. `command -v` is POSIX and also works in fish.
     """
     shell = _login_shell()
     if shell is None:
@@ -452,7 +442,11 @@ def _open_path(path) -> bool:
             os.startfile(str(path))  # noqa: S606 - a path this application chose
             return True
         opener = "open" if system == "Darwin" else "xdg-open"
-        return subprocess.Popen([opener, str(path)]) is not None
+        proc = subprocess.Popen([opener, str(path)])
+        # Reaped off this thread: a dropped Popen is a zombie until GC, and
+        # `Popen.__del__` on one raises a ResourceWarning.
+        threading.Thread(target=proc.wait, daemon=True).start()
+        return True
     except (OSError, ValueError):
         return False
 
@@ -723,7 +717,6 @@ def _shell_profile_file() -> Path:
 
 
 PATH_STANZA_MARKER = "# Added by BlindPilot"
-LEGACY_PATH_STANZA_MARKER = "# Added by Claude Code Reader"
 
 
 def _path_export_line(directory: Path, shell: str) -> str:
@@ -794,7 +787,6 @@ def ensure_on_windows_path(directory: Path) -> bool:
     Returns True when an entry was added, False when it was already present.
     Raises OSError if the registry write fails.
     """
-    _add_to_process_path(directory)
     if platform.system() != "Windows":
         return False
 
@@ -835,11 +827,12 @@ def _powershell_exe() -> Optional[str]:
     return None
 
 
-def _install_argv() -> Optional[List[str]]:
-    """The command that runs the official native installer for this platform.
+def _script_installer_argv(powershell_command: str, posix_url: str) -> Optional[List[str]]:
+    """The command that runs an official script installer on this platform.
 
-    None when the prerequisites aren't there — no PowerShell on Windows, no
-    curl or shell on macOS / Linux.
+    None when the prerequisites are missing: no PowerShell on Windows, no curl
+    or shell on macOS and Linux. macOS ships both curl and bash; a Linux box
+    without curl is possible.
     """
     if platform.system() == "Windows":
         shell = _powershell_exe()
@@ -852,77 +845,41 @@ def _install_argv() -> Optional[List[str]]:
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            f"irm {WINDOWS_INSTALL_PS1_URL} | iex",
+            powershell_command,
         ]
-
-    # macOS ships both curl and bash; a Linux box without curl is possible.
     if shutil.which("curl") is None:
         return None
     shell = shutil.which("bash") or shutil.which("sh")
     if shell is None:
         return None
-    return [shell, "-c", f"curl -fsSL {POSIX_INSTALL_SH_URL} | bash"]
+    return [shell, "-c", f"curl -fsSL {posix_url} | bash"]
 
 
-def _missing_prereq_message() -> str:
-    if platform.system() == "Windows":
-        return (
-            "Could not find PowerShell on this computer, so the installer "
-            "cannot be run automatically."
-        )
-    return (
-        "Could not find curl and bash on this computer, so the installer "
-        "cannot be run automatically."
-    )
+def _install_argv() -> Optional[List[str]]:
+    """Claude Code's official native installer for this platform."""
+    return _script_installer_argv(f"irm {WINDOWS_INSTALL_PS1_URL} | iex", POSIX_INSTALL_SH_URL)
 
 
 def _hermes_install_argv() -> Optional[List[str]]:
-    """Hermes' official installer for this platform, or None without prereqs.
+    """Hermes' official installer for this platform."""
+    return _script_installer_argv(f"iex (irm {HERMES_INSTALL_PS1_URL})", HERMES_INSTALL_SH_URL)
 
-    The same prerequisites as Claude's script installer, for the same reason:
-    PowerShell ships with Windows, curl and bash ship with macOS, and a Linux
-    box without curl is possible.
-    """
-    if platform.system() == "Windows":
-        shell = _powershell_exe()
-        if shell is None:
-            return None
-        return [
-            shell,
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            f"iex (irm {HERMES_INSTALL_PS1_URL})",
-        ]
 
-    if shutil.which("curl") is None:
-        return None
-    shell = shutil.which("bash") or shutil.which("sh")
-    if shell is None:
-        return None
-    return [shell, "-c", f"curl -fsSL {HERMES_INSTALL_SH_URL} | bash"]
+def _missing_prereq_message(installer: str = "the installer") -> str:
+    missing = "PowerShell" if platform.system() == "Windows" else "curl and bash"
+    return f"Could not find {missing} on this computer, so {installer} cannot be run automatically."
 
 
 def _hermes_missing_prereq_message() -> str:
-    if platform.system() == "Windows":
-        return (
-            "Could not find PowerShell on this computer, so Hermes' installer "
-            "cannot be run automatically."
-        )
-    return (
-        "Could not find curl and bash on this computer, so Hermes' installer "
-        "cannot be run automatically."
-    )
+    return _missing_prereq_message("Hermes' installer")
 
 
 def _hermes_binary_after_install() -> Optional[str]:
     """The Hermes launcher after an install, with its install dirs on PATH.
 
-    The installers drop the launcher under the user's home — ``~/.local/bin``
-    on POSIX, ``LOCALAPPDATA\\Programs\\hermes`` among the Windows candidates
-    — so that directory is put on this process' PATH before the search.
+    The installers drop the launcher under the user's home, ``~/.local/bin``
+    on POSIX and ``LOCALAPPDATA\\hermes\\bin`` on Windows, so that directory
+    is put on this process' PATH before the search.
     """
     from hermes_backend import find_hermes_cli
 
@@ -957,6 +914,8 @@ def install_hermes(log: Callable[[str], None]) -> Optional[str]:
         "Downloading and running the official Hermes installer. This usually takes a minute or two."
     )
     rc = _run_logged_process(argv, log)
+    if rc is None:
+        return None
 
     binary = _hermes_binary_after_install()
     if binary is None:
@@ -994,29 +953,11 @@ def install_claude(log: Callable[[str], None]) -> Optional[str]:
         return None
 
     log("Downloading and running the Claude Code installer. This usually takes under a minute.")
-    try:
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **_no_window_kwargs(),
-        )
-    except OSError as exc:
-        log(f"The installer could not be started: {exc}")
+    rc = _run_logged_process(argv, log)
+    if rc is None:
         return None
 
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line:
-            log(line)
-    rc = proc.wait()
-
-    # The installer's own exit code is advisory — what matters is whether a
+    # The installer's own exit code is advisory. What matters is whether a
     # working binary exists afterwards, so look before reporting failure.
     _add_to_process_path(_native_bin_dir())
     binary = _find_claude()
@@ -1034,7 +975,7 @@ def install_claude(log: Callable[[str], None]) -> Optional[str]:
                 f"{_path_shells()} to see it."
             )
         else:
-            log(f"Already on your PATH — `claude` will work in {_path_shells()}.")
+            log(f"Already on your PATH. `claude` will work in {_path_shells()}.")
     except OSError as exc:
         log(f"Installed, but adding it to PATH failed: {exc}")
     return binary
@@ -1270,8 +1211,11 @@ def _npm_environment(npm: str) -> dict[str, str]:
     return subprocess_env(npm)
 
 
-def _npm_install_argv(backend: str) -> Optional[List[str]]:
-    """Return the npm command for a backend, or None if npm is unavailable."""
+def _npm_install_argv(backend: str, latest: bool = False) -> Optional[List[str]]:
+    """The npm command that installs a backend, or None if npm is unavailable.
+
+    `latest` pins the package's latest tag, which is what an update wants.
+    """
     package = _NPM_BACKEND_PACKAGES.get(normalize_backend(backend))
     npm = _find_npm()
     if not package or not npm:
@@ -1282,24 +1226,12 @@ def _npm_install_argv(backend: str) -> Optional[List[str]]:
         "--global",
         "--prefix",
         str(_managed_npm_prefix()),
-        package,
+        f"{package}@latest" if latest else package,
     ]
 
 
 def _npm_update_argv(backend: str) -> Optional[List[str]]:
-    """Return an npm update command pinned to the package's latest tag."""
-    package = _NPM_BACKEND_PACKAGES.get(normalize_backend(backend))
-    npm = _find_npm()
-    if not package or not npm:
-        return None
-    return [
-        npm,
-        "install",
-        "--global",
-        "--prefix",
-        str(_managed_npm_prefix()),
-        f"{package}@latest",
-    ]
+    return _npm_install_argv(backend, latest=True)
 
 
 def _managed_backend_binary(backend: str) -> Optional[str]:
@@ -1370,11 +1302,15 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
     if argv is None:
         log(f"npm could not be installed, so BlindPilot cannot install {label} automatically.")
         return None
+    if backend == BACKEND_CODEX:
+        _drop_codex_server(log)
     if backend == BACKEND_OPENCODE:
         # Same reason as an update: npm cannot replace a running executable.
         stop_opencode_server()
     log(f"Installing {label} with npm. This can take a minute.")
     rc = _run_logged_process(argv, log, env=_npm_environment(npm))
+    if rc is None:
+        return None
     _add_to_process_path(_managed_npm_bin_dir())
     binary = _managed_backend_binary(backend) or find_backend_cli(backend)
     if binary is None:
@@ -1392,6 +1328,8 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
     # the native binary before the setup wizard advances to sign-in.
     log(f"Verifying the {label} installation...")
     verify_rc = _run_logged_process([binary, "--version"], log, env=_npm_environment(npm))
+    if verify_rc is None:
+        return None
     if verify_rc != 0:
         log(f"{label} was installed but failed its startup check (exit code {verify_rc}).")
         return None
@@ -1409,6 +1347,7 @@ def _executable_version(binary: str) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            stdin=subprocess.DEVNULL,
             env=subprocess_env(binary),
             **_no_window_kwargs(),
         )
@@ -1424,7 +1363,9 @@ def _version_tuple(text: str) -> tuple[int, ...]:
 
 def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> bool:
     """Make the Windows launcher use the newest downloaded Claude version."""
-    if platform.system() != "Windows":
+    if platform.system() != "Windows" or Path(binary).suffix.lower() != ".exe":
+        # An npm `claude.cmd` shim is not the native launcher; a PE image
+        # copied over it would break it.
         return True
     versions = Path.home() / ".local" / "share" / "claude" / "versions"
     try:
@@ -1453,6 +1394,15 @@ def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> boo
     return True
 
 
+def _drop_codex_server(log: Callable[[str], None]) -> None:
+    """Let go of the held Codex app-server before npm replaces its executable.
+
+    Windows will not overwrite an executable that is running.
+    """
+    log("Stopping Codex's app-server so its executable can be replaced...")
+    backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
+
+
 def update_backend(backend: str, log: Callable[[str], None]) -> bool:
     """Update an installed provider CLI and stream accessible progress."""
     backend = normalize_backend(backend)
@@ -1467,17 +1417,17 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
     if backend == BACKEND_CLAUDE:
         argv = [binary, "update"]
     elif backend == BACKEND_HERMES:
-        # Not on npm: its official installer is the update path too. It is
-        # safe to re-run — it upgrades in place — and success is measured by
-        # the launcher afterwards, not the exit code. This path used to fall
-        # through to npm and report that npm could not be found, for a
-        # backend that has no npm package.
+        # Not on npm: its official installer is the update path too. It
+        # upgrades in place, and success is measured by the launcher
+        # afterwards, not the exit code.
         hermes_argv = _hermes_install_argv()
         if hermes_argv is None:
             log(_hermes_missing_prereq_message())
             return False
         log(f"Running the official {label} installer to update...")
         rc = _run_logged_process(hermes_argv, log)
+        if rc is None:
+            return False
         if rc != 0:
             log(f"{label} update exited with code {rc}.")
             return False
@@ -1495,6 +1445,8 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
             log(f"npm could not be found, so BlindPilot cannot update {label} automatically.")
             return False
         argv = updating
+    if backend == BACKEND_CODEX:
+        _drop_codex_server(log)
     if backend == BACKEND_OPENCODE:
         # The server BlindPilot has been talking to *is* the executable npm is
         # about to replace, and Windows will not overwrite one that is running.
@@ -1524,6 +1476,8 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
         verify_rc = _run_logged_process(
             [managed_binary, "--version"], log, env=_npm_environment(npm or "")
         )
+        if verify_rc is None:
+            return False
         if verify_rc != 0:
             log(f"{label} updated but failed its startup check (exit code {verify_rc}).")
             return False
@@ -1564,27 +1518,7 @@ AUTH_ERROR_MARKERS = (
     "auth required",
     "oauth token",
 )
-AUTH_HINT = "Not signed in — run `claude auth login` in a terminal, then try again."
-
-
-def _check_auth_quick(binary: str) -> bool:
-    """Returns True if authenticated (or timed out = probably working), False on auth error."""
-    try:
-        result = subprocess.run(
-            [binary, "-p", "x", "--output-format", "stream-json"],
-            capture_output=True,
-            text=True,
-            timeout=12,
-            stdin=subprocess.DEVNULL,
-            env=subprocess_env(binary),
-            **_no_window_kwargs(),
-        )
-        combined = (result.stdout + result.stderr).lower()
-        return not any(m in combined for m in AUTH_ERROR_MARKERS)
-    except subprocess.TimeoutExpired:
-        return True
-    except OSError:
-        return False
+AUTH_HINT = "Not signed in. Run `claude auth login` in a terminal, then try again."
 
 
 # ----- /model: what the CLI currently offers -----
@@ -1605,12 +1539,12 @@ PROBE_TTL_SECONDS = 900
 
 def _keep_choice(current: str) -> str:
     """First combo-box entry: pass no flag, and say what that currently means."""
-    return f"{DEFAULT_CHOICE} — currently {current}" if current else DEFAULT_CHOICE
+    return f"{DEFAULT_CHOICE}, currently {current}" if current else DEFAULT_CHOICE
 
 
 @dataclass
 class ModelOptions:
-    """What `claude` reports it can be asked for, plus what it is using now."""
+    """What a backend reports it can be asked for, plus what it is using now."""
 
     models: List[str]
     efforts: List[str]
@@ -1689,9 +1623,9 @@ def _run_claude(binary: str, args: List[str], cwd: Optional[str], timeout: int) 
 
 
 _probe_lock = threading.Lock()
-# (cwd, cli stamp) -> (when it was probed, what came back). Keyed by the CLI's
-# path+mtime+size so upgrading Claude Code invalidates everything at once.
-_probe_cache: dict[tuple[str, str], tuple[float, ModelOptions]] = {}
+# "backend:cwd" -> (when it was probed, what came back, the CLI's stamp). The
+# stamp is the CLI's path, mtime and size, so upgrading it drops the entry.
+_probe_cache: dict[str, tuple[float, ModelOptions, str]] = {}
 
 
 def invalidate_model_options(backend: str | None = None) -> None:
@@ -1702,7 +1636,7 @@ def invalidate_model_options(backend: str | None = None) -> None:
             _probe_cache.clear()
         else:
             prefix = f"{selected}:"
-            for key in [key for key in _probe_cache if key[0].startswith(prefix)]:
+            for key in [key for key in _probe_cache if key.startswith(prefix)]:
                 _probe_cache.pop(key, None)
     invalidate_backend_cache(selected)
 
@@ -1715,20 +1649,32 @@ def _cli_stamp(binary: str) -> str:
         return binary
 
 
+def _remember_model_options(
+    backend: str, cwd: Optional[str], binary: str, options: ModelOptions
+) -> None:
+    with _probe_lock:
+        _probe_cache[f"{backend}:{cwd or ''}"] = (time.time(), options, _cli_stamp(binary))
+
+
 def cached_model_options(
     cwd: Optional[str], max_age: float, backend: str = BACKEND_CLAUDE
 ) -> Optional[ModelOptions]:
-    """A probe result no older than `max_age` seconds, or None. Never blocks."""
-    backend = normalize_backend(backend)
-    binary = _find_claude() if backend == BACKEND_CLAUDE else find_backend_cli(backend)
-    if binary is None or max_age <= 0:
+    """A probe result no older than `max_age` seconds, or None.
+
+    Never blocks, so it is safe on the GUI thread: the CLI is not searched
+    for (on macOS that can mean a login shell), the entry remembers which
+    binary answered and is dropped if that file has changed since.
+    """
+    if max_age <= 0:
         return None
-    key = (f"{backend}:{cwd or ''}", _cli_stamp(binary))
     with _probe_lock:
-        entry = _probe_cache.get(key)
-    if entry is None or (time.time() - entry[0]) > max_age:
+        entry = _probe_cache.get(f"{normalize_backend(backend)}:{cwd or ''}")
+    if entry is None:
         return None
-    return replace(entry[1], from_cache=True)
+    when, options, stamp = entry
+    if (time.time() - when) > max_age or _cli_stamp(stamp.split("|", 1)[0]) != stamp:
+        return None
+    return replace(options, from_cache=True)
 
 
 def probe_model_options(
@@ -1781,11 +1727,7 @@ def probe_model_options(
             # Only the local path has a binary to stamp the cache against; a
             # remote catalog is re-read instead of being keyed on a file that
             # does not exist here.
-            with _probe_lock:
-                _probe_cache[(f"{backend}:{cwd or ''}", _cli_stamp(binary))] = (
-                    time.time(),
-                    options,
-                )
+            _remember_model_options(backend, cwd, binary, options)
         return options
 
     if binary is None:
@@ -1797,11 +1739,7 @@ def probe_model_options(
         models, efforts, current_model, current_effort, error = codex_model_options(cwd)
         options = ModelOptions(models, efforts, current_model, current_effort, error)
         if models:
-            with _probe_lock:
-                _probe_cache[(f"{backend}:{cwd or ''}", _cli_stamp(binary))] = (
-                    time.time(),
-                    options,
-                )
+            _remember_model_options(backend, cwd, binary, options)
         return options
 
     if backend == BACKEND_FREEBUFF:
@@ -1812,11 +1750,7 @@ def probe_model_options(
         models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
         options = ModelOptions(models, efforts, current_model, current_effort, error)
         if models:
-            with _probe_lock:
-                _probe_cache[(f"{backend}:{cwd or ''}", _cli_stamp(binary))] = (
-                    time.time(),
-                    options,
-                )
+            _remember_model_options(backend, cwd, binary, options)
         return options
 
     # The two probes are independent, so the help text is fetched while the
@@ -1847,11 +1781,7 @@ def probe_model_options(
     options = ModelOptions(models, efforts, current_model, current_effort, error)
     if not problems:
         # Only a clean answer is worth reusing; a failed probe should be retried.
-        with _probe_lock:
-            _probe_cache[(f"{backend}:{cwd or ''}", _cli_stamp(binary))] = (
-                time.time(),
-                options,
-            )
+        _remember_model_options(backend, cwd, binary, options)
     return options
 
 
@@ -1892,8 +1822,6 @@ PERMISSION_MODES = [
         "checks. Use only in an isolated environment.",
     ),
 ]
-# The quick-cycle chord steps through the everyday subset; the rest stay
-# reachable via the dropdown.
 # File extension to suggest when saving a code row, keyed by its display name.
 _LANG_EXT = {
     "Python": ".py",
@@ -2002,7 +1930,7 @@ _HERMES_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/export", "Export a profile (config, skills, theme) to a shareable archive"),
     (
         "/fast",
-        "Fast mode — OpenAI Priority Processing / Anthropic Fast Mode (normal/fast/auto/cold)",
+        "Fast mode. OpenAI Priority Processing or Anthropic Fast Mode (normal/fast/auto/cold)",
     ),
     ("/gateway", "Show gateway/messaging platform status"),
     ("/goal", "Set a standing goal Hermes works on across turns until achieved"),
@@ -2084,6 +2012,8 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
 # is where a new tab starts and where the quick-cycle chord returns to.
 DEFAULT_PERMISSION_MODE = "bypassPermissions"
 
+# The quick-cycle chord steps through the everyday subset; the rest stay
+# reachable via the dropdown.
 _CYCLE_VALUES = [DEFAULT_PERMISSION_MODE, "acceptEdits", "plan"]
 _MODE_LABELS = [label for _v, label, _d in PERMISSION_MODES]
 _MODE_VALUES = [value for value, _l, _d in PERMISSION_MODES]
@@ -2097,11 +2027,8 @@ def _default_permission_mode(cwd: str, backend: str = BACKEND_CLAUDE) -> str:
     Your last choice in this app wins, because it was made deliberately.
     Failing that every backend starts fully automatic: BlindPilot is driven by
     ear, and a backend that stops mid-run to ask permission stops a run its
-    user cannot see is waiting.
-
-    ``cwd`` and ``backend`` are what a per-directory or per-provider default
-    would key off; neither changes the answer today, and both are kept so the
-    call sites do not have to change if one ever does.
+    user cannot see is waiting. ``cwd`` and ``backend`` do not change the
+    answer yet.
     """
     saved = _load_config().get("permission_mode")
     if isinstance(saved, str) and saved in _MODE_VALUES:
@@ -2410,9 +2337,8 @@ def _record_setup_complete(cfg: dict) -> bool:
     if _save_config(cfg):
         return True
     announce(
-        "Your settings could not be saved, so BlindPilot will ask you to set it "
-        "up again next time it starts. Check that its settings folder is "
-        "reachable and not full."
+        "Settings could not be saved. Setup will run again next launch. Check "
+        "that the settings folder is writable and has space."
     )
     return False
 
@@ -2431,17 +2357,10 @@ def _load_config() -> dict:
 def _save_config(cfg: dict) -> bool:
     """Write the settings. False if they did not get written.
 
-    This used to swallow `OSError` and return nothing, so no caller could tell
-    - and several of them announce a sentence the failed write has just made
-    untrue. The one that matters most is the first-run wizard: finishing it is
-    recorded here, and startup shows the wizard again when that record is
-    missing, so a profile whose settings cannot be written puts somebody
-    through the entire wizard on every launch with nothing saying why.
-
-    Written to one side and moved into place, so an interruption partway
-    through cannot leave a half-written file. `_load_config` cannot parse one
-    of those and starts again from empty, which loses every setting at once
-    rather than the one being saved.
+    Callers announce what they saved, so they need to know. Written to one
+    side and moved into place, so an interruption partway through cannot
+    leave a half-written file: `_load_config` cannot parse one of those and
+    falls back to the legacy claude-reader file, or to empty.
     """
     path = _config_path()
     temporary = path.with_name(path.name + ".new")
@@ -2562,7 +2481,8 @@ class _Settings:
         narration = cfg.get("narration")
         self.narration = (
             narration
-            if narration in {mode for mode, _label, _help in NARRATION_MODES}
+            if isinstance(narration, str)
+            and narration in {mode for mode, _label, _help in NARRATION_MODES}
             else NARRATION_EVERYTHING
         )
         # `sounds_enabled` above is the master switch and keeps its meaning.
@@ -2654,10 +2574,13 @@ class _RemoteHermes:
             if not self.key:
                 path.unlink(missing_ok=True)
                 return
-            path.write_text(self.key, encoding="utf-8")
+            # Created owner-only rather than chmod'ed afterwards, so it is
+            # never readable by others even for an instant. On Windows the
+            # per-user AppData directory is already the boundary.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(self.key)
             if platform.system() != "Windows":
-                # Owner-only. On Windows the per-user AppData directory is
-                # already the boundary, and chmod there does not mean this.
                 os.chmod(path, 0o600)
         except OSError:
             pass
@@ -2671,12 +2594,12 @@ class _RemoteHermes:
     def describe(self) -> str:
         """One line saying where this will connect, for the settings dialog."""
         if not self.enabled:
-            return "Off — the Hermes backend runs the copy installed here."
+            return "Off. Hermes runs the copy installed here."
         url = self.url()
         if not url:
             return "On, but no address is set yet."
         how = "username and password" if self.credential == "password" else "session token"
-        return f"On — {url}, signing in with a {how}"
+        return f"On. {url}, signing in with a {how}"
 
     def save(self) -> None:
         cfg = _load_config()
@@ -2708,11 +2631,12 @@ def _resource_dir() -> str:
 class Earcons:
     """Non-speech audio cues.
 
-    Three cues: a one-shot when a prompt is sent, a looping cue while a request
-    is in flight, and a one-shot when the response arrives. Uses only the
-    platform's built-in player so there's no third-party audio dependency:
-    ``winsound`` on Windows (native async + loop), ``afplay`` on macOS (looped
-    by re-spawning in a daemon thread). Missing files are silently ignored.
+    Four cues: a one-shot when a prompt is sent, a looping or periodic cue
+    while a request is in flight, a one-shot when the response arrives, and
+    the system sound when something goes wrong. Uses only players the platform
+    has, so there is no third-party audio dependency: ``winsound`` on Windows,
+    ``afplay`` on macOS, and paplay, aplay or ffplay on Linux, looped by
+    re-spawning in a daemon thread. Missing files are silently ignored.
     """
 
     def __init__(self, folder: str, enabled: bool = True, cues: Optional[dict] = None):
@@ -3162,14 +3086,9 @@ class ClaudeWorker(threading.Thread):
         True if it exited by itself, False if it has gone quiet and should be
         stopped. The clock restarts whenever it writes to stderr, because a CLI
         failing mid-turn is usually explaining itself there and that
-        explanation is all BlindPilot has to report.
-
-        Only for that case. This was once used at the end of *every* turn, on
-        the reasoning that a CLI still writing is still working - but a healthy
-        CLI shutting down writes nothing to stderr, since stderr is for errors
-        and it has none. The clock therefore never restarted, and a wait that
-        described itself as patient was a flat thirty-second timeout that
-        killed a working process mid-tidy.
+        explanation is all BlindPilot has to report. Only for that case: a
+        healthy CLI shutting down writes nothing to stderr, so for it this
+        would be a flat timeout.
         """
         proc = self._proc
         if proc is None:
@@ -3280,14 +3199,8 @@ class ClaudeWorker(threading.Thread):
     def _log_unfinished_turn(self, rc: object, complete: bool, stderr_text: str) -> None:
         """Record a turn the CLI did not finish.
 
-        A turn that dies mid-run is the hardest thing here to look into after
-        the fact: the window is gone, and an exit code says nothing about what
-        the run was doing. This is what is left behind to answer that.
-
-        It used to write its own file by hand, in the roaming settings folder,
-        with no size limit. The fields are the same ones; where they go and how
-        much of them is kept is now shared, and the other three backends leave
-        the same account of themselves through it.
+        The window is gone by the time anyone looks, and an exit code says
+        nothing about what the run was doing. This is what is left behind.
         """
         diagnostics.log_unfinished_turn(
             "claude",
@@ -3950,10 +3863,15 @@ class ModelDialog(wx.Dialog):
         self.model_box.SetName("Model")
         self.model_box.SetValue(selected_model or self._model_keep)
 
+        efforts = list(options.efforts)
+        if selected_effort and selected_effort not in efforts:
+            # Kept as a choice. A read-only box cannot show a value it does not
+            # list, so OK would have silently cleared this tab's override.
+            efforts.append(selected_effort)
         effort_label = wx.StaticText(self, label="&Effort:")
         self.effort_box = wx.ComboBox(
             self,
-            choices=[self._effort_keep, *options.efforts],
+            choices=[self._effort_keep, *efforts],
             style=wx.CB_DROPDOWN | wx.CB_READONLY,
         )
         self.effort_box.SetName("Effort")
@@ -3985,7 +3903,7 @@ class ModelDialog(wx.Dialog):
         event.Skip()
 
     def selection(self) -> tuple[str, str]:
-        """(model, effort) — "" for either one left as Claude Code has it."""
+        """(model, effort), with "" for either one left as the backend has it."""
         model = self.model_box.GetValue().strip()
         effort = self.effort_box.GetValue().strip()
         return (
@@ -4016,8 +3934,10 @@ class QuestionDialog(wx.Dialog):
     text box underneath.
 
     A question that takes one answer gets radio buttons, one that takes several
-    gets a checked list. Esc leaves the question unanswered, which each adapter
-    reports to its backend in whatever way that backend understands.
+    gets a checked list. A question with no choices at all (a secret, a sudo
+    password, a clarification) is only the text box, shown from the start. Esc
+    leaves the question unanswered, which each adapter reports to its backend
+    in whatever way that backend understands.
     """
 
     OTHER = "Other: type your own answer"
@@ -4030,7 +3950,7 @@ class QuestionDialog(wx.Dialog):
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
         self._questions = list(questions)
-        self._pickers: list[wx.Window] = []
+        self._pickers: list[Optional[wx.Window]] = []
         self._texts: list[wx.TextCtrl] = []
         self._labels: list[wx.StaticText] = []
 
@@ -4053,13 +3973,23 @@ class QuestionDialog(wx.Dialog):
             choices = [_question_choice(option) for option in question.options]
             if question.allow_custom:
                 choices.append(self.OTHER)
-            if question.multi_select:
+            picker: Optional[wx.Window]
+            if not question.options:
+                # Nothing to pick from, so no picker. A RadioBox with "Other" as
+                # its only entry starts selected and can never change, so the
+                # event that shows the text box never fired and the question
+                # could not be answered.
+                picker = None
+                heading = wx.StaticText(self, label=title)
+                heading.Wrap(560)
+                sizer.Add(heading, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+            elif question.multi_select:
                 # A checked list is what a screen reader reads as "check box,
                 # not checked" per line, which is what "pick as many as you
                 # like" has to sound like.
                 heading = wx.StaticText(self, label=title)
                 heading.Wrap(560)
-                picker: wx.Window = wx.CheckListBox(self, choices=choices)
+                picker = wx.CheckListBox(self, choices=choices)
                 picker.SetName(question.question)
                 picker.Bind(wx.EVT_CHECKLISTBOX, self._on_choice)
                 sizer.Add(heading, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
@@ -4077,19 +4007,21 @@ class QuestionDialog(wx.Dialog):
                 sizer.Add(picker, 0, wx.EXPAND | wx.ALL, 12)
             self._pickers.append(picker)
 
-            label = wx.StaticText(self, label="&Your own answer:")
+            label = wx.StaticText(
+                self, label="&Your answer:" if picker is None else "&Your own answer:"
+            )
             # Codex can mark a question whose answer is a secret. Masking it is
             # the whole of what that means here: the transcript already keeps
             # the fact of an answer rather than the answer.
             style = wx.TE_PROCESS_ENTER | (wx.TE_PASSWORD if question.secret else 0)
             entry = wx.TextCtrl(self, style=style)
-            entry.SetName(f"Your own answer to {question.question}")
+            entry.SetName(f"Your answer to {question.question}")
             # TE_PROCESS_ENTER takes Enter away from the dialog's default
             # button and gives it to the box, so without this the key does
             # nothing whatsoever in the one place a turn waits to be let go.
             entry.Bind(wx.EVT_TEXT_ENTER, self._on_text_enter)
-            label.Hide()
-            entry.Hide()
+            label.Show(picker is None)
+            entry.Show(picker is None)
             sizer.Add(label, 0, wx.LEFT | wx.RIGHT, 24)
             sizer.Add(entry, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 24)
             self._labels.append(label)
@@ -4109,7 +4041,12 @@ class QuestionDialog(wx.Dialog):
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         if self._pickers:
-            self._pickers[0].SetFocus()
+            self._picker_or_text(0).SetFocus()
+
+    def _picker_or_text(self, index: int) -> wx.Window:
+        """The control that answers question `index`: its picker, or its box."""
+        picker = self._pickers[index]
+        return self._texts[index] if picker is None else picker
 
     def _picked(self, index: int) -> list[int]:
         """Which entries are chosen for one question, by position in its list.
@@ -4126,8 +4063,10 @@ class QuestionDialog(wx.Dialog):
         return []
 
     def _wants_custom(self, index: int) -> bool:
-        """Whether "Other" is chosen — always the last entry, when offered."""
+        """Whether a typed answer is wanted: "Other" is chosen, or there is no list."""
         question = self._questions[index]
+        if not question.options:
+            return True
         return question.allow_custom and len(question.options) in self._picked(index)
 
     def _on_choice(self, event: wx.CommandEvent) -> None:
@@ -4169,7 +4108,7 @@ class QuestionDialog(wx.Dialog):
                 return False
             if not self._chosen(index):
                 announce(f"Error: {question.question} has no answer yet")
-                self._pickers[index].SetFocus()
+                self._picker_or_text(index).SetFocus()
                 return False
         return True
 
@@ -4187,7 +4126,8 @@ class QuestionDialog(wx.Dialog):
         """The answers picked for one question, with "Other" resolved to text."""
         question = self._questions[index]
         answers: list[str] = []
-        for position in self._picked(index):
+        positions = self._picked(index) if question.options else [0]
+        for position in positions:
             if position < len(question.options):
                 # The backend wants its own label back, not the line the
                 # dialog drew from it.
@@ -4403,6 +4343,10 @@ class ConnectDialog(wx.Dialog):
         if not self:
             return
         self._set_busy(False, f"{name}: choose how to sign in.")
+        if not methods:
+            # The server listed methods, none of them usable. An API key is
+            # the one way in every provider has.
+            methods = [{"type": "api", "label": "Manually enter API key"}]
         if len(methods) == 1:
             index = 0
         else:
@@ -4477,7 +4421,7 @@ class ConnectDialog(wx.Dialog):
                     return
                 code = dlg.GetValue().strip()
             if not code:
-                self._set_busy(False, "Sign-in cancelled — no code was pasted.")
+                self._set_busy(False, "Sign-in cancelled. No code was pasted.")
                 return
             self._set_busy(True, f"Waiting for {name} to confirm the sign-in…")
         else:
@@ -5025,8 +4969,11 @@ class HermesSessionsDialog(wx.Dialog):
         self.filter_box.SetFocus()
 
     # ----- Loading and filtering -----
-    def _reload(self) -> None:
-        """Ask Hermes for its conversations. Blocking, so it says it is working."""
+    def _reload(self) -> bool:
+        """Ask Hermes for its conversations. Blocking, so it says it is working.
+
+        False when Hermes could not be asked; the reason has been spoken.
+        """
         self.summary.SetLabel("Asking Hermes for its conversations…")
         with wx.BusyCursor():
             remote_url = REMOTE_HERMES.url()
@@ -5047,8 +4994,9 @@ class HermesSessionsDialog(wx.Dialog):
             self.list_box.Set([])
             self._shown = []
             self._set_open_enabled(False)
-            return
+            return False
         self._refresh()
+        return True
 
     def _is_live(self, entry: dict) -> bool:
         return str(entry.get("id") or "") in self._live
@@ -5098,10 +5046,7 @@ class HermesSessionsDialog(wx.Dialog):
         if entry is None:
             return
         if self._is_live(entry):
-            announce(
-                "Running now. Opening this attaches to the turn in progress and moves "
-                "its output here."
-            )
+            announce("Running now. Opening it moves the live turn to this window.")
 
     # ----- Choosing -----
     def _accept(self) -> None:
@@ -5119,11 +5064,16 @@ class HermesSessionsDialog(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
             return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self._shown:
+            # CHAR_HOOK sees Enter before the focused button does. Enter on
+            # Cancel has to cancel, not open a conversation.
+            if isinstance(self.FindFocus(), wx.Button):
+                event.Skip()
+                return
             self._accept()
             return
         if key == wx.WXK_F5:
-            self._reload()
-            announce("Refreshed")
+            if self._reload():
+                announce("Refreshed")
             return
         if key == wx.WXK_DOWN and self.filter_box.HasFocus() and self._shown:
             self.list_box.SetFocus()
@@ -5133,13 +5083,14 @@ class HermesSessionsDialog(wx.Dialog):
 
 
 class SessionPanel(wx.Panel):
-    """One conversation tab — owns its session_id, rows, and worker.
+    """One conversation tab. Owns its session_id, rows, and worker.
 
     Layout, top to bottom: working-directory label, search box, the flat list of
     rows (oldest at top, newest at bottom), the multi-line prompt box, the Send
-    button. Focus starts in the prompt; Up from the prompt enters the newest
-    row. Arrow keys remain within the responses, including at the first and last
-    rows; Tab is the way to move between the list and the prompt.
+    button. Focus starts in the prompt; Ctrl+Up (or Alt+Up) from the prompt
+    enters the newest row. Arrow keys remain within the responses, including at
+    the first and last rows; Tab is the way to move between the list and the
+    prompt.
 
     `on_status(panel, text)` lets the frame show only the active tab's status,
     and `on_title(panel, text)` names the tab after the conversation in it.
@@ -5181,6 +5132,8 @@ class SessionPanel(wx.Panel):
         # Response number of the turn currently streaming in (None between turns).
         self._stream_response: Optional[int] = None
         self._assistant_narrated_this_turn = False
+        # A Hermes conversation being read back; its rows bypass the live gate.
+        self._replaying = False
         # Answer text already put into the list for the turn in flight, so the
         # finished answer can be checked against it rather than assumed shown.
         self._streamed_assistant = ""
@@ -5251,8 +5204,8 @@ class SessionPanel(wx.Panel):
         )
         self.prompt.SetName("Prompt")
         self.prompt.SetHint(
-            "Type your prompt. Enter to send, Shift+Enter for newline, Up to enter responses; "
-            "Tab returns here from responses."
+            "Type your prompt. Enter to send, Shift+Enter for newline, Ctrl+Up to enter "
+            "responses; Tab returns here from responses."
         )
         self.prompt.Bind(wx.EVT_KEY_DOWN, self._on_prompt_key)
         self.prompt.Bind(wx.EVT_SET_FOCUS, self._on_prompt_focus)
@@ -5485,7 +5438,7 @@ class SessionPanel(wx.Panel):
         selected = self.selected_backend()
         suffix = ""
         if selected != self._session_backend and self._session_id:
-            suffix = " — new conversation on next send"
+            suffix = ". New conversation on next send"
         self.backend_status.SetLabel(f"Backend: {backend_label(selected)}{suffix}")
         if selected == BACKEND_FREEBUFF:
             # FreeBuff's terminal takes seconds to reach the point where it can
@@ -5509,9 +5462,7 @@ class SessionPanel(wx.Panel):
             )
         else:
             self.mode_picker.SetToolTip(
-                f"{backend_label(selected)} does not expose permission modes through "
-                "its command-line interface — it never stops to ask, so there is "
-                "nothing here to choose"
+                f"{backend_label(selected)} has no permission modes. It never stops to ask."
             )
         self.Layout()
 
@@ -5591,7 +5542,7 @@ class SessionPanel(wx.Panel):
         """/connect — opencode's provider list, as its own command offers it."""
         if self.selected_backend() != BACKEND_OPENCODE:
             self._announce(
-                "Error: /connect belongs to opencode. Switch the backend from the File menu first"
+                "Error: /connect is an opencode command. Choose opencode under Model, Backend first"
             )
             return
         dlg = ConnectDialog(self)
@@ -5721,7 +5672,7 @@ class SessionPanel(wx.Panel):
     def _pick_slash_command(self) -> None:
         """Slash-command picker: choose a command to insert into the prompt."""
         commands = _slash_commands_for_backend(self.selected_backend(), self.cwd)
-        labels = [f"{cmd}  —  {desc}" for cmd, desc in commands]
+        labels = [f"{cmd}. {desc}" for cmd, desc in commands]
         dlg = wx.SingleChoiceDialog(
             self,
             "Choose a slash command. It will be placed in the prompt ready to send.",
@@ -5740,7 +5691,9 @@ class SessionPanel(wx.Panel):
         # Strip the placeholder hint (e.g. "[message]", "[model-id]") so the
         # inserted text is the raw command; user can append arguments if needed.
         cmd_text = cmd_text.split(" [")[0]
-        self.prompt.SetValue(cmd_text)
+        # ChangeValue fires no EVT_TEXT, so this is not read back as dictation.
+        self.prompt.ChangeValue(cmd_text)
+        self._prompt_text = cmd_text
         self.prompt.SetInsertionPointEnd()
         self.prompt.SetFocus()
         self._announce(f"Slash command: {cmd_text}. Edit if needed, then press Enter to send.")
@@ -5965,9 +5918,9 @@ class SessionPanel(wx.Panel):
     def _close_question_dialog(self) -> None:
         """Take down an open question, because the run it belongs to is going.
 
-        Stopping a run happens on the GUI thread, which is the thread the
-        dialog's own event loop is running on, while the worker waits on the
-        answer. Closing it here is what lets both carry on.
+        For a tab closing or the app quitting. The dialog is modal, so Stop
+        cannot be pressed while it is open; `_on_stop` calls this only for
+        completeness.
         """
         dlg = self._question_dialog
         if dlg is not None:
@@ -6046,17 +5999,10 @@ class SessionPanel(wx.Panel):
     def _run_in_progress(self) -> bool:
         """Whether a turn is still going, as far as this window is concerned.
 
-        Deliberately not `is_alive()`. A worker thread dies the moment it has
-        *queued* its last event, not when anything has acted on it, and the
-        mailbox above hands the native queue a turn between batches - so a
-        waiting Enter is dispatched inside that gap by design. For the whole
-        of it `is_alive()` says False while the turn's own `complete` and
-        `done` are still sitting in the queue.
-
-        `_worker` is cleared by `_on_worker_finished`, which runs on this
-        thread when the queue reaches it. It is therefore the only answer that
-        is true at the same moment as the rest of the state these handlers
-        read, which is what makes it safe to start a new turn against.
+        Deliberately not `is_alive()`: the worker thread dies as soon as it
+        has queued its last event, while `complete` and `done` may still be
+        in the mailbox. `_worker` is cleared on this thread when `done`
+        drains, so it agrees with the rest of the state these handlers read.
         """
         return self._worker is not None
 
@@ -6172,31 +6118,11 @@ class SessionPanel(wx.Panel):
         self._turns.append(Turn(prompt=prompt))
         if len(self._turns) == 1 and not str(getattr(self, "_session_title", "") or "").strip():
             # A conversation with no name of its own is named by its first
-            # message — that is the title Recent Conversations lists it under —
-            # so the tab holding it takes the same name the moment there is one.
-            # Attachment paths are left out: the title has to be the words the
-            # person typed.
-            #
-            # A name typed in the New Session dialog is NOT replaced here. That
-            # name is the one thing about this conversation the person chose,
-            # and overwriting it with the words of the first message discards it
-            # with nothing to get it back from -- the reported defect: a session
-            # named for its subject, sent "start", and called "start" from then
-            # on.
-            #
-            # With Hermes the two names would also disagree: it stores this one
-            # with title_source='user' and does not overwrite it, so the tab
-            # would say one thing and Hermes Conversations another about the
-            # same conversation. For a CLI backend the name stays a label on
-            # this tab -- the transcript on disk is titled by the tool that
-            # wrote it, which this app does not author.
-            #
-            # Read through getattr for the same reason as in
-            # ``_hermes_worker_extra``: this method is driven on stand-in panels
-            # that do not set every attribute, and an AttributeError here would
-            # refuse a send rather than mislabel a tab. Whitespace counts as no
-            # name, or a tab could end up with a blank label -- the one label a
-            # screen reader cannot tell from its neighbour.
+            # message, the title Recent Conversations lists it under. A name
+            # typed in the New Session dialog is never replaced: it is the one
+            # thing about the conversation the person chose, and a session
+            # named for its subject used to be renamed "start" by its first
+            # message. getattr because stub panels in tests lack the attribute.
             self._on_title(self, make_title(prompt))
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
@@ -6253,8 +6179,9 @@ class SessionPanel(wx.Panel):
         """Put the user's own message in the list, ahead of the answer to it.
 
         Carries the number of the response it belongs to, so both group together
-        for jump-to-response and copy-whole-response. Skipped in silent-until-response mode,
-        where nothing is shown until the response is finished.
+        for jump-to-response and copy-whole-response. Skipped in
+        silent-until-response mode and not added later either, so that
+        transcript holds answers without the prompts that led to them.
         """
         if not SETTINGS.live_rows:
             return
@@ -6307,8 +6234,27 @@ class SessionPanel(wx.Panel):
         self._stopping = True
         self._close_question_dialog()
         self._announce("Stopping")
-        # cancel() waits on the process, so it must not run on the UI thread.
-        threading.Thread(target=worker.cancel, daemon=True).start()
+
+        def cancel() -> None:
+            # cancel() waits on the process, so it must not run on the UI thread.
+            worker.cancel()
+            worker.join(timeout=_CANCEL_JOIN_SECONDS)
+            wx.CallAfter(self._after_cancel, worker)
+
+        threading.Thread(target=cancel, daemon=True).start()
+
+    def _after_cancel(self, worker: AgentWorker) -> None:
+        """Give Stop back if the cancel did not end the turn.
+
+        `_stopping` mutes narration and Stop is disabled, so a backend that
+        ignored the cancel would otherwise run on in silence with no way to
+        try again.
+        """
+        if not self or self._worker is not worker or not worker.is_alive():
+            return
+        self._stopping = False
+        self.stop_btn.Enable()
+        self._announce("Error: Could not stop the task. It is still running", urgent=True)
 
     def _finish_stopped_turn(self) -> None:
         """Close out a turn the user stopped, without reporting it as failed."""
@@ -6555,6 +6501,7 @@ class SessionPanel(wx.Panel):
         self._streamed_assistant = ""
         self._assistant_narrated_this_turn = False
         self._stopping = False
+        self._replaying = True
         self._refresh_list()
         self._on_title(self, title or make_title(session_id))
         self.backend_changed()
@@ -6647,10 +6594,15 @@ class SessionPanel(wx.Panel):
         follows the work by ear; a tool result only speaks its short preview
         line, since results run to hundreds of lines.
 
+        ``kind == "you"`` is the user's own message in a replayed Hermes
+        conversation, and ``kind == "subagent"`` is a subagent's commentary.
+
         With live activity switched off in Options, none of this happens and the
-        whole response lands at the end instead.
+        whole response lands at the end instead. A replayed conversation is the
+        exception: its rows are the transcript, not live activity, and without
+        them a reopened conversation would show nothing at all.
         """
-        if not SETTINGS.live_rows:
+        if not SETTINGS.live_rows and not self._replaying:
             return
         n = self._begin_stream_response()
         if kind == "you":
@@ -6768,6 +6720,8 @@ class SessionPanel(wx.Panel):
         # history — and a screen reader would read that gap as the last thing
         # in the conversation.
         if not text.strip() and not self._turns:
+            # Close the replayed response, or the next message lands under it.
+            self._stream_response = None
             self._set_status(f"Reopened, {len(self._rows)} rows")
             return
         self._narrate_completed_response(text)
@@ -6785,8 +6739,8 @@ class SessionPanel(wx.Panel):
                 f"Response {self._response_count} received, {len(new_rows) - 1} segments"
             )
             return
-        # Fill the header payload so 'copy whole response' yields Claude's
-        # full answer text (the streamed rows are already in the list).
+        # Fill the header payload so 'copy whole response' yields the full
+        # answer text (the streamed rows are already in the list).
         for row in self._rows:
             if row.response_number == self._stream_response and row.kind == "header":
                 row.payload = _strip_noise(text)
@@ -6816,7 +6770,17 @@ class SessionPanel(wx.Panel):
         self._earcons.play_error()
         if self._turns and not self._turns[-1].response:
             self._turns.pop()
+        if self._stream_response is None and self._rows and self._rows[-1].kind == "you":
+            # Nothing streamed, so the "You:" row is numbered for a response
+            # that never opened. Spend that number on it, or the next turn
+            # takes the same one and the two prompts copy as one response.
+            self._response_count = max(self._response_count, self._rows[-1].response_number)
         self._stream_response = None
+        if getattr(self._worker, "lost_session", False):
+            # Codex could not resume this conversation, so the id names
+            # nothing. The next message starts a fresh one, as the worker
+            # has already said, rather than failing the same way again.
+            self._session_id = None
         self._announce(f"Error: {message}", urgent=True)
 
     def _on_worker_finished(self) -> None:
@@ -6832,19 +6796,14 @@ class SessionPanel(wx.Panel):
         if self.stop_btn:
             self.stop_btn.Disable()
         self._worker = None
+        self._replaying = False
 
     # ----- List + find -----
     def _refresh_list(self) -> None:
-        # Rebuilding either control throws its contents away, which loses the
-        # selection, so the row being read has to be put back afterwards - and
-        # putting it back is what speaks. Setting a native list box's selection
-        # fires the accessibility event NVDA reads the row from, and moving the
-        # text view's insertion point is a caret move it reads the line from.
-        # This runs once per drained batch, so during a turn it announced
-        # somebody's own row back to them every few hundredths of a second.
-        #
-        # Output is only ever appended, so the usual case appends too: no
-        # rebuild, no selection to restore, and nothing that speaks.
+        # Rebuilding a control loses the selection, and putting it back is
+        # what speaks (a list selection or a caret move is what NVDA reads).
+        # Output is only ever appended, so the usual case appends too, and
+        # nothing speaks.
         previous = [row.label for row in self._displayed]
         # `previous` records what the model last displayed, not what the
         # control shows. clear_conversation empties both lists while the
@@ -6852,7 +6811,12 @@ class SessionPanel(wx.Panel):
         # control only the visible one ever fills, so the append path asks
         # the control what it is actually showing before trusting the record.
         if SETTINGS.text_view:
-            shown = self.responses_text.GetNumberOfLines()
+            # An empty multi-line control reports one line on Windows.
+            shown = (
+                self.responses_text.GetNumberOfLines()
+                if self.responses_text.GetLastPosition()
+                else 0
+            )
         else:
             shown = self.responses.GetCount()
         trustworthy = shown == len(previous)
@@ -6896,7 +6860,7 @@ class SessionPanel(wx.Panel):
         self.responses_text.SetInsertionPoint(was_at)
 
     def open_find(self) -> None:
-        """Find-in-responses popup (File menu / Cmd-Ctrl+F). Blank clears it."""
+        """Find-in-responses popup (Conversation menu, Ctrl+F). Blank clears it."""
         with wx.TextEntryDialog(
             self,
             "Search responses (leave blank to show all):",
@@ -7000,14 +6964,8 @@ class SessionPanel(wx.Panel):
         self._announce(self._copy_message(row))
 
     def _copy_response(self, sel: int) -> None:
-        if not (0 <= sel < len(self._displayed)):
-            return
-        row = self._displayed[sel]
-        text = reassemble(self._rows, row.response_number)
-        if not _copy_to_clipboard(text):
-            self._announce("Error: Could not access clipboard")
-            return
-        self._announce(f"Copied whole response {row.response_number}")
+        if 0 <= sel < len(self._displayed):
+            self._action_copy_response(self._displayed[sel])
 
     @staticmethod
     def _copy_message(row: Row) -> str:
@@ -7075,7 +7033,10 @@ class SessionPanel(wx.Panel):
     def _action_insert(self, row: Row) -> None:
         current = self.prompt.GetValue()
         sep = "\n" if current and not current.endswith("\n") else ""
-        self.prompt.SetValue(current + sep + row.payload)
+        # ChangeValue fires no EVT_TEXT, so a long payload is not read back as
+        # dictation on top of "Inserted into prompt".
+        self.prompt.ChangeValue(current + sep + row.payload)
+        self._prompt_text = self.prompt.GetValue()
         self.prompt.SetInsertionPointEnd()
         self.prompt.SetFocus()
         self._announce("Inserted into prompt")
@@ -7141,29 +7102,11 @@ class SessionPanel(wx.Panel):
     def cancel_worker(self, wait: bool = True) -> Optional[threading.Thread]:
         """Give up this panel's turn, for a tab closing or the app quitting.
 
-        `_on_stop` already states the rule it follows - "cancel() waits on the
-        process, so it must not run on the UI thread" - and this did not.
-        Cancelling an opencode turn POSTs an abort to its server, where the
-        thirty-second timeout is per socket operation rather than a budget, and
-        every backend then joined for three seconds more. Run from the Close Tab
-        handler that stopped the window pumping messages, which for a screen
-        reader means silence: nothing can be announced by a thread that is
-        parked.
-
-        `wait=False` hands the cancelling to a daemon thread and returns. A tab
-        being destroyed has nothing to wait for; its worker's callbacks are
-        already dropped by `_drain_worker_events` once the panel is gone.
-        Quitting still waits, because the CLI subprocesses have to actually be
-        killed or they outlive the application - but see `_on_close`, which
-        spends one budget on all of them rather than three seconds on each.
-
-        `_on_worker_finished` calls itself the safety net that keeps the
-        progress loop from being left running, but it arrives through the
-        worker mailbox and `_drain_worker_events` discards everything once the
-        panel is gone. A tab closed mid-turn therefore threw away the one event
-        that stops the sound - and the sound is not the panel's to lose: every
-        tab shares the frame's `Earcons`, and on Windows the loop is
-        process-wide. It played on with nothing left alive to stop it.
+        cancel() waits on the process, so `wait=False` hands it to a daemon
+        thread; a tab being destroyed has nothing to wait for. Quitting waits,
+        or the CLI outlives the application (`_on_close` spends one budget on
+        every tab). The shared progress loop is stopped here because the
+        mailbox drops the worker's `done` once the panel is gone.
         """
         self._close_question_dialog()
         self._earcons.stop_progress()
@@ -7173,16 +7116,8 @@ class SessionPanel(wx.Panel):
             self._dictation_timer.Stop()
             self._dictation_timer = None
         # A held backend outlives a single turn, so closing the tab is what
-        # closes it. Left running it would hold a session on the server for a
-        # conversation nobody is looking at any more. It goes before the early
-        # returns below: a tab with no live turn must still let go of it.
-        #
-        # Read with getattr because this runs during teardown, on whatever the
-        # caller has: a panel closed before its own __init__ finished, and the
-        # stand-ins the tab-closing tests drive this path with, both reach here
-        # without the method. Raising while shutting a tab down would leave
-        # the turn uncancelled and the window half closed - a worse failure
-        # than a process this panel never had.
+        # closes it, live turn or not. getattr because this runs during
+        # teardown, on a panel closed before __init__ finished or on a stub.
         drop = getattr(self, "_drop_held_backends", None)
         if drop is not None:
             drop()
@@ -7445,7 +7380,6 @@ class SetupWizard(wx.Dialog):
         self.backend = normalize_backend(initial_backend)
         self._step = 0
         self._backend_path: Optional[str] = None
-        self._login_thread: Optional[threading.Thread] = None
         self._login: Optional[BackendLogin] = None
         self._code_dialog: Optional[wx.TextEntryDialog] = None
 
@@ -7494,17 +7428,8 @@ class SetupWizard(wx.Dialog):
 
     def _make_welcome(self) -> wx.Panel:
         p = wx.Panel(self._book)
-        self._welcome_text = wx.StaticText(
-            p,
-            label=(
-                "Welcome to BlindPilot.\n\n"
-                "Claude Code is the default backend. This wizard checks that its CLI is installed and that "
-                "you are signed in, then optionally points the app at your projects folder.\n\n"
-                "You can choose Codex or FreeBuff later from File, Backend. "
-                "The whole process takes about a minute."
-            ),
-        )
-        self._welcome_text.Wrap(520)
+        # Every label the backend changes is set by _refresh_backend_copy.
+        self._welcome_text = wx.StaticText(p, label="")
         backend_label_widget = wx.StaticText(p, label="&Backend:")
         self._setup_backend_picker = wx.Choice(
             p, choices=[BACKEND_LABELS[value] for value in BACKEND_IDS]
@@ -7566,16 +7491,7 @@ class SetupWizard(wx.Dialog):
 
     def _make_signin(self) -> wx.Panel:
         p = wx.Panel(self._book)
-        self._signin_intro = wx.StaticText(
-            p,
-            label=(
-                "BlindPilot needs you to be signed in to use the Claude Code backend.\n\n"
-                "If you have already run 'claude auth login' in your terminal and "
-                "it worked, click Already Signed In to skip this step.\n\n"
-                "Otherwise click Sign In — your browser will open to complete authentication."
-            ),
-        )
-        self._signin_intro.Wrap(520)
+        self._signin_intro = wx.StaticText(p, label="")
         self._signin_status = wx.StaticText(p, label="")
         self._signin_status.Wrap(520)
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -7605,10 +7521,9 @@ class SetupWizard(wx.Dialog):
         intro = wx.StaticText(
             p,
             label=(
-                "Optionally choose the folder that contains all your projects "
-                "(for example your 'development' or 'repos' folder). "
-                "New Session starts its Browse button there.\n\n"
-                "You can skip this and set it later from the File menu."
+                "Choose the folder that holds your projects, if you have one. "
+                "New Session browses from there.\n\n"
+                "You can skip this and set it later under File, Set Projects Folder."
             ),
         )
         intro.Wrap(520)
@@ -7624,19 +7539,7 @@ class SetupWizard(wx.Dialog):
 
     def _make_done(self) -> wx.Panel:
         p = wx.Panel(self._book)
-        self._done_text = wx.StaticText(
-            p,
-            label=(
-                "All done! BlindPilot is ready.\n\n"
-                "Type in the Prompt field and press Enter to send.\n"
-                "Press Cmd+R to jump to the latest response.\n"
-                "Press Cmd+/ to pick a slash command.\n"
-                "Press Cmd+Shift+M to cycle permission modes.\n"
-                "Type /model to choose the model and effort level.\n\n"
-                "Click Finish to open the app."
-            ),
-        )
-        self._done_text.Wrap(520)
+        self._done_text = wx.StaticText(p, label="")
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(self._done_text, 0, wx.ALL, 8)
         p.SetSizer(s)
@@ -7656,10 +7559,9 @@ class SetupWizard(wx.Dialog):
         self._open_page_btn.Show(self.backend != BACKEND_OPENCODE)
         self._welcome_text.SetLabel(
             "Welcome to BlindPilot.\n\n"
-            "Choose the coding-agent backend you want to use first. This wizard "
-            "checks its CLI, helps install or update it, checks sign-in, and optionally "
-            "points BlindPilot at your projects folder.\n\n"
-            "You can switch or manage backends later from the File menu."
+            "Choose a backend. This wizard checks that it is installed and signed "
+            "in, and can set your projects folder.\n\n"
+            "You can change backends later under Model, Backend."
         )
         self._welcome_text.Wrap(520)
         self._cli_install_btn.SetLabel(f"Install {label}")
@@ -7680,10 +7582,10 @@ class SetupWizard(wx.Dialog):
             )
         else:
             self._signin_intro.SetLabel(
-                f"BlindPilot needs you to be signed in to use {label}.\n\n"
-                f"If you have already run '{login}' in a terminal, choose Already "
-                "Signed In. Otherwise choose Sign In and complete any browser or "
-                "terminal authentication that opens."
+                f"Sign in to {label}.\n\n"
+                f"If you already ran '{login}' in a terminal, choose Already Signed "
+                "In. Otherwise choose Sign In and finish in the browser or terminal "
+                "that opens."
             )
         self._signin_intro.Wrap(520)
         limitations = ""
@@ -7696,14 +7598,11 @@ class SetupWizard(wx.Dialog):
         if not info.supports_compaction:
             limitations += f"\n{label} cannot compact a conversation; start a new one instead."
         self._done_text.SetLabel(
-            f"All done! BlindPilot is ready to use {label}.\n\n"
-            "Type in the Prompt field and press Enter to send.\n"
-            "Press Ctrl+R to jump to the latest response.\n"
-            "Press Ctrl+/ to pick a slash command.\n"
-            "Press Ctrl+period to stop a task that is running.\n"
-            "Press Ctrl+Shift+M to cycle permission modes when supported.\n"
-            "Type /model to choose the model and effort level when supported."
-            f"{limitations}\n\nChoose Finish to open the app."
+            f"BlindPilot is ready to use {label}.\n\n"
+            "Type in the Prompt and press Enter to send. "
+            f"{_chord('Ctrl+R')} jumps to the latest response, {_chord('Ctrl+/')} lists "
+            f"slash commands, {_chord('Ctrl+period')} stops a task."
+            f"{limitations}\n\nChoose Finish."
         )
         self._done_text.Wrap(520)
         for page in self._pages:
@@ -7800,7 +7699,7 @@ class SetupWizard(wx.Dialog):
             return
         self._backend_path = self._find_selected_cli()
         windows = platform.system() == "Windows"
-        # Spoken after the status line — the labels are long, and what the user
+        # Spoken after the status line. The labels are long, and what the user
         # needs to hear is which button to Tab to.
         hint = ""
 
@@ -7812,7 +7711,7 @@ class SetupWizard(wx.Dialog):
                 self._cli_detail.SetLabel(self._backend_path)
                 self._cli_path_btn.Hide()
             else:
-                # Reachable from this app but not from a terminal — worth
+                # Reachable from this app but not from a terminal. Worth
                 # fixing, since /login and everything else assume a shell.
                 self._cli_detail.SetLabel(
                     f"{self._backend_path}\n\n"
@@ -7833,26 +7732,19 @@ class SetupWizard(wx.Dialog):
             flavour = "native Windows version" if windows else "native version"
             self._cli_status.SetLabel("Claude Code is not installed on this computer.")
             self._cli_detail.SetLabel(
-                "BlindPilot's default backend needs it. Click Install Claude Code and it "
-                f"will be installed for you — the {flavour}, no administrator "
-                "rights and no Node.js needed. It is put on your PATH so "
-                f"'claude' also works in {_path_shells()}.\n\n"
-                "You can also install it yourself from claude.com/claude-code "
-                "and click Check Again. To use another backend instead, press "
-                "Escape and choose it from File, Backend in the main window."
+                f"Choose Install Claude Code. It installs the {flavour} with no "
+                "administrator rights and adds it to PATH.\n\n"
+                "Or install it yourself from claude.com/claude-code and choose "
+                "Check Again. To use another backend, go Back and pick one."
             )
             self._cli_install_btn.Show()
             self._cli_update_btn.Hide()
             self._cli_path_btn.Hide()
             self._cli_check_btn.Show()
             self._next_btn.Enable(False)
-            hint = (
-                "Tab to the Install Claude Code button to install it now. "
-                "It needs no administrator rights and is put on your PATH. "
-                "Or press Escape to use another backend."
-            )
+            hint = "Tab to Install Claude Code, or go Back to pick another backend."
         else:
-            # No PowerShell, or no curl — nothing to drive an install with.
+            # No PowerShell, or no curl. Nothing to drive an install with.
             command = (
                 f"irm {WINDOWS_INSTALL_PS1_URL} | iex"
                 if windows
@@ -7863,8 +7755,7 @@ class SetupWizard(wx.Dialog):
                 f"{_missing_prereq_message()}\n\n"
                 f"Install Claude Code by running this in a terminal:\n\n"
                 f"{command}\n\n"
-                "then click Check Again. To use another backend instead, press "
-                "Escape and choose it from File, Backend in the main window."
+                "Then choose Check Again. To use another backend, go Back and pick one."
             )
             self._cli_install_btn.Hide()
             self._cli_update_btn.Hide()
@@ -7903,18 +7794,15 @@ class SetupWizard(wx.Dialog):
             self._next_btn.Enable(True)
         elif not _backend_installs_with_npm(self.backend):
             # This backend does not come from npm: it has an installer of its
-            # own. Offer it when the prerequisites are here — the same offer
-            # the npm backends get, in the backend's own terms — and name what
-            # is missing when they are not. npm is never named: it has nothing
-            # to do with this install, and saying it would send the user after
-            # the wrong thing.
+            # own. Offer it when the prerequisites are here, and name what is
+            # missing when they are not. npm is never named, since saying it
+            # would send the user after the wrong thing.
             if _hermes_install_argv() is not None:
                 self._cli_status.SetLabel(f"{info.label} is not installed.")
                 self._cli_detail.SetLabel(
-                    f"Choose Install {info.label}. BlindPilot runs {info.label}'s official "
-                    "installer — no administrator rights and no Node.js needed — then checks "
-                    "that it starts and puts it on your PATH.\n\n"
-                    f"You can also run it yourself: {info.install_command}\n\n"
+                    f"Choose Install {info.label} to run its official installer. No "
+                    "administrator rights are needed.\n\n"
+                    f"Or run it yourself: {info.install_command}\n\n"
                     "Then choose Check Again."
                 )
                 self._cli_install_btn.Show()
@@ -8109,7 +7997,7 @@ class SetupWizard(wx.Dialog):
         self._next_btn.Enable(True)
         if updated:
             invalidate_model_options(self.backend)
-            announce(f"{label} is up to date. Its model list will refresh at runtime.")
+            announce(f"{label} is up to date.")
         else:
             self._cli_status.SetLabel(f"The {label} update did not complete.")
             announce(f"The {label} update did not complete. Review the updater output.")
@@ -8126,16 +8014,36 @@ class SetupWizard(wx.Dialog):
         self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
         self._backend_path = self._find_selected_cli()
         if not self._backend_path:
-            self._signin_status.SetLabel(
+            self._show_signin_status(
                 f"{label} is not installed. Go Back and complete the CLI step first."
             )
-        elif backend_auth_ok(self.backend):
-            self._signin_status.SetLabel(f"{label} reports that you are signed in.")
-        else:
-            self._signin_status.SetLabel(f"BlindPilot could not confirm a {label} sign-in yet.")
+            return
+        self._show_signin_status(f"Checking whether {label} is signed in…")
+        backend = self.backend
+
+        def work() -> None:
+            # The probe runs a CLI with a timeout of up to 25 seconds. On the
+            # GUI thread that froze the wizard and the screen reader with it.
+            ok = backend_auth_ok(backend)
+            wx.CallAfter(self._on_signin_checked, backend, ok)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_signin_checked(self, backend: str, ok: bool) -> None:
+        if not self or backend != self.backend:
+            return
+        label = backend_label(backend)
+        self._show_signin_status(
+            f"{label} reports that you are signed in."
+            if ok
+            else f"BlindPilot could not confirm a {label} sign-in yet."
+        )
+
+    def _show_signin_status(self, text: str) -> None:
+        self._signin_status.SetLabel(text)
         self._pages[2].Layout()
         self.Layout()
-        announce(self._signin_status.GetLabel())
+        announce(text)
 
     def _do_login(self) -> None:
         if self.backend == BACKEND_OPENCODE:
@@ -8163,24 +8071,27 @@ class SetupWizard(wx.Dialog):
         self._already_btn.Disable()
         self._next_btn.Disable()
         self._open_page_btn.Disable()
-        self._login = BackendLogin(self.backend, self._backend_path)
+        # A setup that asks its questions in a terminal is not watched for a
+        # browser address; `_run_login` opens a console for it instead.
+        self._login = (
+            None
+            if BACKENDS[self.backend].login_needs_terminal
+            else BackendLogin(self.backend, self._backend_path)
+        )
         self._signin_status.SetLabel(
             "Waiting for sign-in… Complete authentication in your browser, then return here."
         )
         self._pages[2].Layout()
         self.Layout()
         announce(self._signin_status.GetLabel())
-        self._login_thread = threading.Thread(target=self._run_login, daemon=True)
-        self._login_thread.start()
+        threading.Thread(target=self._run_login, daemon=True).start()
 
     def _run_login(self) -> None:
         if BACKENDS[self.backend].login_needs_terminal:
             # An interactive setup cannot run hidden with no stdin: it dies
             # immediately and the wizard would report a failed sign-in for a
             # backend that is simply waiting to be asked. Give it a real
-            # console and let the user answer it. This is decided before
-            # BackendLogin runs, because watching output for a browser address
-            # is meaningless for a setup that asks its questions in a console.
+            # console and let the user answer it.
             binary = self._backend_path
             if binary is None:
                 wx.CallAfter(self._on_login_terminal_opened, "", False)
@@ -8293,17 +8204,16 @@ class SetupWizard(wx.Dialog):
     def _ask_login_code(self, prompt: str, url: str) -> None:
         """The CLI is waiting for the code the sign-in page hands back.
 
-        Not every sign-in ends this way — the same page usually completes the
-        round-trip on its own — so this dialog is a way in, not a wall. It
+        Not every sign-in ends this way, since the same page usually completes
+        the round-trip on its own, so this dialog is a way in, not a wall. It
         closes itself the moment the CLI finishes without it.
         """
         if not self or self._code_dialog is not None:
             return
         message = (
-            f"{prompt or 'Paste the code from the sign-in page.'}\n\n"
-            "If the page gave you a code, paste it here and choose OK.\n"
-            "If it did not, leave this alone — it closes by itself once the "
-            "browser has finished signing you in."
+            f"{prompt or 'The sign-in page may give you a code.'}\n\n"
+            "Paste the code and choose OK. If there was no code, leave this "
+            "open; it closes when the browser finishes."
         )
         if url:
             message = f"{message}\n\n{url}"
@@ -8336,7 +8246,7 @@ class SetupWizard(wx.Dialog):
         self._next_btn.Enable()
         if ok:
             self._signin_status.SetLabel("Signed in successfully.")
-            wx.CallAfter(self._go, +1)
+            self._go(+1)
         else:
             trouble = f"{failure} " if failure else ""
             self._signin_status.SetLabel(
@@ -8375,8 +8285,9 @@ class SetupWizard(wx.Dialog):
 class RemoteHermesDialog(wx.Dialog):
     """Where a Hermes on another computer lives, and how to prove who we are.
 
-    Deliberately plain: a checkbox, an address, a port, a key, and a button
-    that tries it. Every field has a label of its own so a screen reader
+    Deliberately plain: a checkbox, an address, a port, a TLS switch, the
+    credential type with its username and key, and a button that tries it.
+    Every field has a label of its own so a screen reader
     announces what it is on the way in, and the test button reports its result
     in the same status line rather than a message box that has to be dismissed.
     """
@@ -8386,9 +8297,8 @@ class RemoteHermesDialog(wx.Dialog):
         intro = wx.StaticText(
             self,
             label=(
-                "By default the Hermes backend runs the copy installed on this "
-                "computer. Turn this on to drive a Hermes running somewhere "
-                "else instead — start it there with 'hermes serve'."
+                "Off runs the Hermes installed on this computer. On connects to a "
+                "Hermes elsewhere; start it there with 'hermes serve'."
             ),
         )
         intro.Wrap(520)
@@ -8410,8 +8320,8 @@ class RemoteHermesDialog(wx.Dialog):
         self._credential = wx.Choice(
             self,
             choices=[
-                "Session token — a Hermes on this same computer",
-                "Username and password — a Hermes on another computer",
+                "Session token (same computer)",
+                "Username and password (another computer)",
             ],
         )
         self._credential.SetSelection(0 if REMOTE_HERMES.credential == "token" else 1)
@@ -8519,6 +8429,9 @@ class RemoteHermesDialog(wx.Dialog):
             transport.close()
 
     def _test_done(self, error: str) -> None:
+        if not self:
+            # Escape while the test ran. The dialog is gone.
+            return
         self._test_btn.Enable()
         if error:
             self._say(error)
@@ -8755,6 +8668,11 @@ class MainFrame(wx.Frame):
         self._projects_folder: Optional[str] = pf if pf and os.path.isdir(pf) else None
 
         # ----- Menu bar (gives us standard Cmd+T / Cmd+W on Mac) -----
+        # Items that act on the visible session tab. Greyed out in Chat mode,
+        # where the notebook is hidden and they would work on a page nobody
+        # sees. Compact, Connect and Hermes Conversations have refreshers of
+        # their own that already know the mode.
+        self._agent_menu_items: list[wx.MenuItem] = []
         menubar = wx.MenuBar()
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
@@ -9249,18 +9167,17 @@ class MainFrame(wx.Frame):
 
     def _set_app_mode(self, mode: str, announce_change: bool = True) -> None:
         mode = APP_MODE_CHAT if mode == APP_MODE_CHAT else APP_MODE_AGENT
+        chat_panel = self.chat_panel
         if mode == APP_MODE_CHAT:
             try:
                 chat_panel = self._ensure_chat_panel()
             except Exception as exc:
-                self._app_mode = APP_MODE_AGENT
-                self.mode_combo.SetSelection(0)
+                # Carry on as Agent mode, all the way through, so the saved
+                # mode, the menus and the focus agree with what is shown.
+                mode = APP_MODE_AGENT
                 message = f"Chat mode could not be opened: {exc}"
                 self._set_status_text(message)
                 wx.MessageBox(message, "Chat Mode", wx.OK | wx.ICON_ERROR, self)
-                return
-        else:
-            chat_panel = self.chat_panel
 
         self._app_mode = mode
         show_agent = mode == APP_MODE_AGENT
@@ -9270,8 +9187,11 @@ class MainFrame(wx.Frame):
             chat_panel.Show(not show_agent)
         for item in self._chat_menu_items:
             item.Enable(not show_agent)
+        for item in self._agent_menu_items:
+            item.Enable(show_agent)
         self.mode_combo.SetSelection(0 if show_agent else 1)
         self._refresh_compact_item()
+        self._refresh_connect_item()
         # Chat mode has no backend conversation to reopen, so the Hermes list
         # goes with it rather than sitting in File doing nothing.
         self._refresh_hermes_sessions_item()
@@ -9280,16 +9200,14 @@ class MainFrame(wx.Frame):
         cfg = _load_config()
         cfg["app_mode"] = mode
         _save_config(cfg)
-        if _STARTUP_CHECK:
-            # A check shows no window, so there is nothing here to focus into,
-            # and asking for focus would take it from whoever is running it.
-            pass
-        elif show_agent:
+        # A startup check shows no window, so there is nothing here to focus
+        # into, and asking for focus would take it from whoever is running it.
+        if not _STARTUP_CHECK:
             page = self.notebook.GetCurrentPage()
-            if isinstance(page, SessionPanel):
+            if show_agent and isinstance(page, SessionPanel):
                 page.focus_prompt()
-        else:
-            chat_panel.message_input.SetFocus()
+            elif not show_agent and chat_panel is not None:
+                chat_panel.message_input.SetFocus()
         if announce_change:
             self._announce_setting(f"{APP_MODE_LABELS[mode]} mode")
 
@@ -9329,10 +9247,8 @@ class MainFrame(wx.Frame):
         # console cannot arrive in the middle of a turn.
         reserve_console_if_needed(backend)
         _save_config(cfg)
-        for index in range(self.notebook.GetPageCount()):
-            page = self.notebook.GetPage(index)
-            if isinstance(page, SessionPanel):
-                page.backend_changed()
+        for page in self._session_panels():
+            page.backend_changed()
         self._refresh_compact_item()
         self._refresh_connect_item()
         self._refresh_hermes_sessions_item()
@@ -9401,9 +9317,9 @@ class MainFrame(wx.Frame):
         self._thinking_item.Check(SETTINGS.show_thinking)
         self._sounds_item.Check(SETTINGS.sounds_enabled)
         self._text_view_item.Check(SETTINGS.text_view)
-        for mode, item in getattr(self, "_narration_items", {}).items():
+        for mode, item in self._narration_items.items():
             item.Check(mode == SETTINGS.narration)
-        for cue, item in getattr(self, "_sound_cue_items", {}).items():
+        for cue, item in self._sound_cue_items.items():
             item.Check(SETTINGS.sound_cues.get(cue, True))
             item.Enable(SETTINGS.sounds_enabled)
         self._cue_loop_item.Check(SETTINGS.progress_cue == CUE_LOOP)
@@ -9417,10 +9333,8 @@ class MainFrame(wx.Frame):
         else:
             self.earcons.stop_progress()
         if changed_text_view:
-            for i in range(self.notebook.GetPageCount()):
-                page = self.notebook.GetPage(i)
-                if isinstance(page, SessionPanel):
-                    page.apply_view_mode()
+            for page in self._session_panels():
+                page.apply_view_mode()
 
         cfg = _load_config()
         cfg["check_for_updates_at_startup"] = dialog.check_updates_startup
@@ -9456,24 +9370,23 @@ class MainFrame(wx.Frame):
                 self,
             )
 
-    def _check_for_updates(self, silent: bool = False) -> None:
-        """Query GitHub off the GUI thread and present an accessible result."""
+    def check_for_updates_silently(self) -> None:
+        """Startup entry point: report only an available update, never network noise.
+
+        Help, Check for Updates is `_show_update_dialog`, which does its own
+        checking and installing.
+        """
         if self._update_checking:
-            if not silent:
-                self._announce_setting("An update check is already running")
             return
         self._update_checking = True
-        if not silent:
-            self._announce_setting("Checking GitHub for BlindPilot updates")
 
         def work() -> None:
             release: Optional[ReleaseInfo] = None
-            error = ""
             try:
                 release = fetch_latest_release(APP_VERSION)
-            except UpdateError as exc:
-                error = str(exc)
-            wx.CallAfter(self._on_update_checked, release, error, silent)
+            except UpdateError:
+                pass
+            wx.CallAfter(self._on_update_checked, release)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -9503,10 +9416,6 @@ class MainFrame(wx.Frame):
         if restart:
             self.Close(force=True)
 
-    def check_for_updates_silently(self) -> None:
-        """Startup entry point: report only an available update, never network noise."""
-        self._check_for_updates(silent=True)
-
     def report_failed_update(self) -> None:
         """Say why the last update did not install, if it did not.
 
@@ -9528,101 +9437,20 @@ class MainFrame(wx.Frame):
         ) as dialog:
             dialog.ShowModal()
 
-    def _on_update_checked(self, release: Optional[ReleaseInfo], error: str, silent: bool) -> None:
+    def _on_update_checked(self, release: Optional[ReleaseInfo]) -> None:
         self._update_checking = False
-        if error:
-            if not silent:
-                self._show_update_error(error)
-            return
         if release is None or not release.is_newer_than(APP_VERSION):
-            if not silent:
-                self._announce_setting(f"BlindPilot {APP_VERSION} is the newest available version")
             return
-        if silent:
-            message = (
-                f"BlindPilot {release.version} is available. "
-                "Open Help, Check for Updates to review and install it."
-            )
-            self._set_status_text(message)
-            announce(message)
-            return
-        notes = release.notes[:1500]
         message = (
-            f"BlindPilot {release.version} is available. You have {APP_VERSION}.\n\n"
-            f"{notes}\n\nDownload and install this update now?"
+            f"BlindPilot {release.version} is available. "
+            "Open Help, Check for Updates to review and install it."
         )
-        with wx.MessageDialog(
-            self,
-            message,
-            "BlindPilot update available",
-            style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_INFORMATION,
-        ) as dialog:
-            if dialog.ShowModal() != wx.ID_YES:
-                self._announce_setting("Update postponed")
-                return
-        if not getattr(sys, "frozen", False):
-            wx.LaunchDefaultBrowser(release.page_url)
-            self._announce_setting(
-                "The release page opened. Automatic installation is used by packaged builds."
-            )
-            return
-        self._download_release(release)
+        self._set_status_text(message)
+        announce(message)
 
-    def _download_release(self, release: ReleaseInfo) -> None:
-        self._announce_setting(f"Downloading and verifying BlindPilot {release.version}")
-
-        def work() -> None:
-            last_bucket = -1
-
-            def progress(received: int, total: int) -> None:
-                nonlocal last_bucket
-                percent = int(received * 100 / total) if total else 0
-                bucket = percent // 25
-                if bucket > last_bucket:
-                    last_bucket = bucket
-                    wx.CallAfter(
-                        self._set_status_text,
-                        f"Downloading BlindPilot update: {min(percent, 100)} percent",
-                    )
-
-            archive = None
-            error = ""
-            try:
-                archive = download_update(release, APP_VERSION, progress=progress)
-            except UpdateError as exc:
-                error = str(exc)
-            wx.CallAfter(self._on_update_downloaded, archive, error, release)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _on_update_downloaded(
-        self, archive: Optional[Path], error: str, release: ReleaseInfo
-    ) -> None:
-        if error or archive is None:
-            self._show_update_error(error or "The update download failed.")
-            return
-        try:
-            schedule_install(archive)
-        except UpdateError as exc:
-            archive.unlink(missing_ok=True)
-            self._show_update_error(str(exc))
-            return
-        self._announce_setting(
-            f"BlindPilot {release.version} is verified. Restarting to install it."
-        )
-        # Force the top-level frame through its normal close handler now. The
-        # detached installer waits for this process and has a bounded forced
-        # shutdown fallback before it replaces any application files.
-        self.Close(force=True)
-
-    def _show_update_error(self, message: str) -> None:
-        self._announce_setting(f"Update error: {message}")
-        wx.MessageBox(
-            message,
-            "BlindPilot update error",
-            wx.OK | wx.ICON_ERROR,
-            self,
-        )
+    def _session_panels(self) -> list["SessionPanel"]:
+        pages = (self.notebook.GetPage(i) for i in range(self.notebook.GetPageCount()))
+        return [page for page in pages if isinstance(page, SessionPanel)]
 
     def _add_session(
         self, cwd: str, initial_prompt: str = "", session_title: str = ""
@@ -9645,10 +9473,6 @@ class MainFrame(wx.Frame):
         # its neighbour.
         self.notebook.AddPage(panel, _tab_label(session_title, cwd), select=True)
         self._sync_tab_switcher()
-        # Model catalogs are intentionally lazy. FreeBuff's installed catalog
-        # is embedded in a large executable, and scanning it here caused a
-        # noticeable CPU spike every time BlindPilot started or opened a tab.
-        # /model and /models perform the runtime refresh only when requested.
         if initial_prompt:
             panel.prompt.SetValue(initial_prompt)
             # Defer so the page is shown before the request fires.
@@ -9704,25 +9528,27 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, lambda _event: action(), item)
         return item
 
+    def _agent_item(self, menu, label, help_text, action, item_id=wx.ID_ANY):
+        """A menu item that acts on the visible session tab; see `_set_app_mode`."""
+        item = self._menu_item(menu, label, help_text, action, item_id)
+        self._agent_menu_items.append(item)
+        return item
+
     def _build_model_menu(self) -> wx.Menu:
         """What answers you, and what it may do.
 
-        The picker already existed and worked, but `/model` typed into the
-        prompt was the only way to reach it and nothing in the menu bar said
-        the word "model" at all. `/status` was in the same position for longer:
-        BlindPilot's own command, offered for every backend because none of
-        them answers it themselves, and findable only by being told the word.
-
-        Built here rather than inline in `_build_menubar` so that appending an
-        item and binding it stay together - they were a hundred and fifty lines
-        apart - and so the menu can be read by a test.
+        Everything the prompt's slash commands reach (/model, /status,
+        /connect) has an item here, so it can be found without knowing the
+        word. Built as a method so the menu can be read by a test.
         """
         menu = wx.Menu()
-        add = self._menu_item
-        menu.AppendSubMenu(
-            self._build_backend_menu(),
-            "&Backend",
-            "Choose which coding-agent CLI BlindPilot uses",
+        add = self._agent_item
+        self._agent_menu_items.append(
+            menu.AppendSubMenu(
+                self._build_backend_menu(),
+                "&Backend",
+                "Choose which coding-agent CLI BlindPilot uses",
+            )
         )
         add(
             menu,
@@ -9732,10 +9558,12 @@ class MainFrame(wx.Frame):
             "Choose the model and effort level this conversation runs at",
             self._model_active,
         )
-        menu.AppendSubMenu(
-            self._build_permission_mode_menu(),
-            "&Permission Mode",
-            "Choose what the backend may do without asking, for this conversation",
+        self._agent_menu_items.append(
+            menu.AppendSubMenu(
+                self._build_permission_mode_menu(),
+                "&Permission Mode",
+                "Choose what the backend may do without asking, for this conversation",
+            )
         )
         add(
             menu,
@@ -9753,10 +9581,10 @@ class MainFrame(wx.Frame):
         add(
             menu,
             "Ma&nage Backends...",
-            "Install, update, or sign in to Claude Code, Codex, FreeBuff, or opencode",
+            "Install, update, or sign in to a backend",
             self._manage_backends,
         )
-        self._connect_item = add(
+        self._connect_item = self._menu_item(
             menu,
             "&Connect a Provider…",
             "Connect a provider to opencode, or disconnect one",
@@ -9776,7 +9604,7 @@ class MainFrame(wx.Frame):
         # Kept so the Hermes conversation list can be taken out of this menu and
         # put back as the backend changes.
         self._file_menu = menu
-        add = self._menu_item
+        add = self._agent_item
         add(
             menu,
             "&New Session…	Ctrl+T",
@@ -9793,7 +9621,7 @@ class MainFrame(wx.Frame):
             "Reopen a past conversation and carry on with it",
             self._open_history,
         )
-        self._hermes_sessions_item = add(
+        self._hermes_sessions_item = self._menu_item(
             menu,
             "Hermes &Conversations…	Ctrl+G",
             "List every conversation Hermes knows, including the ones running right now",
@@ -9820,13 +9648,13 @@ class MainFrame(wx.Frame):
             lambda: self._cycle_tab(-1),
         )
         menu.AppendSeparator()
-        add(
+        self._menu_item(
             menu,
             "Set &Projects Folder…",
             "Choose the folder that contains your projects",
             self._set_projects_folder,
         )
-        add(
+        self._menu_item(
             menu,
             "Create &Desktop Shortcut",
             "Put a BlindPilot shortcut on the desktop",
@@ -9840,7 +9668,7 @@ class MainFrame(wx.Frame):
             self._close_current_session,
             wx.ID_CLOSE,
         )
-        add(menu, "&Quit	Ctrl+Q", "Leave BlindPilot", self.Close, wx.ID_EXIT)
+        self._menu_item(menu, "&Quit	Ctrl+Q", "Leave BlindPilot", self.Close, wx.ID_EXIT)
         return menu
 
     def _build_conversation_menu(self) -> wx.Menu:
@@ -9853,7 +9681,7 @@ class MainFrame(wx.Frame):
         menu item is where the chord is learnt.
         """
         menu = wx.Menu()
-        add = self._menu_item
+        add = self._agent_item
         add(
             menu,
             "S&top Task	Ctrl+.",
@@ -9874,7 +9702,7 @@ class MainFrame(wx.Frame):
             self._slash_active,
         )
         menu.AppendSeparator()
-        self._compact_item = add(
+        self._compact_item = self._menu_item(
             menu,
             "Co&mpact Conversation	Ctrl+Shift+K",
             "Summarise this conversation so the backend has room to keep going",
@@ -9996,7 +9824,6 @@ class MainFrame(wx.Frame):
                 position = index + 1
                 break
         menu.Insert(position, item)
-        self.Bind(wx.EVT_MENU, lambda _event: self._open_hermes_sessions(), item)
 
     def _refresh_connect_item(self) -> None:
         """Grey out Connect for a backend that has no providers to connect.
@@ -10007,15 +9834,12 @@ class MainFrame(wx.Frame):
         item = getattr(self, "_connect_item", None)
         if item is None:
             return
-        supported = self._backend == BACKEND_OPENCODE
+        supported = self._app_mode == APP_MODE_AGENT and self._backend == BACKEND_OPENCODE
         item.Enable(supported)
         if supported:
             item.SetHelp("Connect a provider to opencode, or disconnect one")
         else:
-            item.SetHelp(
-                f"{backend_label(self._backend)} has no providers to connect — "
-                "this one belongs to opencode"
-            )
+            item.SetHelp("Only opencode connects providers.")
 
     def _model_active(self) -> None:
         """Pick the model and effort for the active tab (Ctrl+Shift+E)."""
@@ -10197,10 +10021,8 @@ class MainFrame(wx.Frame):
     def _toggle_text_view(self) -> None:
         SETTINGS.text_view = self._text_view_item.IsChecked()
         SETTINGS.save()
-        for i in range(self.notebook.GetPageCount()):
-            page = self.notebook.GetPage(i)
-            if isinstance(page, SessionPanel):
-                page.apply_view_mode()
+        for page in self._session_panels():
+            page.apply_view_mode()
         if SETTINGS.text_view:
             self._announce_setting("Responses are now a read-only text field, one row per line")
         else:
@@ -10214,7 +10036,7 @@ class MainFrame(wx.Frame):
         self._rows_item.Check(False)
         self._speak_item.Check(False)
         self._announce_setting(
-            "Silent until the response mode on. Nothing is shown or spoken until the whole response is ready."
+            "Silent until the response is on. Nothing is shown or spoken until the whole answer arrives."
         )
 
     def _announce_setting(self, text: str) -> None:
@@ -10328,11 +10150,6 @@ class MainFrame(wx.Frame):
         only question with a useful answer: the transcripts are over there, and
         so are the conversations that are running right now.
         """
-        if self._backend != BACKEND_HERMES:
-            # Opening a Hermes conversation while another backend is selected
-            # would make the next message start a new conversation elsewhere,
-            # so the backend follows the conversation being opened.
-            self._set_backend(BACKEND_HERMES)
         dlg = HermesSessionsDialog(self, cwd=self._history_cwd())
         try:
             if dlg.ShowModal() != wx.ID_OK:
@@ -10433,8 +10250,7 @@ class MainFrame(wx.Frame):
             item.SetHelp("Summarise this conversation so the backend has room to keep going")
         else:
             item.SetHelp(
-                f"{backend_label(self._backend)} cannot compact a conversation — "
-                "start a new conversation instead"
+                f"{backend_label(self._backend)} cannot compact. Start a new conversation instead."
             )
 
     def _set_projects_folder(self) -> Optional[str]:
@@ -10608,12 +10424,10 @@ class MainFrame(wx.Frame):
         # up to three seconds per tab - longer for opencode - of a window that
         # has stopped responding and cannot say why.
         cancelling = []
-        for i in range(self.notebook.GetPageCount()):
-            page = self.notebook.GetPage(i)
-            if isinstance(page, SessionPanel):
-                thread = page.cancel_worker(wait=False)
-                if thread is not None:
-                    cancelling.append(thread)
+        for page in self._session_panels():
+            thread = page.cancel_worker(wait=False)
+            if thread is not None:
+                cancelling.append(thread)
         # Quitting does wait, unlike closing a tab: a CLI that is not killed
         # here outlives the application that started it.
         deadline = time.monotonic() + _CANCEL_JOIN_SECONDS
@@ -10703,9 +10517,6 @@ def main() -> int:
         return 0
     chat_gui_startup_smoke = "--startup-chat-gui-smoke" in sys.argv
     gui_startup_smoke = "--startup-gui-smoke" in sys.argv or chat_gui_startup_smoke
-    # Before anything is started: nothing BlindPilot launches may inherit a
-    # PATH that points back into its own install folder, or the files there
-    # stay open long after BlindPilot has closed and cannot be updated.
     # First, so that anything below which goes wrong leaves a trace behind.
     # The packaged build is windowed and has no stderr to fall back on.
     diagnostics.start_logging()
@@ -10719,6 +10530,9 @@ def main() -> int:
             "no screen reader output is available: accessible-output2 is not "
             "installed, so nothing will be spoken on Windows"
         )
+    # Before anything is started: nothing BlindPilot launches may inherit a
+    # PATH that points back into its own install folder, or the files there
+    # stay open long after BlindPilot has closed and cannot be updated.
     keep_bundle_off_child_path()
     activate_managed_cli_paths()
     app = wx.App(False)

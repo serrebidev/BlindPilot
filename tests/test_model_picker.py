@@ -17,8 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import claude_reader  # noqa: E402
-from claude_reader import (  # noqa: E402
+import blindpilot_app  # noqa: E402
+from blindpilot_app import (  # noqa: E402
     BACKEND_CODEX,
     BACKEND_FREEBUFF,
     _npm_update_argv,
@@ -31,7 +31,7 @@ from claude_reader import (  # noqa: E402
 
 
 def test_npm_backend_updates_request_the_latest_package(monkeypatch):
-    monkeypatch.setattr(claude_reader.shutil, "which", lambda _name: "npm")
+    monkeypatch.setattr(blindpilot_app.shutil, "which", lambda _name: "npm")
 
     assert _npm_update_argv(BACKEND_CODEX)[-1] == "@openai/codex@latest"
     assert _npm_update_argv(BACKEND_FREEBUFF)[-1] == "freebuff@latest"
@@ -44,10 +44,10 @@ def test_claude_update_repairs_an_old_windows_launcher(monkeypatch, tmp_path):
     newest.parent.mkdir(parents=True)
     launcher.write_text("old", encoding="utf-8")
     newest.write_text("new", encoding="utf-8")
-    monkeypatch.setattr(claude_reader.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(claude_reader.Path, "home", classmethod(lambda _cls: tmp_path))
+    monkeypatch.setattr(blindpilot_app.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(blindpilot_app.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(
-        claude_reader,
+        blindpilot_app,
         "_executable_version",
         lambda binary: (
             "2.1.226" if Path(binary).read_text(encoding="utf-8") == "new" else "2.1.225"
@@ -120,19 +120,19 @@ def test_effort_levels_empty_when_the_flag_is_gone():
 
 def _probe_with(
     model_output: str, help_output: str, cwd=None, max_age: float = 0
-) -> claude_reader.ModelOptions:
+) -> blindpilot_app.ModelOptions:
     def fake_run(binary, args, cwd, timeout):
         _RUNS.append(list(args))
         return help_output if args == ["--help"] else model_output
 
-    real_find, real_run = claude_reader._find_claude, claude_reader._run_claude
-    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
-    claude_reader._run_claude = fake_run  # type: ignore[assignment]
+    real_find, real_run = blindpilot_app._find_claude, blindpilot_app._run_claude
+    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
+    blindpilot_app._run_claude = fake_run  # type: ignore[assignment]
     try:
         return probe_model_options(os.getcwd() if cwd is None else cwd, max_age)
     finally:
-        claude_reader._find_claude = real_find  # type: ignore[assignment]
-        claude_reader._run_claude = real_run  # type: ignore[assignment]
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        blindpilot_app._run_claude = real_run  # type: ignore[assignment]
 
 
 # Every fake CLI invocation any probe in this file made, so tests can assert
@@ -151,25 +151,25 @@ def test_probe_reports_what_the_cli_said():
 
 def test_probe_falls_back_and_says_so_when_the_cli_output_changes():
     options = _probe_with("unrecognizable", "unrecognizable")
-    assert options.models == claude_reader._FALLBACK_MODELS
-    assert options.efforts == claude_reader._FALLBACK_EFFORTS
+    assert options.models == blindpilot_app._FALLBACK_MODELS
+    assert options.efforts == blindpilot_app._FALLBACK_EFFORTS
     assert "built-in list" in options.error
 
 
 def test_probe_falls_back_when_claude_is_not_installed():
-    real_find = claude_reader._find_claude
-    claude_reader._find_claude = lambda: None  # type: ignore[assignment]
+    real_find = blindpilot_app._find_claude
+    blindpilot_app._find_claude = lambda: None  # type: ignore[assignment]
     try:
         options = probe_model_options(None)
     finally:
-        claude_reader._find_claude = real_find  # type: ignore[assignment]
-    assert options.models == claude_reader._FALLBACK_MODELS
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+    assert options.models == blindpilot_app._FALLBACK_MODELS
     assert "not found" in options.error
 
 
 def _clear_probe_cache() -> None:
-    with claude_reader._probe_lock:
-        claude_reader._probe_cache.clear()
+    with blindpilot_app._probe_lock:
+        blindpilot_app._probe_cache.clear()
 
 
 def test_a_recent_probe_is_reused_instead_of_shelling_out():
@@ -214,18 +214,18 @@ def test_a_failed_probe_is_not_cached():
 def test_cached_lookup_never_shells_out():
     _clear_probe_cache()
     _RUNS.clear()
-    real_find = claude_reader._find_claude
-    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
+    real_find = blindpilot_app._find_claude
+    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        assert claude_reader.cached_model_options("/tmp/cold", 900) is None
+        assert blindpilot_app.cached_model_options("/tmp/cold", 900) is None
     finally:
-        claude_reader._find_claude = real_find  # type: ignore[assignment]
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
     assert _RUNS == []
 
 
 def test_the_keep_entry_names_the_current_model():
-    assert claude_reader._keep_choice("Opus 5") == "(CLI default) — currently Opus 5"
-    assert claude_reader._keep_choice("") == "(CLI default)"
+    assert blindpilot_app._keep_choice("Opus 5") == "(CLI default), currently Opus 5"
+    assert blindpilot_app._keep_choice("") == "(CLI default)"
 
 
 def _worker_command(**kwargs) -> list[str]:
@@ -241,11 +241,11 @@ def _worker_command(**kwargs) -> list[str]:
         captured.append(list(cmd))
         raise OSError("stop here — the command line is all we need")
 
-    real_popen, real_find = subprocess.Popen, claude_reader._find_claude
+    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
     subprocess.Popen = fake_popen  # type: ignore[assignment]
-    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
+    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        claude_reader.ClaudeWorker(
+        blindpilot_app.ClaudeWorker(
             "hi",
             None,
             os.getcwd(),
@@ -260,7 +260,7 @@ def _worker_command(**kwargs) -> list[str]:
         ).run()
     finally:
         subprocess.Popen = real_popen  # type: ignore[assignment]
-        claude_reader._find_claude = real_find  # type: ignore[assignment]
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
     return captured[0]
 
 
@@ -294,3 +294,63 @@ if __name__ == "__main__":
                 print(f"FAIL {name}: {exc}")
     print(f"\n{failures} failure(s)")
     sys.exit(1 if failures else 0)
+
+
+def test_cached_lookup_never_searches_for_the_cli():
+    """It runs on the GUI thread when /model opens, and on macOS finding the
+    CLI can mean running a login shell with an eight second timeout."""
+    _clear_probe_cache()
+
+    def never(*_args, **_kwargs):
+        raise AssertionError("searched for the CLI on the GUI thread")
+
+    real_find, real_backend = blindpilot_app._find_claude, blindpilot_app.find_backend_cli
+    blindpilot_app._find_claude = never  # type: ignore[assignment]
+    blindpilot_app.find_backend_cli = never  # type: ignore[assignment]
+    try:
+        assert blindpilot_app.cached_model_options("/tmp/cold", 900) is None
+        assert blindpilot_app.cached_model_options("/tmp/cold", 900, backend="codex") is None
+    finally:
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        blindpilot_app.find_backend_cli = real_backend  # type: ignore[assignment]
+
+
+def test_a_cached_catalog_is_dropped_when_the_cli_changes(tmp_path):
+    """An upgrade changes the model list, so the entry remembers the binary
+    that answered and goes when that file does."""
+    _clear_probe_cache()
+    binary = tmp_path / "claude"
+    binary.write_text("version one", encoding="utf-8")
+    options = blindpilot_app.ModelOptions(["opus"], ["high"])
+    blindpilot_app._remember_model_options("claude", "/tmp/proj", str(binary), options)
+
+    cached = blindpilot_app.cached_model_options("/tmp/proj", 900)
+    assert cached is not None and cached.models == ["opus"] and cached.from_cache
+
+    binary.write_text("version two, a longer file", encoding="utf-8")
+
+    assert blindpilot_app.cached_model_options("/tmp/proj", 900) is None
+
+
+def test_the_effort_box_keeps_a_saved_effort_the_backend_no_longer_lists():
+    """A read-only box cannot show a value it does not list, so the saved
+    effort silently became "" and OK cleared the tab's override."""
+    import pytest
+
+    wx = pytest.importorskip("wx")
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    frame = wx.Frame(None)
+    try:
+        options = blindpilot_app.ModelOptions(["opus"], ["low", "high"])
+        dlg = blindpilot_app.ModelDialog(frame, options, "", "xhigh", "Codex")
+        try:
+            assert dlg.effort_box.GetStringSelection() == "xhigh"
+            assert dlg.selection() == ("", "xhigh")
+        finally:
+            dlg.Destroy()
+    finally:
+        frame.Destroy()
+        app.ProcessPendingEvents()
+        if owns_app:
+            app.Destroy()

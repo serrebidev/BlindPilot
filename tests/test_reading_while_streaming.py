@@ -265,3 +265,16 @@ def test_the_other_control_is_filled_when_it_becomes_the_visible_one(monkeypatch
     app.SessionPanel._refresh_list(panel)
 
     assert control.text.split("\n") == [row.label for row in rows]
+
+
+def test_a_single_row_still_fills_an_empty_text_view(monkeypatch):
+    """An empty TE_MULTILINE control reports one line, which equalled the one
+    displayed row, so the append path found nothing to add and the view stayed
+    blank. An empty control holds zero rows, whatever it says about lines."""
+    rows = _rows("one")
+    control = _TextView("")
+    panel = _panel(monkeypatch, text_view=True, displayed=rows, rows=rows, control=control)
+
+    app.SessionPanel._refresh_list(panel)
+
+    assert control.text == "one"

@@ -108,3 +108,76 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
         wx.Yield()
         if owns_app:
             app.Destroy()
+
+
+def _frame(monkeypatch, tmp_path, saved):
+    monkeypatch.setattr(blindpilot_app, "_load_config", lambda: dict(saved))
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda value: saved.update(value))
+    monkeypatch.setattr(chat_integration, "database_path", lambda: tmp_path / "chat.sqlite3")
+    monkeypatch.setattr(chat_integration, "import_existing_accessible_ai_data", lambda _t: None)
+    return blindpilot_app.MainFrame(str(tmp_path))
+
+
+def _destroy(frame, app, owns_app):
+    frame.Destroy()
+    app.ProcessPendingEvents()
+    wx.Yield()
+    if owns_app:
+        app.Destroy()
+
+
+def test_a_chat_mode_that_cannot_open_falls_back_to_agent_mode_completely(monkeypatch, tmp_path):
+    """Before, the handler returned early after the message box: the saved
+    mode still said chat (so the box came back on every launch), Compact and
+    the Hermes list had been refreshed for a mode the window was not in, and
+    nothing had focus."""
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    saved: dict[str, object] = {"setup_complete": True, "app_mode": "chat"}
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("the chat database is unreadable")
+
+    monkeypatch.setattr(chat_integration, "create_chat_panel", broken)
+    boxes: list[str] = []
+    monkeypatch.setattr(wx, "MessageBox", lambda message, *args, **kwargs: boxes.append(message))
+
+    frame = _frame(monkeypatch, tmp_path, saved)
+    try:
+        assert boxes and "Chat mode could not be opened" in boxes[0]
+        assert saved["app_mode"] == "agent"
+        assert frame._app_mode == blindpilot_app.APP_MODE_AGENT
+        assert frame.mode_combo.GetSelection() == 0
+        assert frame.notebook.IsShown()
+        assert frame._compact_item.IsEnabled()
+        assert all(item.IsEnabled() for item in frame._agent_menu_items)
+        assert not frame._chat_refresh_item.IsEnabled()
+    finally:
+        _destroy(frame, app, owns_app)
+
+
+def test_agent_only_commands_are_greyed_out_in_chat_mode(monkeypatch, tmp_path):
+    """The notebook is hidden in Chat mode, and every one of these acts on
+    its current page: Find opened a search over an invisible list, New
+    Session put focus into a control nobody could see. Disabled is what a
+    screen reader announces, so the item says why it does nothing."""
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    saved: dict[str, object] = {"setup_complete": True, "app_mode": "agent"}
+
+    frame = _frame(monkeypatch, tmp_path, saved)
+    try:
+        labels = {item.GetItemLabelText() for item in frame._agent_menu_items}
+        assert {"New Session…", "Find in Responses…", "Backend"} <= labels, labels
+        assert all(item.IsEnabled() for item in frame._agent_menu_items)
+
+        frame._set_app_mode(blindpilot_app.APP_MODE_CHAT)
+        assert not any(item.IsEnabled() for item in frame._agent_menu_items)
+        assert not frame._compact_item.IsEnabled()
+        assert not frame._connect_item.IsEnabled()
+
+        frame._set_app_mode(blindpilot_app.APP_MODE_AGENT)
+        assert all(item.IsEnabled() for item in frame._agent_menu_items)
+        assert frame._compact_item.IsEnabled()
+    finally:
+        _destroy(frame, app, owns_app)
