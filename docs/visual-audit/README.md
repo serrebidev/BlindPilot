@@ -37,4 +37,6 @@ There is no single-instance guard, so this runs beside the real app. The retitle
 
 ## Reports
 
-`01-screenshot-audit.md`, `02-code-layout-audit.md`, `03-reference-checklist.md`, screenshots in `shots\`.
+`01-screenshot-audit.md`, `02-code-layout-audit.md`, `03-reference-checklist.md`, `04-responses-list-design.md`, `05-responses-list-plan.md`.
+
+Screenshots go to `shots\`, which is ignored by git. They are evidence for whoever is writing or checking a report at the time; every report describes what its screenshots show, because the people this app is for cannot see them, and a clone does not need three megabytes of pictures.

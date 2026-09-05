@@ -1187,7 +1187,7 @@ git commit -m "Use the wrapping list for past conversations and slash commands"
 ### Task 9: Lint, types, and a live look
 
 **Files:**
-- Create: `docs/visual-audit/shots/80-list-default.png`, `81-list-700x500.png`, `82-list-dark.png`
+- Capture locally (ignored by git): `docs/visual-audit/shots/80-list-default.png`, `81-list-700x500.png`, `82-list-dark.png`
 
 - [ ] **Step 1: Static checks**
 
@@ -1198,12 +1198,9 @@ Expected: clean. Fix anything reported.
 
 Launch an audit copy (README recipe), open the first past conversation (`^+h`, `{ENTER}`), capture with `capture.ps1 -ProcessId <pid> -NoFocus -Out docs/visual-audit/shots/80-list-default.png`; resize to 700x500 with the windows-mcp App resize tool or `sendkeys.ps1` Alt+Space then S, capture `81-list-700x500.png`; set the dark-mode preference to Dark in the sandbox config, relaunch, capture `82-list-dark.png`. View each PNG with the Read tool and compare with shots 30, 31 and 03. Rows must wrap, bold headers and muted reasoning must be visible, the selected row must show the highlight, and nothing may be clipped at the right edge.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Describe, do not commit**
 
-```bash
-git add docs/visual-audit/shots/80-list-default.png docs/visual-audit/shots/81-list-700x500.png docs/visual-audit/shots/82-list-dark.png
-git commit -m "Screenshots of the wrapping list at three sizes"
-```
+`docs/visual-audit/shots/` is ignored by git. Write what each of the three screenshots shows into the applied report in Task 10, in words, as the earlier reports do.
 
 ---
 

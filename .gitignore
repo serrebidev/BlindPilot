@@ -25,3 +25,7 @@ artifacts/
 .claude/settings.local.json
 # Scratch config for the visual-audit second instance (docs/visual-audit/README.md)
 docs/visual-audit/sandbox/
+
+# Screenshots taken while auditing the look of the app. Viewed at audit time,
+# described in words in docs/visual-audit, and not worth 3 MB per clone.
+docs/visual-audit/shots/

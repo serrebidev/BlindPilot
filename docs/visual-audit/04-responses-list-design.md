@@ -207,8 +207,8 @@ conversation loaded:
 3. The same for the Recent Conversations dialog.
 
 Sighted side: screenshots of the main window with a populated transcript at
-the default size, at 700x500, and in dark mode, viewed and compared with
-shots 30, 31 and 03.
+the default size, at 700x500, and in dark mode, viewed and described in the
+applied report. Screenshots are not committed; the shots folder is ignored.
 
 ## Out of scope
 
