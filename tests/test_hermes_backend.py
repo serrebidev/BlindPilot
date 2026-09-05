@@ -356,19 +356,42 @@ def test_the_noisy_session_list_event_produces_no_rows():
 # -- permissions and approvals -------------------------------------------
 
 
-def test_permission_modes_map_onto_whether_hermes_may_act_unattended():
+def test_permission_modes_map_onto_a_session_yolo_toggle():
+    """Bypass modes reach the gateway through config.set, not session.create.
+
+    ``session.create`` has no ``yolo`` parameter — measured against the live
+    gateway, which reads model/effort/title there and silently drops the rest
+    — so the first version's ``params["yolo"]`` never did anything and a
+    bypass session still asked approvals. The per-session ``config.set`` with
+    ``key: "yolo"`` is the control the gateway's own /yolo command drives.
+    """
     worker = _worker()
+    worker._live_session = "live1"
+    for mode, value in (("bypassPermissions", "1"), ("default", "0"), ("plan", "0")):
+        worker._permission_mode = mode
+        transport = _FakeTransport([])
+        worker._transport = transport
+        worker._apply_yolo()
+        toggles = [m for m in transport.sent if m.get("method") == "config.set"]
+        assert len(toggles) == 1
+        assert toggles[0]["params"]["key"] == "yolo"
+        assert toggles[0]["params"]["value"] == value
+        assert toggles[0]["params"]["session_id"] == "live1"
+    # session.create itself carries nothing about permissions.
     worker._permission_mode = "bypassPermissions"
-    assert worker._session_params()["yolo"] is True
-    worker._permission_mode = "default"
-    assert worker._session_params()["yolo"] is False
-    worker._permission_mode = "plan"
-    assert worker._session_params()["yolo"] is False
+    assert "yolo" not in worker._session_params()
 
 
 def test_an_approval_is_answered_so_the_turn_cannot_hang():
-    """An unanswered approval leaves Hermes waiting forever."""
-    for mode, expected in (("auto", "approve"), ("default", "deny")):
+    """An unanswered approval leaves Hermes waiting forever.
+
+    The reply speaks the gateway's own protocol: a ``choice`` of
+    ``once``/``session``/``always``/``deny``. The first version sent
+    ``{"decision": "approve"}``; the gateway reads a key it does not know and
+    falls back to its default, which is deny — so even the bypass path
+    refused every dangerous command it was meant to allow.
+    """
+    for mode, expected in (("auto", "once"), ("default", "deny")):
         rows = []
         # `rows=rows` binds this iteration's list. Without it the closure reads
         # whatever `rows` names when it is finally called, which in a loop is
@@ -385,12 +408,58 @@ def test_an_approval_is_answered_so_the_turn_cannot_hang():
 
         answers = [m for m in transport.sent if m.get("method") == "approval.respond"]
         assert len(answers) == 1
-        assert answers[0]["params"]["decision"] == expected
+        assert answers[0]["params"]["choice"] == expected
         # Either way the user is told what happened.
         assert rows and rows[0][0] == "tool"
 
 
-def test_a_denied_approval_explains_how_to_allow_it():
+def test_a_non_bypass_mode_asks_the_person_instead_of_denying_silently():
+    """The whole point of an approval request is the person's answer.
+
+    Before this, a mode that was not a bypass denied without showing the
+    request to anybody — the person whose approval Hermes was asking for
+    never saw it, and code things failed with nothing to approve.
+    """
+    asked = []
+    answers = [["session"]]
+
+    def on_question(questions):
+        asked.extend(questions)
+        return answers
+
+    worker = _worker(on_question=on_question)
+    worker._permission_mode = "default"
+    transport = _FakeTransport([])
+    worker._transport = transport
+    worker._handle_event(
+        _event(
+            "approval.request",
+            {"request_id": "r9", "command": "git push", "choices": ["once", "session", "deny"]},
+        )
+    )
+
+    assert len(asked) == 1
+    assert "git push" in asked[0].question
+    assert [o.label for o in asked[0].options] == ["once", "session", "deny"]
+    replies = [m for m in transport.sent if m.get("method") == "approval.respond"]
+    assert len(replies) == 1
+    assert replies[0]["params"]["choice"] == "session"
+
+
+def test_a_declined_question_counts_as_a_deny():
+    """Closing the dialog without an answer must not leave Hermes waiting."""
+    worker = _worker(on_question=lambda _questions: None)
+    worker._permission_mode = "acceptEdits"
+    transport = _FakeTransport([])
+    worker._transport = transport
+    worker._handle_event(_event("approval.request", {"request_id": "r4", "command": "git push"}))
+
+    replies = [m for m in transport.sent if m.get("method") == "approval.respond"]
+    assert len(replies) == 1
+    assert replies[0]["params"]["choice"] == "deny"
+
+
+def test_a_deny_without_a_dialog_explains_how_to_allow_it():
     rows = []
     worker = _worker(on_activity=lambda kind, value: rows.append((kind, value)))
     worker._permission_mode = "default"

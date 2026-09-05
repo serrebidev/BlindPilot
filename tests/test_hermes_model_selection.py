@@ -522,6 +522,7 @@ def test_a_changed_pick_moves_the_session_and_is_remembered() -> None:
         [
             {"jsonrpc": "2.0", "id": 101, "result": {"output": "switched"}},
             {"jsonrpc": "2.0", "id": 102, "result": {}},
+            {"jsonrpc": "2.0", "id": 103, "result": {}},
             {
                 "jsonrpc": "2.0",
                 "method": "event",
@@ -540,7 +541,15 @@ def test_a_changed_pick_moves_the_session_and_is_remembered() -> None:
     assert first["method"] == "slash.exec"
     assert first["params"]["command"].startswith(f"/model {_QUALIFIED_MODEL}")
     assert f"--provider {_PROVIDER}" in first["params"]["command"]
-    assert transport.sent[1]["method"] == "prompt.submit"
+    # The permission mode is pushed onto the live session the same way, right
+    # after the model pick: session.create carried no such parameter and a
+    # mode picked between messages has to reach the conversation.
+    assert transport.sent[1]["method"] == "config.set"
+    assert transport.sent[1]["params"]["key"] == "yolo"
+    assert transport.sent[2]["method"] == "prompt.submit"
+    # Three requests, three scripted replies: the toggle takes a request id
+    # of its own, and a turn that never hears its prompt.submit reply ends
+    # dirty instead of handing the connection on.
     # The next turn on this connection knows what the session now runs.
     assert held.take() == (transport, "live-1")
     assert held.model == _ROW

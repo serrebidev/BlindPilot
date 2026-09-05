@@ -825,6 +825,10 @@ class HermesWorker(threading.Thread):
                 return
             if not self._ensure_session():
                 return
+            # With the session id in hand, the picked permission mode can be
+            # pushed onto it. It cannot ride on session.create (see
+            # _apply_yolo), so it goes right after.
+            self._apply_yolo()
         else:
             # The model and reasoning level ride on session.create, so a
             # conversation already under way would keep whatever it started
@@ -833,6 +837,9 @@ class HermesWorker(threading.Thread):
             # change is applied to the live session the way Hermes' own hosts
             # do it: through its slash commands.
             self._apply_live_selection()
+            # The permission mode can change between turns of a held
+            # conversation; a mode picked since the last message applies now.
+            self._apply_yolo()
         if self._compact:
             self._run_compaction()
             return
@@ -992,6 +999,31 @@ class HermesWorker(threading.Thread):
             )
         return True
 
+    def _apply_yolo(self) -> None:
+        """Put the picked permission mode onto the live Hermes session.
+
+        ``session.create`` has no ``yolo`` parameter — the gateway reads model,
+        reasoning and title there, but the approval bypass is not one of them,
+        so sending it was a no-op and the session kept asking approvals even
+        in bypass mode. The real control is the gateway's per-session
+        ``config.set`` with ``key: "yolo"``, the same one its own /yolo
+        command drives. Sent best-effort every turn, so a mode picked between
+        messages reaches the conversation already under way, and a gateway
+        that predates the key keeps working (approvals are answered per
+        request below instead).
+        """
+        yolo = _MODE_TO_YOLO.get(self._permission_mode)
+        if yolo is None or not self._live_session:
+            return
+        self._request(
+            "config.set",
+            {
+                "session_id": self._live_session,
+                "key": "yolo",
+                "value": "1" if yolo else "0",
+            },
+        )
+
     def _session_params(self) -> dict:
         params: dict = {}
         if self._model:
@@ -1011,9 +1043,9 @@ class HermesWorker(threading.Thread):
             # Omitted when empty, which is how a conversation gets that
             # automatic name instead.
             params["title"] = self._session_title
-        yolo = _MODE_TO_YOLO.get(self._permission_mode)
-        if yolo is not None:
-            params["yolo"] = yolo
+        # The permission mode does not ride on session.create: the gateway's
+        # handler has no such parameter, so it was silently ignored. It is
+        # applied through _apply_yolo instead.
         return params
 
     def _run_turn(self) -> None:
@@ -1518,21 +1550,67 @@ class HermesWorker(threading.Thread):
         )
 
     def _answer_approval(self, payload: dict) -> None:
+        """Answer a dangerous-command approval the way the mode says to.
+
+        Two things were wrong with the first version, both measured against
+        the live gateway. The reply sent ``{"decision": "approve"}``, but the
+        gateway's ``approval.respond`` reads a ``choice`` whose values are
+        ``once``, ``session``, ``always`` or ``deny`` — anything else falls
+        through to its default, which is deny. So even the "Approved
+        automatically" path denied the command, and a bypass turn died on the
+        first dangerous command it met with no way to approve it.
+
+        The other half: a mode that is not a bypass denied without ever
+        showing the request to the person whose approval was being asked for.
+        The gateway's choices offer a once/session/always/deny menu, so that
+        becomes a question the window asks, and the answer goes back as the
+        choice. No ``on_question`` (a resume replay, say) still cannot hang:
+        the request is answered with the mode's own decision.
+        """
         request_id = payload.get("request_id")
-        allowed = _MODE_TO_YOLO.get(self._permission_mode, False)
+        if request_id is None:
+            return
         command = _first_text(payload.get("command"), payload.get("summary"))
+        allowed = _MODE_TO_YOLO.get(self._permission_mode, False)
+        choice = ""
         if allowed:
             self._on_activity("tool", f"Approved automatically: {command or 'a command'}")
-            decision = "approve"
-        else:
-            self._on_activity(
-                "tool",
-                f"Hermes needs approval for: {command or 'a command'}. "
-                "Switch the permission mode to allow it.",
+            choice = "once"
+        elif self._on_question is not None:
+            choices = [str(c) for c in (payload.get("choices") or []) if str(c).strip()]
+            if not choices:
+                choices = ["once", "session", "always", "deny"]
+            question = Question(
+                question=f"Allow Hermes to run: {command or 'a command'}?",
+                options=tuple(QuestionOption(c) for c in choices),
+                allow_custom=False,
             )
-            decision = "deny"
-        if request_id is not None:
-            self._request("approval.respond", {"request_id": request_id, "decision": decision})
+            answers = self._on_question([question])
+            self._on_activity("tool", question_summary([question], answers))
+            if answers and answers[0]:
+                # The person picked one of the offered choices; the gateway
+                # expects the label back as-is. Anything typed instead of
+                # picked cannot be matched to a choice, so it counts as no.
+                said = str(answers[0][0]).strip().lower()
+                if said in [c.lower() for c in choices]:
+                    choice = said
+        if not choice:
+            if allowed:
+                # Approved above; nothing reaches here but a future edit to
+                # the mapping, so the safe fallback is the denial.
+                pass
+            elif self._on_question is not None:
+                # The person was asked and declined (or skipped) the dialog;
+                # the summary row above already said so.
+                pass
+            else:
+                self._on_activity(
+                    "tool",
+                    f"Declined {command or 'a command'} — the permission mode does not allow it. "
+                    "Switch the permission mode to allow it.",
+                )
+            choice = "deny"
+        self._request("approval.respond", {"request_id": request_id, "choice": choice})
 
     def _turn_complete(self, payload: dict) -> Optional[bool]:
         self._accepting_input.clear()
