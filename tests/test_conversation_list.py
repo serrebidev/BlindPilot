@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+import wx
+
 from markdown_rows import Row
 
 import conversation_list as cl
@@ -48,3 +51,66 @@ def test_strings_become_prose_rows_and_rows_pass_through():
     out = cl.as_rows(["first", row])
     assert out[0].kind == "prose" and out[0].label == "first" and out[0].payload == "first"
     assert out[1] is row
+
+
+@pytest.fixture
+def frame():
+    app = wx.App.Get() or wx.App(False)
+    frame = wx.Frame(None)
+    frame.SetSize(wx.Size(400, 300))
+    yield frame
+    frame.Destroy()
+    app.ProcessPendingEvents()
+
+
+LONG = "The audit found seventy-seven items across five areas and the first fix is the worker that killed the CLI five seconds after a turn ended."
+
+
+def test_the_list_holds_rows_and_counts_them(frame):
+    lst = cl.ConversationList(frame)
+    lst.Set(["one", "two"])
+    assert lst.GetCount() == 2
+    assert [r.label for r in lst.GetRows()] == ["one", "two"]
+    lst.AppendItems(["three"])
+    assert lst.GetCount() == 3
+
+
+def test_a_long_row_is_taller_when_the_control_is_narrower(frame):
+    lst = cl.ConversationList(frame)
+    lst.Set([LONG])
+    lst.SetSize(wx.Size(600, 200))
+    wide = lst.OnMeasureItem(0)
+    lst.SetSize(wx.Size(200, 200))
+    narrow = lst.OnMeasureItem(0)
+    assert narrow > wide
+
+
+def test_measurements_are_cached_until_the_rows_or_width_change(frame):
+    lst = cl.ConversationList(frame)
+    lst.Set([LONG, "short"])
+    lst.SetSize(wx.Size(300, 200))
+    lst.OnMeasureItem(0)
+    lst.OnMeasureItem(1)
+    assert set(lst._measured) == {(0, lst.GetClientSize().width), (1, lst.GetClientSize().width)}
+    lst.AppendItems(["more"])
+    assert (0, lst.GetClientSize().width) in lst._measured, "append kept the rows that stayed"
+    lst.Set(["fresh"])
+    assert lst._measured == {}
+
+
+def test_set_keeps_the_selection_index_when_it_still_exists(frame):
+    lst = cl.ConversationList(frame)
+    lst.Set(["a", "b", "c"])
+    lst.SetSelection(1)
+    lst.Set(["a", "b", "c", "d"])
+    assert lst.GetSelection() == 1
+    lst.Set(["only"])
+    assert lst.GetSelection() in (0, wx.NOT_FOUND)
+
+
+def test_fonts_follow_the_style(frame):
+    lst = cl.ConversationList(frame)
+    base = lst.GetFont()
+    assert lst._font_for(cl.style_for("you")).GetWeight() == wx.FONTWEIGHT_BOLD
+    assert lst._font_for(cl.style_for("code")).GetFamily() == wx.FONTFAMILY_TELETYPE
+    assert lst._font_for(cl.style_for("prose")).GetPointSize() == base.GetPointSize()
