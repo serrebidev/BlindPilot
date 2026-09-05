@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import sys
 from pathlib import Path
@@ -20,6 +21,27 @@ from app_updater import (
 
 
 ANNOUNCE_EVERY_PERCENT = 10
+
+# Sizer borders in device independent pixels. Every one goes through FromDIP.
+PAD = 8
+PAD_DIALOG = 12
+
+# The dialog's size when it has release notes to show, and the least it
+# shrinks to when it does not.
+FULL_SIZE = wx.Size(640, 470)
+MIN_SIZE = wx.Size(480, 160)
+STATUS_WRAP = 590
+
+_HEADING_MARK = re.compile(r"^#{1,6}[ \t]+")
+
+
+def plain_notes(notes: str) -> str:
+    """Release notes as plain text.
+
+    GitHub release bodies are markdown, and the first line is usually a
+    heading. A text box shows the hashes as they are, so they come off.
+    """
+    return "\n".join(_HEADING_MARK.sub("", line) for line in notes.splitlines())
 
 
 def _call_after(callback, *args) -> None:
@@ -49,9 +71,10 @@ class UpdateDialog(wx.Dialog):
         super().__init__(
             parent,
             title="BlindPilot Software Update",
-            size=wx.Size(640, 470),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        self.SetMinSize(self.FromDIP(MIN_SIZE))
+        self.SetSize(self.FromDIP(FULL_SIZE))
         self.current_version = current_version
         self.speak = speak
         self.check = check
@@ -64,43 +87,53 @@ class UpdateDialog(wx.Dialog):
         self._last_announced_percent = -1
 
         panel = wx.Panel(self)
+        self.panel = panel
+        pad = panel.FromDIP(PAD)
+        pad_dialog = panel.FromDIP(PAD_DIALOG)
         outer = wx.BoxSizer(wx.VERTICAL)
 
         self.status = wx.StaticText(panel, label="")
         self.status.SetName("Update status")
-        outer.Add(self.status, 0, wx.EXPAND | wx.ALL, 12)
+        outer.Add(self.status, 0, wx.EXPAND | wx.ALL, pad_dialog)
 
         self.notes_label = wx.StaticText(panel, label="What is new:")
         self.notes_label.SetName("Release notes label")
-        outer.Add(self.notes_label, 0, wx.LEFT | wx.RIGHT, 12)
+        outer.Add(self.notes_label, 0, wx.LEFT | wx.RIGHT, pad_dialog)
         self.notes = wx.TextCtrl(
             panel,
             style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
         )
         self.notes.SetName("Release notes")
-        outer.Add(self.notes, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.Add(self.notes, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad_dialog)
 
         self.progress_label = wx.StaticText(panel, label="Download progress:")
         self.progress_label.SetName("Download progress label")
-        outer.Add(self.progress_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.Add(self.progress_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad_dialog)
         self.gauge = wx.Gauge(panel, range=100, style=wx.GA_HORIZONTAL)
         self.gauge.SetName("Download progress")
-        outer.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad_dialog)
 
         buttons = wx.BoxSizer(wx.HORIZONTAL)
         self.primary_button = wx.Button(panel, wx.ID_OK, "&Install update")
         self.primary_button.SetName("Update action")
         self.secondary_button = wx.Button(panel, wx.ID_CANCEL, "&Close")
         self.secondary_button.SetName("Close update dialog")
-        buttons.Add(self.primary_button, 0, wx.RIGHT, 8)
+        buttons.Add(self.primary_button, 0, wx.RIGHT, pad)
         buttons.Add(self.secondary_button, 0)
-        outer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, 12)
+        outer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, pad_dialog)
         panel.SetSizer(outer)
+        # The dialog's own sizer holds the panel, so laying out the dialog
+        # reaches the controls. Without it the panel's sizer ran once, and a
+        # control shown later stayed where it was created, at the top left.
+        root = wx.BoxSizer(wx.VERTICAL)
+        root.Add(panel, 1, wx.EXPAND)
+        self.SetSizer(root)
 
         self.primary_button.Bind(wx.EVT_BUTTON, self.on_primary)
         self.secondary_button.Bind(wx.EVT_BUTTON, self.on_secondary)
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self._show_checking()
+        self.CentreOnParent()
         if start_check:
             self._start(self._check_worker)
 
@@ -115,9 +148,9 @@ class UpdateDialog(wx.Dialog):
         announce: bool = True,
     ) -> None:
         self.status.SetLabel(message)
-        self.status.Wrap(590)
+        self.status.Wrap(self.FromDIP(STATUS_WRAP))
         has_notes = bool(notes)
-        self.notes.SetValue(notes)
+        self.notes.SetValue(plain_notes(notes))
         self.notes.SetInsertionPoint(0)
         self.notes_label.Show(has_notes)
         self.notes.Show(has_notes)
@@ -127,12 +160,29 @@ class UpdateDialog(wx.Dialog):
         if primary is not None:
             self.primary_button.SetLabel(primary)
         self.secondary_button.SetLabel(secondary)
-        self.Layout()
+        self._fit_to_state(has_notes)
         target = self.primary_button if primary is not None else self.secondary_button
         target.SetDefault()
         target.SetFocus()
         if announce:
             self.speak(message)
+
+    def _fit_to_state(self, has_notes: bool) -> None:
+        """Size the dialog to what it shows and lay the panel out again.
+
+        With notes to read the dialog wants its full size back, if a
+        smaller state left it fitted. Without them it fits down to the
+        status line, the progress bar when there is one, and the buttons.
+        """
+        if has_notes:
+            full = self.FromDIP(FULL_SIZE)
+            size = self.GetSize()
+            if size.x < full.x or size.y < full.y:
+                self.SetSize(wx.Size(max(size.x, full.x), max(size.y, full.y)))
+        else:
+            self.Fit()
+        self.Layout()
+        self.panel.Layout()
 
     def _show_checking(self) -> None:
         self._set_state(

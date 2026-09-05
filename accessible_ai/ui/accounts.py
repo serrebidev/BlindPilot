@@ -32,6 +32,16 @@ from accessible_ai.services.model_service import ModelService
 from accessible_ai.storage.credentials import CredentialStore, CredentialStoreError
 from accessible_ai.storage.database import Database
 
+# Sizer borders in device independent pixels. Every one goes through FromDIP.
+PAD = 8
+PAD_DIALOG = 12
+
+EDITOR_SIZE = wx.Size(680, 650)
+JSON_FIELD_HEIGHT = 70
+NOTE_WRAP = 640
+COMPAT_NOTE_WRAP = 620
+LIST_DIALOG_SIZE = wx.Size(650, 480)
+
 
 PROVIDER_ORDER = [
     PROVIDER_OPENROUTER,
@@ -120,18 +130,20 @@ class AccountEditorDialog(wx.Dialog):
         super().__init__(
             parent,
             title="Account Settings",
-            size=(680, 650),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        self.SetSize(self.FromDIP(EDITOR_SIZE))
         self.db = db
         self.credentials = credentials
         self.account = account or Account()
         self.is_new = account is None
 
         panel = wx.Panel(self)
+        pad = panel.FromDIP(PAD)
+        pad_dialog = panel.FromDIP(PAD_DIALOG)
         outer = wx.BoxSizer(wx.VERTICAL)
 
-        main_grid = wx.FlexGridSizer(cols=2, vgap=9, hgap=12)
+        main_grid = wx.FlexGridSizer(cols=2, vgap=pad, hgap=pad_dialog)
         main_grid.AddGrowableCol(1, 1)
 
         self.name = self._add_text(main_grid, panel, "Account name:", "Account name")
@@ -161,19 +173,19 @@ class AccountEditorDialog(wx.Dialog):
         self.streaming.SetName("Stream responses")
         main_grid.Add(self.streaming, 0, wx.ALIGN_LEFT)
 
-        outer.Add(main_grid, 0, wx.EXPAND | wx.ALL, 12)
+        outer.Add(main_grid, 0, wx.EXPAND | wx.ALL, pad_dialog)
 
         self.provider_note = wx.StaticText(panel, label="")
         self.provider_note.SetName("Provider connection information")
-        self.provider_note.Wrap(640)
-        outer.Add(self.provider_note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        self.provider_note.Wrap(self.FromDIP(NOTE_WRAP))
+        outer.Add(self.provider_note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         # A wxStaticBoxSizer's contents must be children of its wxStaticBox, not
         # of the surrounding panel, or wxWidgets warns and the box does not
         # reliably hide its contents with itself.
         self.compat_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Custom OpenAI-compatible server")
         compat_parent = self.compat_box.GetStaticBox()
-        compat_grid = wx.FlexGridSizer(cols=2, vgap=9, hgap=12)
+        compat_grid = wx.FlexGridSizer(cols=2, vgap=pad, hgap=pad_dialog)
         compat_grid.AddGrowableCol(1, 1)
 
         self.base_url = self._add_text(
@@ -191,7 +203,7 @@ class AccountEditorDialog(wx.Dialog):
         )
         self.api_mode.SetName("API mode")
         compat_grid.Add(self.api_mode, 1, wx.EXPAND)
-        self.compat_box.Add(compat_grid, 0, wx.EXPAND | wx.ALL, 10)
+        self.compat_box.Add(compat_grid, 0, wx.EXPAND | wx.ALL, pad)
 
         compat_note = wx.StaticText(
             compat_parent,
@@ -200,13 +212,13 @@ class AccountEditorDialog(wx.Dialog):
                 "configured automatically as /models, /chat/completions, /responses, and /messages."
             ),
         )
-        compat_note.Wrap(620)
-        self.compat_box.Add(compat_note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
-        outer.Add(self.compat_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        compat_note.Wrap(self.FromDIP(COMPAT_NOTE_WRAP))
+        self.compat_box.Add(compat_note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        outer.Add(self.compat_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         advanced_box = wx.StaticBoxSizer(wx.VERTICAL, panel, "Advanced request settings")
         advanced_parent = advanced_box.GetStaticBox()
-        advanced_grid = wx.FlexGridSizer(cols=2, vgap=9, hgap=12)
+        advanced_grid = wx.FlexGridSizer(cols=2, vgap=pad, hgap=pad_dialog)
         advanced_grid.AddGrowableCol(1, 1)
 
         advanced_grid.Add(
@@ -214,7 +226,11 @@ class AccountEditorDialog(wx.Dialog):
             0,
             wx.ALIGN_TOP,
         )
-        self.custom_headers = wx.TextCtrl(advanced_parent, style=wx.TE_MULTILINE, size=(-1, 70))
+        self.custom_headers = wx.TextCtrl(
+            advanced_parent,
+            style=wx.TE_MULTILINE,
+            size=wx.Size(-1, panel.FromDIP(JSON_FIELD_HEIGHT)),
+        )
         self.custom_headers.SetName("Custom HTTP headers JSON")
         advanced_grid.Add(self.custom_headers, 1, wx.EXPAND)
 
@@ -223,12 +239,16 @@ class AccountEditorDialog(wx.Dialog):
             0,
             wx.ALIGN_TOP,
         )
-        self.custom_body = wx.TextCtrl(advanced_parent, style=wx.TE_MULTILINE, size=(-1, 70))
+        self.custom_body = wx.TextCtrl(
+            advanced_parent,
+            style=wx.TE_MULTILINE,
+            size=wx.Size(-1, panel.FromDIP(JSON_FIELD_HEIGHT)),
+        )
         self.custom_body.SetName("Custom request body fields JSON")
         advanced_grid.Add(self.custom_body, 1, wx.EXPAND)
 
-        advanced_box.Add(advanced_grid, 1, wx.EXPAND | wx.ALL, 10)
-        outer.Add(advanced_box, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        advanced_box.Add(advanced_grid, 1, wx.EXPAND | wx.ALL, pad)
+        outer.Add(advanced_box, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         note = wx.StaticText(
             panel,
@@ -237,8 +257,8 @@ class AccountEditorDialog(wx.Dialog):
                 "always disabled and cached OpenRouter responses are rejected."
             ),
         )
-        note.Wrap(640)
-        outer.Add(note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        note.Wrap(self.FromDIP(NOTE_WRAP))
+        outer.Add(note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         buttons = wx.StdDialogButtonSizer()
         ok_button = wx.Button(panel, wx.ID_OK)
@@ -247,12 +267,13 @@ class AccountEditorDialog(wx.Dialog):
         buttons.AddButton(cancel_button)
         buttons.Realize()
         ok_button.SetDefault()
-        outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        outer.Add(buttons, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
         panel.SetSizer(outer)
 
         self.provider.Bind(wx.EVT_CHOICE, self.on_provider_changed)
         self.Bind(wx.EVT_BUTTON, self.on_ok, id=wx.ID_OK)
         self._load()
+        self.CentreOnParent()
 
     @staticmethod
     def _add_text(
@@ -327,7 +348,7 @@ class AccountEditorDialog(wx.Dialog):
         self.compat_box.GetStaticBox().Show(is_compatible)
 
         self.provider_note.SetLabel(BUILTIN_PROVIDER_NOTES.get(provider, CUSTOM_PROVIDER_NOTE))
-        self.provider_note.Wrap(640)
+        self.provider_note.Wrap(self.FromDIP(NOTE_WRAP))
         self.Layout()
 
     def on_ok(self, event: wx.CommandEvent) -> None:
@@ -456,9 +477,9 @@ class AccountsDialog(wx.Dialog):
         super().__init__(
             parent,
             title="Accounts",
-            size=(650, 480),
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
         )
+        self.SetSize(self.FromDIP(LIST_DIALOG_SIZE))
         self.db = db
         self.credentials = credentials
         self.model_service = model_service
@@ -466,12 +487,18 @@ class AccountsDialog(wx.Dialog):
         self.model_action_running = False
 
         panel = wx.Panel(self)
+        pad = panel.FromDIP(PAD)
+        pad_dialog = panel.FromDIP(PAD_DIALOG)
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(wx.StaticText(panel, label="Accounts:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.Add(
+            wx.StaticText(panel, label="Accounts:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad_dialog
+        )
         self.listbox = wx.ListBox(panel)
         self.listbox.SetName("Accounts")
-        outer.Add(self.listbox, 1, wx.EXPAND | wx.ALL, 12)
+        outer.Add(self.listbox, 1, wx.EXPAND | wx.ALL, pad_dialog)
 
+        # One row. The actions sit on the left; Close goes through the
+        # standard button sizer so it lands where the platform puts it.
         row = wx.BoxSizer(wx.HORIZONTAL)
         self.add_button = wx.Button(panel, label="&Add")
         self.edit_button = wx.Button(panel, label="&Edit")
@@ -485,11 +512,14 @@ class AccountsDialog(wx.Dialog):
             self.test_button,
             self.refresh_button,
         ]:
-            row.Add(button, 0, wx.RIGHT, 8)
-        outer.Add(row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-
+            row.Add(button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        row.AddStretchSpacer()
         self.close_button = wx.Button(panel, wx.ID_CLOSE, "Close")
-        outer.Add(self.close_button, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        buttons = wx.StdDialogButtonSizer()
+        buttons.AddButton(self.close_button)
+        buttons.Realize()
+        row.Add(buttons, 0, wx.ALIGN_CENTER_VERTICAL)
+        outer.Add(row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
         panel.SetSizer(outer)
 
         self.add_button.Bind(wx.EVT_BUTTON, self.on_add)
@@ -498,9 +528,12 @@ class AccountsDialog(wx.Dialog):
         self.test_button.Bind(wx.EVT_BUTTON, self.on_test)
         self.refresh_button.Bind(wx.EVT_BUTTON, self.on_refresh)
         self.close_button.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(wx.ID_CLOSE))
+        # Escape presses the Close button, as it does in every other dialog.
+        self.SetEscapeId(wx.ID_CLOSE)
         self.listbox.Bind(wx.EVT_LISTBOX_DCLICK, self.on_edit)
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.reload()
+        self.CentreOnParent()
 
     def reload(self, select_account_id: int | None = None) -> None:
         self.accounts = self.db.list_accounts()
