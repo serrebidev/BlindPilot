@@ -1437,6 +1437,18 @@ def _freebuff_picker_options(visible: str, models: list[str]) -> tuple[list[str]
     on screen and not in this list does not cost that model, it costs every
     model below it. Matching therefore has to recognise every row the picker
     can move to, or recognise none of them.
+
+    FreeBuff 0.0.168 stopped drawing the focus marker altogether: the welcome
+    screen opens with the highlight on the recommended card and no ``›``
+    anywhere, so a reader that insists on the marker finds no focused row and
+    the message is lost. When no row is marked, the content row of the first
+    painted card is taken as the focused one — the highlight starts on the
+    first card on both the welcome screen and the expanded list. A model card
+    opens with a ``┌─┐`` top and its name on the row below, which the
+    advertising boxes below the cards do not share; the position is only
+    claimed when that first row was itself matched, so a catalog that has
+    lost the very first model still reports no focus rather than a wrong one.
+    Releases that draw the marker never reach this.
     """
     # Longest first, so a model whose id is a prefix of another's cannot claim
     # the longer one's row.
@@ -1457,6 +1469,17 @@ def _freebuff_picker_options(visible: str, models: list[str]) -> tuple[list[str]
         options.append(matched)
         if "›" in raw or re.search(r"(?:^|│)\s*>\s*", raw):
             focused = len(options) - 1
+    if focused < 0 and options:
+        lines = [line.strip() for line in visible.splitlines()]
+        first_top = next(
+            (index for index, line in enumerate(lines) if re.fullmatch(r"┌─+┐", line)),
+            -1,
+        )
+        if first_top >= 0 and first_top + 1 < len(lines):
+            row = _freebuff_display_key(lines[first_top + 1])
+            matched = next((model for model, key in keyed if key and key in row), "")
+            if matched and matched in options:
+                focused = 0
     return options, focused
 
 
@@ -2122,6 +2145,13 @@ _FREEBUFF_INTERRUPTED = "[response interrupted]"
 # message that is never sent.
 _FREEBUFF_PICKER_RE = re.compile(r"(?i)RECOMMENDED|Start coding for free|See all \d+ models?")
 
+# Either phrase means the full model list is already on screen. 0.0.168 opens
+# on the expanded list and says "Show fewer"; earlier releases opened on a
+# recommended card with a "See all N models" entry. Navigating straight to a
+# model is only correct on the expanded screen — on the collapsed one the
+# first Down moves to that entry instead.
+_FREEBUFF_PICKER_EXPANDED_RE = re.compile(r"(?i)show fewer|see all \d+ models?")
+
 _FREEBUFF_QUESTION_MARKER = "Some questions for you"
 
 # A question in that box: collapsed (right-pointing) or open (down-pointing),
@@ -2480,7 +2510,7 @@ def _freebuff_chat_stamp(chat: Optional[Path]) -> tuple:
 
 
 def _freebuff_run_status(chat: Optional[Path], offset: int = 0) -> str:
-    """Return complete/cancelled from FreeBuff's authoritative per-chat log."""
+    """Return complete/cancelled/disconnected from FreeBuff's per-chat log."""
     if chat is None:
         return ""
     try:
@@ -2493,7 +2523,39 @@ def _freebuff_run_status(chat: Optional[Path], offset: int = 0) -> str:
         return "cancelled"
     if "Main prompt finished" in tail:
         return "complete"
+    if "session over" in tail:
+        # Seen on 0.0.168: "Freebuff session over; holding queued messages
+        # until rejoin", logged as the first line of a brand-new chat. The
+        # CLI stays up and paints its composer, the message is accepted, and
+        # nothing ever answers it — the queue waits for a rejoin that does not
+        # happen. Without this the turn waits out its hour in silence.
+        return "disconnected"
     return ""
+
+
+# Said once, in the same words, wherever the drop is noticed: the terminal
+# closing before a prompt, the startup wait running out, or a turn that was
+# accepted and then never answered.
+_FREEBUFF_REJOIN_MESSAGE = (
+    "FreeBuff dropped its session and is holding the message until it rejoins, "
+    "but nothing is answering. Quit and reopen FreeBuff, then send the message again."
+)
+
+
+def _freebuff_dropped_new_chat(before: dict[str, float], cwd: str) -> bool:
+    """Whether a chat created during this launch logged a dropped session.
+
+    The drop is invisible on the terminal — the welcome screen or composer
+    just sits there — so FreeBuff's own per-chat log is the only place it is
+    written down. Only chats created during this launch are consulted: a drop
+    logged by an earlier session must not fail this one.
+    """
+    after = _freebuff_chat_dirs(cwd)
+    new_ids = set(after) - set(before)
+    if not new_ids:
+        return False
+    newest = max(new_ids, key=lambda chat_id: after[chat_id])
+    return _freebuff_run_status(_freebuff_chat_path(cwd, newest), 0) == "disconnected"
 
 
 def _freebuff_launch_failure(visible: str) -> str:
@@ -2804,7 +2866,12 @@ class FreebuffWorker(threading.Thread):
     activity rows and resumes the chat id FreeBuff creates on the next turn.
     """
 
-    _PROMPT_RE = re.compile(r"(?mi)(?:^\s*[›>]\s*$|Enter a coding task or / for commands)")
+    # The quoted form is drawn first on the composer in 0.0.168, before the
+    # caption has scrolled in; matching it means readiness is seen at once
+    # instead of after a silence long enough to look like a hang.
+    _PROMPT_RE = re.compile(
+        r"(?mi)(?:^\s*[›>]\s*$|Enter a coding task or / for commands|Describe your task)"
+    )
     _BUSY_RE = re.compile(
         r"(?mi)(?:thinking(?:\.\.\.|…)|working(?:\.\.\.|…)|■\s*Esc|Esc\s+to\s+(?:stop|interrupt))"
     )
@@ -2991,7 +3058,12 @@ class FreebuffWorker(threading.Thread):
         baseline_answer_id = _freebuff_answer_id(chat_path)
         structured_answer_id = ""
         chat_stamp: tuple = ()
+        # A drop is only reported once, and only once the composer has
+        # actually been reached: the 0.0.168 drop logs itself as the first
+        # line of a brand-new chat, before the welcome screen has even been
+        # answered, and a failure there would abort the turn before it began.
         run_status = ""
+        disconnected_reported = False
         agent_states: dict[str, str] = {}
         screen_dirty = False
         screen_changed_at = time.monotonic()
@@ -3084,6 +3156,13 @@ class FreebuffWorker(threading.Thread):
                 continue
             if not chunk and self._stream_ended.is_set():
                 if not sent:
+                    # A dropped session closes nothing and prints nothing: the
+                    # composer just never arrives. FreeBuff's log is the only
+                    # place the drop is written down, and it is more use than
+                    # any inference from an empty screen.
+                    if _freebuff_dropped_new_chat(before, self._cwd):
+                        self._fail(_FREEBUFF_REJOIN_MESSAGE)
+                        return
                     # Whatever killed it said so on the terminal before dying —
                     # a missing Node, a failed download, a refused login. That
                     # sentence is the whole of what the person can act on, so
@@ -3121,11 +3200,14 @@ class FreebuffWorker(threading.Thread):
                     self._write("\r")
                     accepted_recommended_model = True
                     continue
-                if not picker_expanded:
+                if not picker_expanded and not _FREEBUFF_PICKER_EXPANDED_RE.search(last_visible):
                     # Move from the recommended card to "See all models" and
                     # open it. The expanded picker is then navigated from its
                     # actual runtime ordering, so model catalog changes do not
-                    # require a BlindPilot update.
+                    # require a BlindPilot update. A release that opens on the
+                    # expanded list already — 0.0.168 shows "Show fewer" under
+                    # the cards — has no such entry, and a Down here would
+                    # walk off the first card and choose the wrong model.
                     self._write("\x1b[B")
                     time.sleep(0.05)
                     self._write("\r")
@@ -3193,6 +3275,9 @@ class FreebuffWorker(threading.Thread):
 
             now = time.monotonic()
             if not sent and now - screen_changed_at >= _FREEBUFF_STARTUP_SILENCE_SECONDS:
+                if _freebuff_dropped_new_chat(before, self._cwd):
+                    self._fail(_FREEBUFF_REJOIN_MESSAGE)
+                    return
                 self._fail(
                     _freebuff_startup_silence(last_visible, _FREEBUFF_STARTUP_SILENCE_SECONDS)
                 )
@@ -3248,6 +3333,10 @@ class FreebuffWorker(threading.Thread):
                     run_status = _freebuff_run_status(chat_path, log_offset)
                 if run_status == "cancelled":
                     self._fail("FreeBuff reported that the response was interrupted")
+                    return
+                if run_status == "disconnected" and started and not disconnected_reported:
+                    disconnected_reported = True
+                    self._fail(_FREEBUFF_REJOIN_MESSAGE)
                     return
                 if run_status == "complete":
                     if completion_seen_at is None:
