@@ -28,10 +28,14 @@ from typing import List, Optional
 
 from markdown_it import MarkdownIt
 
-# A response is segmented with CommonMark rules. We don't enable extensions
-# (tables, etc.) because agent output is plain CommonMark and we want the
-# fence handling to stay predictable.
-_MD = MarkdownIt("commonmark")
+# A response is segmented with CommonMark rules plus tables. Tables are routine
+# in agent output; without the rule a table reads as one prose row of pipes.
+# No other extension is enabled, so the fence handling stays predictable.
+_MD = MarkdownIt("commonmark").enable("table")
+
+# Anything between angle brackets in an html_block token. Only the words of a
+# <details> or <div> block are wanted, never the tags.
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 # Container blocks we recurse INTO only when they hold a fenced code block, so
 # that nested code still becomes its own pristine code row. Without a nested
@@ -262,6 +266,31 @@ def _code_row(tok, response_number: int) -> Row:
     )
 
 
+def _prose_row(text: str, response_number: int, label: Optional[str] = None) -> Row:
+    return Row(
+        kind="prose",
+        label=_flatten(text) if label is None else label,
+        payload=text,
+        response_number=response_number,
+    )
+
+
+def _emit_table(inner: list, rows: List[Row], response_number: int) -> None:
+    """One prose row per table row, cells read out in plain words.
+
+    The header row comes first, as written. A screen reader has no way to
+    show a grid, so "Row: a, b, c" is what a listener can follow.
+    """
+    for k, tok in enumerate(inner):
+        if tok.type != "tr_open":
+            continue
+        row_tokens = inner[k + 1 : _match_close(inner, k)]
+        cells = [_flatten(_inline_plain_text(t)) for t in row_tokens if t.type == "inline"]
+        text = ", ".join(cell for cell in cells if cell)
+        if text:
+            rows.append(_prose_row(text, response_number, label=f"Row: {text}"))
+
+
 def _emit(tokens: list, rows: List[Row], response_number: int) -> None:
     """Walk a token sequence, appending prose and code rows in document order."""
     i = 0
@@ -272,9 +301,21 @@ def _emit(tokens: list, rows: List[Row], response_number: int) -> None:
             rows.append(_code_row(tok, response_number))
             i += 1
             continue
+        if tok.type == "html_block":
+            # Self-closing, so the nesting walk below never saw it and the
+            # words inside a <details> or <div> block were lost.
+            text = _tidy_prose(_HTML_TAG_RE.sub("", tok.content))
+            if text:
+                rows.append(_prose_row(text, response_number))
+            i += 1
+            continue
         if tok.nesting == 1:
             close_idx = _match_close(tokens, i)
             inner = tokens[i + 1 : close_idx]
+            if tok.type == "table_open":
+                _emit_table(inner, rows, response_number)
+                i = close_idx + 1
+                continue
             # Recurse into a container only to rescue a nested code fence;
             # otherwise the whole container is one prose row.
             if tok.type in _CONTAINER_OPENS and _contains_code(inner):

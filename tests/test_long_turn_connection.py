@@ -696,3 +696,14 @@ def test_the_connection_is_checked_far_sooner_than_the_idle_limit():
 
     assert _CONNECTION_CHECK_SECONDS < 60
     assert _CONNECTION_CHECK_SECONDS * 10 < _IDLE_LIMIT
+
+
+def test_the_idle_limit_says_the_turn_went_quiet_not_that_the_connection_closed(monkeypatch):
+    """Nothing closed. The turn was silent for the whole limit, and the message
+    has to say so, or the listener goes looking for a network fault."""
+    transport = _ScriptedTransport(empty_reads=10_000, end_after=False)
+    _worker, _rows, failed = _run_loop(transport, monkeypatch, idle_limit=900.0)
+
+    assert len(failed) == 1
+    assert "15 minutes" in failed[0]
+    assert "connection" not in failed[0].lower()

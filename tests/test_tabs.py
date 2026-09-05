@@ -19,7 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from claude_reader import _short_label, _tab_label, _tab_title  # noqa: E402
+from blindpilot_app import _short_label, _tab_label, _tab_title  # noqa: E402
 from session_history import make_title  # noqa: E402
 
 

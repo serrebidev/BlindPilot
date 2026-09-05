@@ -6,7 +6,33 @@ message and, where MCP servers are configured, discarding and restarting all
 of their child processes with it.
 
 This module owns process lifetime and nothing else. Each backend says how to
-start, check, interrupt and stop its own process; the pool decides when.
+check, interrupt and stop its own process; the pool decides when.
+
+What was measured before this existed, on Windows with the npm Codex install:
+a cold spawn to an acknowledged `thread/start` took about 4.4 seconds and a
+warm one about 0.55; `thread/resume` took 0.37 seconds on a rollout under
+half a megabyte, 0.62 at 13 MB and 4.41 at 113 MB, so the per-turn tax grew
+with the conversation. With nine MCP servers configured one app-server had 17
+descendant processes half a second after `thread/start` and 29 twenty seconds
+later, all killed at turn end and started again on the next prompt. One
+app-server was confirmed to serve several threads at once.
+
+The key encodes the shape. `("codex", None)` is one process for every tab,
+because the app-server multiplexes conversations and one per tab would mean
+one MCP tree per tab. `(backend, panel)` is one process per conversation, for
+the backends whose protocol wants that. The panel object is the key because
+`cwd` is not unique (`/btw` opens a second tab in the same folder) and the
+session id does not exist until the first turn has started.
+
+Idle processes are reaped after `_HELD_IDLE_SECONDS` with no turn, and the
+reap is announced so a slow next prompt is never unexplained. The limit is a
+constant, not a preference. A process-wide process is only dropped when it is
+found dead, on an explicit restart, or before an update replaces its
+executable; a cancel that goes unconfirmed gives up the conversation, never
+the server other tabs are still using.
+
+Today Codex is the only backend on the pool. opencode keeps its own
+singleton, Hermes its `HeldConnection`, and FreeBuff its prewarm.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 SPDX-License-Identifier: MIT
@@ -50,25 +76,16 @@ class Adapter(NamedTuple):
     ``interrupt`` returns whether the backend CONFIRMED the turn stopped
     within the timeout. An unconfirmed interrupt is not a failure to report to
     the user; it is the signal that this process cannot be trusted for the
-    next turn.
+    next turn. Codex's cancel path does not go through it, so nothing in
+    production calls it yet. Whoever does must not write
+    `if not held.interrupt(t): pool.drop(key)` for a shared process: an
+    unconfirmed interrupt says nothing about the other tabs using it.
 
-    Nothing in production calls this yet -- Codex is the only backend on the
-    pool so far, its own cancel path never goes through the pool, and its
-    adapter's `interrupt` is a hardcoded `lambda _server, _timeout: False`.
-    It is here for opencode, Claude, Hermes, and FreeBuff to use as they
-    migrate. The trap for whoever wires one up: generic code shaped like
-    `if not held.interrupt(t): pool.drop(key)` would drop a server other
-    tabs are still sharing, since an unconfirmed interrupt says nothing about
-    whether anyone else is using the process -- only that this one turn could
-    not be confirmed stopped.
-
-    ``busy`` says whether a turn is speaking through the process at this
-    moment. Only the backend knows -- Codex counts borrowers on the app-server
-    itself -- and without it the reaper measures nothing but how long ago a
-    turn STARTED, which is not what "idle" means.
+    ``busy`` says whether a turn is speaking through the process right now.
+    Only the backend knows, and without it the reaper measures only how long
+    ago a turn STARTED, which is not what "idle" means.
     """
 
-    start: Callable[[], object]
     alive: Callable[[object], bool]
     interrupt: Callable[[object, float], bool]
     stop: Callable[[object], None]
@@ -76,24 +93,15 @@ class Adapter(NamedTuple):
 
 
 class HeldProcess:
-    """One live backend process and the identity it is bound to."""
+    """One live backend process and how long it has sat unused."""
 
     def __init__(
         self,
         handle: object,
         adapter: Adapter,
-        binding: object = None,
         now: Callable[[], float] = time.monotonic,
     ) -> None:
         self.handle = handle
-        # Ids the protocol needs beyond the process itself. Hermes holds a
-        # stored session id and a separate live one the gateway answers to,
-        # and steering by the wrong one fails; the pool carries it without
-        # knowing what it is.
-        # Not set by anything yet -- Codex is the only backend on the pool so
-        # far. It is here for opencode, Claude, Hermes, and FreeBuff to use as
-        # they migrate.
-        self.binding = binding
         self._adapter = adapter
         self._now = now
         self._stopped = False
@@ -109,9 +117,7 @@ class HeldProcess:
             return False
 
     def interrupt(self, timeout: float) -> bool:
-        """No production caller yet -- see `Adapter.interrupt` for the trap
-        waiting in whatever calls this once a backend other than Codex is on
-        the pool."""
+        """Whether the backend confirmed the turn stopped. See `Adapter`."""
         if self._stopped:
             return False
         try:
@@ -169,14 +175,12 @@ _SHARED = None
 def pool_key(backend: str, panel: object = None) -> tuple:
     """The registry key for this backend, in the shape its protocol wants.
 
-    Codex and opencode multiplex several conversations through one process, so
-    the panel is left out and every tab shares. Claude, Hermes and FreeBuff run
-    one conversation per process, so the panel is what separates them.
-
-    The panel -- the SessionPanel object itself -- is the only stable
-    per-conversation identity. `cwd` is not unique, because `/btw` opens a
-    second tab in the same directory; and `session_id` does not exist yet when
-    the first turn of a conversation starts.
+    No panel means one process for every tab, which is how Codex is held. A
+    panel, the SessionPanel object itself, means one process per conversation,
+    the shape a backend like Claude or FreeBuff would take if it moved onto
+    the pool. The panel is the only stable per-conversation identity: `cwd` is
+    not unique, because `/btw` opens a second tab in the same directory, and
+    `session_id` does not exist yet when the first turn starts.
     """
     return (backend, panel)
 
@@ -276,7 +280,7 @@ class BackendPool:
             held.stop()
 
     def drop_all(self) -> None:
-        """Stop everything -- at quit, and before an update replaces a CLI."""
+        """Stop everything, at quit. An update drops only the key it replaces."""
         with self._lock:
             everything = list(self._shared.values())
             self._shared.clear()
@@ -371,7 +375,7 @@ _reaper_stop = threading.Event()
 
 
 def stop_all_held_processes() -> None:
-    """Stop every held process -- at quit, and before an update replaces a CLI.
+    """Stop every held process, at quit.
 
     Belt and braces alongside the window's own teardown: `_on_close` cancels
     each tab, but a crash on the way out, or a path that never reaches the

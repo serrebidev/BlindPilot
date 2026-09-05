@@ -36,6 +36,8 @@ def frame(wx_app):
     """A bare frame carrying the real append-and-bind helper the builders use."""
     window = wx.Frame(None)
     window._menu_item = lambda *args, **kwargs: app.MainFrame._menu_item(window, *args, **kwargs)
+    window._agent_menu_items = []
+    window._agent_item = lambda *args, **kwargs: app.MainFrame._agent_item(window, *args, **kwargs)
     # Each builder takes a reference to the handler as it appends the item, so
     # all of them have to exist by name. None of them is ever called: that
     # needs a click, and these tests only read labels.

@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import claude_reader  # noqa: E402
-from claude_reader import (  # noqa: E402
+import blindpilot_app  # noqa: E402
+from blindpilot_app import (  # noqa: E402
     DEFAULT_PERMISSION_MODE,
     _default_permission_mode,
     _remember_permission_mode,
@@ -45,16 +45,16 @@ class _Sandbox:
         # The reader's own config.json is stubbed so tests never touch the
         # real one, and never write to it.
         self._writes = []
-        self._old_load = claude_reader._load_config
-        self._old_save = claude_reader._save_config
+        self._old_load = blindpilot_app._load_config
+        self._old_save = blindpilot_app._save_config
         cfg = {"permission_mode": self._saved} if self._saved else {}
-        claude_reader._load_config = lambda: dict(cfg)
-        claude_reader._save_config = lambda c: self._writes.append(dict(c))
+        blindpilot_app._load_config = lambda: dict(cfg)
+        blindpilot_app._save_config = lambda c: self._writes.append(dict(c))
         return self
 
     def __exit__(self, *exc):
-        claude_reader._load_config = self._old_load
-        claude_reader._save_config = self._old_save
+        blindpilot_app._load_config = self._old_load
+        blindpilot_app._save_config = self._old_save
         self._tmp.cleanup()
         return False
 

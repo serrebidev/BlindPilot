@@ -7,7 +7,9 @@ bundle identifier, the version read out of APP_VERSION, the minimum macOS
 version, the application icon, and the per-platform hidden imports all live
 here. The release workflow builds with:
 
-    python -m PyInstaller --noconfirm --clean --additional-hooks-dir hooks BlindPilot.spec
+    python -m PyInstaller --noconfirm --clean BlindPilot.spec
+
+The hooks directory is named in the spec itself (hookspath below).
 
 The spec's own folder (SPECPATH) is where the packaging assets live, so the
 build works from any checkout location.
@@ -31,7 +33,7 @@ if app_version_match is None:
 APP_VERSION = app_version_match.group(1)
 
 datas = [("EarCons", "EarCons")]
-hiddenimports = ["pexpect"]
+hiddenimports = []
 binaries = []
 
 # websocket's jsonrpc/transport submodules are imported by name at runtime, and
@@ -57,6 +59,9 @@ if sys.platform == "win32":
     icon = str(spec_dir / "packaging" / "BlindPilot.ico")
     app_icon = icon
 else:
+    # pexpect drives the pseudo-terminal on macOS and Linux only; it is not
+    # installed on Windows, where naming it made PyInstaller warn every build.
+    hiddenimports += ["pexpect"]
     app_icon = None
 
 a = Analysis(

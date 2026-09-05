@@ -1,15 +1,6 @@
 target-version = "py310"
 line-length = 100
 
-# Design documents are not source. ruff formats Python code blocks inside
-# markdown, and the specs and plans under docs/superpowers deliberately show
-# snippets at the indentation of the method they belong in - a class body at
-# eight spaces, not four. Formatting those re-indents them to module level and
-# silently changes what the document says to do. It has already happened once
-# here, mid-implementation, and the corrupted plan was caught only because the
-# file was committed and could be restored.
-extend-exclude = ["docs/superpowers"]
-
 [lint]
 # W is here because of a real escape: an invalid escape sequence reached this
 # repository, compiled to a SyntaxWarning nobody reads, and would have failed

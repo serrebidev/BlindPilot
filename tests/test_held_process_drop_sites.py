@@ -67,7 +67,6 @@ def test_dropping_stops_every_backend_this_panel_held():
             self.running = False
 
     adapter = backend_pool.Adapter(
-        start=lambda: _Handle(),
         alive=lambda h: h.running,
         interrupt=lambda _h, _t: True,
         stop=lambda h: h.stop(),
@@ -106,7 +105,6 @@ def test_dropping_leaves_the_process_wide_backends_alone():
             self.stops += 1
 
     adapter = backend_pool.Adapter(
-        start=lambda: _Handle(),
         alive=lambda _h: True,
         interrupt=lambda _h, _t: True,
         stop=lambda h: h.stop(),

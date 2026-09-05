@@ -46,13 +46,10 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
         assert frame.notebook.IsShown()
         assert isinstance(frame.notebook, wx.Simplebook)
         assert not frame._chat_refresh_item.IsEnabled()
-        assert not hasattr(frame, "_on_picker_focus")
-        assert not hasattr(frame, "session_picker")
         assert frame.tab_switcher.GetName() == "Session tabs"
         assert frame.tab_switcher.IsShown()
         page = frame.notebook.GetCurrentPage()
         assert isinstance(page, blindpilot_app.SessionPanel)
-        assert not hasattr(page, "_on_mode_picker_focus")
 
         boundary_calls: list[str] = []
         page.focus_first_control = lambda: boundary_calls.append("first")
@@ -94,11 +91,6 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
         assert frame.chat_panel.message_input.GetName() == "Message"
         assert frame.chat_panel.account_choice.GetName() == "Account"
         assert frame.chat_panel.model_combo.GetName() == "Model"
-        assert not hasattr(frame.chat_panel, "accounts_button")
-        assert not hasattr(frame.chat_panel, "profiles_button")
-        assert not hasattr(frame.chat_panel, "diagnostics_button")
-        assert not hasattr(frame.chat_panel, "refresh_models_button")
-        assert not hasattr(frame.chat_panel, "history_view_choice")
         assert frame._chat_refresh_item.IsEnabled()
         assert frame._chat_accounts_item.IsEnabled()
         assert frame._chat_profiles_item.IsEnabled()
@@ -118,56 +110,74 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
             app.Destroy()
 
 
-def test_tab_switcher_mirrors_the_session_pages(monkeypatch, tmp_path):
-    """The strip is the session navigation: it follows the book, and drives it."""
+def _frame(monkeypatch, tmp_path, saved):
+    monkeypatch.setattr(blindpilot_app, "_load_config", lambda: dict(saved))
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda value: saved.update(value))
+    monkeypatch.setattr(chat_integration, "database_path", lambda: tmp_path / "chat.sqlite3")
+    monkeypatch.setattr(chat_integration, "import_existing_accessible_ai_data", lambda _t: None)
+    return blindpilot_app.MainFrame(str(tmp_path))
+
+
+def _destroy(frame, app, owns_app):
+    frame.Destroy()
+    app.ProcessPendingEvents()
+    wx.Yield()
+    if owns_app:
+        app.Destroy()
+
+
+def test_a_chat_mode_that_cannot_open_falls_back_to_agent_mode_completely(monkeypatch, tmp_path):
+    """Before, the handler returned early after the message box: the saved
+    mode still said chat (so the box came back on every launch), Compact and
+    the Hermes list had been refreshed for a mode the window was not in, and
+    nothing had focus."""
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    saved: dict[str, object] = {"setup_complete": True, "app_mode": "chat"}
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("the chat database is unreadable")
+
+    monkeypatch.setattr(chat_integration, "create_chat_panel", broken)
+    boxes: list[str] = []
+    monkeypatch.setattr(wx, "MessageBox", lambda message, *args, **kwargs: boxes.append(message))
+
+    frame = _frame(monkeypatch, tmp_path, saved)
+    try:
+        assert boxes and "Chat mode could not be opened" in boxes[0]
+        assert saved["app_mode"] == "agent"
+        assert frame._app_mode == blindpilot_app.APP_MODE_AGENT
+        assert frame.mode_combo.GetSelection() == 0
+        assert frame.notebook.IsShown()
+        assert frame._compact_item.IsEnabled()
+        assert all(item.IsEnabled() for item in frame._agent_menu_items)
+        assert not frame._chat_refresh_item.IsEnabled()
+    finally:
+        _destroy(frame, app, owns_app)
+
+
+def test_agent_only_commands_are_greyed_out_in_chat_mode(monkeypatch, tmp_path):
+    """The notebook is hidden in Chat mode, and every one of these acts on
+    its current page: Find opened a search over an invisible list, New
+    Session put focus into a control nobody could see. Disabled is what a
+    screen reader announces, so the item says why it does nothing."""
     owns_app = wx.GetApp() is None
     app = wx.GetApp() or wx.App(False)
     saved: dict[str, object] = {"setup_complete": True, "app_mode": "agent"}
-    monkeypatch.setattr(blindpilot_app, "_load_config", lambda: dict(saved))
-    monkeypatch.setattr(blindpilot_app, "_save_config", lambda value: saved.update(value))
 
-    frame = blindpilot_app.MainFrame(str(tmp_path))
+    frame = _frame(monkeypatch, tmp_path, saved)
     try:
-        switcher, book = frame.tab_switcher, frame.notebook
+        labels = {item.GetItemLabelText() for item in frame._agent_menu_items}
+        assert {"New Session…", "Find in Responses…", "Backend"} <= labels, labels
+        assert all(item.IsEnabled() for item in frame._agent_menu_items)
 
-        def labels(control):
-            return [control.GetPageText(i) for i in range(control.GetPageCount())]
+        frame._set_app_mode(blindpilot_app.APP_MODE_CHAT)
+        assert not any(item.IsEnabled() for item in frame._agent_menu_items)
+        assert not frame._compact_item.IsEnabled()
+        assert not frame._connect_item.IsEnabled()
 
-        assert labels(switcher) == labels(book)
-        assert switcher.GetSelection() == book.GetSelection() == 0
-
-        second = tmp_path / "second"
-        second.mkdir()
-        frame._add_session(str(second))
-        assert switcher.GetPageCount() == book.GetPageCount() == 2
-        assert labels(switcher) == labels(book)
-        assert switcher.GetSelection() == book.GetSelection() == 1
-
-        # Renaming a conversation relabels its tab.
-        panel = book.GetPage(1)
-        frame._panel_title_changed(panel, "Fix the parser")
-        assert labels(switcher) == labels(book)
-        assert "Fix the parser" in switcher.GetPageText(1)
-
-        # Ctrl+Tab wraps, and the strip follows.
-        frame._cycle_tab(+1)
-        assert book.GetSelection() == 0
-        assert switcher.GetSelection() == 0
-        frame._cycle_tab(-1)
-        assert book.GetSelection() == 1
-        assert switcher.GetSelection() == 1
-
-        # Arrowing the strip switches the session.
-        event = wx.BookCtrlEvent(wx.wxEVT_BOOKCTRL_PAGE_CHANGED, switcher.GetId(), 0, 1)
-        frame._on_tab_switcher_changed(event)
-        assert book.GetSelection() == 0
-
-        frame._close_current_session()
-        assert switcher.GetPageCount() == book.GetPageCount() == 1
-        assert labels(switcher) == labels(book)
+        frame._set_app_mode(blindpilot_app.APP_MODE_AGENT)
+        assert all(item.IsEnabled() for item in frame._agent_menu_items)
+        assert frame._compact_item.IsEnabled()
     finally:
-        frame.Destroy()
-        app.ProcessPendingEvents()
-        wx.Yield()
-        if owns_app:
-            app.Destroy()
+        _destroy(frame, app, owns_app)

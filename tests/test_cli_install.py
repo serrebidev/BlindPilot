@@ -26,8 +26,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import claude_reader  # noqa: E402
-from claude_reader import (  # noqa: E402
+import blindpilot_app  # noqa: E402
+from blindpilot_app import (  # noqa: E402
     BACKEND_FREEBUFF,
     PATH_STANZA_MARKER,
     _first_login_url,
@@ -57,13 +57,13 @@ class _Patch:
 
     def __enter__(self):
         for name, value in self._new.items():
-            self._old[name] = getattr(claude_reader, name)
-            setattr(claude_reader, name, value)
+            self._old[name] = getattr(blindpilot_app, name)
+            setattr(blindpilot_app, name, value)
         return self
 
     def __exit__(self, *exc):
         for name, value in self._old.items():
-            setattr(claude_reader, name, value)
+            setattr(blindpilot_app, name, value)
         return False
 
 
@@ -94,12 +94,12 @@ class _PatchPopen:
         self._factory = factory
 
     def __enter__(self):
-        self._real = claude_reader.subprocess.Popen
-        claude_reader.subprocess.Popen = self._factory
+        self._real = blindpilot_app.subprocess.Popen
+        blindpilot_app.subprocess.Popen = self._factory
         return self
 
     def __exit__(self, *exc):
-        claude_reader.subprocess.Popen = self._real
+        blindpilot_app.subprocess.Popen = self._real
         return False
 
 
@@ -110,12 +110,12 @@ class _PatchRun:
         self._function = function
 
     def __enter__(self):
-        self._real = claude_reader.subprocess.run
-        claude_reader.subprocess.run = self._function
+        self._real = blindpilot_app.subprocess.run
+        blindpilot_app.subprocess.run = self._function
         return self
 
     def __exit__(self, *exc):
-        claude_reader.subprocess.run = self._real
+        blindpilot_app.subprocess.run = self._real
         return False
 
 
@@ -284,7 +284,7 @@ def test_login_shell_path_split_keeps_entries_containing_spaces():
 
     with _PatchRun(run):
         with _Patch(platform=_FakePlatform("Darwin"), _login_shell=lambda: shell):
-            dirs = claude_reader._posix_persistent_path_dirs()
+            dirs = blindpilot_app._posix_persistent_path_dirs()
 
     assert spaced in dirs, dirs
     assert not any(d == "/opt/Some" for d in dirs)

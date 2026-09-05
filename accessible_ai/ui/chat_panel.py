@@ -791,10 +791,10 @@ class ChatPanel(wx.Panel):
     def _last_assistant_message(self) -> Message | None:
         if self.current_conversation_id is None:
             return None
-        messages = self.db.list_messages(self.current_conversation_id)
-        if not messages or messages[-1].role != "assistant" or messages[-1].id is None:
+        last = self.db.last_message(self.current_conversation_id)
+        if last is None or last.role != "assistant" or last.id is None:
             return None
-        return messages[-1]
+        return last
 
     def _update_regenerate_enabled(self) -> None:
         enabled = not self.generating and self._last_assistant_message() is not None

@@ -36,15 +36,10 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; force, not yes. Restart Manager finds every program holding one of our files
-; — including a background service that loaded one of our libraries and has no
-; window to close and nobody watching it — and asks it to close. A program that
-; never answers leaves setup offering Abort, Retry and Ignore over a file it
-; cannot replace, and an update that ends in a rollback. Anything reached here
-; is holding a file BlindPilot is about to overwrite and has already declined
-; to let go, so close it outright. This is what the in-app updater has always
-; passed on the command line; running setup by hand now behaves the same way.
-; /NOFORCECLOSEAPPLICATIONS still asks politely for anyone who wants that.
+; force, not yes. Anything Restart Manager finds here is holding a file we are
+; about to overwrite and has already declined to close, so close it. This is
+; what the in-app updater has always passed on the command line.
+; /NOFORCECLOSEAPPLICATIONS restores the polite prompt.
 CloseApplications=force
 RestartApplications=no
 SetupLogging=yes

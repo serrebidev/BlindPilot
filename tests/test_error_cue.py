@@ -19,6 +19,7 @@ macOS. High is now what an error gets, not what everything gets.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,6 +44,8 @@ def _panel(monkeypatch):
     panel._stopping = False
     panel._turns = []
     panel._stream_response = None
+    panel._rows = []
+    panel._worker = None
     panel._earcons = _Earcons()
     panel.announced: list[tuple] = []
     panel._announce = lambda text, urgent=False: panel.announced.append((text, urgent))
@@ -162,3 +165,39 @@ def test_announce_takes_an_urgency(monkeypatch, urgent):
     app.announce("something", urgent=urgent)
 
     assert said == ["something"]
+
+
+# ----- what a failed turn leaves behind -----
+def test_a_failed_turns_prompt_keeps_a_number_of_its_own(monkeypatch):
+    """Nothing streamed, so the "You:" row was numbered for a response that
+    never opened. The next turn reused that number, and the two prompts came
+    back as one response from "Copy whole response"."""
+    panel = _panel(monkeypatch)
+    panel._response_count = 2
+    panel._rows = [app.Row(kind="you", label="You: a", payload="a", response_number=3)]
+
+    app.SessionPanel._on_failed(panel, "the turn stopped")
+
+    assert panel._response_count == 3
+
+
+def test_a_worker_that_lost_its_session_clears_the_tabs_session_id(monkeypatch):
+    """Codex could not resume the conversation, so its id names nothing. Kept,
+    the next message would fail the same way; cleared, it starts afresh."""
+    panel = _panel(monkeypatch)
+    panel._session_id = "thread-1"
+    panel._worker = SimpleNamespace(lost_session=True)
+
+    app.SessionPanel._on_failed(panel, "Codex could not resume this conversation")
+
+    assert panel._session_id is None
+
+
+def test_an_ordinary_failure_keeps_the_session(monkeypatch):
+    panel = _panel(monkeypatch)
+    panel._session_id = "thread-1"
+    panel._worker = SimpleNamespace(lost_session=False)
+
+    app.SessionPanel._on_failed(panel, "the turn stopped")
+
+    assert panel._session_id == "thread-1"

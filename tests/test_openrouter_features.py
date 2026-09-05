@@ -6,39 +6,31 @@ the chat window sends the request, reads what comes back, and runs nothing
 itself. These tests pin the request bodies to the shapes OpenRouter documents,
 and pin what the window does with the three new things a response can carry:
 thinking, tool calls, and citations.
-
-Run from the project root:
-
-    python -m pytest tests/ -q
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
-import sys
 from threading import Event
 
 import httpx
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from accessible_ai.models import (  # noqa: E402
+from accessible_ai.models import (
     Account,
     GenerationSettings,
     OpenRouterFeatures,
     PROVIDER_OPENROUTER,
     Profile,
 )
-from accessible_ai.providers.openrouter import OpenRouterProvider  # noqa: E402
-from accessible_ai.providers.protocols import (  # noqa: E402
+from accessible_ai.providers.openrouter import OpenRouterProvider
+from accessible_ai.providers.protocols import (
     SourceCollector,
     ToolCallCollector,
     reasoning_text,
 )
-from accessible_ai.storage.database import SCHEMA, Database  # noqa: E402
+from accessible_ai.storage.database import SCHEMA, Database
 
 
 # ----- The request these settings come to -----
@@ -409,6 +401,53 @@ def test_citations_come_back_as_their_own_event_after_the_answer(monkeypatch):
     assert kinds.index("text") < kinds.index("sources") < kinds.index("done")
     sources = next(event for event in events if event.kind == "sources")
     assert sources.metadata["sources"] == [{"url": "https://news.example", "title": "News"}]
+
+
+def test_an_answer_cut_off_at_the_length_limit_says_so(monkeypatch):
+    """A sentence that stops mid-word needs a reason a listener can hear."""
+    recorder = _Recorder(
+        [
+            {"choices": [{"delta": {"content": "Once upon a"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "length"}]},
+        ]
+    )
+    provider = _provider(recorder, monkeypatch)
+    events = list(provider.generate(_settings(), Event()))
+    kinds = [event.kind for event in events]
+    cut_off = next(event for event in events if event.kind == "status")
+    assert cut_off.text == "Response cut off at the model's length limit"
+    assert cut_off.metadata.get("record") is True
+    assert kinds.index("text") < kinds.index("status") < kinds.index("done")
+
+
+def test_a_finished_answer_reports_no_cut_off(monkeypatch):
+    recorder = _Recorder(
+        [{"choices": [{"delta": {"content": "All of it."}, "finish_reason": "stop"}]}]
+    )
+    provider = _provider(recorder, monkeypatch)
+    assert not any(event.kind == "status" for event in provider.generate(_settings(), Event()))
+
+
+def test_an_error_openrouter_reports_inside_a_choice_is_raised_as_one(monkeypatch):
+    """OpenRouter puts a mid-stream failure in choices[0].error, not at the top."""
+    recorder = _Recorder(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {},
+                        "finish_reason": "error",
+                        "error": {"code": 502, "message": "the upstream provider fell over"},
+                    }
+                ]
+            }
+        ]
+    )
+    provider = _provider(recorder, monkeypatch)
+    with pytest.raises(Exception) as caught:
+        list(provider.generate(_settings(), Event()))
+    assert "the upstream provider fell over" in str(caught.value)
+    assert "without returning any text" not in str(caught.value)
 
 
 # ----- The profile editor -----

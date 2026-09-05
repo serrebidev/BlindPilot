@@ -32,6 +32,8 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+import time
+
 import agent_backends
 import hermes_backend
 from agent_backends import BACKEND_HERMES, BACKENDS
@@ -270,6 +272,27 @@ def test_a_local_catalog_still_uses_the_pipe(monkeypatch) -> None:
     assert models and list(efforts) == list(HERMES_EFFORTS)
 
 
+def test_a_gateway_that_dies_before_ready_is_reported_at_once(monkeypatch) -> None:
+    """The model query had its own ready loop, which never asked connected()."""
+
+    class _Dead(_CatalogTransport):
+        def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
+            self.alive = False
+            return None
+
+    monkeypatch.setattr(hermes_backend, "hermes_installed", lambda: True)
+    monkeypatch.setattr(hermes_backend, "StdioTransport", lambda _cwd: _Dead(_CATALOG))
+    # Bounded so a regression fails instead of hanging the run.
+    monkeypatch.setattr(hermes_backend, "MODEL_QUERY_TIMEOUT", 2.0)
+
+    started = time.monotonic()
+    models, _efforts, _current, _effort, error = hermes_model_options(".")
+
+    assert models == []
+    assert error == "catalog transport ended"
+    assert time.monotonic() - started < 1.0
+
+
 def test_a_missing_local_hermes_is_reported_rather_than_dialled(monkeypatch) -> None:
     monkeypatch.setattr(hermes_backend, "hermes_installed", lambda: False)
     models, _efforts, _current, _effort, error = hermes_model_options(".")
@@ -429,3 +452,111 @@ def test_a_frame_that_produces_a_row_does_reset_the_timer(monkeypatch) -> None:
 
     assert heard, "a reported step must still produce a row"
     assert not any("Still working" in text for text in heard), heard
+
+
+# -- moving a reused session onto the picked model ---------------------------
+
+
+class _ReplyTransport:
+    """Answers with scripted frames and ends when they run out, like a pipe."""
+
+    def __init__(self, frames: list[dict]) -> None:
+        self.frames = list(frames)
+        self.sent: list[dict] = []
+        self.closed = False
+        self.alive = True
+
+    def send(self, message: dict) -> bool:
+        if not self.connected():
+            return False
+        self.sent.append(message)
+        return True
+
+    def receive(self, timeout: float) -> dict | None:  # noqa: ARG002 - interface
+        if self.frames:
+            return self.frames.pop(0)
+        self.alive = False
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    def connected(self) -> bool:
+        return self.alive and not self.closed
+
+    def failure_detail(self) -> str:
+        return "reply transport ended"
+
+
+_ROW = f"{_PROVIDER}{MODEL_ROW_SEPARATOR}{_QUALIFIED_MODEL}"
+
+
+def _reused(model: str, session_model: str, frames: list[dict]):
+    from hermes_worker import HeldConnection
+
+    activities: list[tuple[str, str]] = []
+    kwargs = _callbacks()
+    kwargs["on_activity"] = lambda kind, text: activities.append((kind, text))
+    worker = HermesWorker("test", None, ".", "default", model=model, **kwargs)
+    transport = _ReplyTransport(frames)
+    held = HeldConnection()
+    held.keep(transport, "live-1", session_model)
+    worker._held = held
+    return worker, held, transport, activities
+
+
+def test_a_reused_session_already_on_the_picked_model_is_left_alone() -> None:
+    """A /model round trip on every turn was a 60 s wait budget for nothing."""
+    worker, _held, transport, _rows = _reused(_ROW, _ROW, [])
+    assert worker._open_transport() is True
+
+    worker._apply_live_selection()
+
+    assert transport.sent == []
+
+
+def test_a_changed_pick_moves_the_session_and_is_remembered() -> None:
+    worker, held, transport, _rows = _reused(
+        _ROW,
+        f"{_PROVIDER}{MODEL_ROW_SEPARATOR}other-model",
+        [
+            {"jsonrpc": "2.0", "id": 101, "result": {"output": "switched"}},
+            {"jsonrpc": "2.0", "id": 102, "result": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "event",
+                "params": {
+                    "type": "message.complete",
+                    "session_id": "live-1",
+                    "payload": {"status": "complete", "text": "done"},
+                },
+            },
+        ],
+    )
+
+    worker.run()
+
+    first = transport.sent[0]
+    assert first["method"] == "slash.exec"
+    assert first["params"]["command"].startswith(f"/model {_QUALIFIED_MODEL}")
+    assert f"--provider {_PROVIDER}" in first["params"]["command"]
+    assert transport.sent[1]["method"] == "prompt.submit"
+    # The next turn on this connection knows what the session now runs.
+    assert held.take() == (transport, "live-1")
+    assert held.model == _ROW
+
+
+def test_a_refused_switch_is_heard_and_not_recorded_as_applied() -> None:
+    """Best effort. The message still goes, on whatever model the session had."""
+    worker, _held, transport, rows = _reused(
+        _ROW,
+        "",
+        [{"jsonrpc": "2.0", "id": 101, "error": {"message": "unknown model"}}],
+    )
+    assert worker._open_transport() is True
+
+    worker._apply_live_selection()
+
+    assert [m["method"] for m in transport.sent] == ["slash.exec"]
+    assert any("refused" in text and "unknown model" in text for _kind, text in rows)
+    assert worker._session_model == ""

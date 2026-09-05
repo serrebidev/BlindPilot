@@ -22,6 +22,19 @@ from app_updater import (
 ANNOUNCE_EVERY_PERCENT = 10
 
 
+def _call_after(callback, *args) -> None:
+    """wx.CallAfter, unless the application has already gone.
+
+    The workers below run under a 20 second HTTP timeout. Close the dialog and
+    quit inside it and the thread finishes after wx.App is destroyed, where
+    wx.CallAfter asserts and the thread hook logs a critical line for a
+    message nobody is left to read.
+    """
+    if wx.GetApp() is None:
+        return
+    wx.CallAfter(callback, *args)
+
+
 class UpdateDialog(wx.Dialog):
     """Check, download, verify, and hand off an update without changing windows."""
 
@@ -189,12 +202,12 @@ class UpdateDialog(wx.Dialog):
         try:
             release = self.check(self.current_version)
         except UpdateError as exc:
-            wx.CallAfter(self._check_failed, str(exc))
+            _call_after(self._check_failed, str(exc))
             return
         except Exception as exc:
-            wx.CallAfter(self._check_failed, f"Checking for updates failed: {exc}")
+            _call_after(self._check_failed, f"Checking for updates failed: {exc}")
             return
-        wx.CallAfter(self._check_finished, release)
+        _call_after(self._check_finished, release)
 
     def _check_finished(self, release: Optional[ReleaseInfo]) -> None:
         if self._closing:
@@ -214,19 +227,19 @@ class UpdateDialog(wx.Dialog):
             archive = download_update(
                 release,
                 self.current_version,
-                progress=lambda done, total: wx.CallAfter(self._on_progress, done, total),
+                progress=lambda done, total: _call_after(self._on_progress, done, total),
                 cancel=self.cancel_event,
             )
         except UpdateCancelled:
-            wx.CallAfter(self._download_cancelled)
+            _call_after(self._download_cancelled)
             return
         except UpdateError as exc:
-            wx.CallAfter(self._download_failed, str(exc))
+            _call_after(self._download_failed, str(exc))
             return
         except Exception as exc:
-            wx.CallAfter(self._download_failed, f"The update could not be prepared: {exc}")
+            _call_after(self._download_failed, f"The update could not be prepared: {exc}")
             return
-        wx.CallAfter(self._download_finished, archive)
+        _call_after(self._download_finished, archive)
 
     def _on_progress(self, done: int, total: int) -> None:
         if self._closing:

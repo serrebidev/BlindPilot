@@ -21,7 +21,6 @@ def _real() -> backend_pool.HeldProcess:
     return backend_pool.HeldProcess(
         handle,
         backend_pool.Adapter(
-            start=lambda: _Handle(),
             alive=lambda h: h.running,
             interrupt=lambda _h, _t: True,
             stop=lambda h: h.stop(),
@@ -45,7 +44,6 @@ def test_a_process_that_never_admits_it_stopped_is_rejected():
         return _Liar(
             handle,
             backend_pool.Adapter(
-                start=lambda: _Handle(),
                 alive=lambda h: h.running,
                 interrupt=lambda _h, _t: True,
                 stop=lambda h: h.stop(),
@@ -88,7 +86,6 @@ def test_a_process_that_keeps_confirming_interrupts_is_rejected():
         return _ConfirmsInterruptEvenAfterStop(
             handle,
             backend_pool.Adapter(
-                start=lambda: _Handle(),
                 alive=lambda h: h.running,
                 interrupt=lambda _h, _t: True,
                 stop=lambda h: h.stop(),

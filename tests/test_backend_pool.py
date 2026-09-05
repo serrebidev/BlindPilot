@@ -29,7 +29,6 @@ def _adapter() -> backend_pool.Adapter:
         return handle.confirms
 
     return backend_pool.Adapter(
-        start=lambda: _FakeHandle(),
         alive=lambda handle: handle.running,
         interrupt=interrupt,
         stop=lambda handle: handle.stop(),
@@ -376,7 +375,6 @@ def test_a_backend_that_never_learned_the_question_is_reaped_as_before():
     pool = backend_pool.BackendPool()
     handle = _FakeHandle()
     plain = backend_pool.Adapter(
-        start=lambda: _FakeHandle(),
         alive=lambda h: h.running,
         interrupt=lambda _h, _t: True,
         stop=lambda h: h.stop(),

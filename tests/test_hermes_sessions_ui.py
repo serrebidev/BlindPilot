@@ -220,3 +220,25 @@ def test_an_empty_catalog_says_so_rather_than_looking_broken(monkeypatch, frame)
         assert "no conversations" in dialog.summary.GetLabel()
     finally:
         dialog.Destroy()
+
+
+def test_reopening_a_finished_conversation_closes_the_replayed_response():
+    """The replay streams through the live path, so `_stream_response` holds
+    the replay's number when the empty completion arrives. Left set, the next
+    message and its answer landed under the replayed response: no new header,
+    and Ctrl+R could not reach the answer as a response of its own."""
+    panel = type("PanelStub", (), {})()
+    panel._stopping = False
+    panel._turns = []
+    panel._stream_response = 1
+    panel._rows = [
+        blindpilot_app.Row(kind="header", label="Response 1", payload="", response_number=1)
+    ]
+    panel._earcons = type("Earcons", (), {"play_received": lambda self: None})()
+    statuses: list[str] = []
+    panel._set_status = statuses.append
+
+    blindpilot_app.SessionPanel._on_response_complete(panel, "")
+
+    assert panel._stream_response is None
+    assert statuses == ["Reopened, 1 rows"]

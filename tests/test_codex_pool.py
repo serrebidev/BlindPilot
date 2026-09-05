@@ -166,7 +166,7 @@ def test_what_a_finished_turn_says_on_its_way_out_is_not_kept_for_the_next_one()
     server = agent_backends.CodexServer(proc)
     first = server.inbox()
     server.attach("thread-1", first)
-    server.detach("thread-1", first)
+    server.detach_listener(first)
 
     server._route({"method": "item/completed", "params": {"threadId": "thread-1", "item": {}}})
 
@@ -339,12 +339,12 @@ def test_a_second_turn_reuses_the_app_server_the_first_one_left():
         started.append(server)
         return server
 
-    adapter = agent_backends.codex_adapter()._replace(start=start)
+    adapter = agent_backends.codex_adapter()
     key = backend_pool.pool_key("codex")
     try:
         first = pool.take(key)
         assert first is None
-        held = backend_pool.HeldProcess(adapter.start(), adapter)
+        held = backend_pool.HeldProcess(start(), adapter)
         pool.keep(key, held)
         assert pool.take(key) is held
         assert len(started) == 1, "a second app-server was started for the second turn"
@@ -820,29 +820,26 @@ def test_a_reply_of_the_wrong_shape_does_not_end_every_tabs_turn():
 
 def test_a_question_from_a_turn_that_is_over_is_declined_rather_than_ignored():
     """Codex holds an unanswered request id open, so silence is not refusal."""
-    sent: list[dict] = []
-    worker = _bare_worker()
-    worker._turn_id = "turn-2"
-    worker._send = lambda message: sent.append(message) or True
-
-    worker._decline_server_request(
-        {
-            "method": "item/commandExecution/requestApproval",
-            "id": 77,
-            "params": {"threadId": "thread-1", "turnId": "turn-1"},
-        }
-    )
-    worker._decline_server_request(
-        {
-            "method": "item/tool/requestUserInput",
-            "id": 78,
-            "params": {
-                "threadId": "thread-1",
-                "turnId": "turn-1",
-                "questions": [{"id": "pick", "question": "Which one?", "options": []}],
-            },
-        }
-    )
+    sent = [
+        agent_backends._declined_request(
+            {
+                "method": "item/commandExecution/requestApproval",
+                "id": 77,
+                "params": {"threadId": "thread-1", "turnId": "turn-1"},
+            }
+        ),
+        agent_backends._declined_request(
+            {
+                "method": "item/tool/requestUserInput",
+                "id": 78,
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "questions": [{"id": "pick", "question": "Which one?", "options": []}],
+                },
+            }
+        ),
+    ]
 
     assert sent == [
         {"id": 77, "result": {"decision": "decline"}},
@@ -2096,3 +2093,92 @@ def test_the_stderr_of_a_process_that_outlives_thousands_of_turns_is_capped():
     # slice of somebody else's.
     assert server.stderr_since(total - 10) == [f"line {n}" for n in range(total - 10, total)]
     assert server.stderr_since(total) == []
+
+
+def test_a_request_for_a_conversation_nobody_is_reading_is_declined_not_dropped():
+    """Codex holds an unanswered request id open, so a dropped request is a
+    turn that never ends. Escape as the model is about to run a command is
+    the ordinary way here: the thread is abandoned, then the approval request
+    arrives for a conversation nobody reads any more."""
+    proc = _FakeProc()
+    server = agent_backends.CodexServer(proc)
+
+    server._route(
+        {
+            "method": "item/commandExecution/requestApproval",
+            "id": 5,
+            "params": {"threadId": "abandoned", "turnId": "turn-9"},
+        }
+    )
+
+    sent = [json.loads(line) for line in proc.stdin.written]
+    assert sent == [{"id": 5, "result": {"decision": "decline"}}]
+
+
+def test_a_question_for_a_conversation_nobody_is_reading_is_answered_with_nothing():
+    proc = _FakeProc()
+    server = agent_backends.CodexServer(proc)
+
+    server._route(
+        {
+            "method": "item/tool/requestUserInput",
+            "id": 6,
+            "params": {
+                "threadId": "abandoned",
+                "questions": [{"id": "q1", "question": "Which one?", "options": []}],
+            },
+        }
+    )
+
+    sent = [json.loads(line) for line in proc.stdin.written]
+    assert sent == [{"id": 6, "result": {"answers": {"q1": {"answers": []}}}}]
+
+
+def test_a_notification_for_a_conversation_nobody_is_reading_is_still_dropped():
+    proc = _FakeProc()
+    server = agent_backends.CodexServer(proc)
+
+    server._route(
+        {
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": "abandoned", "itemId": "m1", "delta": "late"},
+        }
+    )
+
+    assert proc.stdin.written == []
+
+
+def test_a_conversation_codex_cannot_resume_costs_the_tab_its_session_not_the_server(
+    monkeypatch,
+):
+    """A stale session id, its rollout rotated or deleted, used to drop the
+    shared app-server and every MCP child with it, over one tab's bookkeeping.
+    The server stays; the tab is told, and starts a new conversation."""
+
+    class _RefusesToResume(_FakeProc):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stdout = self._script()
+
+        def _script(self):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                for line in list(self.stdin.written):
+                    message = json.loads(line)
+                    if message.get("method") == "thread/resume":
+                        yield json.dumps(
+                            {"id": message["id"], "error": {"message": "thread not found"}}
+                        )
+                        return
+                time.sleep(0.005)
+
+    proc = _RefusesToResume()
+    worker, _completed, failures, _activity = _turn(proc, monkeypatch, session_id="stale")
+
+    assert failures and "thread not found" in failures[0], failures
+    assert "new conversation" in failures[0], "the person was not told what happens next"
+    assert worker.lost_session is True
+    held = backend_pool.pool().take(backend_pool.pool_key(agent_backends.BACKEND_CODEX))
+    assert held is not None, "one tab's stale session id took the shared server down"
+    assert held.handle.proc is proc
+    assert not proc.killed

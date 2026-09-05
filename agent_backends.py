@@ -27,6 +27,7 @@ import atexit
 import collections
 import json
 import logging
+import ntpath
 import os
 import platform
 import queue
@@ -34,6 +35,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -43,8 +45,7 @@ from typing import Callable, NamedTuple, Optional, Protocol, Sequence, cast
 import backend_pool
 import diagnostics
 
-from markdown_rows import _SENTENCE_END_RE as _markdown_sentence_end_re
-from markdown_rows import complete_sentences
+from markdown_rows import complete_sentences as _complete_sentences
 
 
 # A windowed app owns no console, so every child process Windows considers a
@@ -80,25 +81,34 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
     a wait there is a frozen application rather than a stopped task.
 
     The group is only signalled when the child is demonstrably the leader of
-    one, which is exactly what ``start_new_session`` made it. Anything else —
-    a child started without its own group, a stand-in in a test, Windows — is
-    stopped on its own. That check is not a formality: a process still sitting
-    in BlindPilot's group would otherwise have BlindPilot signal itself, and
-    take every other backend down with it.
+    one, which is exactly what ``start_new_session`` made it. Anything else, a
+    child started without its own group or a stand-in in a test, is stopped on
+    its own. That check is not a formality: a process still sitting in
+    BlindPilot's group would otherwise have BlindPilot signal itself, and take
+    every other backend down with it.
+
+    Windows has no process groups to signal, so the tree is ended by pid with
+    ``taskkill /T``. TerminateProcess alone ends the parent and nothing else,
+    and Codex's app-server has a dozen or more MCP children to leave behind.
     """
     poll = getattr(proc, "poll", None)
     if poll is not None and poll() is not None:
         return
     pid = getattr(proc, "pid", None)
-    if platform.system() != "Windows" and isinstance(pid, int) and pid > 0:
-        try:
-            # POSIX only, and the platform test above is a runtime condition
-            # the checker cannot read, so against a Windows target it reports
-            # all three of these as missing.
-            if os.getpgid(pid) == pid:  # type: ignore[attr-defined]
-                os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
-        except OSError:
-            pass
+    if isinstance(pid, int) and pid > 0:
+        if platform.system() == "Windows":
+            _end_windows_tree(pid)
+        else:
+            try:
+                # POSIX only, and the platform test above is a runtime
+                # condition the checker cannot read, so against a Windows
+                # target it reports all three of these as missing.
+                if os.getpgid(pid) == pid:  # type: ignore[attr-defined]
+                    os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
+            except OSError:
+                pass
+    # Still done after the tree kill, so a taskkill that failed or was not
+    # there still costs the parent its life.
     kill = getattr(proc, "kill", None)
     if kill is not None:
         try:
@@ -111,6 +121,32 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
             wait(timeout=timeout)
         except Exception:
             pass
+
+
+def _end_windows_tree(pid: int) -> None:
+    """Kill a Windows process and every descendant, by the full path to taskkill.
+
+    The full path because the child's own directory may be a cloned repository,
+    and a ``taskkill.exe`` committed to it is not what should run with force.
+    Best effort: the caller kills the parent directly afterwards either way.
+    """
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    # os.path.join uses this process's separators; under POSIX that turns the
+    # path into "C:\Win/System32/taskkill.exe", which Windows then splits at
+    # every forward slash and refuses to run. Windows accepts either
+    # separator, so forward slashes are built unconditionally instead.
+    taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
+    try:
+        subprocess.run(
+            [taskkill, "/T", "/F", "/PID", str(pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            **no_window_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 _CONSOLE_WINDOW_CLASSES = ("ConsoleWindowClass", "PseudoConsoleWindow")
@@ -556,7 +592,9 @@ def _fallback_cli_paths(name: str) -> tuple[Path, ...]:
         appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
         local = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
         candidates: list[Path] = []
-        for suffix in (".exe", ".cmd", ".ps1", ""):
+        # No .ps1: Popen cannot run one (WinError 193), so offering it would
+        # fail every turn where finding nothing lets the wizard offer to install.
+        for suffix in (".exe", ".cmd", ""):
             filename = name + suffix
             candidates.extend(
                 [
@@ -595,7 +633,7 @@ def find_backend_cli(backend: str) -> Optional[str]:
     # copy that happens to occur earlier on PATH.
     managed = blindpilot_data_dir() / "npm"
     managed_bin = managed if platform.system() == "Windows" else managed / "bin"
-    suffixes = (".exe", ".cmd", ".ps1", "") if platform.system() == "Windows" else ("",)
+    suffixes = (".exe", ".cmd", "") if platform.system() == "Windows" else ("",)
     for suffix in suffixes:
         candidate = managed_bin / f"{info.executable}{suffix}"
         if candidate.is_file():
@@ -658,25 +696,34 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
             )
             return proc.returncode == 0
         if backend == BACKEND_FREEBUFF:
-            credential = Path.home() / ".config" / "manicode" / "credentials.json"
-            try:
-                payload = json.loads(credential.read_text(encoding="utf-8"))
-                account = payload.get("default") if isinstance(payload, dict) else None
-                return isinstance(account, dict) and all(
-                    isinstance(account.get(field), str) and account[field].strip()
-                    for field in ("authToken", "fingerprintId", "fingerprintHash")
-                )
-            except (OSError, ValueError):
-                return False
+            return _freebuff_signed_in(_freebuff_account())
         if backend == BACKEND_OPENCODE:
-            return _opencode_auth_ok()
+            return bool(_opencode_providers())
     except (OSError, subprocess.TimeoutExpired):
         return False
     return True
 
 
-def _opencode_auth_ok() -> bool:
-    """Whether opencode has a provider it could actually run a model on.
+def _freebuff_account() -> Optional[dict]:
+    """The account FreeBuff stored at sign-in, or None if there is none to read."""
+    credential = Path.home() / ".config" / "manicode" / "credentials.json"
+    try:
+        payload = json.loads(credential.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    account = payload.get("default") if isinstance(payload, dict) else None
+    return account if isinstance(account, dict) else None
+
+
+def _freebuff_signed_in(account: Optional[dict]) -> bool:
+    return account is not None and all(
+        isinstance(account.get(field), str) and account[field].strip()
+        for field in ("authToken", "fingerprintId", "fingerprintHash")
+    )
+
+
+def _opencode_providers() -> list[str]:
+    """The providers opencode could run a model on, read without starting it.
 
     Answered from the credentials opencode stored when a provider was
     connected, which is where /connect puts them, plus its own key in the
@@ -688,13 +735,16 @@ def _opencode_auth_ok() -> bool:
     nothing to do with it, and a confident yes that turns into a wall at the
     first message is worse than an "unconfirmed" the wizard lets you walk past.
     """
+    providers: list[str] = []
     try:
         payload = json.loads((_opencode_data_dir() / "auth.json").read_text(encoding="utf-8"))
-        if isinstance(payload, dict) and payload:
-            return True
+        if isinstance(payload, dict):
+            providers = sorted(str(name) for name in payload)
     except (OSError, ValueError):
-        pass
-    return bool(os.environ.get("OPENCODE_API_KEY", "").strip())
+        providers = []
+    if os.environ.get("OPENCODE_API_KEY", "").strip():
+        providers.append("OPENCODE_API_KEY in the environment")
+    return providers
 
 
 def _probe_backend(binary: str, args: list[str], timeout: int) -> tuple[Optional[int], str]:
@@ -762,19 +812,10 @@ def _codex_account_lines(code: Optional[int], text: str) -> list[str]:
 
 def _freebuff_account_lines() -> list[str]:
     """FreeBuff has no status command; its stored credentials are the answer."""
-    credential = Path.home() / ".config" / "manicode" / "credentials.json"
-    try:
-        payload = json.loads(credential.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    account = _freebuff_account()
+    if account is None:
         return ["Signed in: no"]
-    account = payload.get("default") if isinstance(payload, dict) else None
-    if not isinstance(account, dict):
-        return ["Signed in: no"]
-    signed_in = all(
-        isinstance(account.get(field), str) and account[field].strip()
-        for field in ("authToken", "fingerprintId", "fingerprintHash")
-    )
-    lines = [f"Signed in: {'yes' if signed_in else 'no'}"]
+    lines = [f"Signed in: {'yes' if _freebuff_signed_in(account) else 'no'}"]
     for field, caption in (("name", "Account"), ("email", "Email")):
         value = str(account.get(field) or "").strip()
         if value:
@@ -789,15 +830,7 @@ def _opencode_account_lines() -> list[str]:
     be the thing that starts one — a report on what is already set up has no
     business spending ten seconds bringing a server to life to say so.
     """
-    providers: list[str] = []
-    try:
-        payload = json.loads((_opencode_data_dir() / "auth.json").read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            providers = sorted(str(name) for name in payload)
-    except (OSError, ValueError):
-        providers = []
-    if os.environ.get("OPENCODE_API_KEY", "").strip():
-        providers.append("OPENCODE_API_KEY in the environment")
+    providers = _opencode_providers()
     if not providers:
         return ["Signed in: no", "Connected providers: none"]
     return ["Signed in: yes", f"Connected providers: {', '.join(providers)}"]
@@ -1027,8 +1060,8 @@ def _codex_app_server_binary(binary: str) -> str:
 
     Terminating an npm ``.cmd`` launcher does not terminate its native child,
     which leaves the app-server writer lock attached to the thread. Launching
-    the packaged executable directly gives BlindPilot reliable ownership and
-    makes immediate session continuation possible.
+    the packaged executable directly makes the process BlindPilot holds the
+    app-server itself; its own children are the tree kill's business.
     """
     if platform.system() != "Windows" or Path(binary).suffix.casefold() == ".exe":
         return binary
@@ -1087,11 +1120,10 @@ def codex_model_options(
 
     current_model = ""
     current_effort = ""
-    config_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     try:
         import tomllib
 
-        with open(config_home / "config.toml", "rb") as handle:
+        with open(_codex_home() / "config.toml", "rb") as handle:
             config = tomllib.load(handle)
         if isinstance(config.get("model"), str):
             current_model = config["model"]
@@ -1552,6 +1584,17 @@ _CODEX_QUESTION_ARGS = (
 )
 
 
+def _question_options(raw: object) -> tuple[QuestionOption, ...]:
+    """The labelled options of a question, as Codex and opencode both send them."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(
+        QuestionOption(str(option["label"]), str(option.get("description") or ""))
+        for option in raw
+        if isinstance(option, dict) and option.get("label")
+    )
+
+
 def _codex_questions(raw: object) -> tuple[Question, ...]:
     """Read request_user_input's params into BlindPilot's own question shape.
 
@@ -1568,17 +1611,12 @@ def _codex_questions(raw: object) -> tuple[Question, ...]:
         text = str(entry.get("question") or "").strip()
         if not text:
             continue
-        options: list[QuestionOption] = []
-        for option in entry.get("options") or []:
-            if isinstance(option, dict) and option.get("label"):
-                options.append(
-                    QuestionOption(str(option["label"]), str(option.get("description") or ""))
-                )
+        options = _question_options(entry.get("options"))
         questions.append(
             Question(
                 question=text,
                 header=str(entry.get("header") or ""),
-                options=tuple(options),
+                options=options,
                 multi_select=False,
                 allow_custom=bool(entry.get("isOther")) or not options,
                 secret=bool(entry.get("isSecret")),
@@ -1663,26 +1701,31 @@ class _TurnWatch:
 _CODEX_START_LOCK = threading.Lock()
 
 
-def _offer(listener: "queue.Queue[object]", message: object) -> None:
-    """Put a message in a queue without ever blocking the reader.
+def _unhandled_request(request_id: object) -> dict:
+    return {
+        "id": request_id,
+        "error": {"code": -32601, "message": "BlindPilot cannot handle this request yet"},
+    }
 
-    A turn's inbox is unbounded, so this is a safety net rather than a routine
-    path: the one reader serves every tab, and blocking it on one conversation
-    would stop all of them. A bounded queue loses its oldest message instead.
+
+def _declined_request(message: dict) -> dict:
+    """The reply that says no to a server request nobody is going to answer.
+
+    Codex holds an unanswered request id open, so silence is not the same as
+    refusal. Declining is: the turn it belongs to was interrupted, and the
+    person is not going to be shown a question from it.
     """
-    try:
-        listener.put_nowait(message)
-        return
-    except queue.Full:
-        pass
-    try:
-        listener.get_nowait()
-    except queue.Empty:
-        pass
-    try:
-        listener.put_nowait(message)
-    except queue.Full:
-        pass
+    method = str(message.get("method") or "")
+    request_id = message.get("id")
+    if method == "item/tool/requestUserInput":
+        questions = _codex_questions((message.get("params") or {}).get("questions"))
+        answers: dict[str, dict] = {
+            question.id or question.question: {"answers": []} for question in questions
+        }
+        return {"id": request_id, "result": {"answers": answers}}
+    if method.endswith("requestApproval"):
+        return {"id": request_id, "result": {"decision": "decline"}}
+    return _unhandled_request(request_id)
 
 
 class CodexServer:
@@ -1698,10 +1741,9 @@ class CodexServer:
         # Two locks, never held together. `_write_lock` guards only the
         # stdin write+flush pair, so a wedged app-server blocking on flush
         # cannot also block every other tab's `next_id()`. `_state_lock`
-        # guards only in-process bookkeeping (the id counter, and later the
-        # reply-routing table) -- Task 7 registers a reply queue before
-        # sending, and taking the same lock `send` uses for I/O there would
-        # self-deadlock.
+        # guards only in-process bookkeeping, the id counter and the routing
+        # tables. A turn registers its reply queue before sending, and taking
+        # the lock `send` uses for I/O there would self-deadlock.
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._next_id = 10
@@ -1820,7 +1862,7 @@ class CodexServer:
                 if binds_thread:
                     self._thread_replies.add(request_id)
         if closed:
-            _offer(listener, _CODEX_CLOSED)
+            listener.put_nowait(_CODEX_CLOSED)
 
     def unexpect(self, request_ids: Sequence[int]) -> None:
         with self._state_lock:
@@ -1842,17 +1884,7 @@ class CodexServer:
             if not closed:
                 self._threads[thread_id] = listener
         if closed:
-            _offer(listener, _CODEX_CLOSED)
-
-    def detach(self, thread_id: str, listener: "queue.Queue[object]") -> None:
-        """Stop reading a conversation, without disturbing a newer reader.
-
-        No production caller -- `_release` uses `detach_listener` below,
-        which does not need the id. Only a test calls this one directly.
-        """
-        with self._state_lock:
-            if self._threads.get(thread_id) is listener:
-                del self._threads[thread_id]
+            listener.put_nowait(_CODEX_CLOSED)
 
     def detach_listener(self, listener: "queue.Queue[object]") -> None:
         """Stop reading every conversation bound to this queue.
@@ -2055,7 +2087,7 @@ class CodexServer:
                         if thread_id:
                             self._threads[thread_id] = waiting
             if waiting is not None:
-                _offer(waiting, message)
+                waiting.put_nowait(message)
             return
         params = message.get("params")
         if not isinstance(params, dict):
@@ -2068,6 +2100,7 @@ class CodexServer:
             if watch is not None:
                 watch.done.set()
         thread_id = str(params.get("threadId") or "")
+        listener: Optional["queue.Queue[object]"] = None
         with self._state_lock:
             if self._closed:
                 return
@@ -2077,8 +2110,6 @@ class CodexServer:
                 # interrupted. Keeping it would hand the *next* turn on this
                 # conversation somebody else's ending to act on.
                 listener = self._threads.get(thread_id)
-                if listener is None:
-                    return
             elif len(self._threads) == 1:
                 # `threadId` is required on every notification and every server
                 # request this worker acts on (checked against the app server's
@@ -2088,9 +2119,15 @@ class CodexServer:
                 # about who should hear it. With more than one there is, so an
                 # unnamed message is dropped rather than told to the wrong tab.
                 listener = next(iter(self._threads.values()))
-            else:
-                return
-            _offer(listener, message)
+        if listener is None:
+            if method and "id" in message:
+                # A request, though, must still be answered. Codex holds the
+                # id open until it is, and the turn it belongs to never ends.
+                # Outside the state lock: send takes the write lock, and the
+                # two are never held together.
+                self.send(_declined_request(message))
+            return
+        listener.put_nowait(message)
 
     def _close(self, error: str) -> None:
         """Wake everyone waiting on this server and say why, once."""
@@ -2111,7 +2148,7 @@ class CodexServer:
             # will never speak again.
             turns = list(self._turns.values())
         for listener in listeners:
-            _offer(listener, _CODEX_CLOSED)
+            listener.put_nowait(_CODEX_CLOSED)
         for watch in turns:
             watch.done.set()
 
@@ -2154,6 +2191,16 @@ class CodexServer:
     def stop(self) -> None:
         end_process_group(self.proc, timeout=2)
         self._close("")
+
+
+def _app_version() -> str:
+    """BlindPilot's version, for the clientInfo Codex logs.
+
+    Read off the window's module when it is loaded rather than imported from
+    it, because that module imports this one.
+    """
+    app = sys.modules.get("blindpilot_app")
+    return str(getattr(app, "APP_VERSION", "") or "unknown")
 
 
 def _start_codex_server() -> CodexServer:
@@ -2201,7 +2248,6 @@ def codex_adapter() -> backend_pool.Adapter:
         return cast(CodexServer, server).borrower_count() > 0
 
     return backend_pool.Adapter(
-        start=_start_codex_server,
         alive=alive,
         # The pool's generic interrupt has no turn to name. Codex's cancel path
         # goes through CodexServer.interrupt with the ids it holds; reaching
@@ -2250,14 +2296,10 @@ class CodexWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
-        # The turn borrows a process it does not own: the pool starts it, the
-        # pool stops it, and several tabs may be reading the same one.
+        # Borrowed from the pool, which starts and stops it; other tabs read it too.
         self._server: Optional[CodexServer] = None
         self._held: Optional[backend_pool.HeldProcess] = None
-        # Where this turn's stderr begins in a process that has been running
-        # since long before it. Zero until a server is borrowed, which is
-        # right for one started for this turn: everything it has said is this
-        # turn's.
+        # Where this turn's stderr begins in a process older than the turn.
         self._stderr_mark = 0
         self._inbox: Optional["queue.Queue[object]"] = None
         self._expected: list[int] = []
@@ -2266,42 +2308,27 @@ class CodexWorker(threading.Thread):
         self._accepting_input = threading.Event()
         self._thread_id = session_id or ""
         self._turn_id = ""
-        # Set when an interrupt went unconfirmed, or when a turn that was asked
-        # for could never be named: this conversation is not trusted to be
-        # carried on in the process, and the next turn resumes it from its
-        # rollout on disk instead. The thread is what is given up, never the
-        # server -- several other tabs are talking through that.
+        # The conversation given up after an unconfirmed interrupt. The next
+        # turn resumes it from disk; the server stays, other tabs are on it.
         self.abandoned_thread = ""
-        # Whether Codex has been asked to run a turn on this conversation. True
-        # from the moment the request goes out, which is before there is any id
-        # to name it by: between the two, a turn is running that a cancel
-        # cannot address.
+        # Set when Codex answered `thread/resume` with an error: the tab's
+        # session id names a conversation that no longer exists, and the
+        # window clears it so the next message starts a new one.
+        self.lost_session = False
+        # True from the moment `turn/start` goes out, before any id names it.
         self._turn_requested = False
-        # Held for the instant in which asking for a turn and hearing that this
-        # one was stopped decide which of them happened first. Whoever takes it
-        # first wins outright: either the turn is asked for and the cancel that
-        # follows knows there is something to stop, or the cancel is in and no
-        # turn is ever asked for. Nothing is sent or waited on under it.
+        # Decides whether the turn was asked for or the cancel landed first.
         self._start_gate = threading.Lock()
-        # Set once `_turn_id` will not change again -- either because the turn
-        # has been named or because this turn has stopped looking. A cancel on
-        # another thread waits on it rather than polling.
+        # Set once `_turn_id` is final, so a cancel can wait instead of polling.
         self._turn_id_known = threading.Event()
-        # Set when this turn has ended of its own accord. A cancel that lost
-        # the race to a finishing turn has nothing to interrupt, and must not
-        # read the silence that follows as Codex ignoring it.
+        # Set when the turn ended by itself, so a cancel has nothing to interrupt.
         self._finished = threading.Event()
-        # The turn id currently registered with the server, so the registration
-        # is given back exactly once.
+        # The turn id registered with the server, given back exactly once.
         self._watched = ""
-        # Whether this turn has asked for a turn of its own yet. Until it has,
-        # anything naming a turn names an older one.
+        # Until this turn asks for a turn, anything naming one names an older one.
         self._turn_asked = False
-        # The turns those earlier messages named. Once a turn has been seen to
-        # be somebody else's, it stays somebody else's however late the rest of
-        # it arrives.
+        # Turns known to be somebody else's, however late the rest of them arrive.
         self._stale_turns: set[str] = set()
-        self._request_id = 10
         self._assistant_parts: list[str] = []
         self._assistant_delta_seen: set[str] = set()
         self._assistant_streams: dict[str, list[str]] = {}
@@ -2338,12 +2365,8 @@ class CodexWorker(threading.Thread):
     def _next_id(self) -> int:
         # Ids are the server's, not the turn's: several tabs write to one
         # stdin, and two turns numbering from ten would each be handed the
-        # other's replies.
-        server = self._server
-        if server is not None:
-            return server.next_id()
-        self._request_id += 1
-        return self._request_id
+        # other's replies. Every caller runs after `_borrow_server` set it.
+        return cast(CodexServer, self._server).next_id()
 
     def steer(self, text: str) -> bool:
         if not self.accepting_input() or not self._thread_id or not self._turn_id:
@@ -2533,15 +2556,9 @@ class CodexWorker(threading.Thread):
             server.detach_listener(inbox)
         held = self._held
         if held is not None:
-            # Touched before the borrow is given back, so `busy()` cannot go
-            # false while the clock still reads turn-start: a reaper sweep
-            # landing between these two statements must see either a still
-            # busy server or a freshly touched one, never idle-since-the-
-            # start-of-a-turn-that-just-finished. The idle clock is time with
-            # NO turn, so it starts here rather than when the turn began.
-            # Started at the take instead, a turn that ran for fourteen
-            # minutes was reaped a minute after it answered -- while the next
-            # prompt was being typed.
+            # Touched before the borrow is given back, so a reaper sweep
+            # between the two sees a busy server or a freshly touched one,
+            # never one idle since the start of a turn that just finished.
             held.touch()
         if self._borrowed:
             self._borrowed = False
@@ -2626,10 +2643,6 @@ class CodexWorker(threading.Thread):
         return "on-request", {"type": "workspaceWrite", "networkAccess": True}
 
     def _do_run(self) -> None:
-        binary = find_backend_cli(BACKEND_CODEX)
-        if not binary:
-            self._fail("Codex is not installed. Run: npm install -g @openai/codex")
-            return
         if self._compact and not self._session_id:
             self._fail("There is no Codex conversation to compact yet")
             return
@@ -2693,6 +2706,14 @@ class CodexWorker(threading.Thread):
 
             if message.get("id") == thread_request:
                 error = message.get("error")
+                if error and self._session_id:
+                    # The conversation is gone, its rollout rotated or
+                    # deleted, and only this tab's session id is wrong. The
+                    # server is serving every other tab perfectly well.
+                    self.lost_session = True
+                    detail = self._error_text(error, "Codex could not resume this conversation")
+                    self._fail(f"{detail}. The next message starts a new conversation.")
+                    return
                 if error:
                     # A server that cannot start a conversation will not start
                     # the next one either; it goes rather than failing every
@@ -2797,7 +2818,7 @@ class CodexWorker(threading.Thread):
                 if method and "id" in message:
                     # It asked something, though, and an answer it never gets
                     # is a request id Codex holds for ever.
-                    self._decline_server_request(message)
+                    self._send(_declined_request(message))
                 continue
             if self._compact and not self._turn_id:
                 # Only compaction: `thread/compact/start` answers empty, so
@@ -2890,7 +2911,7 @@ class CodexWorker(threading.Thread):
                     "clientInfo": {
                         "name": "blindpilot",
                         "title": "BlindPilot",
-                        "version": "0.3.0",
+                        "version": _app_version(),
                     },
                     # request_user_input is still marked experimental in the
                     # app-server protocol, and Codex only sends experimental
@@ -3001,25 +3022,11 @@ class CodexWorker(threading.Thread):
     def _is_this_turn(self, method: str, params: dict) -> bool:
         """Whether a message about a turn is about the turn this worker is running.
 
-        One conversation is one process's thread, and a turn that was stopped
-        goes on producing for a moment after the interrupt is sent. Those
-        messages arrive on the right thread but belong to the turn before this
-        one, and acting on their `turn/completed` used to fail the new turn
-        instantly with "Codex turn was interrupted" -- for a person who cannot
-        see a spinner, an unexplained failure a retry then fixes.
-
-        What separates the two is not the order the messages arrive in but
-        where they sit relative to the point this turn asked for a turn --
-        which is what `_CODEX_ASKED` marks. Nothing said before that can be
-        about this turn. Anything after it may be, in whatever order it comes,
-        so a compaction turn -- whose id no reply ever carries -- does not
-        depend on `turn/started` arriving before its items.
-
-        Position alone cannot judge a straggler that arrives after the mark, so
-        the turns rejected before it are remembered by name as well. Leftovers
-        are exactly what queues ahead of the mark, so in the ordinary case the
-        first of them names the turn and the rest are recognised however late
-        they come.
+        A stopped turn goes on producing for a moment after the interrupt, on
+        the same thread. What separates its messages from this turn's is where
+        they sit relative to `_CODEX_ASKED`, the mark this turn put in its inbox
+        when it asked for a turn, plus the names of turns already rejected, for
+        stragglers that arrive after the mark.
         """
         named = self._turn_named(params)
         if not named:
@@ -3089,43 +3096,7 @@ class CodexWorker(threading.Thread):
         elif method == "item/tool/requestUserInput":
             self._answer_user_input(request_id, message.get("params") or {})
         else:
-            self._send(
-                {
-                    "id": request_id,
-                    "error": {
-                        "code": -32601,
-                        "message": "BlindPilot cannot handle this request yet",
-                    },
-                }
-            )
-
-    def _decline_server_request(self, message: dict) -> None:
-        """Say no to something a turn that is over asked for.
-
-        Codex holds an unanswered request id open, so silence is not the same
-        as refusal. Declining is: the turn it belongs to was interrupted, and
-        the person is not going to be shown a question from it.
-        """
-        method = str(message.get("method") or "")
-        request_id = message.get("id")
-        if method == "item/tool/requestUserInput":
-            questions = _codex_questions((message.get("params") or {}).get("questions"))
-            answers: dict[str, dict] = {
-                question.id or question.question: {"answers": []} for question in questions
-            }
-            self._send({"id": request_id, "result": {"answers": answers}})
-        elif method.endswith("requestApproval"):
-            self._send({"id": request_id, "result": {"decision": "decline"}})
-        else:
-            self._send(
-                {
-                    "id": request_id,
-                    "error": {
-                        "code": -32601,
-                        "message": "BlindPilot cannot handle this request yet",
-                    },
-                }
-            )
+            self._send(_unhandled_request(request_id))
 
     def _answer_user_input(self, request_id: object, params: dict) -> None:
         """Put request_user_input in front of the person and answer it.
@@ -3208,6 +3179,17 @@ def _strip_terminal_noise(text: str) -> str:
     return text.strip()
 
 
+def _freebuff_chat_folders(cwd: str) -> list[Path]:
+    """Every folder a FreeBuff chat for this workspace could be stored under."""
+    root = Path.home() / ".config" / "manicode" / "projects"
+    candidates = [root / Path(cwd).name / "chats", root / "chats"]
+    try:
+        candidates.extend(path for path in root.glob("*/chats") if path not in candidates)
+    except OSError:
+        pass
+    return candidates
+
+
 def _freebuff_chat_dirs(cwd: str) -> dict[str, float]:
     """Return known FreeBuff chat ids and modification times.
 
@@ -3215,14 +3197,8 @@ def _freebuff_chat_dirs(cwd: str) -> dict[str, float]:
     the workspace basename supplied with ``--cwd``.  Search every chat bucket
     so a newly-created id can still be captured and resumed.
     """
-    root = Path.home() / ".config" / "manicode" / "projects"
-    candidates = [root / Path(cwd).name / "chats", root / "chats"]
-    try:
-        candidates.extend(p for p in root.glob("*/chats") if p not in candidates)
-    except OSError:
-        pass
     found: dict[str, float] = {}
-    for folder in candidates:
+    for folder in _freebuff_chat_folders(cwd):
         try:
             for path in folder.iterdir():
                 if path.is_dir():
@@ -3236,13 +3212,7 @@ def _freebuff_chat_path(cwd: str, session_id: str) -> Optional[Path]:
     """Locate one FreeBuff chat regardless of its Git-derived project bucket."""
     if not session_id:
         return None
-    root = Path.home() / ".config" / "manicode" / "projects"
-    candidates = [root / Path(cwd).name / "chats", root / "chats"]
-    try:
-        candidates.extend(path for path in root.glob("*/chats") if path not in candidates)
-    except OSError:
-        pass
-    for folder in candidates:
+    for folder in _freebuff_chat_folders(cwd):
         candidate = folder / session_id
         if candidate.is_dir():
             return candidate
@@ -3386,6 +3356,10 @@ _FREEBUFF_FRAME_SECONDS = 0.1
 # never reach the listener until the turn ended.
 _FREEBUFF_MAX_LAG_SECONDS = 0.4
 
+# The longest a single FreeBuff turn is listened to. Reaching it is not the
+# turn finishing, and is reported as what it is - see the end of `_do_run`.
+_FREEBUFF_TURN_SECONDS = 60 * 60
+
 # How long a starting FreeBuff may paint nothing at all before the message is
 # given up on. This bounds the wait by silence rather than by the clock: any
 # repaint at all -- a download progress bar, a splash, the model picker -- is
@@ -3396,10 +3370,6 @@ _FREEBUFF_MAX_LAG_SECONDS = 0.4
 # message and an hour of silence with it. Two minutes because a first launch
 # downloads a 125MB FreeBuff and then unpacks it, and only the download half
 # draws a progress bar.
-# The longest a single FreeBuff turn is listened to. Reaching it is not the
-# turn finishing, and is reported as what it is - see the end of `_do_run`.
-_FREEBUFF_TURN_SECONDS = 60 * 60
-
 _FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
 
 # How long a mid-turn drop is listened to before it is called. A session can
@@ -3407,17 +3377,6 @@ _FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
 # and a turn abandoned at the first word of trouble would throw away work that
 # a moment of patience would have saved.
 _FREEBUFF_DROP_PATIENCE_SECONDS = 30.0
-
-# Sentence-ending punctuation, or the end of a paragraph, either of which is a
-# place a listener expects the reading to stop. The definition lives in
-# ``markdown_rows`` (which depends on nothing of ours) so the Hermes worker can
-# share it without importing this module and closing an import cycle.
-_SENTENCE_END_RE = _markdown_sentence_end_re
-
-
-def _complete_sentences(text: str) -> str:
-    """The part of ``text`` that reads as finished, or nothing yet."""
-    return complete_sentences(text)
 
 
 def _unwrap_screen_text(text: str) -> str:
@@ -3722,22 +3681,28 @@ def _freebuff_boot_ready(
     launch that has created no chat yet is taken as ready, because there is
     nothing to wait for and never sending would lose the message anyway.
     """
-    target = chat_path
+    if chat_path is not None:
+        return not _freebuff_log_pending_drop(_freebuff_log_tail(chat_path, log_offset))
+    tail = _freebuff_new_chat_log(before, cwd)
+    if tail is None:
+        return True
+    if not tail.strip():
+        # A chat folder with nothing logged yet is a boot still in progress;
+        # the recovery line arrives moments later.
+        return False
+    return not _freebuff_log_pending_drop(tail)
+
+
+def _freebuff_new_chat_log(before: dict[str, float], cwd: str) -> Optional[str]:
+    """The whole log of the chat this launch created, or None if it made none."""
+    after = _freebuff_chat_dirs(cwd)
+    new_ids = set(after) - set(before)
+    if not new_ids:
+        return None
+    target = _freebuff_chat_path(cwd, max(new_ids, key=lambda chat_id: after[chat_id]))
     if target is None:
-        after = _freebuff_chat_dirs(cwd)
-        new_ids = set(after) - set(before)
-        if not new_ids:
-            return True
-        target = _freebuff_chat_path(cwd, max(new_ids, key=lambda chat_id: after[chat_id]))
-        if target is None:
-            return True
-        tail = _freebuff_log_tail(target, 0)
-        if not tail.strip():
-            # A chat folder with nothing logged yet is a boot still in
-            # progress; the recovery line arrives moments later.
-            return False
-        return not _freebuff_log_pending_drop(tail)
-    return not _freebuff_log_pending_drop(_freebuff_log_tail(target, log_offset))
+        return None
+    return _freebuff_log_tail(target, 0)
 
 
 def _freebuff_dropped_new_chat(before: dict[str, float], cwd: str) -> bool:
@@ -3748,17 +3713,17 @@ def _freebuff_dropped_new_chat(before: dict[str, float], cwd: str) -> bool:
     chats created during this launch are consulted: a drop logged by an
     earlier session must not fail this one.
     """
-    after = _freebuff_chat_dirs(cwd)
-    new_ids = set(after) - set(before)
-    if not new_ids:
-        return False
-    target = _freebuff_chat_path(cwd, max(new_ids, key=lambda chat_id: after[chat_id]))
-    if target is None:
-        return False
-    tail = _freebuff_log_tail(target, 0)
-    if not tail.strip():
-        return False
-    return _freebuff_log_pending_drop(tail)
+    tail = _freebuff_new_chat_log(before, cwd)
+    return bool(tail and tail.strip()) and _freebuff_log_pending_drop(cast(str, tail))
+
+
+def _last_visible_line(visible: str) -> str:
+    """The last non-blank line on the screen, short enough to be spoken."""
+    lines = [line.strip() for line in _strip_terminal_noise(visible).splitlines()]
+    reason = next((line for line in reversed(lines) if line), "")
+    if len(reason) > 200:
+        reason = reason[:199] + "…"
+    return reason
 
 
 def _freebuff_launch_failure(visible: str) -> str:
@@ -3769,10 +3734,7 @@ def _freebuff_launch_failure(visible: str) -> str:
     where an application started from the Dock inherits a PATH holding no Node
     at all, and it is far more use than a guess at reinstalling.
     """
-    lines = [line.strip() for line in _strip_terminal_noise(visible).splitlines()]
-    reason = next((line for line in reversed(lines) if line), "")
-    if len(reason) > 200:
-        reason = reason[:199] + "\u2026"
+    reason = _last_visible_line(visible)
     if not reason:
         return (
             "FreeBuff's terminal closed before it was ready for a prompt, "
@@ -3799,10 +3761,7 @@ def _freebuff_startup_silence(visible: str, seconds: float) -> str:
     and simply never paints a composer to type into.
     """
     waited = int(seconds)
-    lines = [line.strip() for line in _strip_terminal_noise(visible).splitlines()]
-    reason = next((line for line in reversed(lines) if line), "")
-    if len(reason) > 200:
-        reason = reason[:199] + "\u2026"
+    reason = _last_visible_line(visible)
     if reason:
         return (
             f"FreeBuff stopped short of a prompt and printed nothing for {waited} "
@@ -3877,7 +3836,13 @@ def _spawn_freebuff_pty(
         threading.Thread(target=hide_terminal, daemon=True).start()
 
         # pywinpty accepts an argv list and supplies a real ConPTY console.
-        pty = PtyProcess.spawn(args, dimensions=(60, 180), cwd=cwd)
+        try:
+            pty = PtyProcess.spawn(args, cwd=cwd, env=subprocess_env(args[0]), dimensions=(60, 180))
+        except Exception:
+            # No pump will ever set this, and the watcher above polls
+            # EnumWindows until it is set.
+            stream_ended.set()
+            raise
         holder["pty"] = pty
         pty_pid = getattr(pty, "pid", 0)
         if pty_pid:
@@ -3885,8 +3850,11 @@ def _spawn_freebuff_pty(
         chunks: queue.Queue[str] = queue.Queue()
 
         def pump() -> None:
+            # Read to EOF rather than while alive: a terminal that dies at
+            # startup has its last line, the one that says why, still
+            # buffered after isalive() goes false.
             try:
-                while pty.isalive():
+                while True:
                     try:
                         data = pty.read(4096)
                     except Exception:
@@ -3962,8 +3930,9 @@ def _spawn_freebuff_pty(
 _FREEBUFF_PREWARM_LOCK = threading.Lock()
 _freebuff_prewarm: Optional[dict] = None
 _freebuff_prewarm_generation = 0
-# Long enough to cover thinking time between messages, short enough that an
-# abandoned terminal does not sit there all day.
+# How long an unclaimed terminal is kept before a timer closes it. Long enough
+# to cover thinking time between messages, short enough that a terminal started
+# for a message that never comes does not sit there all day.
 _FREEBUFF_PREWARM_TTL = 15 * 60
 
 
@@ -3984,6 +3953,15 @@ def _kill_pty(pty: object) -> None:
             continue
 
 
+def _end_prewarm(holding: dict) -> None:
+    """Close a waiting terminal that will not be claimed. Not under the lock."""
+    holding["ended"].set()
+    timer = holding.get("timer")
+    if timer is not None:
+        timer.cancel()
+    _kill_pty(holding["pty"])
+
+
 def discard_freebuff_prewarm() -> None:
     """Throw away any terminal held for the next message."""
     global _freebuff_prewarm, _freebuff_prewarm_generation
@@ -3991,8 +3969,7 @@ def discard_freebuff_prewarm() -> None:
         _freebuff_prewarm_generation += 1
         holding, _freebuff_prewarm = _freebuff_prewarm, None
     if holding is not None:
-        holding["ended"].set()
-        _kill_pty(holding["pty"])
+        _end_prewarm(holding)
 
 
 def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: float = 0.0) -> None:
@@ -4005,7 +3982,14 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
     binary = find_backend_cli(BACKEND_FREEBUFF)
     if not binary:
         return
-    key = (os.path.abspath(cwd), session_id or "", model or _read_freebuff_choice())
+    # Resolved the same way the turn resolves it, or a fresh install with no
+    # recorded choice prewarms under "" and the turn, looking for the
+    # preferred model, kills the waiting terminal every time.
+    key = (
+        os.path.abspath(cwd),
+        session_id or "",
+        model or _read_freebuff_choice() or FREEBUFF_PREFERRED_MODEL,
+    )
     with _FREEBUFF_PREWARM_LOCK:
         holding = _freebuff_prewarm
         if holding is not None and holding["key"] == key and not holding["ended"].is_set():
@@ -4050,7 +4034,7 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
             pty, read = _spawn_freebuff_pty(args, cwd, ended)
         except Exception:
             return
-        holding = {
+        holding: dict = {
             "key": key,
             "pty": pty,
             "read": read,
@@ -4058,12 +4042,25 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
             "before": before,
             "expires": time.monotonic() + _FREEBUFF_PREWARM_TTL,
         }
+
+        def expire() -> None:
+            global _freebuff_prewarm
+            with _FREEBUFF_PREWARM_LOCK:
+                if _freebuff_prewarm is not holding:
+                    # Claimed or replaced meanwhile; it is somebody else's now.
+                    return
+                _freebuff_prewarm = None
+            _end_prewarm(holding)
+
+        timer = threading.Timer(_FREEBUFF_PREWARM_TTL, expire)
+        timer.daemon = True
+        holding["timer"] = timer
         stale = None
         global _freebuff_prewarm
         stale, _freebuff_prewarm = _freebuff_prewarm, holding
+        timer.start()
         if stale is not None:
-            stale["ended"].set()
-            _kill_pty(stale["pty"])
+            _end_prewarm(stale)
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -4078,15 +4075,15 @@ def _take_freebuff_prewarm(cwd: str, session_id: Optional[str], model: str) -> O
         if holding is None:
             return None
         expired = time.monotonic() > holding["expires"]
-        if holding["key"] != key or expired or holding["ended"].is_set():
-            # Whatever is waiting cannot serve this message. Drop it rather
-            # than leave a terminal running for a conversation nobody resumed.
-            _freebuff_prewarm = None
-        else:
-            _freebuff_prewarm = None
+        _freebuff_prewarm = None
+        if holding["key"] == key and not expired and not holding["ended"].is_set():
+            timer = holding.get("timer")
+            if timer is not None:
+                timer.cancel()
             return holding
-    holding["ended"].set()
-    _kill_pty(holding["pty"])
+    # Whatever is waiting cannot serve this message. Drop it rather than leave
+    # a terminal running for a conversation nobody resumed.
+    _end_prewarm(holding)
     return None
 
 
@@ -4943,10 +4940,6 @@ class FreebuffWorker(threading.Thread):
 
         return "\n".join(thinking).strip(), "\n".join(answer).strip()
 
-    def _clean_freebuff_screen(self, visible: str) -> str:
-        """Compatibility helper returning only user-facing answer text."""
-        return self._freebuff_sections(visible)[1]
-
 
 # ------------------------------------------------------------------------
 # opencode
@@ -5166,16 +5159,19 @@ class OpencodeServer:
 
     def stop(self) -> None:
         proc = self._proc
-        if proc.poll() is None:
+        if proc.poll() is not None:
+            return
+        if platform.system() != "Windows":
             # It owns a SQLite database, so it is asked to close before it is
-            # made to. The group sweep afterwards is for anything it started
-            # that did not go with it.
+            # made to. On Windows terminate() is TerminateProcess, which asks
+            # nothing and would leave its children behind, so there the tree
+            # is ended in one go below.
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 pass
-            end_process_group(proc, timeout=5)
+        end_process_group(proc, timeout=5)
 
 
 def opencode_server() -> OpencodeServer:
@@ -5560,17 +5556,11 @@ def _opencode_questions(raw: object) -> tuple[Question, ...]:
         text = str(entry.get("question") or "").strip()
         if not text:
             continue
-        options: list[QuestionOption] = []
-        for option in entry.get("options") or []:
-            if isinstance(option, dict) and option.get("label"):
-                options.append(
-                    QuestionOption(str(option["label"]), str(option.get("description") or ""))
-                )
         questions.append(
             Question(
                 question=text,
                 header=str(entry.get("header") or ""),
-                options=tuple(options),
+                options=_question_options(entry.get("options")),
                 multi_select=bool(entry.get("multiple")),
             )
         )

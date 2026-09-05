@@ -75,3 +75,70 @@ def test_the_deferred_checks_are_guarded_too(monkeypatch):
     """`_show_step` queues these, so they can land one iteration after a close."""
     app.SetupWizard._check_cli(_Dead())
     app.SetupWizard._check_signin(_Dead())
+
+
+class _Label:
+    def __init__(self):
+        self.text = ""
+
+    def SetLabel(self, text):
+        self.text = text
+
+    def GetLabel(self):
+        return self.text
+
+
+class _Page:
+    def Layout(self):
+        pass
+
+
+def _signin_wizard(monkeypatch):
+    stub = type("WizardStub", (), {"Layout": lambda self: None})()
+    stub.backend = app.BACKEND_CLAUDE
+    stub._login = None
+    stub._open_page_btn = type("Btn", (), {"Enable": lambda self, on=True: None})()
+    stub._find_selected_cli = lambda: "C:/somewhere/claude.exe"
+    stub._signin_status = _Label()
+    stub._pages = [_Page(), _Page(), _Page()]
+    stub._show_signin_status = lambda text: app.SetupWizard._show_signin_status(stub, text)
+    stub._on_signin_checked = lambda backend, ok: app.SetupWizard._on_signin_checked(
+        stub, backend, ok
+    )
+    return stub
+
+
+def test_the_sign_in_probe_runs_off_the_wizards_own_thread(monkeypatch):
+    """`backend_auth_ok` runs a CLI with a 12 to 25 second timeout. On the GUI
+    thread that froze the wizard, and the screen reader, for the duration."""
+    said = _quiet(monkeypatch)
+    probed_on: list[str] = []
+
+    class _Thread:
+        def __init__(self, target, daemon=False, name=""):
+            self._target = target
+
+        def start(self):
+            probed_on.append("thread")
+            self._target()
+
+    monkeypatch.setattr(app.threading, "Thread", _Thread)
+    monkeypatch.setattr(app.wx, "CallAfter", lambda fn, *a: fn(*a))
+    monkeypatch.setattr(app, "backend_auth_ok", lambda backend: probed_on.append("probe") or True)
+    wizard = _signin_wizard(monkeypatch)
+
+    app.SetupWizard._check_signin(wizard)
+
+    assert probed_on == ["thread", "probe"], "the probe ran before a thread was started"
+    assert "signed in" in wizard._signin_status.text
+    assert said[-1] == wizard._signin_status.text
+
+
+def test_a_probe_for_a_backend_no_longer_chosen_is_ignored(monkeypatch):
+    said = _quiet(monkeypatch)
+    wizard = _signin_wizard(monkeypatch)
+    wizard.backend = app.BACKEND_CODEX
+
+    app.SetupWizard._on_signin_checked(wizard, app.BACKEND_CLAUDE, True)
+
+    assert said == []

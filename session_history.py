@@ -121,7 +121,10 @@ class HistoryTurn:
 # slash-command wrappers — all of it wrapped in an XML-ish element. Removing
 # whole elements leaves exactly what the person typed, which is what a title
 # has to be and what a replayed conversation should show.
-_INJECTED_BLOCK = re.compile(r"<([A-Za-z][\w.:-]*)>[\s\S]*?</\1>")
+# One opening or closing tag. Elements are matched with a stack in a single
+# pass over these (see `_without_injected_blocks`); a backreference pattern
+# rescanned to the end of the text for every tag that was never closed.
+_TAG = re.compile(r"<(/?)([A-Za-z][\w.:-]*)>")
 
 # Injected preamble that is not wrapped in an element of its own. Codex writes
 # this heading above the instructions it loaded from AGENTS.md.
@@ -129,7 +132,7 @@ _INJECTED_MARKERS = (re.compile(r"^#\s*AGENTS\.md instructions.*$", re.IGNORECAS
 
 
 def _home() -> Path:
-    """The home directory the three history stores hang off.
+    """The home directory the history stores hang off.
 
     A function rather than a constant so tests can point the whole module at a
     temporary directory.
@@ -170,15 +173,53 @@ def clean_user_text(text: str) -> str:
     remainder = (text or "").strip()
     if not remainder:
         return ""
-    # Repeated because removing an outer element can expose another one that
-    # was nested inside it.
-    previous = ""
-    while previous != remainder:
-        previous = remainder
-        remainder = _INJECTED_BLOCK.sub(" ", remainder)
+    remainder = _without_injected_blocks(remainder)
     for marker in _INJECTED_MARKERS:
         remainder = marker.sub(" ", remainder)
     return remainder.strip()
+
+
+def _without_injected_blocks(text: str) -> str:
+    """``text`` with every ``<name>...</name>`` element replaced by a space.
+
+    One pass with a stack of open tags: a closing tag removes everything back
+    to its nearest matching opener, nested elements included, and an opener
+    that is never closed is left as the words it is ("what does <div> mean").
+    Linear in the number of tags, so a pasted file full of generics or an
+    HTML fragment costs milliseconds rather than seconds.
+    """
+    open_tags: List[tuple] = []  # (name, start offset), innermost last
+    open_counts: dict = {}
+    spans: List[tuple] = []  # (start, end) of elements to remove, in order
+    for match in _TAG.finditer(text):
+        closing, name = match.group(1), match.group(2)
+        if not closing:
+            open_tags.append((name, match.start()))
+            open_counts[name] = open_counts.get(name, 0) + 1
+            continue
+        if not open_counts.get(name):
+            continue
+        depth = len(open_tags) - 1
+        while open_tags[depth][0] != name:
+            depth -= 1
+        start = open_tags[depth][1]
+        for popped, _offset in open_tags[depth:]:
+            open_counts[popped] -= 1
+        del open_tags[depth:]
+        # An element that started inside this one is covered by it.
+        while spans and spans[-1][0] >= start:
+            spans.pop()
+        spans.append((start, match.end()))
+    if not spans:
+        return text
+    pieces: List[str] = []
+    last = 0
+    for start, end in spans:
+        pieces.append(text[last:start])
+        pieces.append(" ")
+        last = end
+    pieces.append(text[last:])
+    return "".join(pieces)
 
 
 def _content_text(content: object, kinds: Sequence[str]) -> str:
@@ -286,6 +327,10 @@ def _claude_project_dirs(cwd: Optional[str]) -> List[Path]:
 def _claude_user_text(record: dict) -> str:
     """The typed text of a user record, or "" if it is not one."""
     if record.get("type") != "user" or record.get("isMeta") or record.get("isSidechain"):
+        return ""
+    if record.get("isCompactSummary"):
+        # The "this session is being continued" summary Claude Code writes
+        # after compaction. It is a user record, but nobody typed it.
         return ""
     message = record.get("message")
     if not isinstance(message, dict):
@@ -518,14 +563,13 @@ def _hermes_connect(path: Path):
 
     Read-only matters: this is the database a running Hermes owns. The URI form
     fails outright rather than creating an empty file when the path is wrong,
-    which is what a plain connect() would do.
+    which is what a plain connect() would do. `as_uri` escapes the path: a
+    `#`, `?` or `%` in it would otherwise be read as URI syntax, dropping
+    both the rest of the path and the read-only flag.
     """
-    if not path.is_file():
-        return None
     try:
-        import sqlite3
-
-        connection = sqlite3.connect(f"file:{path}?mode=ro&immutable=0", uri=True, timeout=5.0)
+        uri = f"{path.absolute().as_uri()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=5.0)
         connection.row_factory = sqlite3.Row
         return connection
     except Exception:  # noqa: BLE001 - a locked or corrupt store is just absent
@@ -866,6 +910,10 @@ def _opencode_entries(cwd: Optional[str]) -> List[HistoryEntry]:
                 title = _opencode_first_prompt(connection, str(session_id))
             if not title:
                 continue
+            try:
+                modified = float(updated or 0) / 1000.0
+            except (TypeError, ValueError):
+                modified = 0.0
             entries.append(
                 HistoryEntry(
                     backend=BACKEND_OPENCODE,
@@ -875,7 +923,7 @@ def _opencode_entries(cwd: Optional[str]) -> List[HistoryEntry]:
                     # session id is what identifies it and the path is only
                     # here so the picker has something to show.
                     path=str(_opencode_db()),
-                    modified=float(updated or 0) / 1000.0,
+                    modified=modified,
                     cwd=directory,
                     folder=_folder_name(directory),
                 )
@@ -1028,8 +1076,6 @@ def describe_age(modified: float, now: Optional[float] = None) -> str:
         return "unknown"
     now = time.time() if now is None else now
     seconds = now - modified
-    if seconds < 0:
-        return "just now"
     if seconds < 60:
         return "just now"
     minutes = int(seconds // 60)

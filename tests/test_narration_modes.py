@@ -61,8 +61,10 @@ def test_following_everything_is_the_default(monkeypatch):
     assert app._Settings().narration == app.NARRATION_EVERYTHING
 
 
-def test_a_mode_this_version_does_not_know_falls_back(monkeypatch):
-    monkeypatch.setattr(app, "_load_config", lambda: {"narration": "interpretive dance"})
+@pytest.mark.parametrize("stored", ["interpretive dance", [], {}, 3])
+def test_a_mode_this_version_does_not_know_falls_back(monkeypatch, stored):
+    """A hand-edited or corrupt value, of any type, must not stop the app."""
+    monkeypatch.setattr(app, "_load_config", lambda: {"narration": stored})
 
     assert app._Settings().narration == app.NARRATION_EVERYTHING
 
