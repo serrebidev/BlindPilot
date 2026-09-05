@@ -282,7 +282,7 @@ def announce(text: str, urgent: bool = False) -> None:
 
 
 APP_NAME = "BlindPilot"
-APP_VERSION = "0.21.2"
+APP_VERSION = "0.21.3"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}

@@ -3603,13 +3603,28 @@ def _freebuff_run_status(chat: Optional[Path], offset: int = 0) -> str:
     tail = _freebuff_log_tail(chat, offset)
     if not tail:
         return ""
-    if "Agent run cancelled by user" in tail:
+    messages = _freebuff_log_messages(tail)
+    if any(message.startswith("Agent run cancelled by user") for message in messages):
         return "cancelled"
-    if "Main prompt finished" in tail:
+    if "Main prompt finished" in messages:
         return "complete"
     if _freebuff_log_pending_drop(tail):
         return "disconnected"
     return ""
+
+
+def _freebuff_log_messages(tail: str) -> list[str]:
+    """Read event names, never prompt or answer text inside the log data."""
+    messages = []
+    for line in tail.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            # The final line can still be in the middle of being written.
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("msg"), str):
+            messages.append(entry["msg"])
+    return messages
 
 
 def _freebuff_log_pending_drop(tail: str) -> bool:
@@ -3620,10 +3635,10 @@ def _freebuff_log_pending_drop(tail: str) -> bool:
     pending at the end is the session's state right now.
     """
     pending = False
-    for line in tail.splitlines():
-        if "session over" in line:
+    for line in _freebuff_log_messages(tail):
+        if line.startswith("[chat-runtime] Freebuff session over;"):
             pending = True
-        elif "Reconnection detected" in line or "Start agent" in line:
+        elif line.startswith(("Reconnection detected", "Start agent ")):
             pending = False
     return pending
 
@@ -3866,13 +3881,31 @@ def _spawn_freebuff_pty(
         timeout=0.25,
     )
 
+    posix_chunks: queue.Queue[str] = queue.Queue()
+
+    def pump_posix() -> None:
+        # A prewarmed terminal has no worker reading it yet. Drain it from
+        # launch, as on Windows, or a full PTY buffer blocks the TUI before
+        # it can process input even though its connection log says ready.
+        try:
+            while not stream_ended.is_set():
+                try:
+                    data = child.read_nonblocking(4096, timeout=0.25)
+                except pexpect.TIMEOUT:
+                    continue
+                except (pexpect.EOF, OSError):
+                    break
+                if data:
+                    posix_chunks.put(data)
+        finally:
+            stream_ended.set()
+
+    threading.Thread(target=pump_posix, daemon=True).start()
+
     def read_posix(timeout: float) -> str:
         try:
-            return child.read_nonblocking(4096, timeout=timeout)
-        except pexpect.TIMEOUT:
-            return ""
-        except pexpect.EOF:
-            stream_ended.set()
+            return posix_chunks.get(timeout=timeout)
+        except queue.Empty:
             return ""
 
     return child, read_posix
@@ -3884,6 +3917,7 @@ def _spawn_freebuff_pty(
 # continue, and handed to the run that claims it.
 _FREEBUFF_PREWARM_LOCK = threading.Lock()
 _freebuff_prewarm: Optional[dict] = None
+_freebuff_prewarm_generation = 0
 # Long enough to cover thinking time between messages, short enough that an
 # abandoned terminal does not sit there all day.
 _FREEBUFF_PREWARM_TTL = 15 * 60
@@ -3908,8 +3942,9 @@ def _kill_pty(pty: object) -> None:
 
 def discard_freebuff_prewarm() -> None:
     """Throw away any terminal held for the next message."""
-    global _freebuff_prewarm
+    global _freebuff_prewarm, _freebuff_prewarm_generation
     with _FREEBUFF_PREWARM_LOCK:
+        _freebuff_prewarm_generation += 1
         holding, _freebuff_prewarm = _freebuff_prewarm, None
     if holding is not None:
         holding["ended"].set()
@@ -3922,6 +3957,7 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
     Doing nothing here is always safe: a message that finds no terminal waiting,
     or one started for a different conversation, simply starts its own.
     """
+    global _freebuff_prewarm_generation
     binary = find_backend_cli(BACKEND_FREEBUFF)
     if not binary:
         return
@@ -3933,10 +3969,22 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
             # throw away a terminal that has finished starting for one that has
             # not, which is the opposite of the point.
             return
+        _freebuff_prewarm_generation += 1
+        generation = _freebuff_prewarm_generation
 
     def work() -> None:
         if delay:
             time.sleep(delay)
+        # Claiming a terminal must wait for an in-progress spawn to publish
+        # it. Otherwise Send launches a second CLI and chat discovery can
+        # follow the idle background chat forever. Delayed starts must also
+        # be invalidated when Send or a newer warmup has already taken over.
+        with _FREEBUFF_PREWARM_LOCK:
+            if generation != _freebuff_prewarm_generation:
+                return
+            launch()
+
+    def launch() -> None:
         # FreeBuff reads the selected model once, at launch, and rewrites the
         # setting to its own recommendation after a turn. Applying the choice
         # before the terminal starts is what makes a waiting one usable.
@@ -3967,9 +4015,8 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
             "expires": time.monotonic() + _FREEBUFF_PREWARM_TTL,
         }
         stale = None
-        with _FREEBUFF_PREWARM_LOCK:
-            global _freebuff_prewarm
-            stale, _freebuff_prewarm = _freebuff_prewarm, holding
+        global _freebuff_prewarm
+        stale, _freebuff_prewarm = _freebuff_prewarm, holding
         if stale is not None:
             stale["ended"].set()
             _kill_pty(stale["pty"])
@@ -3980,8 +4027,9 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
 def _take_freebuff_prewarm(cwd: str, session_id: Optional[str], model: str) -> Optional[dict]:
     """Claim the waiting terminal, if it is the one this message needs."""
     key = (os.path.abspath(cwd), session_id or "", model)
-    global _freebuff_prewarm
+    global _freebuff_prewarm, _freebuff_prewarm_generation
     with _FREEBUFF_PREWARM_LOCK:
+        _freebuff_prewarm_generation += 1
         holding = _freebuff_prewarm
         if holding is None:
             return None

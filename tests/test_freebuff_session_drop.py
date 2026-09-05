@@ -17,6 +17,8 @@ for its whole hour. The chat log is the only place the drop is written down.
 from __future__ import annotations
 
 import agent_backends
+import json
+import pytest
 from agent_backends import FreebuffWorker, _freebuff_picker_options, _freebuff_run_status
 
 CATALOG = [
@@ -85,6 +87,46 @@ REJOIN_LOG = (
     '{"level":"INFO","msg":"[chat-runtime] Freebuff session over; '
     'holding queued messages until rejoin"}\n'
 )
+
+
+@pytest.mark.parametrize(
+    "quoted_event",
+    ["Main prompt finished", "Agent run cancelled by user", "session over"],
+)
+def test_prompt_and_answer_text_cannot_end_a_turn(tmp_path, quoted_event):
+    log = tmp_path / "log.jsonl"
+    log.write_text(
+        json.dumps({"msg": "Sending message", "data": {"prompt": quoted_event}}) + "\n",
+        encoding="utf-8",
+    )
+    assert _freebuff_run_status(tmp_path) == ""
+
+
+def test_quoted_reconnection_cannot_release_a_held_message(tmp_path):
+    (tmp_path / "log.jsonl").write_text(
+        REJOIN_LOG
+        + json.dumps({"msg": "Diagnostic", "data": {"text": "Reconnection detected"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert not agent_backends._freebuff_boot_ready(".", {}, tmp_path, 0)
+
+
+def test_partial_log_line_cannot_complete_a_turn(tmp_path):
+    log = tmp_path / "log.jsonl"
+    log.write_text('{"msg":"Main prompt finished"', encoding="utf-8")
+    assert _freebuff_run_status(tmp_path) == ""
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("}\n")
+    assert _freebuff_run_status(tmp_path) == "complete"
+
+
+def test_prompt_preview_in_event_name_is_not_a_disconnect(tmp_path):
+    (tmp_path / "log.jsonl").write_text(
+        json.dumps({"msg": "Start agent base step 1 (abc - Prompt: session over)"}) + "\n",
+        encoding="utf-8",
+    )
+    assert _freebuff_run_status(tmp_path) == ""
 
 
 def test_the_v168_welcome_screen_is_read_without_a_focus_marker():
