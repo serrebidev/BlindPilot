@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 
@@ -59,7 +60,7 @@ BUILTIN_PROVIDER_NOTES = {
     ),
     PROVIDER_CLAUDE: (
         "Claude connection addresses are built in. Enter an account name and your Anthropic API key. "
-        "Claude uses Anthropic's Messages protocol, so file attachments are not available on this account type."
+        "Claude uses Anthropic's Messages protocol. File attachments are available on OpenRouter accounts only."
     ),
     PROVIDER_GEMINI: (
         "Gemini connection addresses are built in. Enter an account name and your Google AI Studio API key. "
@@ -87,6 +88,11 @@ BUILTIN_PROVIDER_NOTES = {
         "name and your OpenCode Go API key. You do not need to enter or verify any URL."
     ),
 }
+
+# Where CredentialStore keeps the key on this platform, for the two places the
+# dialog names it. Off Windows the store is whatever keyring backend the desktop
+# provides: the macOS Keychain, or the Secret Service on Linux.
+CREDENTIAL_STORE_NAME = "Windows Credential Manager" if os.name == "nt" else "the system keychain"
 
 CUSTOM_PROVIDER_NOTE = (
     "This account type is only for a server that implements an OpenAI-compatible API and is not one "
@@ -135,7 +141,11 @@ class AccountEditorDialog(wx.Dialog):
         self.provider.SetName("Provider")
         main_grid.Add(self.provider, 1, wx.EXPAND)
 
-        self.api_key = self._add_text(main_grid, panel, "API key:", "API key", password=True)
+        self.api_key_label = wx.StaticText(panel, label="API key:")
+        main_grid.Add(self.api_key_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.api_key = wx.TextCtrl(panel, style=wx.TE_PASSWORD)
+        self.api_key.SetName("API key")
+        main_grid.Add(self.api_key, 1, wx.EXPAND)
         self.default_model = self._add_text(
             main_grid, panel, "Default model, optional:", "Default model"
         )
@@ -223,7 +233,7 @@ class AccountEditorDialog(wx.Dialog):
         note = wx.StaticText(
             panel,
             label=(
-                "API keys are stored in Windows Credential Manager. OpenRouter response caching is "
+                f"API keys are stored in {CREDENTIAL_STORE_NAME}. OpenRouter response caching is "
                 "always disabled and cached OpenRouter responses are rejected."
             ),
         )
@@ -278,6 +288,9 @@ class AccountEditorDialog(wx.Dialog):
         self.provider.SetSelection(provider_index)
 
         if self.account.id is not None:
+            # An empty field on OK leaves the stored key as it is (see on_ok),
+            # so the label has to say so; the field itself gives nothing away.
+            self.api_key_label.SetLabel("API key, blank keeps the stored key:")
             try:
                 self.api_key.SetValue(self.credentials.get_api_key(int(self.account.id)))
             except CredentialStoreError:
@@ -397,6 +410,7 @@ class AccountEditorDialog(wx.Dialog):
         account_id: int | None = None
         try:
             account_id = self.db.save_account(self.account)
+            # Blank means keep whatever key is stored, as the field's label says.
             if api_key:
                 self.credentials.set_api_key(account_id, api_key)
         except sqlite3.IntegrityError:
@@ -420,7 +434,7 @@ class AccountEditorDialog(wx.Dialog):
                         "Could not roll back new account metadata after credential storage failed"
                     )
             wx.MessageBox(
-                f"Could not store the API key in Windows Credential Manager: {exc}",
+                f"Could not store the API key in {CREDENTIAL_STORE_NAME}: {exc}",
                 "Account Settings",
                 wx.OK | wx.ICON_ERROR,
                 self,

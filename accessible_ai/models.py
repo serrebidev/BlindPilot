@@ -170,7 +170,6 @@ OPENROUTER_SERVER_TOOLS: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
-SERVER_TOOL_LABELS = {name: label for name, label, _description in OPENROUTER_SERVER_TOOLS}
 SERVER_TOOL_NAMES = tuple(name for name, _label, _description in OPENROUTER_SERVER_TOOLS)
 
 # The two tools that take settings of their own.

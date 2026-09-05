@@ -185,7 +185,7 @@ Help, Check for Updates asks GitHub Releases for a newer version, downloads it, 
 2. `pip install -r requirements.txt`
 3. `python blind_pilot.py`
 
-`blind_pilot.py` is the entry point; the code is in `blindpilot_app.py`. `claude_reader.py` is a compatibility alias for the original application's name.
+`blind_pilot.py` is the entry point; the code is in `blindpilot_app.py`.
 
 ## Build
 

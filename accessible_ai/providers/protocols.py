@@ -47,6 +47,26 @@ TEXT_EXTENSIONS = {
 }
 
 
+LENGTH_LIMIT_NOTICE = "Response cut off at the model's length limit"
+
+
+def _raise_choice_error(choice: dict[str, Any]) -> None:
+    """OpenRouter reports a failure part-way through inside the choice itself.
+
+    It arrives as `choices[0].error` with `finish_reason: "error"`, not as the
+    top-level error object `iter_sse_json` already raises on. Left alone it
+    ended as "completed without returning any text".
+    """
+    error = choice.get("error")
+    if not error:
+        return
+    if isinstance(error, dict):
+        detail = error.get("message") or str(error)
+    else:
+        detail = str(error)
+    raise ProviderError(f"Provider stream error: {detail}")
+
+
 def attachment_content_part(attachment: MessageAttachment) -> dict[str, Any]:
     encoded = base64.b64encode(attachment.data).decode("ascii")
     mime_type = attachment.mime_type or "application/octet-stream"
@@ -265,6 +285,7 @@ class ProtocolMixin(BaseProvider):
             body["plugins"] = settings.plugins
 
         received_text = False
+        cut_off = False
         sources = SourceCollector()
         tools = ToolCallCollector()
         with self.client() as client:
@@ -279,6 +300,8 @@ class ProtocolMixin(BaseProvider):
                         first = choices[0]
                         if not isinstance(first, dict):
                             continue
+                        _raise_choice_error(first)
+                        cut_off = cut_off or first.get("finish_reason") == "length"
                         delta = first.get("delta", {})
                         if not isinstance(delta, dict):
                             continue
@@ -303,6 +326,8 @@ class ProtocolMixin(BaseProvider):
                 data = response.json()
                 choices = data.get("choices", []) if isinstance(data, dict) else []
                 if choices and isinstance(choices[0], dict):
+                    _raise_choice_error(choices[0])
+                    cut_off = choices[0].get("finish_reason") == "length"
                     message = choices[0].get("message", {})
                     if isinstance(message, dict):
                         thinking = reasoning_text(message)
@@ -319,6 +344,10 @@ class ProtocolMixin(BaseProvider):
         listed = sources.listing()
         if listed:
             yield StreamEvent("sources", text=listed, metadata={"sources": sources.as_list()})
+        if cut_off:
+            # Otherwise a sentence that stops mid-word is announced as complete.
+            # Recorded into History so the reason is still there afterwards.
+            yield StreamEvent("status", text=LENGTH_LIMIT_NOTICE, metadata={"record": True})
         if not received_text and not cancel.is_set():
             raise ProviderError(self._empty_response_reason(tools))
         yield StreamEvent("done")
@@ -486,8 +515,4 @@ class ProtocolMixin(BaseProvider):
                     yield StreamEvent("text", text=text)
         if not received_text and not cancel.is_set():
             raise ProviderError("The provider completed the request without returning any text.")
-        yield StreamEvent("done")
-
-    def unsupported_mode(self, mode: str) -> Iterator[StreamEvent]:
-        raise ProviderError(f"Unsupported API mode: {mode}")
         yield StreamEvent("done")

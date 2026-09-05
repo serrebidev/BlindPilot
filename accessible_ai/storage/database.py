@@ -80,11 +80,6 @@ CREATE TABLE IF NOT EXISTS model_cache (
     model_id TEXT NOT NULL,
     PRIMARY KEY (account_id, model_id)
 );
-
-CREATE TABLE IF NOT EXISTS app_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
 """
 
 
@@ -307,13 +302,6 @@ class Database:
             conversation.id = int(cur.lastrowid)
         return int(conversation.id)
 
-    def touch_conversation(self, conversation_id: int) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (conversation_id,),
-            )
-
     def add_message(self, message: Message) -> int:
         if message.conversation_id is None:
             raise ValueError("conversation_id is required")
@@ -348,6 +336,27 @@ class Database:
                 "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (row["conversation_id"],),
             )
+
+    def last_message(self, conversation_id: int) -> Message | None:
+        """The newest message alone, without its attachments.
+
+        For asking whose turn it was. `list_messages` loads every attachment
+        blob in the conversation, which is far more than that question needs.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id, conversation_id, role, content FROM messages "
+                "WHERE conversation_id = ? ORDER BY id DESC LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Message(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            role=row["role"],
+            content=row["content"],
+        )
 
     def list_messages(self, conversation_id: int) -> list[Message]:
         with self.connect() as conn:
@@ -408,16 +417,3 @@ class Database:
                 (account_id,),
             ).fetchall()
         return [row["model_id"] for row in rows]
-
-    def get_setting(self, key: str, default: str = "") -> str:
-        with self.connect() as conn:
-            row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else default
-
-    def set_setting(self, key: str, value: str) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                "INSERT INTO app_settings (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, value),
-            )

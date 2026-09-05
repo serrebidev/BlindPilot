@@ -1,14 +1,12 @@
 """What the GitHub Actions workflows have to guarantee.
 
-The release workflow does run the tests and both static checks — but only on a
-`v*` tag or a manual dispatch, which means nothing verifies a commit until
-somebody has already decided to ship it. A broken commit is found at tag time,
-with the release half made.
+ci.yml runs the tests and static checks on every push and pull request, and
+release.yml runs them again on a tag. These keep those triggers, the platforms
+and the checks from being quietly dropped.
 
-These read the workflow files as text rather than parsing YAML, so no parser
-is added to the test dependencies for four assertions. They are not checking
-that the workflows *work* — only CI itself can show that — but they do keep
-the triggers and the platforms from being quietly dropped.
+They read the workflow files as text rather than parsing YAML, so no parser is
+added to the test dependencies. They are not checking that the workflows work,
+only CI itself can show that.
 """
 
 from __future__ import annotations
@@ -135,3 +133,26 @@ def test_the_job_that_publishes_still_has_what_it_needs():
     assert publishing, "nothing publishes a release any more"
     for text in publishing:
         assert "contents: write" in text, "the publishing workflow cannot write a release"
+
+
+def test_every_multi_command_step_fails_on_its_first_failing_command():
+    """A `run: |` block with two commands and no `shell:` is two checks on
+    Linux and one on Windows: pwsh, the Windows default, reports only the last
+    command's exit code, so `ruff check` can fail and the step stay green."""
+    for name, text in _workflow_text().items():
+        steps = text.split("\n      - name: ")[1:]
+        for step in steps:
+            if "run: |" not in step:
+                continue
+            block = step.split("run: |", 1)[1]
+            commands = [
+                line
+                for line in block.splitlines()
+                if line.startswith("          ")
+                and line.strip()
+                and not line.strip().startswith("#")
+            ]
+            if len(commands) < 2:
+                continue
+            title = step.splitlines()[0]
+            assert "shell:" in step, f"{name}: step {title!r} runs several commands with no shell:"

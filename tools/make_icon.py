@@ -33,8 +33,8 @@ ICNS_SIZES = {
     "ic08": 256,
     "ic09": 512,
     "ic10": 1024,
-    "ic11": 64,  # 32@2x
-    "ic12": 32,  # 16@2x
+    "ic11": 32,  # 16@2x
+    "ic12": 64,  # 32@2x
     "ic13": 256,  # 128@2x
     "ic14": 512,  # 256@2x
 }
@@ -70,17 +70,6 @@ def _rounded_rect_distance(px, py, size, radius):
     outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
     inside = min(max(qx, qy), 0.0)
     return outside + inside - radius
-
-
-def render(size: int) -> tuple[list[tuple[int, int, int, int]], int]:
-    """Return a list of (r, g, b, a) pixels for *size* (any power of two).
-
-    The master render runs at TRUE_SIZE with AA*AA samples per pixel; smaller
-    sizes are box-filtered down from it, so every output is the same design.
-    """
-    master, _ = _render_at(TRUE_SIZE)
-    pixels, _ = _downsample(master, TRUE_SIZE, size)
-    return pixels, size
 
 
 def _render_at(size: int) -> tuple[list[tuple[int, int, int, int]], int]:

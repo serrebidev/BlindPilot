@@ -219,6 +219,36 @@ def test_emoji_in_code_is_removed_but_code_structure_kept():
     assert code.payload == "if x:\n    do()  "  # indentation preserved, emoji gone
 
 
+def test_html_block_text_is_kept_as_a_prose_row():
+    # markdown-it parses a line starting with a block tag as an html_block
+    # token. Its words are the answer too; only the tags go.
+    text = "Intro.\n\n<details>\n<summary>More</summary>\nHidden text.\n</details>\n\nAfter."
+    rows = parse_response(text, 1)
+    assert kinds(rows) == ["header", "prose", "prose", "prose"]
+    assert rows[2].payload == "More\nHidden text."
+    assert rows[2].label == "More Hidden text."
+    assert rows[3].payload == "After."
+
+
+def test_a_table_is_read_one_row_at_a_time_in_plain_words():
+    text = "Files:\n\n| Name | Lines |\n|---|---|\n| a.py | 12 |\n| b.py | 3 |\n\nDone."
+    rows = parse_response(text, 1)
+    assert kinds(rows) == ["header", "prose", "prose", "prose", "prose", "prose"]
+    assert [row.label for row in rows[2:5]] == [
+        "Row: Name, Lines",
+        "Row: a.py, 12",
+        "Row: b.py, 3",
+    ]
+    assert rows[2].payload == "Name, Lines"
+    assert "|" not in "".join(row.payload for row in rows[1:])
+    assert rows[5].payload == "Done."
+
+
+def test_a_table_cell_holding_markup_reads_as_words():
+    rows = parse_response("| **Bold** | `code` |\n|---|---|\n| [link](http://x) | 1 |", 1)
+    assert [row.label for row in rows[1:]] == ["Row: Bold, code", "Row: link, 1"]
+
+
 if __name__ == "__main__":
     import traceback
 

@@ -17,87 +17,38 @@ from accessible_ai.models import (
 )
 
 
-BUILTIN_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
-    PROVIDER_OPENROUTER: {
-        "base_url": "https://openrouter.ai/api/v1",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_AUTO,
-    },
-    PROVIDER_OPENAI: {
-        "base_url": "https://api.openai.com/v1",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_AUTO,
-    },
-    PROVIDER_OPENCODE_GO: {
-        "base_url": "https://opencode.ai/zen/go/v1",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_AUTO,
-    },
+# Every built-in provider speaks the same four paths; only the host and the
+# API mode differ, so that is all the table below says.
+_ENDPOINTS = {
+    "models_endpoint": "/models",
+    "chat_endpoint": "/chat/completions",
+    "responses_endpoint": "/responses",
+    "messages_endpoint": "/messages",
+}
+
+_BUILTIN_PROVIDERS: dict[str, tuple[str, str]] = {
+    PROVIDER_OPENROUTER: ("https://openrouter.ai/api/v1", API_MODE_AUTO),
+    PROVIDER_OPENAI: ("https://api.openai.com/v1", API_MODE_AUTO),
+    PROVIDER_OPENCODE_GO: ("https://opencode.ai/zen/go/v1", API_MODE_AUTO),
     # Anthropic speaks only its own Messages API and authenticates with an
     # x-api-key header rather than a bearer token.  The chat and responses paths
-    # below are placeholders that this provider never calls.
-    PROVIDER_CLAUDE: {
-        "base_url": "https://api.anthropic.com/v1",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_MESSAGES,
-    },
+    # are placeholders that this provider never calls.
+    PROVIDER_CLAUDE: ("https://api.anthropic.com/v1", API_MODE_MESSAGES),
     # Google exposes Gemini through an OpenAI-compatible surface.  Only /models
     # and /chat/completions exist there.
-    PROVIDER_GEMINI: {
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_CHAT,
-    },
-    PROVIDER_Z_AI: {
-        "base_url": "https://api.z.ai/api/paas/v4",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_CHAT,
-    },
+    PROVIDER_GEMINI: ("https://generativelanguage.googleapis.com/v1beta/openai", API_MODE_CHAT),
+    PROVIDER_Z_AI: ("https://api.z.ai/api/paas/v4", API_MODE_CHAT),
     # Moonshot AI's international endpoint.
-    PROVIDER_MOONSHOT: {
-        "base_url": "https://api.moonshot.ai/v1",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_CHAT,
-    },
+    PROVIDER_MOONSHOT: ("https://api.moonshot.ai/v1", API_MODE_CHAT),
     # Kimi is Moonshot's mainland China service.  It is a separate account with
     # a separate API key, which is why it is a separate provider here.
-    PROVIDER_KIMI: {
-        "base_url": "https://api.moonshot.cn/v1",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_CHAT,
-    },
-    PROVIDER_DEEPSEEK: {
-        "base_url": "https://api.deepseek.com/v1",
-        "models_endpoint": "/models",
-        "chat_endpoint": "/chat/completions",
-        "responses_endpoint": "/responses",
-        "messages_endpoint": "/messages",
-        "api_mode": API_MODE_CHAT,
-    },
+    PROVIDER_KIMI: ("https://api.moonshot.cn/v1", API_MODE_CHAT),
+    PROVIDER_DEEPSEEK: ("https://api.deepseek.com/v1", API_MODE_CHAT),
+}
+
+BUILTIN_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
+    provider: {"base_url": base_url, "api_mode": api_mode, **_ENDPOINTS}
+    for provider, (base_url, api_mode) in _BUILTIN_PROVIDERS.items()
 }
 
 

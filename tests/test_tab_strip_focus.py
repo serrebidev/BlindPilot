@@ -147,3 +147,49 @@ def test_the_first_control_falls_through_to_the_prompt_when_responses_cannot_tak
             assert asked == ["prompt", "responses"]
         finally:
             frame.Destroy()
+
+
+def test_tab_switcher_mirrors_the_session_pages(monkeypatch, tmp_path):
+    """The strip is the session navigation: it follows the book, and drives it."""
+    with _running_app():
+        frame = _frame(monkeypatch, tmp_path)
+        try:
+            switcher, book = frame.tab_switcher, frame.notebook
+
+            def labels(control):
+                return [control.GetPageText(i) for i in range(control.GetPageCount())]
+
+            assert labels(switcher) == labels(book)
+            assert switcher.GetSelection() == book.GetSelection() == 0
+
+            second = tmp_path / "second"
+            second.mkdir()
+            frame._add_session(str(second))
+            assert switcher.GetPageCount() == book.GetPageCount() == 2
+            assert labels(switcher) == labels(book)
+            assert switcher.GetSelection() == book.GetSelection() == 1
+
+            # Renaming a conversation relabels its tab.
+            panel = book.GetPage(1)
+            frame._panel_title_changed(panel, "Fix the parser")
+            assert labels(switcher) == labels(book)
+            assert "Fix the parser" in switcher.GetPageText(1)
+
+            # Ctrl+Tab wraps, and the strip follows.
+            frame._cycle_tab(+1)
+            assert book.GetSelection() == 0
+            assert switcher.GetSelection() == 0
+            frame._cycle_tab(-1)
+            assert book.GetSelection() == 1
+            assert switcher.GetSelection() == 1
+
+            # Arrowing the strip switches the session.
+            event = wx.BookCtrlEvent(wx.wxEVT_BOOKCTRL_PAGE_CHANGED, switcher.GetId(), 0, 1)
+            frame._on_tab_switcher_changed(event)
+            assert book.GetSelection() == 0
+
+            frame._close_current_session()
+            assert switcher.GetPageCount() == book.GetPageCount() == 1
+            assert labels(switcher) == labels(book)
+        finally:
+            frame.Destroy()

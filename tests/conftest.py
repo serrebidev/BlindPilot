@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
 import uuid
@@ -42,6 +43,36 @@ def diagnostics_stay_out_of_the_real_log(monkeypatch):
         # to delete a file faulthandler is still holding.
         diagnostics.stop_logging()
         shutil.rmtree(logs, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def chat_data_stays_out_of_the_real_folder(monkeypatch):
+    """Point Chat mode's data folder at a throwaway directory for every test.
+
+    `accessible_ai.storage.paths.app_data_dir` is where chat.sqlite3 and the
+    chat log go, and it creates the folder when asked. Left alone, any test
+    that opens Chat mode writes into the installed app's own %APPDATA% folder.
+    """
+    try:
+        from accessible_ai.storage import paths
+    except Exception:
+        yield
+        return
+    data = Path(tempfile.mkdtemp(prefix="blindpilot-test-chat-"))
+    monkeypatch.setattr(paths, "system_config_dir", lambda: data)
+    try:
+        yield
+    finally:
+        # The chat log handler holds the file open on Windows; drop it first.
+        chat_logger = logging.getLogger("accessible_ai")
+        for handler in list(chat_logger.handlers):
+            if (
+                isinstance(handler, logging.FileHandler)
+                and Path(handler.baseFilename).parent == data
+            ):
+                chat_logger.removeHandler(handler)
+                handler.close()
+        shutil.rmtree(data, ignore_errors=True)
 
 
 def _forget_every_held_process() -> None:

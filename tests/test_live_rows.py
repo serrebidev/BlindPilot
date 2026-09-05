@@ -17,15 +17,15 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from claude_reader import _result_label, _tool_result_text, _tool_use_label  # noqa: E402
+from blindpilot_app import _result_label, _tool_result_text, _tool_use_label  # noqa: E402
 from markdown_rows import Row, reassemble, reassemble_all  # noqa: E402
 
 
 def test_live_narration_is_enabled_for_a_fresh_configuration(monkeypatch):
-    import claude_reader
+    import blindpilot_app
 
-    monkeypatch.setattr(claude_reader, "_load_config", dict)
-    settings = claude_reader._Settings()
+    monkeypatch.setattr(blindpilot_app, "_load_config", dict)
+    settings = blindpilot_app._Settings()
 
     assert settings.live_rows is True
     assert settings.speak_live is True
@@ -34,7 +34,7 @@ def test_live_narration_is_enabled_for_a_fresh_configuration(monkeypatch):
 def test_completed_answer_is_narrated_when_no_assistant_activity_was_spoken(
     monkeypatch,
 ):
-    import claude_reader
+    import blindpilot_app
 
     spoken = []
     panel = type(
@@ -42,13 +42,13 @@ def test_completed_answer_is_narrated_when_no_assistant_activity_was_spoken(
         (),
         {
             "_assistant_narrated_this_turn": False,
-            "_session_backend": claude_reader.BACKEND_FREEBUFF,
+            "_session_backend": blindpilot_app.BACKEND_FREEBUFF,
             "_say": lambda self, text: spoken.append(text) or True,
         },
     )()
-    monkeypatch.setattr(claude_reader.SETTINGS, "speak_live", True)
+    monkeypatch.setattr(blindpilot_app.SETTINGS, "speak_live", True)
 
-    claude_reader.SessionPanel._narrate_completed_response(panel, "Finished cleanly.")
+    blindpilot_app.SessionPanel._narrate_completed_response(panel, "Finished cleanly.")
 
     assert spoken == ["FreeBuff. Finished cleanly."]
     assert panel._assistant_narrated_this_turn is True
@@ -56,8 +56,8 @@ def test_completed_answer_is_narrated_when_no_assistant_activity_was_spoken(
 
 # ----- Tool step narration -----
 def test_read_says_the_file_name_only():
-    label = _tool_use_label("Read", {"file_path": "/home/me/project/claude_reader.py"})
-    assert label == "Reading claude_reader.py"
+    label = _tool_use_label("Read", {"file_path": "/home/me/project/blindpilot_app.py"})
+    assert label == "Reading blindpilot_app.py"
 
 
 def test_bash_says_the_command():
@@ -208,7 +208,7 @@ def _run_worker(events, on_activity=None):
     import json
     import subprocess
 
-    import claude_reader
+    import blindpilot_app
 
     lines = [json.dumps(e) + "\n" for e in events]
     activity: list[tuple[str, str]] = []
@@ -230,11 +230,11 @@ def _run_worker(events, on_activity=None):
         if on_activity is not None:
             on_activity(procs[0] if procs else None, kind, text)
 
-    real_popen, real_find = subprocess.Popen, claude_reader._find_claude
+    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
     subprocess.Popen = fake_popen  # type: ignore[assignment]
-    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
+    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        worker = claude_reader.ClaudeWorker(
+        worker = blindpilot_app.ClaudeWorker(
             "hi",
             None,
             os.getcwd(),
@@ -249,7 +249,7 @@ def _run_worker(events, on_activity=None):
         worker.run()
     finally:
         subprocess.Popen = real_popen  # type: ignore[assignment]
-        claude_reader._find_claude = real_find  # type: ignore[assignment]
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
     return activity, completed, procs[0]
 
 
@@ -342,7 +342,7 @@ def test_steer_writes_a_second_message_into_the_running_process():
         {"type": "result", "subtype": "success"},
     ]
 
-    import claude_reader
+    import blindpilot_app
     import subprocess
 
     lines = [_json.dumps(e) + "\n" for e in events]
@@ -356,11 +356,11 @@ def test_steer_writes_a_second_message_into_the_running_process():
             procs.append(proc)
         return proc
 
-    real_popen, real_find = subprocess.Popen, claude_reader._find_claude
+    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
     subprocess.Popen = fake_popen  # type: ignore[assignment]
-    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
+    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        worker = claude_reader.ClaudeWorker(
+        worker = blindpilot_app.ClaudeWorker(
             "do a thing",
             None,
             os.getcwd(),
@@ -376,7 +376,7 @@ def test_steer_writes_a_second_message_into_the_running_process():
         worker.run()
     finally:
         subprocess.Popen = real_popen  # type: ignore[assignment]
-        claude_reader._find_claude = real_find  # type: ignore[assignment]
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
 
     assert sent.get("steered") is True
     written = [_json.loads(w) for w in procs[0].stdin.written]
@@ -387,9 +387,9 @@ def test_steer_writes_a_second_message_into_the_running_process():
 
 
 def test_steer_is_refused_once_the_run_is_over():
-    import claude_reader
+    import blindpilot_app
 
-    worker = claude_reader.ClaudeWorker(
+    worker = blindpilot_app.ClaudeWorker(
         "hi",
         None,
         os.getcwd(),
@@ -708,7 +708,7 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
 # ----- Compaction and starting over -----
 def _compaction_panel(backend, session_id):
     """A panel stub with just the state compaction looks at."""
-    import claude_reader
+    import blindpilot_app
 
     calls = {"announced": [], "sent": [], "prompt": ""}
     panel = type(
@@ -719,7 +719,7 @@ def _compaction_panel(backend, session_id):
             # The real one: compaction refuses while a turn is still being
             # applied, and a stub must not be able to disagree about when
             # that is.
-            "_run_in_progress": claude_reader.SessionPanel._run_in_progress,
+            "_run_in_progress": blindpilot_app.SessionPanel._run_in_progress,
             "_session_id": session_id,
             "_session_backend": backend,
             "selected_backend": lambda self: backend,
@@ -730,7 +730,7 @@ def _compaction_panel(backend, session_id):
             )(),
         },
     )()
-    return claude_reader.SessionPanel.compact_conversation, panel, calls
+    return blindpilot_app.SessionPanel.compact_conversation, panel, calls
 
 
 def test_compacting_claude_sends_it_as_an_ordinary_message():
@@ -786,7 +786,7 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
     import json
     import subprocess
 
-    import claude_reader
+    import blindpilot_app
 
     lines = [json.dumps(event) + "\n" for event in events]
     asked: list[tuple] = []
@@ -808,11 +808,11 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
         asked.append(tuple(questions))
         return answer
 
-    real_popen, real_find = subprocess.Popen, claude_reader._find_claude
+    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
     subprocess.Popen = fake_popen  # type: ignore[assignment]
-    claude_reader._find_claude = lambda: "claude"  # type: ignore[assignment]
+    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        worker = claude_reader.ClaudeWorker(
+        worker = blindpilot_app.ClaudeWorker(
             "hi",
             None,
             os.getcwd(),
@@ -828,7 +828,7 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
         worker.run()
     finally:
         subprocess.Popen = real_popen  # type: ignore[assignment]
-        claude_reader._find_claude = real_find  # type: ignore[assignment]
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
     written = [json.loads(line) for line in procs[0].stdin.written]
     return asked, written, activity, commands[0]
 
@@ -926,3 +926,80 @@ def test_every_other_tool_still_answers_to_the_permission_mode():
     # permission mode decided this before, and it still does.
     assert asked == []
     assert written[-1]["response"]["response"]["behavior"] == "deny"
+
+
+def test_reopening_a_finished_conversation_leaves_no_open_response(monkeypatch):
+    """The replay's rows went through `_begin_stream_response`, so the response
+    number was still open when the empty completion arrived. The next message
+    then landed under the replayed response instead of opening its own."""
+    import blindpilot_app as app
+
+    panel = _stub_panel(app)
+    panel._turns = []
+    panel._stream_response = 1
+    panel._response_count = 1
+    panel._rows = [app.Row(kind="header", label="Response 1", payload="", response_number=1)]
+
+    app.SessionPanel._on_response_complete(panel, "")
+
+    assert panel._stream_response is None
+    assert panel.status[-1] == "Reopened, 1 rows"
+
+
+def test_a_failed_turns_prompt_is_not_grouped_into_the_next_response(monkeypatch):
+    """The failed prompt kept the number the next turn then took, so copy whole
+    response returned both prompts."""
+    import blindpilot_app as app
+
+    monkeypatch.setattr(app.SETTINGS, "live_rows", True)
+    panel = _stub_panel(app)
+    panel._announce = lambda text, urgent=False: panel.announced.append(text)
+    panel._earcons.play_error = lambda: None
+    app.SessionPanel._add_your_message(panel, "first")
+    app.SessionPanel._on_failed(panel, "the backend went away")
+    app.SessionPanel._add_your_message(panel, "second")
+
+    numbers = [row.response_number for row in panel._rows]
+    assert numbers[0] != numbers[1], numbers
+
+
+def test_a_stop_the_backend_ignores_is_reported_and_stop_is_offered_again(monkeypatch):
+    """Stop disabled itself and muted narration before the cancel ran. When the
+    cancel did not end the turn, the tab was left with neither Stop nor sound."""
+    import blindpilot_app as app
+
+    class _Worker:
+        def __init__(self):
+            self.cancelled = 0
+
+        def is_alive(self):
+            return True
+
+        def cancel(self):
+            self.cancelled += 1
+
+        def join(self, timeout=None):
+            pass
+
+    class _Thread:
+        def __init__(self, target, daemon=False, name=""):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(app.threading, "Thread", _Thread)
+    monkeypatch.setattr(app.wx, "CallAfter", lambda fn, *a: fn(*a))
+    worker = _Worker()
+    panel = _stub_panel(app, _worker=worker)
+    panel._announce = lambda text, urgent=False: panel.announced.append(text)
+    panel._question_dialog = None
+    panel._close_question_dialog = lambda: None
+    panel._after_cancel = lambda w: app.SessionPanel._after_cancel(panel, w)
+
+    app.SessionPanel._on_stop(panel)
+
+    assert worker.cancelled == 1
+    assert panel._stopping is False
+    assert panel.stop_btn.enabled is True
+    assert any("still running" in text for text in panel.announced)

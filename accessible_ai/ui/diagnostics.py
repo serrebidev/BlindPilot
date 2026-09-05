@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import wx
 
-from accessible_ai.logging_setup import LOG_PATH
+from accessible_ai.logging_setup import log_path
 
 
 class DiagnosticsDialog(wx.Dialog):
@@ -15,7 +15,7 @@ class DiagnosticsDialog(wx.Dialog):
         )
         panel = wx.Panel(self)
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(wx.StaticText(panel, label=f"Log file: {LOG_PATH}"), 0, wx.EXPAND | wx.ALL, 12)
+        outer.Add(wx.StaticText(panel, label=f"Log file: {log_path()}"), 0, wx.EXPAND | wx.ALL, 12)
         self.text = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2)
         self.text.SetName("Diagnostic log")
         outer.Add(self.text, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
@@ -31,10 +31,9 @@ class DiagnosticsDialog(wx.Dialog):
         self.on_refresh(None)
 
     def on_refresh(self, event) -> None:
+        path = log_path()
         try:
-            value = (
-                LOG_PATH.read_text(encoding="utf-8") if LOG_PATH.exists() else "No log entries yet."
-            )
+            value = path.read_text(encoding="utf-8") if path.exists() else "No log entries yet."
         except OSError as exc:
             value = f"Could not read log: {exc}"
         self.text.SetValue(value)

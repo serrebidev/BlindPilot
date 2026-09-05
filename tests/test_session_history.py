@@ -706,6 +706,48 @@ def test_hermes_honours_its_own_home_override(home: Path, monkeypatch) -> None:
     assert [entry.title for entry in list_history("hermes")] == ["Default home"]
 
 
+def test_a_hermes_home_with_uri_characters_in_it_is_still_read(home: Path, monkeypatch) -> None:
+    """The store is opened by URI, so a `#` or `%` in the path has to be escaped.
+
+    Unescaped, SQLite read `a b#c` as the path `a b` plus a fragment, lost the
+    read-only flag, and created an empty database there.
+    """
+    elsewhere = home / "a b#c%20d"
+    _write_hermes(
+        elsewhere,
+        [{"id": "s7", "title": "Odd path"}],
+        [
+            {"session_id": "s7", "role": "user", "content": "a"},
+            {"session_id": "s7", "role": "assistant", "content": "b"},
+        ],
+    )
+    monkeypatch.setenv("HERMES_HOME", str(elsewhere / ".hermes"))
+
+    assert [entry.title for entry in list_history("hermes")] == ["Odd path"]
+    assert not (home / "a b").exists()
+
+
+def test_a_compaction_summary_is_not_the_persons_prompt(home: Path) -> None:
+    """Claude Code writes the continuation summary as a user record after compaction."""
+    _write_claude(
+        home,
+        CLAUDE_CWD,
+        "compacted",
+        [
+            _claude_user(
+                "This session is being continued from a previous conversation...",
+                isCompactSummary=True,
+            ),
+            _claude_user("so what is left to do?"),
+            _claude_assistant("Two tests."),
+        ],
+    )
+
+    entries = list_history("claude", CLAUDE_CWD)
+    assert [entry.title for entry in entries] == ["so what is left to do?"]
+    assert [turn.prompt for turn in load_turns(entries[0])] == ["so what is left to do?"]
+
+
 def test_a_conversation_run_through_wsl_is_found_by_the_folder_filter(home: Path) -> None:
     """Hermes in WSL records /mnt/d/work; the picker asks about D:\\work.
 
@@ -793,6 +835,19 @@ def test_injected_blocks_are_removed_but_real_words_survive() -> None:
     )
     # A message that merely mentions a tag is still a real message.
     assert clean_user_text("what does <div> mean") == "what does <div> mean"
+    assert clean_user_text("<a><b>x</a></b> kept") == "</b> kept"
+
+
+def test_unclosed_tags_are_cleaned_in_linear_time() -> None:
+    """A pasted file full of generics or an HTML fragment is the realistic case.
+
+    Every `<word>` without a closing tag used to scan to the end of the text,
+    which made 3000 of them take two seconds per record.
+    """
+    text = "<a>" * 3000 + "x" * 20000
+    started = time.perf_counter()
+    assert clean_user_text(text) == text
+    assert time.perf_counter() - started < 0.5
 
 
 def test_ages_are_said_the_way_a_person_would() -> None:
@@ -940,6 +995,19 @@ def test_opencode_reasoning_is_not_part_of_the_answer(home: Path) -> None:
     assert [(turn.prompt, turn.response) for turn in turns] == [
         ("testing with a recipe", "Here is the recipe.")
     ]
+
+
+def test_opencode_text_in_the_time_column_does_not_take_the_list_down(home: Path) -> None:
+    """A value that is not a number is an unknown age, not an error."""
+    _write_opencode(home, "ses_1", OPENCODE_CWD, "Odd clock", [("user", "hello")])
+    database = home / ".local" / "share" / "opencode" / "opencode.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE session SET time_updated = 'abc' WHERE id = 'ses_1'")
+    connection.close()
+
+    entries = list_history("opencode", OPENCODE_CWD)
+    assert [entry.title for entry in entries] == ["Odd clock"]
+    assert entries[0].modified == 0.0
 
 
 def test_opencode_history_is_empty_without_a_database(home: Path) -> None:

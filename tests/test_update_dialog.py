@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import wx
 
@@ -41,3 +42,31 @@ def test_update_dialog_has_named_controls_and_readable_release_notes(monkeypatch
     finally:
         dialog.Destroy()
         app.ProcessPendingEvents()
+
+
+def test_a_check_that_finishes_after_the_app_is_gone_stays_quiet(monkeypatch):
+    """Quit within the HTTP timeout and the worker outlives wx.App.
+
+    wx.CallAfter with no application asserts, and the thread hook logs that
+    as an uncaught exception in a thread. Nobody is left to tell, so say
+    nothing.
+    """
+    monkeypatch.setattr(wx, "GetApp", lambda: None)
+
+    def no_app(*_args, **_kwargs):
+        raise AssertionError("No wx.App created yet")
+
+    monkeypatch.setattr(wx, "CallAfter", no_app)
+    stub = SimpleNamespace(
+        check=lambda _version: _release(),
+        current_version="1.0.0",
+        _check_finished=lambda _release: None,
+        _check_failed=lambda _message: None,
+    )
+    UpdateDialog._check_worker(stub)
+
+    def stalled(_version):
+        raise RuntimeError("stalled")
+
+    stub.check = stalled
+    UpdateDialog._check_worker(stub)

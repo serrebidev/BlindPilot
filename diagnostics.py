@@ -10,8 +10,8 @@ somebody has to make on purpose rather than a `logger.debug(prompt)` that
 looked convenient one afternoon.
 
 The packaged build is windowed, which on Windows means it has no stderr at
-all. An uncaught exception there currently goes nowhere: no console, no
-message, no file. That is what the hooks below are for.
+all. Without the hooks below an uncaught exception there goes nowhere: no
+console, no message, no file.
 """
 
 from __future__ import annotations

@@ -55,17 +55,18 @@ jobs:
         run: python -m pytest -q -W error
 
       - name: Run static checks
+        # bash on every runner: pwsh, the Windows default, reports only the
+        # last command's exit code, so a ruff check failure would pass.
+        shell: bash
         run: |
           python -m ruff check .
           python -m ruff format --check .
 
-      - name: Compile source
-        run: python -m py_compile blind_pilot.py blindpilot_app.py linux_accessibility.py app_updater.py claude_reader.py agent_backends.py markdown_rows.py session_history.py
-
       - name: Generate application icons
-        # The icon is rendered by a pure-stdlib tool into packaging/, so the
-        # asset is never stale and the build does not depend on a committed
-        # binary. BlindPilot.spec and the Inno installer consume it from there.
+        # The icon is rendered by a pure-stdlib tool into packaging/, over the
+        # committed copies, so what ships always matches the tool even when
+        # the copies are stale. BlindPilot.spec and the Inno installer consume
+        # it from there.
         run: python tools/make_icon.py
 
       - name: Build Windows application
