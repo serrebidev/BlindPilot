@@ -2447,6 +2447,38 @@ def _valid_progress_cue(value: object) -> str:
     return text if text in PROGRESS_CUES else CUE_PERIODIC
 
 
+# How the windows are drawn. "system" follows the operating system's light or
+# dark setting; the other two force one. wxWidgets applies this once, before
+# the first window exists, so a change waits for the next start.
+APPEARANCE_SYSTEM = "system"
+APPEARANCE_LIGHT = "light"
+APPEARANCE_DARK = "dark"
+APPEARANCES = (
+    (APPEARANCE_SYSTEM, "Follow system"),
+    (APPEARANCE_LIGHT, "Light"),
+    (APPEARANCE_DARK, "Dark"),
+)
+APPEARANCE_RESTART_NOTE = "Appearance will change the next time BlindPilot starts."
+
+
+def _valid_appearance(value: object) -> str:
+    """One of the three appearances, whatever the config file holds.
+
+    Missing or unrecognised means follow the system, so a config written by a
+    newer version cannot leave the app forced light or dark.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in {key for key, _label in APPEARANCES} else APPEARANCE_SYSTEM
+
+
+def _appearance_for(value: str) -> wx.App.Appearance:
+    """The wx.App.Appearance for a config value. Anything unknown is System."""
+    return {
+        APPEARANCE_LIGHT: wx.App.Appearance.Light,
+        APPEARANCE_DARK: wx.App.Appearance.Dark,
+    }.get(_valid_appearance(value), wx.App.Appearance.System)
+
+
 def _valid_cue_seconds(value: object) -> int:
     try:
         seconds = int(float(value))  # type: ignore[arg-type]
@@ -2508,6 +2540,10 @@ class _Settings:
         self.show_thinking = bool(cfg.get("show_thinking", False))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
+        # Read again in main() before the first window, which is the only
+        # point wxWidgets lets it be set. Kept here so Preferences can show
+        # and save it like the rest.
+        self.appearance = _valid_appearance(cfg.get("appearance"))
 
     def save(self) -> None:
         cfg = _load_config()
@@ -2520,6 +2556,7 @@ class _Settings:
         cfg["show_thinking"] = self.show_thinking
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
+        cfg["appearance"] = self.appearance
         _save_config(cfg)
 
 
@@ -8750,6 +8787,29 @@ class PreferencesDialog(wx.Dialog):
         self._sync_interval()
 
         root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, pad)
+        self._appearance_box = wx.RadioBox(
+            panel,
+            label="Appearance",
+            choices=[label for _key, label in APPEARANCES],
+            majorDimension=1,
+            style=wx.RA_SPECIFY_ROWS,
+        )
+        self._appearance_box.SetSelection(
+            [key for key, _label in APPEARANCES].index(SETTINGS.appearance)
+        )
+        # wxWidgets applies the appearance before the first window exists and
+        # cannot change it afterwards, so the choice waits for the next start.
+        # Said under the box and in its tooltip, so it is read either way.
+        self._appearance_box.SetToolTip(APPEARANCE_RESTART_NOTE)
+        root.Add(self._appearance_box, 0, wx.EXPAND | wx.ALL, pad)
+        root.Add(
+            wx.StaticText(panel, label=APPEARANCE_RESTART_NOTE),
+            0,
+            wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            pad,
+        )
+
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, pad)
         self._updates = wx.CheckBox(panel, label="Check for updates at startup")
         self._updates.SetValue(bool(_load_config().get("check_for_updates_at_startup", True)))
         root.Add(self._updates, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
@@ -8820,6 +8880,10 @@ class PreferencesDialog(wx.Dialog):
     @property
     def check_updates_startup(self) -> bool:
         return self._updates.GetValue()
+
+    @property
+    def appearance(self) -> str:
+        return APPEARANCES[self._appearance_box.GetSelection()][0]
 
 
 class MainFrame(wx.Frame):
@@ -9518,6 +9582,8 @@ class MainFrame(wx.Frame):
         SETTINGS.text_view = dialog.text_view
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
+        changed_appearance = dialog.appearance != SETTINGS.appearance
+        SETTINGS.appearance = dialog.appearance
         changed_text_view = SETTINGS.text_view != self._text_view_item.IsChecked()
         SETTINGS.save()
 
@@ -9550,6 +9616,10 @@ class MainFrame(wx.Frame):
         _save_config(cfg)
         self._automatic_updates_item.Check(dialog.check_updates_startup)
         self._announce_setting("Preferences applied")
+        if changed_appearance:
+            # Nothing on screen changes yet, so without this the new choice
+            # would seem to have done nothing.
+            announce(APPEARANCE_RESTART_NOTE)
 
     def _show_about(self) -> None:
         description = (
@@ -10763,6 +10833,24 @@ def main() -> int:
     app.SetAppDisplayName(APP_NAME)
 
     cfg = _load_config()
+    # Chosen here, before the first window, because wxWidgets cannot change
+    # it later; that is why Preferences says the choice waits for a restart.
+    # Dark mode on Windows is experimental in wxWidgets 3.3, so a refusal is
+    # noted and the app carries on with whatever it gets.
+    appearance = _valid_appearance(cfg.get("appearance"))
+    set_appearance = getattr(app, "SetAppearance", None)
+    if set_appearance is None:
+        # wxPython before 4.3 has no appearance API. requirements.txt allows
+        # 4.2, so the setting is simply not applied there.
+        logging.getLogger("blindpilot").info(
+            "appearance %s was not applied, this wxPython cannot set it", appearance
+        )
+    else:
+        result = set_appearance(_appearance_for(appearance))
+        if result != wx.App.AppearanceResult.Ok:
+            logging.getLogger("blindpilot").info(
+                "appearance %s was not applied, wx returned %s", appearance, result
+            )
     reserve_console_if_needed(cfg.get("backend"), gui_startup_smoke)
     # Installs that predate full-auto still carry the mode an older BlindPilot
     # saved for them. Moving them over here is what makes "nothing stops to
