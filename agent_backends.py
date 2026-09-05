@@ -27,6 +27,7 @@ import atexit
 import collections
 import json
 import logging
+import ntpath
 import os
 import platform
 import queue
@@ -130,7 +131,11 @@ def _end_windows_tree(pid: int) -> None:
     Best effort: the caller kills the parent directly afterwards either way.
     """
     system_root = os.environ.get("SystemRoot") or r"C:\Windows"
-    taskkill = os.path.join(system_root, "System32", "taskkill.exe")
+    # os.path.join uses this process's separators; under POSIX that turns the
+    # path into "C:\Win/System32/taskkill.exe", which Windows then splits at
+    # every forward slash and refuses to run. Windows accepts either
+    # separator, so forward slashes are built unconditionally instead.
+    taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
     try:
         subprocess.run(
             [taskkill, "/T", "/F", "/PID", str(pid)],

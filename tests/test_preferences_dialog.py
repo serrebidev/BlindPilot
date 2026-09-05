@@ -107,6 +107,11 @@ class _FrameStub:
 
         self.notebook = _Notebook()
 
+        def _session_panels():
+            return []
+
+        self._session_panels = _session_panels
+
         def _turn_in_flight():
             return False
 
