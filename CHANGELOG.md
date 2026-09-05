@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.21.6 - 2026-09-05
+
+- Bypass permissions now works on Hermes. The gateway has no yolo parameter on session.create, so the one BlindPilot sent was silently ignored; the bypass is applied the way Hermes' own /yolo command does it, per session, on every turn, and a mode picked between messages takes effect.
+- A Hermes approval request is now answerable. The reply was sent with a key and values the gateway does not read, so every answer — including the automatic ones in bypass mode — landed as a denial and the command could not be run. In the asking modes the request is put in front of the person with the gateway's own once, session, always, and deny choices instead of being denied unheard.
+- Visual pass 1 from a sighted contributor: a real app icon with display-scaling awareness, menu layouts that match what they announce, the error cue and update dialog made presentable, packaging checks for the icon and manifest, and ruff's formatter scoped out of the docs' code samples.
+- Visual pass 2: the windows follow the system's dark mode, or light or dark can be chosen in Preferences. wxWidgets applies the choice before the first window exists, so the dialog says it takes effect at the next start, and a wxPython without the appearance API carries on as it was.
+
 ## v0.21.5 - 2026-09-05
 
 - Stopping Codex or opencode on Windows ends their whole process tree instead of leaving every MCP child orphaned, and the taskkill path is built for Windows separators so the tree kill works wherever it runs.
