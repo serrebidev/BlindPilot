@@ -285,3 +285,66 @@ def test_a_startup_check_never_claims_a_console_even_for_freebuff(monkeypatch):
     blindpilot_app.reserve_console_if_needed("freebuff", startup_check=True)
 
     assert claimed == []
+
+
+def test_the_configured_appearance_is_applied_before_any_window_exists(monkeypatch):
+    """Dark or light is decided once, on the App, before the frame is built.
+
+    wxWidgets only honours SetAppearance before the first window exists, so
+    it has to run between wx.App() and MainFrame(). A wxPython too old to
+    have it is skipped, not crashed on.
+    """
+    import blindpilot_app
+
+    events: list[object] = []
+    appearance_enum = blindpilot_app.wx.App.Appearance
+    result_enum = blindpilot_app.wx.App.AppearanceResult
+
+    class FakeApp:
+        # main() reads the enums off wx.App, which this stands in for.
+        Appearance = appearance_enum
+        AppearanceResult = result_enum
+
+        def __init__(self, _redirect: bool) -> None:
+            pass
+
+        def MainLoop(self) -> None:
+            events.append("main-loop")
+
+        def SetAppName(self, name: str) -> None:
+            pass
+
+        def SetAppDisplayName(self, name: str) -> None:
+            pass
+
+        def SetAppearance(self, appearance) -> object:
+            events.append(("appearance", appearance))
+            return result_enum.Ok
+
+    class FakeFrame:
+        def __init__(self, *, initial_cwd: str) -> None:
+            events.append("frame")
+
+        def Show(self) -> None:
+            pass
+
+        def Layout(self) -> None:
+            pass
+
+        def Raise(self) -> None:
+            pass
+
+        def Close(self) -> None:
+            pass
+
+    monkeypatch.setattr(blindpilot_app.sys, "argv", ["blind_pilot.py", "--startup-gui-smoke"])
+    monkeypatch.setattr(blindpilot_app, "_load_config", lambda: {"appearance": "dark"})
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda cfg: None)
+    monkeypatch.setattr(blindpilot_app, "MainFrame", FakeFrame)
+    monkeypatch.setattr(blindpilot_app, "_bring_to_front", lambda: None)
+    monkeypatch.setattr(blindpilot_app.wx, "App", FakeApp)
+    monkeypatch.setattr(blindpilot_app.wx, "CallLater", lambda _delay, callback: callback())
+
+    assert blindpilot_app.main() == 0
+    assert ("appearance", appearance_enum.Dark) in events
+    assert events.index(("appearance", appearance_enum.Dark)) < events.index("frame")

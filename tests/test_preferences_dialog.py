@@ -133,6 +133,7 @@ def test_the_dialog_reads_the_live_settings(wx_app):
         assert dialog.progress_cue == app.SETTINGS.progress_cue
         assert dialog.progress_interval == app.SETTINGS.progress_cue_seconds
         assert dialog.text_view == app.SETTINGS.text_view
+        assert dialog.appearance == app.SETTINGS.appearance
     finally:
         dialog.Destroy()
 
@@ -204,6 +205,7 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
         sounds_enabled = False
         sound_cues = {cue: False for cue, _label, _help in app.SOUND_CUES}
         text_view = True
+        appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30
         check_updates_startup = False
@@ -234,3 +236,84 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
     # save happens first, the update flag is the second write.
     assert saved and saved[-1].get("check_for_updates_at_startup") is False
     assert frame.announced == ["Preferences applied"]
+
+
+def test_the_appearance_setting_round_trips_through_settings(monkeypatch):
+    """Missing or unknown values read as "system"; a saved value reads back."""
+    saved: list[dict] = []
+    monkeypatch.setattr(app, "_save_config", lambda cfg: saved.append(dict(cfg)))
+
+    monkeypatch.setattr(app, "_load_config", dict)
+    assert app._Settings().appearance == app.APPEARANCE_SYSTEM
+
+    monkeypatch.setattr(app, "_load_config", lambda: {"appearance": "garbage"})
+    assert app._Settings().appearance == app.APPEARANCE_SYSTEM
+
+    monkeypatch.setattr(app, "_load_config", lambda: {"appearance": "dark"})
+    settings = app._Settings()
+    assert settings.appearance == app.APPEARANCE_DARK
+
+    settings.appearance = app.APPEARANCE_LIGHT
+    settings.save()
+    assert saved[-1]["appearance"] == "light"
+    monkeypatch.setattr(app, "_load_config", lambda: saved[-1])
+    assert app._Settings().appearance == app.APPEARANCE_LIGHT
+
+
+def test_appearance_for_maps_the_config_value_to_the_wx_enum():
+    assert app._appearance_for("system") == wx.App.Appearance.System
+    assert app._appearance_for("light") == wx.App.Appearance.Light
+    assert app._appearance_for("dark") == wx.App.Appearance.Dark
+    assert app._appearance_for("garbage") == wx.App.Appearance.System
+
+
+def test_the_dialog_offers_the_three_appearances(wx_app):
+    dialog = app.PreferencesDialog(None)
+
+    try:
+        box = dialog._appearance_box
+        assert box.GetLabel() == "Appearance"
+        choices = [box.GetString(i) for i in range(box.GetCount())]
+        assert choices == ["Follow system", "Light", "Dark"]
+        for index, expected in enumerate(("system", "light", "dark")):
+            box.SetSelection(index)
+            assert dialog.appearance == expected
+    finally:
+        dialog.Destroy()
+
+
+def test_changing_the_appearance_says_it_takes_effect_next_launch(wx_app, monkeypatch):
+    """SetAppearance only works before the first window, so the new choice
+    waits for the next start and the person is told so, once."""
+    spoken: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: spoken.append(text))
+    monkeypatch.setattr(app, "_load_config", dict)
+    monkeypatch.setattr(app, "_save_config", lambda cfg: True)
+    app.SETTINGS.appearance = app.APPEARANCE_SYSTEM
+    frame = _FrameStub()
+
+    class _Dialog:
+        def narration_selection(self):
+            return app.SETTINGS.narration
+
+        live_rows = app.SETTINGS.live_rows
+        speak_live = app.SETTINGS.speak_live
+        show_thinking = app.SETTINGS.show_thinking
+        sounds_enabled = app.SETTINGS.sounds_enabled
+        sound_cues = dict(app.SETTINGS.sound_cues)
+        text_view = app.SETTINGS.text_view
+        appearance = app.APPEARANCE_DARK
+        progress_cue = app.SETTINGS.progress_cue
+        progress_interval = app.SETTINGS.progress_cue_seconds
+        check_updates_startup = True
+
+    app.MainFrame._apply_preferences(frame, _Dialog())
+
+    assert app.SETTINGS.appearance == app.APPEARANCE_DARK
+    assert spoken.count(app.APPEARANCE_RESTART_NOTE) == 1
+    assert app.APPEARANCE_RESTART_NOTE == "Appearance will change the next time BlindPilot starts."
+    assert frame.announced == ["Preferences applied"]
+
+    # Applying again with the same choice has nothing new to say.
+    app.MainFrame._apply_preferences(frame, _Dialog())
+    assert spoken.count(app.APPEARANCE_RESTART_NOTE) == 1
