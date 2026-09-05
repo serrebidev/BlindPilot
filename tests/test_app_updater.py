@@ -866,9 +866,16 @@ def test_the_setup_helper_hands_the_installer_paths_with_spaces_as_one_argument(
     # be cleared before Windows Script Host has even read the file, which puts
     # a "cannot find script file" dialog on the person's screen.
     restarted = install_dir / "restarted.txt"
+    # The trace is written in two steps: the "restarted" file is closed before
+    # the "ready" file exists, so seeing the second means the writer has let
+    # go of the first. Seeing the first alone was not enough -- CI tore the
+    # temp tree down while Windows Script Host still held the trace open, and
+    # the teardown's PermissionError failed a job whose every test had passed.
+    restarted_ready = install_dir / "restarted-ready.txt"
     (install_dir / "BlindPilot.vbs").write_text(
         'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
         'fso.CreateTextFile("' + str(restarted) + '", True).Close\r\n'
+        'fso.CreateTextFile("' + str(restarted_ready) + '", True).Close\r\n'
         "WScript.Quit 0\r\n",
         encoding="ascii",
     )
@@ -928,9 +935,10 @@ def test_the_setup_helper_hands_the_installer_paths_with_spaces_as_one_argument(
         detail += status_file.read_text(encoding="utf-8-sig", errors="replace")
     assert result.returncode == 0, detail
     deadline = time.monotonic() + 15
-    while not restarted.exists() and time.monotonic() < deadline:
+    while not restarted_ready.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
-    assert restarted.exists(), "the helper never restarted the stand-in app"
+    assert restarted_ready.exists(), "the helper never restarted the stand-in app"
+    assert restarted.exists()
     arguments = recorded.read_text(encoding="utf-8", errors="replace").splitlines()
     assert f"/DIR={install_dir}" in arguments, arguments
     assert f"/LOG={log_dir / 'updater.setup.log'}" in arguments, arguments
