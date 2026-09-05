@@ -150,11 +150,15 @@ TRANSPORT_METHODS = frozenset({"send", "receive", "close", "connected", "failure
 # The same mercy is owed to platform-gated modules, for the same reason. The
 # Windows-only pseudo-terminal tests gate on ``platform.system()`` AND then
 # ``pytest.importorskip("winpty")``, so on Linux and macOS their import fails
-# while Windows — the only platform where their fakes could hide — sweeps them
-# in full. Naming the package instead of the module keeps the next platform-
+# even though nothing in them could hide a fake that Windows would miss;
+# Windows, the only platform where their fakes could hide, sweeps them in
+# full. Naming the package instead of the module keeps the next platform-
 # gated file from re-breaking this guard.
 WX_IS_MISSING = ("wx",)
-MISSING_PLATFORM_PACKAGE = {"Windows": ("winpty",)}.get(platform.system(), ())
+# Packages tolerated when the platform they serve is absent: pywinpty drives
+# FreeBuff's pseudo-terminal on Windows only, so elsewhere the Windows-gated
+# module's importorskip fires before anything can be swept.
+MISSING_PLATFORM_PACKAGE = () if platform.system() == "Windows" else ("winpty",)
 
 
 def _is_only_missing_wx(exc: BaseException) -> bool:
