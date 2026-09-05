@@ -509,7 +509,7 @@ def test_the_list_and_its_rows_have_the_roles_a_screen_reader_expects():
     assert acc.GetChildCount() == (wx.ACC_OK, 2)
 
 
-def test_a_row_is_named_by_its_label_and_described_by_its_position():
+def test_a_row_is_named_by_its_label_and_has_no_description():
     acc = cl.RowsAccessible(_FakeList(["first row", "second row", "third row"]))
     assert acc.GetName(0) == (wx.ACC_OK, "Responses")
     assert acc.GetName(2) == (wx.ACC_OK, "second row")
@@ -578,9 +578,9 @@ Append to `conversation_list.py`:
 class RowsAccessible(wx.Accessible):
     """Each row is a list item to MSAA; the control is the list.
 
-    Child ids are 1-based row indexes. Zero is the list itself. NVDA speaks
-    the name on every move and the description after it, so the position
-    goes in the description, which is how "3 of 40" is heard.
+    Child ids are 1-based row indexes. Zero is the list itself. NVDA speaks the name on every move and
+    the description after it, so the description stays empty to match the
+    native list.
     """
 
     def __init__(self, ctrl):
@@ -686,7 +686,7 @@ Expected: 17 passed
 
 ```bash
 git add conversation_list.py tests/test_conversation_list.py
-git commit -m "Tell a screen reader that each conversation row is a list item, N of M"
+git commit -m "Tell a screen reader that each conversation row is a list item"
 ```
 
 ---
