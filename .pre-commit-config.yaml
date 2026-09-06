@@ -1,0 +1,37 @@
+# The checks CI runs, run before the commit exists, so a failed run on GitHub
+# is not the first place a lint error or a warning is seen.
+#
+#   pip install pre-commit
+#   pre-commit install
+#   pre-commit install --hook-type pre-push
+#
+# The first three hooks run on every commit and take a few seconds. The test
+# hook runs on push, because the suite takes about three minutes, with -W error
+# as CI has it. What these cannot catch is a failure on another platform; the
+# Linux and macOS runners remain the only check for those.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: python -m ruff check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: python -m ruff format --check
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        entry: python -m mypy
+        language: system
+        pass_filenames: false
+        files: \.py$
+      - id: pytest
+        name: pytest
+        entry: python -m pytest -q -W error --ignore=docs
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
