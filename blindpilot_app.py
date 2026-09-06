@@ -2305,7 +2305,8 @@ def _flatten(text: str) -> str:
 
 
 def _one_line(label: str) -> str:
-    """A row's label on a single line, for the text view where a line is a row.
+    """Fold a row's label onto one logical line, so `_row_starts` stays in
+    step with the text even though rows now wrap to several visual lines.
 
     Labels are already flattened; a stray newline would break that mapping.
     """
@@ -7175,9 +7176,20 @@ class SessionPanel(wx.Panel):
                     self._jump_to_next_response(sel)
                 return
             # The responses are one focus region. At the bottom, consume Down
-            # and remain on the final row; only Tab may enter the prompt.
+            # and remain on the final row; only Tab may enter the prompt. In
+            # text view a row wraps to several visual lines and Down moves by
+            # visual line, so the guard only applies once the caret is on the
+            # last row's own last visual line; before that, Down must still
+            # move the caret so the rest of the row can be read.
             if sel != wx.NOT_FOUND and sel == self._row_count() - 1:
-                return
+                if SETTINGS.text_view:
+                    _ok, _col, line = self.responses_text.PositionToXY(
+                        self.responses_text.GetInsertionPoint()
+                    )
+                    if line == self.responses_text.GetNumberOfLines() - 1:
+                        return
+                else:
+                    return
             event.Skip()
             return
 

@@ -579,9 +579,15 @@ def test_reasoning_is_left_out_of_the_activity_by_default(monkeypatch):
     assert [row.kind for row in panel._rows] == ["thinking"]
 
 
-def test_down_on_last_response_row_stays_in_responses():
-    """The prompt is reachable from responses by Tab, never by Down."""
+def test_down_on_last_response_row_stays_in_responses(monkeypatch):
+    """The prompt is reachable from responses by Tab, never by Down.
+
+    List mode only; pinned explicitly because the guard is now mode-dependent
+    and SETTINGS reflects whatever text_view a real config on disk saved.
+    """
     import blindpilot_app as app
+
+    monkeypatch.setattr(app.SETTINGS, "text_view", False)
 
     class Event:
         skipped = False

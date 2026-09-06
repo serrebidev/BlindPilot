@@ -124,3 +124,66 @@ def test_selecting_a_row_puts_the_caret_at_its_start(monkeypatch):
     app.SessionPanel._select_row(panel, 2)
     assert panel.responses_text.caret == 14
     assert app.SessionPanel._selected_row(panel) == 2
+
+
+class _KeyEvent:
+    """What _on_list_key needs from a wx.KeyEvent for the Down key, and nothing else."""
+
+    skipped = False
+
+    @staticmethod
+    def GetKeyCode():
+        return app.wx.WXK_DOWN
+
+    @staticmethod
+    def CmdDown():
+        return False
+
+    def Skip(self):
+        self.skipped = True
+
+
+class _CaretText:
+    """A text control stub whose caret line and line count are set directly."""
+
+    def __init__(self, line, total_lines):
+        self._line = line
+        self._total_lines = total_lines
+
+    def GetInsertionPoint(self):
+        return 0
+
+    def PositionToXY(self, pos):
+        return (True, 0, self._line)
+
+    def GetNumberOfLines(self):
+        return self._total_lines
+
+
+def test_down_on_the_last_rows_first_visual_line_is_skipped_not_consumed(monkeypatch):
+    """Rows wrap now, so Down should keep moving by visual line until the
+    caret reaches the last row's own last visual line."""
+    monkeypatch.setattr(app.SETTINGS, "text_view", True)
+    panel = type("PanelStub", (), {})()
+    panel._selected_row = lambda: 2
+    panel._row_count = lambda: 3
+    panel.responses_text = _CaretText(line=1, total_lines=4)
+
+    event = _KeyEvent()
+    app.SessionPanel._on_list_key(panel, event)
+
+    assert event.skipped is True
+
+
+def test_down_on_the_last_rows_last_visual_line_is_consumed(monkeypatch):
+    """On the last visual line of the last row, Down stays in responses."""
+    monkeypatch.setattr(app.SETTINGS, "text_view", True)
+    panel = type("PanelStub", (), {})()
+    panel._selected_row = lambda: 2
+    panel._row_count = lambda: 3
+    panel.responses_text = _CaretText(line=3, total_lines=4)
+
+    event = _KeyEvent()
+    app.SessionPanel._on_list_key(panel, event)
+
+    assert event.skipped is False

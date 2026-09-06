@@ -108,6 +108,14 @@ def test_set_keeps_the_selection_index_when_it_still_exists(frame):
     assert lst.GetSelection() in (0, wx.NOT_FOUND)
 
 
+def test_setting_the_selection_to_not_found_clears_it_instead_of_landing_on_row_0(frame):
+    lst = cl.ConversationList(frame)
+    lst.Set(["a", "b", "c"])
+    lst.SetSelection(1)
+    lst.SetSelection(wx.NOT_FOUND)
+    assert lst.GetSelection() == wx.NOT_FOUND
+
+
 def test_fonts_follow_the_style(frame):
     lst = cl.ConversationList(frame)
     base = lst.GetFont()
@@ -191,11 +199,19 @@ def test_states_say_which_row_is_selected_and_whether_it_has_focus():
 
 def test_focus_and_selection_report_the_selected_row_or_nothing():
     acc = cl.RowsAccessible(_FakeList(["a", "b"], selected=0))
-    assert acc.GetFocus(0) == (wx.ACC_OK, 1, None)
+    assert acc.GetFocus() == (wx.ACC_OK, 1, None)
     assert acc.GetSelections() == (wx.ACC_OK, 1)
     acc = cl.RowsAccessible(_FakeList(["a", "b"]))
-    assert acc.GetFocus(0) == (wx.ACC_OK, 0, None)
+    assert acc.GetFocus() == (wx.ACC_OK, 0, None)
     assert acc.GetSelections() == (wx.ACC_OK, None)
+
+
+def test_get_focus_takes_no_argument_as_wx_calls_it():
+    # wxPython calls GetFocus with zero arguments; childId is an out-parameter,
+    # as it is for HitTest and Navigate. A signature that requires an argument
+    # raises TypeError on every real call.
+    acc = cl.RowsAccessible(_FakeList(["a", "b", "c"], selected=1))
+    assert acc.GetFocus() == (wx.ACC_OK, 2, None)
 
 
 def test_navigation_walks_the_rows_and_stops_at_the_ends():
@@ -221,6 +237,17 @@ def test_the_default_action_is_open_and_the_rest_is_silent():
     assert acc.GetDefaultAction(0) == (wx.ACC_OK, "")
     for method in (acc.GetValue, acc.GetHelpText, acc.GetKeyboardShortcut):
         assert method(1) == (wx.ACC_OK, "")
+
+
+def test_a_childid_outside_the_row_range_is_invalid_not_row_0():
+    acc = cl.RowsAccessible(_FakeList(["a", "b"]))
+    for childId in (3, -1, 99):
+        assert acc.GetRole(childId)[0] == wx.ACC_INVALID_ARG
+        assert acc.GetState(childId)[0] == wx.ACC_INVALID_ARG
+        assert acc.GetLocation(childId)[0] == wx.ACC_INVALID_ARG
+        assert acc.GetDefaultAction(childId)[0] == wx.ACC_INVALID_ARG
+    # 0 always stays the list itself.
+    assert acc.GetRole(0) == (wx.ACC_OK, wx.ROLE_SYSTEM_LIST)
 
 
 def test_the_control_carries_the_accessible_object(frame):

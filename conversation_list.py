@@ -3,8 +3,8 @@
 wx.ListBox draws one native line per row and cannot wrap, so a paragraph is
 cut off at the right edge of the window. wx.VListBox draws whatever it is
 told, but a screen reader sees nothing inside it unless it is given an
-accessible object. This module is both: the drawing and the accessible
-object, kept together because they must agree on what a row is.
+accessible object. This module holds both the drawing and the accessible
+object, kept together here so they agree on what a row is.
 """
 
 from __future__ import annotations
@@ -82,12 +82,12 @@ class ConversationList(wx.VListBox):
     def Set(self, items: Sequence[Union[Row, str]]) -> None:
         keep = self.GetSelection()
         self._rows = as_rows(items)
+        # Cleared before the count changes so no stale height survives.
         self._measured.clear()
         self.SetItemCount(len(self._rows))
         if self._rows and keep != wx.NOT_FOUND:
             self.SetSelection(min(keep, len(self._rows) - 1))
         self.RefreshAll()
-        # The cache is cleared before the count changes so no stale height survives.
 
     def AppendItems(self, items: Sequence[Union[Row, str]]) -> None:
         self._rows.extend(as_rows(items))
@@ -97,6 +97,9 @@ class ConversationList(wx.VListBox):
 
     def SetSelection(self, index: int) -> None:  # type: ignore[override]
         if not self._rows:
+            return
+        if index == wx.NOT_FOUND:
+            super().SetSelection(wx.NOT_FOUND)
             return
         index = max(0, min(index, len(self._rows) - 1))
         super().SetSelection(index)
@@ -181,6 +184,8 @@ class ConversationList(wx.VListBox):
 
     # ----- what the screen reader is told -----
     def _announce_selection(self) -> None:
+        if not self:
+            return
         sel = self.GetSelection()
         if sel == wx.NOT_FOUND:
             return
@@ -193,7 +198,7 @@ class ConversationList(wx.VListBox):
 
     def _on_focus(self, event: wx.FocusEvent) -> None:
         if self.GetSelection() == wx.NOT_FOUND and self._rows:
-            super().SetSelection(0)
+            self.SetSelection(0)
         # After the focus change has settled, so the reader hears the list
         # first and the row second, as it does for the native control.
         wx.CallAfter(self._announce_selection)
@@ -222,6 +227,8 @@ class RowsAccessible(wx.Accessible):
         return (wx.ACC_OK, None)
 
     def GetRole(self, childId):
+        if childId != 0 and not 1 <= childId <= self._count():
+            return (wx.ACC_INVALID_ARG, 0)
         return (wx.ACC_OK, wx.ROLE_SYSTEM_LIST if childId == 0 else wx.ROLE_SYSTEM_LISTITEM)
 
     def GetName(self, childId):
@@ -233,15 +240,19 @@ class RowsAccessible(wx.Accessible):
         return (wx.ACC_OK, rows[childId - 1].label)
 
     def GetDescription(self, childId):
+        # The native list spoke no position, and the baseline recording is
+        # the contract, so this stays empty.
         return (wx.ACC_OK, "")
 
     def GetState(self, childId):
-        focused = self._ctrl.HasFocus()
         if childId == 0:
             state = wx.ACC_STATE_SYSTEM_FOCUSABLE
-            if focused:
+            if self._ctrl.HasFocus():
                 state |= wx.ACC_STATE_SYSTEM_FOCUSED
             return (wx.ACC_OK, state)
+        if not 1 <= childId <= self._count():
+            return (wx.ACC_INVALID_ARG, 0)
+        focused = self._ctrl.HasFocus()
         state = wx.ACC_STATE_SYSTEM_SELECTABLE | wx.ACC_STATE_SYSTEM_FOCUSABLE
         if self._ctrl.GetSelection() == childId - 1:
             state |= wx.ACC_STATE_SYSTEM_SELECTED
@@ -254,11 +265,13 @@ class RowsAccessible(wx.Accessible):
     def GetLocation(self, childId):
         if childId == 0:
             return (wx.ACC_OK, self._ctrl.GetScreenRect())
+        if not 1 <= childId <= self._count():
+            return (wx.ACC_INVALID_ARG, wx.Rect())
         rect = self._ctrl.GetItemRect(childId - 1)
         pos = self._ctrl.ClientToScreen(rect.GetPosition())
         return (wx.ACC_OK, wx.Rect(pos, rect.GetSize()))
 
-    def GetFocus(self, childId):
+    def GetFocus(self):
         sel = self._ctrl.GetSelection()
         return (wx.ACC_OK, 0 if sel == wx.NOT_FOUND else sel + 1, None)
 
@@ -267,6 +280,8 @@ class RowsAccessible(wx.Accessible):
         return (wx.ACC_OK, None if sel == wx.NOT_FOUND else sel + 1)
 
     def GetDefaultAction(self, childId):
+        if childId != 0 and not 1 <= childId <= self._count():
+            return (wx.ACC_INVALID_ARG, "")
         return (wx.ACC_OK, "Open" if childId else "")
 
     def GetValue(self, childId):
