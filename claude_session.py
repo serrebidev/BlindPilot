@@ -269,9 +269,11 @@ class ClaudeSession:
         )
 
     def send_control(
-        self, subtype: str, timeout: float = _CONTROL_SECONDS, **fields: object
+        self, subtype: str, timeout: Optional[float] = None, **fields: object
     ) -> Optional[dict]:
         """Ask the CLI something and wait for its answer, or None on silence."""
+        if timeout is None:
+            timeout = _CONTROL_SECONDS
         request_id = uuid.uuid4().hex
         done = threading.Event()
         slot: dict = {}
@@ -296,8 +298,10 @@ class ClaudeSession:
     def _confirmed(response: Optional[dict]) -> bool:
         return response is not None and response.get("subtype") == "success"
 
-    def interrupt(self, timeout: float = _INTERRUPT_SECONDS) -> bool:
+    def interrupt(self, timeout: Optional[float] = None) -> bool:
         """Whether the CLI confirmed the running turn was stopped."""
+        if timeout is None:
+            timeout = _INTERRUPT_SECONDS
         return self._confirmed(self.send_control("interrupt", timeout=timeout))
 
     def set_model(self, model: str) -> bool:

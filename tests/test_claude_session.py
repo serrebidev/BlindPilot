@@ -503,12 +503,13 @@ def test_a_model_change_the_cli_does_not_answer_restarts_the_process(monkeypatch
     _fresh_pool(monkeypatch)
     made = _starting(monkeypatch, [_Proc(), _Proc()])
     monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
-    monkeypatch.setattr(cs, "_CONTROL_SECONDS", 0.1)
+    monkeypatch.setattr(cs, "_CONTROL_SECONDS", 0.2)
     panel = _Panel()
     first = cs.take_or_start(panel, WANTS, "claude")
     first.session_id = "s1"
     # Nobody answers the set_model request, so the change cannot be trusted
     # to have landed and the process is replaced with the model on its command line.
+    # The wait is the patched value.
     second = cs.take_or_start(panel, replace_wants(WANTS, session_id="s1", model="c"), "claude")
     assert second is not first and not first.alive()
     assert len(made) == 2 and "--model" in made[1].cmd
@@ -535,13 +536,14 @@ def test_one_tabs_slow_model_change_does_not_block_another_tab(monkeypatch):
     _fresh_pool(monkeypatch)
     made = _starting(monkeypatch, [_Proc(), _Proc(), _Proc()])
     monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
-    monkeypatch.setattr(cs, "_CONTROL_SECONDS", 1.0)
+    monkeypatch.setattr(cs, "_CONTROL_SECONDS", 0.2)
     panel_a = _Panel()
     panel_b = _Panel()
     first = cs.take_or_start(panel_a, WANTS, "claude")
     first.session_id = "s1"
     # Nobody answers control requests on this process, so the model change
     # below waits out the CLI's silence before it gives up and replaces it.
+    # The wait is the patched value.
 
     result = {}
 
