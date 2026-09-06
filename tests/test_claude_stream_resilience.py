@@ -115,8 +115,11 @@ class _FakeProc:
             self.returncode = 1
 
 
-def _drive(proc, on_activity=None, timeout=10.0):
+def _drive(proc, on_activity=None, timeout=10.0, on_worker=None):
     """Run one worker turn over `proc`, off the main thread so a stall shows up.
+
+    `on_worker` is handed the worker before it starts, so a test can stop the
+    turn from its own thread while the worker is reading.
 
     Returns (activity, completed, failures, raised, finished).
     """
@@ -138,35 +141,40 @@ def _drive(proc, on_activity=None, timeout=10.0):
     claude_session._popen = lambda *_a, **_k: proc  # type: ignore[assignment]
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
 
-    worker = blindpilot_app.ClaudeWorker(
-        "hi",
-        None,
-        os.getcwd(),
-        "default",
-        on_session=lambda _sid: None,
-        on_started=lambda: None,
-        on_activity=record,
-        on_complete=completed.append,
-        on_failed=failures.append,
-        on_done=lambda: None,
-    )
+    try:
+        worker = blindpilot_app.ClaudeWorker(
+            "hi",
+            None,
+            os.getcwd(),
+            "default",
+            on_session=lambda _sid: None,
+            on_started=lambda: None,
+            on_activity=record,
+            on_complete=completed.append,
+            on_failed=failures.append,
+            on_done=lambda: None,
+        )
+        if on_worker is not None:
+            on_worker(worker)
 
-    def go():
-        try:
-            worker.run()
-        except BaseException as exc:  # noqa: BLE001 - the point of the test
-            raised.append(exc)
+        def go():
+            try:
+                worker.run()
+            except BaseException as exc:  # noqa: BLE001 - the point of the test
+                raised.append(exc)
 
-    thread = threading.Thread(target=go, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    finished = not thread.is_alive()
+        thread = threading.Thread(target=go, daemon=True)
+        thread.start()
+        thread.join(timeout)
+        finished = not thread.is_alive()
+    finally:
+        # A test that fails part way through must not leave the real Popen
+        # swapped out, or every test after it launches the fake.
+        claude_session._popen = real_popen  # type: ignore[assignment]
+        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        import backend_pool
 
-    claude_session._popen = real_popen  # type: ignore[assignment]
-    blindpilot_app._find_claude = real_find  # type: ignore[assignment]
-    import backend_pool
-
-    backend_pool.pool().drop_all()
+        backend_pool.pool().drop_all()
     return activity, completed, failures, raised, finished
 
 
@@ -502,3 +510,93 @@ def test_an_error_result_arriving_after_an_answer_keeps_the_answer():
     assert finished and not raised
     assert completed, f"the answer was discarded; only failures were reported: {failures}"
     assert "the answer" in completed[0]
+
+
+def _interrupt_id(stdin, patience: float = 3.0) -> str:
+    """The id of the interrupt the worker wrote, once it has written one."""
+    import json
+
+    deadline = time.monotonic() + patience
+    while time.monotonic() < deadline:
+        for raw in list(stdin.written):
+            event = json.loads(raw)
+            request = event.get("request") or {}
+            if event.get("type") == "control_request" and request.get("subtype") == "interrupt":
+                return str(event.get("request_id"))
+        time.sleep(0.01)
+    raise AssertionError("the worker never sent an interrupt")
+
+
+def test_a_stopped_turn_ends_at_the_drain_when_no_result_follows(monkeypatch):
+    """A Stop the CLI confirms must not leave the reader parked for ever.
+
+    The reader waits on the turn's queue with no timeout, and the drain is
+    only asked for when the next event is asked for. So a Stop that landed
+    while the reader was parked started no drain at all: a confirmed
+    interrupt whose result never arrived held the turn, and the tab's
+    process with it, for good.
+    """
+    import blindpilot_app
+
+    monkeypatch.setattr(blindpilot_app, "_CANCEL_DRAIN_SECONDS", 0.3)
+    workers: list = []
+    first_row = threading.Event()
+
+    def stdout():
+        yield _line(ANSWER)
+        # The CLI confirms the stop and then says nothing more: no result for
+        # the interrupted turn, and no exit either.
+        yield _line(
+            {
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": _interrupt_id(proc.stdin)},
+            }
+        )
+        while not proc.killed:
+            time.sleep(0.01)
+
+    proc = _FakeProc(stdout())
+
+    def note_first_row(kind, _text):
+        if kind == "assistant":
+            first_row.set()
+
+    def stop_after_the_first_row():
+        first_row.wait(3.0)
+        # Long enough for the reader to be back on the queue, which is the
+        # state Stop was never heard in.
+        time.sleep(0.1)
+        if workers:
+            workers[0].cancel()
+
+    stopper = threading.Thread(target=stop_after_the_first_row, daemon=True)
+    stopper.start()
+    try:
+        _activity, completed, failures, raised, finished = _drive(
+            proc, on_activity=note_first_row, timeout=3.0, on_worker=workers.append
+        )
+    finally:
+        stopper.join(3.0)
+
+    assert finished, "the stopped turn never ended: the reader stayed parked on the queue"
+    assert not raised, f"the worker thread died: {raised}"
+    assert proc.killed, "the process that kept the result was left running"
+    assert not failures, f"a cancelled turn is not a failure, but it said: {failures}"
+    assert not completed, completed
+
+
+def test_the_panel_join_budget_outlasts_an_interrupt_and_its_drain():
+    """Stop must not call itself a failure while the stop is still landing.
+
+    The panel cancels and then waits for the worker thread, and that thread
+    spends the interrupt budget waiting for the CLI to confirm and then the
+    drain waiting for the stopped turn's result. A shorter wait announced
+    "Could not stop the task. It is still running" over a Stop that was
+    working exactly as designed.
+    """
+    import blindpilot_app
+    import claude_session
+
+    assert blindpilot_app._CANCEL_JOIN_SECONDS > (
+        claude_session._INTERRUPT_SECONDS + blindpilot_app._CANCEL_DRAIN_SECONDS
+    )

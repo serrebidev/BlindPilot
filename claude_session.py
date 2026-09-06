@@ -361,6 +361,18 @@ class ClaudeSession:
     def returncode(self) -> Optional[int]:
         return self._proc.poll()
 
+    def wait(self, timeout: float = 2.0) -> Optional[int]:
+        """The exit code, waiting briefly for one. None if it never arrived.
+
+        A stream that has ended is not yet a process that has been reaped, so
+        `poll()` straight after EOF often has no code to give. Waiting is the
+        difference between saying how the CLI ended and saying "None".
+        """
+        try:
+            return self._proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
     def stop(self) -> None:
         """End the process group. Safe to call again; only the first call acts."""
         with self._state:

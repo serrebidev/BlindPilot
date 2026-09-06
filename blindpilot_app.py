@@ -3088,6 +3088,11 @@ def _claude_questions(raw: list) -> tuple[Question, ...]:
 # cannot be trusted to carry the next turn.
 _CANCEL_DRAIN_SECONDS = 5.0
 
+# Put on a stopped turn's queue by cancel(), so a reader parked on a queue with
+# no timeout wakes up and asks again with the drain's clock running. It carries
+# nothing and means nothing else.
+_CANCEL_WAKE = {"type": "cancel_wake"}
+
 
 class ClaudeWorker(threading.Thread):
     """Runs one Claude turn on the tab's held process and reports it back.
@@ -3134,8 +3139,10 @@ class ClaudeWorker(threading.Thread):
         self._held_for = held_for
         self._on_unsolicited = on_unsolicited
         self._session: Optional[claude_session.ClaudeSession] = None
+        # The queue this turn is reading, kept so Stop can wake a reader that
+        # is parked on it.
+        self._events: Optional[queue.Queue] = None
         self._cancelled = False
-        self._stopped_by_us = False
         # Set once the session is up and the opening prompt has gone in, cleared
         # when the turn ends. Guards `steer()` against writing to a session that
         # is not there yet (or is already gone).
@@ -3152,20 +3159,14 @@ class ClaudeWorker(threading.Thread):
         self._on_failed(message)
 
     def _ending_note(self, rc: object, detail: str) -> str:
-        """How the run ended, saying who ended it.
+        """How the run ended, with its exit code when there is one.
 
-        A kill is BlindPilot's doing, and on Windows it is also BlindPilot's
-        number: a terminated process reports exactly 1. Reporting that as
-        "Claude Code exited with code 1" blamed the CLI for something this
-        application had just done, and made the two indistinguishable in a bug
-        report.
+        A process whose stream has ended has not always been reaped, so there
+        is not always a code to give. "Claude Code exited with code None" read
+        as a bug in BlindPilot; saying there was no code says what happened.
         """
-        if self._stopped_by_us:
-            return (
-                "BlindPilot stopped Claude Code: it did not confirm the stop within "
-                f"{int(claude_session._INTERRUPT_SECONDS)} seconds. "
-                "Whatever the turn had already produced is kept."
-            )
+        if rc is None:
+            return f"Claude Code exited without a code{detail}"
         return f"Claude Code exited with code {rc}{detail}"
 
     @staticmethod
@@ -3228,11 +3229,24 @@ class ClaudeWorker(threading.Thread):
         if session is None:
             return
         if not session.interrupt(claude_session._INTERRUPT_SECONDS):
-            self._stopped_by_us = True
             self._drop_process()
+        # The reader may have been parked on the queue with no timeout since
+        # before Stop was pressed, and the drain's clock only starts when it
+        # asks for the next event. This is what makes it ask.
+        events = self._events
+        if events is not None:
+            events.put(_CANCEL_WAKE)
 
     def _drop_process(self) -> None:
+        """Stop the process this turn borrowed and take it out of the pool.
+
+        The pool holds it under the tab's key, but a process already dropped
+        by somebody else is still this turn's to stop, so both are done.
+        """
         backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CLAUDE, self._held_for))
+        session = self._session
+        if session is not None:
+            session.stop()
 
     def run(self) -> None:
         try:
@@ -3297,6 +3311,10 @@ class ClaudeWorker(threading.Thread):
         # tool existed, and it still does. Headless Claude Code denies whatever
         # its mode leaves to a prompt, so denying here keeps every mode behaving
         # exactly as it did.
+        self._deny(request_id, tool)
+
+    def _deny(self, request_id: str, tool: str = "") -> None:
+        """Refuse one tool call, in the words the permission mode gives it."""
         self._write_json(
             {
                 "type": "control_response",
@@ -3370,8 +3388,33 @@ class ClaudeWorker(threading.Thread):
             effort=self._effort,
             session_id=self._session_id,
         )
+        session = self._take(wants, binary)
+        if session is None:
+            return
+        if session is self._session:
+            # This turn is being retried after that same process died, and
+            # its exit has not reached the pool yet. Reading its stream again
+            # only reaches the end of it again.
+            self._drop_process()
+            session = self._take(wants, binary)
+            if session is None:
+                return
+        self._session = session
+        events = session.attach()
+        self._events = events
         try:
-            session = claude_session.take_or_start(
+            mark = session.stderr_mark()
+            self._read_turn(session, events, mark)
+        finally:
+            session.detach()
+            self._accepting_input.clear()
+
+    def _take(
+        self, wants: "claude_session.Wants", binary: str
+    ) -> Optional["claude_session.ClaudeSession"]:
+        """The tab's process for this turn, or None once the failure is told."""
+        try:
+            return claude_session.take_or_start(
                 self._held_for,
                 wants,
                 binary,
@@ -3381,19 +3424,15 @@ class ClaudeWorker(threading.Thread):
             )
         except OSError as exc:
             self._fail(f"Failed to launch Claude Code: {exc}")
-            return
-        self._session = session
-        events = session.attach()
-        mark = session.stderr_mark()
-        try:
-            self._read_turn(session, events, mark)
-        finally:
-            session.detach()
-            self._accepting_input.clear()
+            return None
 
     def _read_turn(
         self, session: claude_session.ClaudeSession, events: "queue.Queue", mark: int
     ) -> None:
+        if self._cancelled:
+            # Stop landed before there was a process to stop. Sending the
+            # prompt now would start the very turn that was called off.
+            return
         if self._prompt is not None and not session.send_user(self._prompt):
             self._fail("Could not send the prompt to Claude Code")
             return
@@ -3410,15 +3449,29 @@ class ClaudeWorker(threading.Thread):
                 # at once; a process that keeps it is not trusted with the next.
                 event = events.get(timeout=_CANCEL_DRAIN_SECONDS if self._cancelled else None)
             except queue.Empty:
-                self._stopped_by_us = True
                 self._drop_process()
                 return
+            if event is _CANCEL_WAKE:
+                # Stop put this here to be woken by. Ask again, now with the
+                # drain's clock running.
+                continue
             if event is claude_session.EOF:
                 died = True
                 break
             if self._cancelled:
+                if event.get("type") == "control_request":
+                    # A request left unanswered holds the CLI for ever, and a
+                    # stopped turn is still the only one listening.
+                    request_id = event.get("request_id")
+                    if isinstance(request_id, str):
+                        self._deny(request_id)
+                    continue
                 # Read to the result so it is not left for a late turn to find.
                 if event.get("type") == "result":
+                    if not event.get("is_error") and self._count(event.get("queued_turn_count")):
+                        # Somebody else's result, as on the live path. Ours is
+                        # the one that leaves nothing queued behind it.
+                        continue
                     return
                 continue
 
@@ -3526,8 +3579,10 @@ class ClaudeWorker(threading.Thread):
             return
 
         if died:
+            # The stream ends before the process is reaped, so the code is
+            # waited for rather than asked for once.
+            rc = session.wait()
             session.wait_stderr()
-            rc = session.returncode()
             stderr_text = session.stderr_since(mark)
             if _looks_like_auth_error(stderr_text):
                 self._fail(AUTH_HINT)
@@ -4739,10 +4794,13 @@ class HistoryDialog(wx.Dialog):
         event.Skip()
 
 
-# How long the application waits, in total, for the turns still running when it
-# quits. They are cancelled at the same time and share this, rather than each
-# being given the whole of it.
-_CANCEL_JOIN_SECONDS = 3.0
+# How long a cancelled turn is waited for. Stop may spend five seconds waiting
+# for the CLI to confirm the interrupt and five more waiting for the
+# interrupted turn's result, so the wait here is longer than both together
+# before the panel says the stop did not land. At quit the turns still running
+# are cancelled at the same time and share this, rather than each being given
+# the whole of it.
+_CANCEL_JOIN_SECONDS = 12.0
 
 
 # How long the prompt has to stop changing before dictated or pasted text is
