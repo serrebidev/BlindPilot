@@ -125,6 +125,13 @@ def _panel(session_title: str, prompt: str = "start", session_id=None):
     # The real method, not a stand-in: what a turn is GIVEN is half of what this
     # file is about, so the name reaching session.create is measured too.
     panel._hermes_worker_extra = lambda files: app.SessionPanel._hermes_worker_extra(panel, files)
+    # The real methods too: Task 5 moved the worker-building tail of _on_send
+    # into _launch_turn, and added _claude_worker_extra beside the Hermes one
+    # this stub already carried.
+    panel._claude_worker_extra = lambda: app.SessionPanel._claude_worker_extra(panel)
+    panel._launch_turn = lambda send_text, backend, extra: app.SessionPanel._launch_turn(
+        panel, send_text, backend, extra
+    )
     panel._on_title = lambda _panel, title: panel.titles.append(title)
     return panel
 

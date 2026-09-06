@@ -5165,6 +5165,9 @@ class SessionPanel(wx.Panel):
         # the run can close it: the worker thread is blocked on the answer, and
         # the thread that would stop it is the one the dialog is running on.
         self._question_dialog: Optional["QuestionDialog"] = None
+        # Set when the CLI spoke with no turn running while the last turn's
+        # `done` was still in the mailbox; the late turn starts once it drains.
+        self._late_turn_waiting = False
         self._session_id: Optional[str] = None
         self._session_backend = normalize_backend(self._get_backend())
         self._worker: Optional[AgentWorker] = None
@@ -6023,6 +6026,8 @@ class SessionPanel(wx.Panel):
                     self._on_failed(str(args[0]))
                 elif name == "done":
                     self._on_worker_finished()
+                elif name == "late_turn":
+                    self._start_late_turn()
             handled += 1
 
         if rows_changed:
@@ -6181,13 +6186,20 @@ class SessionPanel(wx.Panel):
         self._earcons.start_progress()
         self._show_working()
 
-        worker_type = worker_class(selected_backend, ClaudeWorker)
         extra = dict(worker_extra or {})
         if selected_backend == BACKEND_HERMES:
             # No condition on "does this backend upload" here: this branch IS
             # the uploading backend. Guarding it twice would be a line no test
             # could ever hold to account.
             extra.update(self._hermes_worker_extra(outgoing_files))
+        elif selected_backend == BACKEND_CLAUDE:
+            extra.update(self._claude_worker_extra())
+        self._launch_turn(send_text, selected_backend, extra)
+
+    def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
+        """Start the worker for one turn. `send_text` is None for a late turn,
+        which has nothing to send and only reads what has already arrived."""
+        worker_type = worker_class(selected_backend, ClaudeWorker)
         self._worker = worker_type(
             send_text,
             self._session_id,
@@ -6218,6 +6230,43 @@ class SessionPanel(wx.Panel):
             return
         self.steer_btn.Enable()
         self.stop_btn.Enable()
+
+    def _claude_worker_extra(self) -> dict:
+        """What a Claude turn needs beyond the message, namely whose process
+        it borrows and how to wake this tab when the CLI speaks with no turn
+        running."""
+        return {
+            "held_for": self,
+            "on_unsolicited": lambda: self._queue_worker_event("late_turn"),
+        }
+
+    def _start_late_turn(self) -> None:
+        """Receive what the CLI says with no turn of ours running.
+
+        An agent this tab started in the background, or resumed, has finished,
+        and Claude is answering what it found. It is a turn like any other
+        except that nobody typed anything, so there is no "You:" row.
+        """
+        if not self:
+            return
+        if self._run_in_progress():
+            self._late_turn_waiting = True
+            return
+        self._late_turn_waiting = False
+        self._assistant_narrated_this_turn = False
+        self._streamed_assistant = ""
+        self._stopping = False
+        self._turns.append(Turn(prompt=""))
+        self._announce("A background agent has reported. Receiving response")
+        self._earcons.start_progress()
+        self._show_working()
+        self._launch_turn(None, BACKEND_CLAUDE, self._claude_worker_extra())
+
+    def _show_working(self) -> None:
+        """A sighted working indicator is not built yet; the earcon and the
+        status line carry this until it is. Kept as its own method so a late
+        turn calls the same thing a sent turn will once that lands."""
+        return
 
     def _add_your_message(self, text: str, steering: bool = False) -> None:
         """Put the user's own message in the list, ahead of the answer to it.
@@ -6858,6 +6907,11 @@ class SessionPanel(wx.Panel):
             self.stop_btn.Disable()
         self._worker = None
         self._replaying = False
+        if getattr(self, "_late_turn_waiting", False):
+            # A qualified call, not `self._start_late_turn()`: a stub that
+            # reaches this line without a bound stand-in still gets the real
+            # method, the same one a direct call to it would run.
+            SessionPanel._start_late_turn(self)
 
     # ----- List + find -----
     def _refresh_list(self) -> None:
