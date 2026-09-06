@@ -6648,7 +6648,7 @@ class SessionPanel(wx.Panel):
         shared = backend_pool.pool()
         for backend in (BACKEND_CLAUDE, BACKEND_HERMES, BACKEND_FREEBUFF):
             # A key never held is a documented no-op, so this stays correct
-            # while those three backends are still starting fresh each turn.
+            # while Hermes and FreeBuff still start fresh each turn.
             shared.drop(backend_pool.pool_key(backend, self))
 
     def _on_session_started(self, session_id: str) -> None:
