@@ -150,9 +150,11 @@ turn that resumes it with SendMessage and ends, confirm the follow-up
 arrives as a late turn with rows and an answer, and that the process id does
 not change across the three turns. That check did not run. The audit copy's
 Claude Code could not sign in on this machine, its on-disk credentials are
-stale, so no `claude -p` process on it gets past authentication. Those live
-steps are still to run, unchanged from the design, once `claude /login` has
-been done on that copy.
+stale, so no `claude -p` process on it gets past authentication. The person
+who wrote this signs in with an API key and cannot run `claude /login`, so
+those live steps are still to run, unchanged from the design, by someone with
+a Claude account who can sign the CLI in on an audit copy. Until then the
+branch is verified by its tests and the fake process only.
 
 ## The one CLI fact this rests on
 
