@@ -73,17 +73,17 @@ class ConversationList(wx.VListBox):
         self._rows: list[Row] = []
         # (row index, client width) -> height. Cleared when either changes.
         self._measured: dict[tuple[int, int], int] = {}
-        # The width measurements are taken at, captured so a measure started
-        # before a resize finishes cannot key on two different widths. On GTK
-        # SetSize reaches the window through the event loop, so asking the
-        # control for its client size during that gap returns first the old
-        # width and then the new one, and one measurement is cached under a
-        # width the control no longer has - an entry nothing would ever read,
-        # and an EVT_SIZE clears the cache anyway once the resize lands.
+        # The width measurements are taken at, held across a resize. On GTK
+        # SetSize reaches the window through the event loop, so measuring
+        # during that gap asks the control for its client size and gets first
+        # the old width and then the new one: one measurement lands in the
+        # cache under a width the control no longer reports. The real list
+        # never reads that entry - the next EVT_SIZE clears the cache - but a
+        # test that counts the entries cannot pass while the key wanders. So
+        # the first measurement after a Set pins the width until the cache is
+        # next cleared, keeping one measurement session on one key.
         self._frozen_width: int | None = None
         self.Bind(wx.EVT_SIZE, self._on_size)
-        self.Bind(wx.EVT_ENTER_WINDOW, self._freeze_width)
-        self.Bind(wx.EVT_LEAVE_WINDOW, self._unfreeze_width)
         self._accessible: RowsAccessible | None = None
         if ACCESSIBLE_AVAILABLE:
             self._accessible = RowsAccessible(self)
@@ -103,6 +103,7 @@ class ConversationList(wx.VListBox):
         self._rows = as_rows(items)
         # Cleared before the count changes so no stale height survives.
         self._measured.clear()
+        self._drop_frozen_width()
         self.SetItemCount(len(self._rows))
         if self._rows and keep != wx.NOT_FOUND:
             self.SetSelection(min(keep, len(self._rows) - 1))
@@ -126,16 +127,21 @@ class ConversationList(wx.VListBox):
             self.ScrollToRow(index)
 
     # ----- measuring and drawing -----
-    def _freeze_width(self, _event: wx.MouseEvent) -> None:
-        self._frozen_width = self.GetClientSize().width
-
-    def _unfreeze_width(self, _event: wx.MouseEvent) -> None:
-        self._frozen_width = None
-
     def _measure_width(self) -> int:
-        if self._frozen_width is not None:
-            return self._frozen_width
-        return self.GetClientSize().width
+        """The width to measure at: pinned across a resize until cleared.
+
+        Set by the first measurement taken while the cache is empty, and
+        dropped whenever the cache is cleared - a Set, a resize, or an
+        explicit ForgetMeasurementWidth. Between those, every measurement in
+        the session keys on the same width even if GTK has not applied the
+        size the control was given yet.
+        """
+        if self._frozen_width is None:
+            self._frozen_width = self.GetClientSize().width
+        return self._frozen_width
+
+    def _drop_frozen_width(self) -> None:
+        self._frozen_width = None
 
     def _pad(self) -> int:
         return self.FromDIP(6)
@@ -209,6 +215,7 @@ class ConversationList(wx.VListBox):
 
     def _on_size(self, event: wx.SizeEvent) -> None:
         self._measured.clear()
+        self._drop_frozen_width()
         self.RefreshAll()
         event.Skip()
 
