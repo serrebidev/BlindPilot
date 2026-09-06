@@ -78,14 +78,12 @@ class ConversationList(wx.VListBox):
     def Set(self, items: Sequence[Union[Row, str]]) -> None:
         keep = self.GetSelection()
         self._rows = as_rows(items)
+        self._measured.clear()
         self.SetItemCount(len(self._rows))
         if self._rows and keep != wx.NOT_FOUND:
             self.SetSelection(min(keep, len(self._rows) - 1))
         self.RefreshAll()
-        # SetItemCount and RefreshAll both call OnMeasureItem on their own to lay
-        # out and scroll the list, so the cache is cleared last, once those are
-        # done, rather than left holding heights from before the rows changed.
-        self._measured.clear()
+        # The cache is cleared before the count changes so no stale height survives.
 
     def AppendItems(self, items: Sequence[Union[Row, str]]) -> None:
         self._rows.extend(as_rows(items))
