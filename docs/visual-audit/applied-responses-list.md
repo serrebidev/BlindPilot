@@ -90,6 +90,11 @@ including the focused row's role and states after the find. Three differ:
   label; the new one uses the control's name, "Responses". NVDA does not
   speak the colon at its default symbol level, so the two sound the same.
 
+`GetFocus` had the wrong arity during this recording (`GetFocus(self, childId)`
+instead of the zero-argument override wx actually calls), so every real call
+to it raised `TypeError`; it was fixed afterwards, without a re-recording.
+<!-- controller: re-check result -->
+
 Recent Conversations, checked once: Tab into the list speaks "Conversations
 list" then the row label, and the focused row reports list item, selectable,
 focusable, focused, selected.
@@ -118,3 +123,10 @@ Three screenshots, viewed at audit time, not committed.
 - A position in the accessible description. The baseline showed the native
   list speaks none even with position reporting on, so adding one would have
   added speech.
+- Type-ahead. Typing a letter to jump to a row existed in `wx.ListBox`;
+  `wx.VListBox` has none, and this pass did not add it back.
+- The text view was not re-recorded with NVDA. Down there now moves by
+  visual line because rows wrap, and the last-row guard consumes Down only
+  on the last visual line, not on every visual line of the last row.
+- `GetDefaultAction` says "Open" but there is no `DoDefaultAction`. Left for
+  a follow-up.
