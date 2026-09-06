@@ -28,6 +28,7 @@ terminal sessions in different project folders.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import importlib.util
 import difflib
@@ -2309,6 +2310,23 @@ def _one_line(label: str) -> str:
     Labels are already flattened; a stray newline would break that mapping.
     """
     return " ".join(label.split())
+
+
+def _row_at(starts: List[int], position: int) -> int:
+    """Which row a caret position is in, by each row's start offset."""
+    if not starts:
+        return -1
+    return max(0, bisect.bisect_right(starts, position) - 1)
+
+
+def _starts_of(lines: List[str]) -> List[int]:
+    """Each line's start offset once every line is joined with a newline."""
+    starts: List[int] = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line) + 1
+    return starts
 
 
 def _result_label(text: str) -> str:
@@ -5275,6 +5293,9 @@ class SessionPanel(wx.Panel):
         self._turns: List[Turn] = []
         self._rows: List[Row] = []  # every row across every response, in order
         self._displayed: List[Row] = []  # rows currently shown (after search)
+        # Start offset of each displayed row's line in the text view, kept in
+        # step with _displayed so a caret position can be mapped to a row.
+        self._row_starts: List[int] = []
         self._search_term = ""
         self._response_count = 0
         # Response number of the turn currently streaming in (None between turns).
@@ -5338,7 +5359,7 @@ class SessionPanel(wx.Panel):
         # which of the two controls is shown; only the visible one is filled.
         self.responses_text = wx.TextCtrl(
             self,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP | wx.TE_RICH2,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
         )
         self.responses_text.SetName("Responses")
         self.responses_text.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
@@ -5466,12 +5487,8 @@ class SessionPanel(wx.Panel):
         if not self._displayed:
             return wx.NOT_FOUND
         if SETTINGS.text_view:
-            ok, _col, line = self.responses_text.PositionToXY(
-                self.responses_text.GetInsertionPoint()
-            )
-            if not ok or not (0 <= line < len(self._displayed)):
-                return wx.NOT_FOUND
-            return line
+            line = _row_at(self._row_starts, self.responses_text.GetInsertionPoint())
+            return line if 0 <= line < len(self._displayed) else wx.NOT_FOUND
         sel = self.responses.GetSelection()
         return sel if 0 <= sel < len(self._displayed) else wx.NOT_FOUND
 
@@ -5482,7 +5499,7 @@ class SessionPanel(wx.Panel):
             return
         index = max(0, min(index, count - 1))
         if SETTINGS.text_view:
-            self.responses_text.SetInsertionPoint(self.responses_text.XYToPosition(0, index))
+            self.responses_text.SetInsertionPoint(self._row_starts[index])
         else:
             self.responses.SetSelection(index)
 
@@ -6978,12 +6995,7 @@ class SessionPanel(wx.Panel):
         # control only the visible one ever fills, so the append path asks
         # the control what it is actually showing before trusting the record.
         if SETTINGS.text_view:
-            # An empty multi-line control reports one line on Windows.
-            shown = (
-                self.responses_text.GetNumberOfLines()
-                if self.responses_text.GetLastPosition()
-                else 0
-            )
+            shown = len(self._row_starts) if self.responses_text.GetLastPosition() else 0
         else:
             shown = self.responses.GetCount()
         trustworthy = shown == len(previous)
@@ -7007,7 +7019,9 @@ class SessionPanel(wx.Panel):
         # replaced by its parsed form - so there is no way around a rebuild,
         # and restoring the selection afterwards is right rather than wrong.
         if SETTINGS.text_view:
-            self.responses_text.ChangeValue("\n".join(_one_line(label) for label in labels))
+            lines = [_one_line(row.label) for row in self._displayed]
+            self._row_starts = _starts_of(lines)
+            self.responses_text.ChangeValue("\n".join(lines))
         else:
             self.responses.Set(self._displayed)
         if keep != wx.NOT_FOUND and labels:
@@ -7018,9 +7032,15 @@ class SessionPanel(wx.Panel):
         if not SETTINGS.text_view:
             self.responses.AppendItems(rows)
             return
-        text = "\n".join(_one_line(row.label) for row in rows)
+        lines = [_one_line(row.label) for row in rows]
+        last = self.responses_text.GetLastPosition()
+        base = last + (1 if last else 0)
+        for line in lines:
+            self._row_starts.append(base)
+            base += len(line) + 1
+        text = "\n".join(lines)
         was_at = self.responses_text.GetInsertionPoint()
-        lead = "\n" if self.responses_text.GetLastPosition() else ""
+        lead = "\n" if last else ""
         # Appending moves the caret to the end, which is itself a move worth
         # announcing, so it goes straight back to the line being read.
         self.responses_text.AppendText(lead + text)

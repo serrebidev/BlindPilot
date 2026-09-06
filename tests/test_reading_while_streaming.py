@@ -112,6 +112,10 @@ def _panel(monkeypatch, *, text_view, displayed, rows, control):
     panel._search_term = ""
     if text_view:
         panel.responses_text = control
+        # Mirrors what a prior text-mode refresh would have recorded for the
+        # rows the control already holds, so the fast/rebuild-path check that
+        # compares it against `_displayed` sees the same state the control does.
+        panel._row_starts = app._starts_of(control.text.split("\n")) if control.text else []
     else:
         panel.responses = control
     panel._selected_row = lambda: app.SessionPanel._selected_row(panel)
