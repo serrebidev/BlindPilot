@@ -168,6 +168,7 @@ class _FakeList:
         return n if 0 <= n < len(self._rows) else wx.NOT_FOUND
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_the_list_and_its_rows_have_the_roles_a_screen_reader_expects():
     acc = cl.RowsAccessible(_FakeList(["a", "b"]))
     assert acc.GetRole(0) == (wx.ACC_OK, wx.ROLE_SYSTEM_LIST)
@@ -175,6 +176,7 @@ def test_the_list_and_its_rows_have_the_roles_a_screen_reader_expects():
     assert acc.GetChildCount() == (wx.ACC_OK, 2)
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_a_row_is_named_by_its_label_and_has_no_description():
     acc = cl.RowsAccessible(_FakeList(["first row", "second row", "third row"]))
     assert acc.GetName(0) == (wx.ACC_OK, "Responses")
@@ -184,6 +186,7 @@ def test_a_row_is_named_by_its_label_and_has_no_description():
     assert acc.GetDescription(0) == (wx.ACC_OK, "")
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_states_say_which_row_is_selected_and_whether_it_has_focus():
     acc = cl.RowsAccessible(_FakeList(["a", "b"], selected=1, focused=True))
     ok, state = acc.GetState(2)
@@ -197,6 +200,7 @@ def test_states_say_which_row_is_selected_and_whether_it_has_focus():
     assert state & wx.ACC_STATE_SYSTEM_SELECTED and not state & wx.ACC_STATE_SYSTEM_FOCUSED
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_focus_and_selection_report_the_selected_row_or_nothing():
     acc = cl.RowsAccessible(_FakeList(["a", "b"], selected=0))
     assert acc.GetFocus() == (wx.ACC_OK, 1, None)
@@ -206,6 +210,7 @@ def test_focus_and_selection_report_the_selected_row_or_nothing():
     assert acc.GetSelections() == (wx.ACC_OK, None)
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_get_focus_takes_no_argument_as_wx_calls_it():
     # wxPython calls GetFocus with zero arguments; childId is an out-parameter,
     # as it is for HitTest and Navigate. A signature that requires an argument
@@ -214,6 +219,7 @@ def test_get_focus_takes_no_argument_as_wx_calls_it():
     assert acc.GetFocus() == (wx.ACC_OK, 2, None)
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_navigation_walks_the_rows_and_stops_at_the_ends():
     acc = cl.RowsAccessible(_FakeList(["a", "b", "c"]))
     assert acc.Navigate(wx.NAVDIR_FIRSTCHILD, 0) == (wx.ACC_OK, 1, None)
@@ -223,6 +229,7 @@ def test_navigation_walks_the_rows_and_stops_at_the_ends():
     assert acc.Navigate(wx.NAVDIR_DOWN, 3)[0] == wx.ACC_FALSE
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_a_row_is_located_on_screen_and_found_under_a_point():
     acc = cl.RowsAccessible(_FakeList(["a", "b"]))
     assert acc.GetLocation(2) == (wx.ACC_OK, wx.Rect(5, 25, 100, 20))
@@ -231,6 +238,7 @@ def test_a_row_is_located_on_screen_and_found_under_a_point():
     assert acc.HitTest(wx.Point(10, 500)) == (wx.ACC_OK, 0, None)
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_the_default_action_is_open_and_the_rest_is_silent():
     acc = cl.RowsAccessible(_FakeList(["a"]))
     assert acc.GetDefaultAction(1) == (wx.ACC_OK, "Open")
@@ -239,6 +247,7 @@ def test_the_default_action_is_open_and_the_rest_is_silent():
         assert method(1) == (wx.ACC_OK, "")
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_a_childid_outside_the_row_range_is_invalid_not_row_0():
     acc = cl.RowsAccessible(_FakeList(["a", "b"]))
     for childId in (3, -1, 99):
@@ -250,11 +259,13 @@ def test_a_childid_outside_the_row_range_is_invalid_not_row_0():
     assert acc.GetRole(0) == (wx.ACC_OK, wx.ROLE_SYSTEM_LIST)
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_the_control_carries_the_accessible_object(frame):
     lst = cl.ConversationList(frame)
     assert isinstance(lst.GetAccessible(), cl.RowsAccessible)
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
 def test_moving_the_selection_tells_the_screen_reader_which_row_has_focus(frame, monkeypatch):
     events = []
     monkeypatch.setattr(
@@ -292,5 +303,28 @@ def test_the_conversation_pickers_use_the_wrapping_list():
 
     for cls in (app.HistoryDialog, app.HermesSessionsDialog, app.SlashCommandDialog):
         source = inspect.getsource(cls.__init__)
-        assert "ConversationList(" in source, f"{cls.__name__} still builds a wx.ListBox"
+        assert "make_conversation_list(" in source, f"{cls.__name__} still builds a wx.ListBox"
         assert "wx.ListBox(" not in source
+
+
+def test_without_wx_accessible_the_list_still_works_and_the_factory_falls_back(frame, monkeypatch):
+    monkeypatch.setattr(cl, "ACCESSIBLE_AVAILABLE", False)
+    lst = cl.ConversationList(frame)
+    assert lst._accessible is None
+    lst._announce_selection()  # must not raise with no accessible object
+    made = cl.make_conversation_list(frame)
+    assert isinstance(made, cl.NativeConversationList)
+
+
+def test_the_native_list_holds_rows_grows_and_keeps_its_selection(frame):
+    lst = cl.NativeConversationList(frame)
+    lst.Set(["a", "b"])
+    assert lst.GetCount() == 2
+    assert [r.label for r in lst.GetRows()] == ["a", "b"]
+    lst.AppendItems(["c"])
+    assert lst.GetCount() == 3
+    lst.SetSelection(1)
+    lst.Set(["x", "y", "z"])
+    assert lst.GetSelection() == 1
+    lst.SetSelection(wx.NOT_FOUND)
+    assert lst.GetSelection() == wx.NOT_FOUND

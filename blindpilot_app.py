@@ -63,7 +63,7 @@ from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 import backend_pool
 import diagnostics
 from certificates import open_url
-from conversation_list import ConversationList
+from conversation_list import make_conversation_list
 from app_updater import (
     ReleaseInfo,
     UpdateError,
@@ -4882,7 +4882,7 @@ class HistoryDialog(wx.Dialog):
         self.filter_box.Bind(wx.EVT_TEXT, lambda _e: self._refresh())
 
         list_label = wx.StaticText(self, label="&Conversations:")
-        self.list_box = ConversationList(self, name="Conversations")
+        self.list_box = make_conversation_list(self, name="Conversations")
         self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
 
         self.summary = wx.StaticText(self, label="")
@@ -5098,7 +5098,7 @@ class HermesSessionsDialog(wx.Dialog):
         self.running_only.Bind(wx.EVT_CHECKBOX, lambda _e: self._refresh())
 
         list_label = wx.StaticText(self, label="&Conversations:")
-        self.list_box = ConversationList(self, name="Conversations")
+        self.list_box = make_conversation_list(self, name="Conversations")
         self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
         # The consequence of the selected row, spoken on arrow keys: attaching
         # and reopening are different acts and the difference must be heard
@@ -5258,7 +5258,7 @@ class SlashCommandDialog(wx.Dialog):
         )
         message_text = wx.StaticText(self, label=message)
 
-        self.list_box = ConversationList(self, name="Slash commands")
+        self.list_box = make_conversation_list(self, name="Slash commands")
         self.list_box.Set(labels)
         if labels:
             self.list_box.SetSelection(0)
@@ -5401,7 +5401,7 @@ class SessionPanel(wx.Panel):
         cwd_label.SetName("Working directory")
 
         responses_label = wx.StaticText(self, label="Responses:")
-        self.responses = ConversationList(self)
+        self.responses = make_conversation_list(self)
         self.responses.SetName("Responses")
         self.responses.Bind(wx.EVT_LISTBOX_DCLICK, self._on_list_activate)
         self.responses.Bind(wx.EVT_KEY_DOWN, self._on_list_key)

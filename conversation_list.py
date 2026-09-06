@@ -57,6 +57,13 @@ def as_rows(items: Sequence[Union[Row, str]]) -> list[Row]:
     return rows
 
 
+# wx.Accessible is only implemented in the Windows (MSW) build of wxWidgets.
+# On GTK and Cocoa, constructing it raises NotImplementedError, so those
+# builds fall back to a native control; their screen readers already read a
+# native wx.ListBox by themselves without any accessible object from us.
+ACCESSIBLE_AVAILABLE = wx.Platform == "__WXMSW__"
+
+
 class ConversationList(wx.VListBox):
     """Rows that wrap to the width of the control and are drawn by kind."""
 
@@ -67,8 +74,10 @@ class ConversationList(wx.VListBox):
         # (row index, client width) -> height. Cleared when either changes.
         self._measured: dict[tuple[int, int], int] = {}
         self.Bind(wx.EVT_SIZE, self._on_size)
-        self._accessible = RowsAccessible(self)
-        self.SetAccessible(self._accessible)
+        self._accessible: RowsAccessible | None = None
+        if ACCESSIBLE_AVAILABLE:
+            self._accessible = RowsAccessible(self)
+            self.SetAccessible(self._accessible)
         self.Bind(wx.EVT_LISTBOX, self._on_select)
         self.Bind(wx.EVT_SET_FOCUS, self._on_focus)
 
@@ -184,6 +193,8 @@ class ConversationList(wx.VListBox):
 
     # ----- what the screen reader is told -----
     def _announce_selection(self) -> None:
+        if self._accessible is None:
+            return
         if not self:
             return
         sel = self.GetSelection()
@@ -306,3 +317,48 @@ class RowsAccessible(wx.Accessible):
         if navDir in (wx.NAVDIR_PREVIOUS, wx.NAVDIR_UP) and fromId > 1:
             return (wx.ACC_OK, fromId - 1, None)
         return (wx.ACC_FALSE, 0, None)
+
+
+class NativeConversationList(wx.ListBox):
+    """The native list a reader already knows.
+
+    Used on the platforms where the drawn list cannot be given an
+    accessible object, so a plain wx.ListBox stands in instead. It does
+    not wrap.
+    """
+
+    def __init__(self, parent: wx.Window, name: str = "Responses"):
+        super().__init__(parent, style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
+        self.SetName(name)
+        self._rows: list[Row] = []
+
+    def GetRows(self) -> list[Row]:
+        return list(self._rows)
+
+    def Set(self, items: Sequence[Union[Row, str]]) -> None:
+        keep = self.GetSelection()
+        self._rows = as_rows(items)
+        wx.ListBox.Set(self, [row.label for row in self._rows])
+        if self._rows and keep != wx.NOT_FOUND:
+            self.SetSelection(min(keep, len(self._rows) - 1))
+
+    def AppendItems(self, items: Sequence[Union[Row, str]]) -> None:
+        new_rows = as_rows(items)
+        self._rows.extend(new_rows)
+        super().AppendItems([row.label for row in new_rows])
+
+    def SetSelection(self, index: int) -> None:  # type: ignore[override]
+        if not self._rows:
+            return
+        if index == wx.NOT_FOUND:
+            super().SetSelection(wx.NOT_FOUND)
+            return
+        index = max(0, min(index, len(self._rows) - 1))
+        super().SetSelection(index)
+
+
+def make_conversation_list(parent: wx.Window, name: str = "Responses"):
+    """A ConversationList where wx.Accessible exists, else a native list."""
+    if ACCESSIBLE_AVAILABLE:
+        return ConversationList(parent, name)
+    return NativeConversationList(parent, name)

@@ -173,10 +173,12 @@ the position within the filtered list, as now.
   unwrapped; the measure then reports one line, and the row clips at the
   edge instead of raising. This only happens while the window is being made
   very small.
-- If `SetAccessible` is unavailable (wx built without accessibility, which
-  is not the case for any supported build), the list still works; the
-  screen reader then sees a generic client area. A warning is logged once at
-  startup so the case is visible in the diagnostics log.
+- `wx.Accessible` only exists on the Windows build of wxWidgets. The GTK and
+  macOS builds have no `wx.Accessible`, so on those platforms
+  `make_conversation_list` hands back a plain `wx.ListBox`
+  (`NativeConversationList`) instead of the wrapping list, and their screen
+  readers read that native control by themselves. The wrapping list with its
+  accessible object is Windows only for now.
 
 ## Testing
 

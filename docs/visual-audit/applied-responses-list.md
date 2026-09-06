@@ -118,8 +118,10 @@ Three screenshots, viewed at audit time, not committed.
 
 ## Skipped
 
-- The spec's one-time warning when `SetAccessible` is unavailable. Every
-  supported wxPython build has accessibility, so it was dropped from scope.
+- The spec's one-time warning when `SetAccessible` is unavailable. GTK and
+  macOS builds have no `wx.Accessible` at all, so those platforms keep the
+  native `wx.ListBox` through `make_conversation_list` instead of logging a
+  warning, and the wrapping list is Windows only for now.
 - A position in the accessible description. The baseline showed the native
   list speaks none even with position reporting on, so adding one would have
   added speech.
