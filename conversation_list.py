@@ -199,9 +199,7 @@ class ConversationList(wx.VListBox):
     def _on_focus(self, event: wx.FocusEvent) -> None:
         if self.GetSelection() == wx.NOT_FOUND and self._rows:
             self.SetSelection(0)
-        # After the focus change has settled, so the reader hears the list
-        # first and the row second, as it does for the native control.
-        wx.CallAfter(self._announce_selection)
+        # The reader finds the focused row through GetFocus by itself, so announcing here would speak the row twice.
         event.Skip()
 
 

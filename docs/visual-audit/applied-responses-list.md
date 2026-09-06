@@ -22,7 +22,7 @@ v0.21.6.
 - `RowsAccessible(wx.Accessible)`. The control is a list, each row a list
   item with a 1-based child id. Name is the row label, description is empty,
   states carry selectable, focusable, selected, focused and invisible.
-  Selection changes and focus raise `ACC_EVENT_OBJECT_FOCUS` then
+  Selection changes only raise `ACC_EVENT_OBJECT_FOCUS` then
   `ACC_EVENT_OBJECT_SELECTION` for the selected row. Focus with nothing
   selected selects row 0 first, as the native list did.
 
@@ -93,7 +93,7 @@ including the focused row's role and states after the find. Three differ:
 `GetFocus` had the wrong arity during this recording (`GetFocus(self, childId)`
 instead of the zero-argument override wx actually calls), so every real call
 to it raised `TypeError`; it was fixed afterwards, without a re-recording.
-<!-- controller: re-check result -->
+Re-checked on the fixed build: arrows, Home and Tab into the list speak the right rows once each, the focused row reports list item, selectable, focusable, focused, selected, and the diagnostics log shows no tracebacks where the earlier recording's log showed eighteen. Tab into the list had spoken the row twice once GetFocus worked, because the focus-time announcement repeated what the reader already found; that announcement was removed.
 
 Recent Conversations, checked once: Tab into the list speaks "Conversations
 list" then the row label, and the focused row reports list item, selectable,

@@ -270,7 +270,7 @@ def test_moving_the_selection_tells_the_screen_reader_which_row_has_focus(frame,
     assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 3), (wx.ACC_EVENT_OBJECT_SELECTION, 3)]
 
 
-def test_focus_with_nothing_selected_lands_on_the_first_row(frame, monkeypatch):
+def test_focus_with_nothing_selected_lands_on_the_first_row_and_stays_quiet(frame, monkeypatch):
     events = []
     monkeypatch.setattr(
         wx.Accessible,
@@ -282,7 +282,7 @@ def test_focus_with_nothing_selected_lands_on_the_first_row(frame, monkeypatch):
     lst._on_focus(wx.FocusEvent())
     wx.GetApp().ProcessPendingEvents()
     assert lst.GetSelection() == 0
-    assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 1), (wx.ACC_EVENT_OBJECT_SELECTION, 1)]
+    assert events == []
 
 
 def test_the_conversation_pickers_use_the_wrapping_list():

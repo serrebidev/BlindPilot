@@ -119,11 +119,11 @@ indexes; 0 is the list itself.
 | `HitTest` | the row under the point from `VirtualHitTest`, or the list | |
 | `GetValue`, `GetHelpText`, `GetKeyboardShortcut` | "" | "" |
 
-Events: on every selection change and whenever the control gains focus, the
-list calls `wx.Accessible.NotifyEvent` with `wx.ACC_EVENT_OBJECT_FOCUS` and
-then `wx.ACC_EVENT_OBJECT_SELECTION` for `wx.OBJID_CLIENT` and the selected
-row's id. When the control gains focus with no selection and at least one
-row, it selects row 0 first, as the native list does.
+Events: on every selection change only, the list calls `wx.Accessible.NotifyEvent`
+with `wx.ACC_EVENT_OBJECT_FOCUS` and then `wx.ACC_EVENT_OBJECT_SELECTION` for
+`wx.OBJID_CLIENT` and the selected row's id. When the control gains focus with
+no selection and at least one row, it selects row 0 first; the reader finds
+the focused row through GetFocus by itself.
 
 ### `SessionPanel` changes (`blindpilot_app.py`)
 
