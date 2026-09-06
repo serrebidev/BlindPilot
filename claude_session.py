@@ -18,10 +18,10 @@ import subprocess
 import threading
 import uuid
 from dataclasses import dataclass, replace
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
-import backend_pool  # noqa: F401 - wired up by the pool adapter task
-from agent_backends import (  # noqa: F401 - BACKEND_CLAUDE is wired up by a later task
+import backend_pool
+from agent_backends import (
     BACKEND_CLAUDE,
     end_process_group,
     own_group_kwargs,
@@ -399,3 +399,52 @@ class ClaudeSession:
     def wait_stderr(self, timeout: float = 2.0) -> None:
         """Let the drainer catch up once the process has ended."""
         self._drainer.join(timeout)
+
+
+def claude_adapter() -> backend_pool.Adapter:
+    """What the pool needs to know about a Claude process, and nothing more."""
+    return backend_pool.Adapter(
+        alive=lambda session: cast(ClaudeSession, session).alive(),
+        interrupt=lambda session, timeout: cast(ClaudeSession, session).interrupt(timeout),
+        stop=lambda session: cast(ClaudeSession, session).stop(),
+        busy=lambda session: cast(ClaudeSession, session).busy(),
+    )
+
+
+# Taking and starting happen under one lock so two turns in two tabs cannot
+# each decide the other's process is theirs, and a settings change is applied
+# to a process before anyone else takes it.
+_START_LOCK = threading.Lock()
+
+
+def take_or_start(
+    panel: object,
+    wants: Wants,
+    binary: str,
+    prompt_tool: str = "",
+    idle_sink: Optional[Callable[[], None]] = None,
+    popen_kwargs: Optional[dict] = None,
+) -> ClaudeSession:
+    """The process this turn speaks through: the tab's held one, or a new one.
+
+    A held process is reused when it can serve the conversation and accepts
+    the turn's model and permission mode. Otherwise it is stopped and a new
+    one started with everything on the command line. Raises OSError when the
+    binary cannot be started.
+    """
+    key = backend_pool.pool_key(BACKEND_CLAUDE, panel)
+    shared = backend_pool.pool()
+    with _START_LOCK:
+        held = shared.take(key)
+        session = cast(Optional[ClaudeSession], held.handle if held is not None else None)
+        if session is not None and not (session.can_serve(wants) and session.adopt(wants)):
+            shared.drop(key)
+            session = None
+        if session is None:
+            session = ClaudeSession.start(binary, wants, prompt_tool, popen_kwargs)
+            held = backend_pool.HeldProcess(session, claude_adapter())
+            session.on_event = held.touch
+            shared.keep(key, held)
+        if idle_sink is not None:
+            session.set_idle_sink(idle_sink)
+        return session

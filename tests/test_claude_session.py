@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 
+import backend_pool
 import claude_session as cs
 
 
@@ -88,6 +89,15 @@ def _settle(predicate, timeout=2.0):
 
 
 WANTS = cs.Wants(cwd="C:/work", permission_mode="default")
+
+
+class _Panel:
+    """Stands in for a SessionPanel: identity-hashed and weak-referenceable.
+
+    Plain `object()` cannot sit in `backend_pool`'s per-panel WeakKeyDictionary
+    (it has no `__weakref__` slot), the same reason test_backend_pool.py keeps
+    this stand-in rather than using one directly.
+    """
 
 
 def test_the_command_line_is_the_one_a_turn_used_to_build():
@@ -402,3 +412,120 @@ def test_adopt_applies_model_then_mode_and_fails_on_a_refusal():
     session2 = cs.ClaudeSession(refusing, cs.Wants(cwd="C:/work", permission_mode="default"))
     _answer_controls(refusing, subtype="error")
     assert not session2.adopt(cs.Wants(cwd="C:/work", permission_mode="plan"))
+
+
+def _fresh_pool(monkeypatch):
+    pool = backend_pool.BackendPool()
+    monkeypatch.setattr(backend_pool, "pool", lambda: pool)
+    return pool
+
+
+def _starting(monkeypatch, procs):
+    """Each start takes the next fake process from `procs`."""
+    made = []
+
+    def fake_popen(cmd, **kwargs):
+        proc = procs.pop(0)
+        proc.cmd = cmd
+        made.append(proc)
+        return proc
+
+    monkeypatch.setattr(cs, "_popen", fake_popen)
+    monkeypatch.setattr(cs, "subprocess_env", lambda binary: {})
+    return made
+
+
+def test_the_adapter_reports_the_session_alive_busy_and_stops_it(monkeypatch):
+    monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    adapter = cs.claude_adapter()
+    assert adapter.alive(session)
+    assert not adapter.busy(session)
+    session.attach()
+    assert adapter.busy(session)
+    session.detach()
+    adapter.stop(session)
+    assert not adapter.alive(session)
+
+
+def test_the_first_turn_starts_a_process_and_keeps_it(monkeypatch):
+    pool = _fresh_pool(monkeypatch)
+    made = _starting(monkeypatch, [_Proc()])
+    panel = _Panel()
+    session = cs.take_or_start(panel, WANTS, "claude", "stdio")
+    assert len(made) == 1
+    assert pool.held_count() == 1
+    assert session.on_event is not None, "events touch the pool's idle clock"
+    assert "--permission-prompt-tool" in made[0].cmd
+
+
+def test_the_next_turn_reuses_the_process_when_the_conversation_matches(monkeypatch):
+    _fresh_pool(monkeypatch)
+    made = _starting(monkeypatch, [_Proc(), _Proc()])
+    panel = _Panel()
+    first = cs.take_or_start(panel, WANTS, "claude")
+    first.session_id = "s1"
+    again = cs.take_or_start(panel, replace_wants(WANTS, session_id="s1"), "claude")
+    assert again is first
+    assert len(made) == 1
+
+
+def test_a_different_effort_or_directory_or_conversation_starts_a_new_process(monkeypatch):
+    _fresh_pool(monkeypatch)
+    made = _starting(monkeypatch, [_Proc(), _Proc(), _Proc()])
+    monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
+    panel = _Panel()
+    first = cs.take_or_start(panel, WANTS, "claude")
+    first.session_id = "s1"
+    second = cs.take_or_start(panel, replace_wants(WANTS, session_id="s1", effort="high"), "claude")
+    assert second is not first and not first.alive(), "the old process was stopped, not leaked"
+    second.session_id = "s1"
+    third = cs.take_or_start(panel, replace_wants(WANTS, session_id="s2", effort="high"), "claude")
+    assert third is not second
+    assert len(made) == 3
+
+
+def test_a_model_change_is_sent_down_the_stream_to_the_held_process(monkeypatch):
+    _fresh_pool(monkeypatch)
+    procs = [_Proc()]
+    made = _starting(monkeypatch, list(procs))
+    panel = _Panel()
+    first = cs.take_or_start(panel, WANTS, "claude")
+    first.session_id = "s1"
+    _answer_controls(procs[0])
+    again = cs.take_or_start(panel, replace_wants(WANTS, session_id="s1", model="b"), "claude")
+    assert again is first and first.wants.model == "b"
+    assert len(made) == 1
+
+
+def test_a_model_change_the_cli_does_not_answer_restarts_the_process(monkeypatch):
+    _fresh_pool(monkeypatch)
+    made = _starting(monkeypatch, [_Proc(), _Proc()])
+    monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
+    monkeypatch.setattr(cs, "_CONTROL_SECONDS", 0.1)
+    panel = _Panel()
+    first = cs.take_or_start(panel, WANTS, "claude")
+    first.session_id = "s1"
+    # Nobody answers the set_model request, so the change cannot be trusted
+    # to have landed and the process is replaced with the model on its command line.
+    second = cs.take_or_start(panel, replace_wants(WANTS, session_id="s1", model="c"), "claude")
+    assert second is not first and not first.alive()
+    assert len(made) == 2 and "--model" in made[1].cmd
+
+
+def test_two_tabs_get_two_processes(monkeypatch):
+    _fresh_pool(monkeypatch)
+    made = _starting(monkeypatch, [_Proc(), _Proc()])
+    one = cs.take_or_start(_Panel(), WANTS, "claude")
+    two = cs.take_or_start(_Panel(), WANTS, "claude")
+    assert one is not two and len(made) == 2
+
+
+def test_the_idle_sink_is_registered_on_take(monkeypatch):
+    _fresh_pool(monkeypatch)
+    _starting(monkeypatch, [_Proc()])
+    woken = []
+    session = cs.take_or_start(_Panel(), WANTS, "claude", idle_sink=lambda: woken.append(1))
+    session._proc.stdout.feed({"type": "assistant"})
+    assert _settle(lambda: woken == [1])
