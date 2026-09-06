@@ -91,9 +91,14 @@ def test_measurements_are_cached_until_the_rows_or_width_change(frame):
     lst.SetSize(wx.Size(300, 200))
     lst.OnMeasureItem(0)
     lst.OnMeasureItem(1)
-    assert set(lst._measured) == {(0, lst.GetClientSize().width), (1, lst.GetClientSize().width)}
+    # The width is whatever the control reports for the first measurement,
+    # held for the session: on GTK SetSize reaches the window through the
+    # event loop, so the control's own answer cannot be assumed here - the
+    # second ask in a session must agree with the first, that is the point.
+    width = next(iter({key[1] for key in lst._measured}))
+    assert set(lst._measured) == {(0, width), (1, width)}
     lst.AppendItems(["more"])
-    assert (0, lst.GetClientSize().width) in lst._measured, "append kept the rows that stayed"
+    assert (0, width) in lst._measured, "append kept the rows that stayed"
     lst.Set(["fresh"])
     assert all(n < lst.GetCount() for n, _w in lst._measured)
 
