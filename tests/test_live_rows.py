@@ -451,6 +451,8 @@ def _stub_panel(app, **overrides):
     """A SessionPanel stand-in carrying only the state these handlers use."""
     panel = type("PanelStub", (), {})()
     panel._earcons = _Earcons()
+    panel._show_working = lambda: None
+    panel._hide_working = lambda: None
     panel._turns = []
     panel._rows = []
     panel._response_count = 0
@@ -577,9 +579,15 @@ def test_reasoning_is_left_out_of_the_activity_by_default(monkeypatch):
     assert [row.kind for row in panel._rows] == ["thinking"]
 
 
-def test_down_on_last_response_row_stays_in_responses():
-    """The prompt is reachable from responses by Tab, never by Down."""
+def test_down_on_last_response_row_stays_in_responses(monkeypatch):
+    """The prompt is reachable from responses by Tab, never by Down.
+
+    List mode only; pinned explicitly because the guard is now mode-dependent
+    and SETTINGS reflects whatever text_view a real config on disk saved.
+    """
     import blindpilot_app as app
+
+    monkeypatch.setattr(app.SETTINGS, "text_view", False)
 
     class Event:
         skipped = False
@@ -670,14 +678,16 @@ def test_stream_refresh_preserves_the_selected_response_row(monkeypatch):
             # trusts the model's record of that.
             return len(self.labels)
 
-        def Set(self, labels):
-            self.labels = list(labels)
+        def Set(self, rows):
+            # The list is given rows now, not labels, but this stub still
+            # tracks labels for its assertions.
+            self.labels = [row.label for row in rows]
             self.selection = app.wx.NOT_FOUND
 
-        def AppendItems(self, labels):
+        def AppendItems(self, rows):
             # Appending is how new output arrives now: it leaves the selection
             # alone, which is the whole point - restoring one speaks.
-            self.labels.extend(labels)
+            self.labels.extend(row.label for row in rows)
 
         def SetSelection(self, index):
             self.selection = index
@@ -1006,3 +1016,42 @@ def test_a_stop_the_backend_ignores_is_reported_and_stop_is_offered_again(monkey
     assert panel._stopping is False
     assert panel.stop_btn.enabled is True
     assert any("still running" in text for text in panel.announced)
+
+
+def test_the_list_is_given_rows_not_labels(monkeypatch):
+    import blindpilot_app
+    from markdown_rows import Row
+
+    given = {}
+
+    class _List:
+        def GetCount(self):
+            # Nonzero and unequal to the empty _displayed below, so
+            # _refresh_list treats this as a rebuild and calls Set, the
+            # branch this test is checking.
+            return 1
+
+        def Set(self, rows):
+            given["set"] = rows
+
+        def AppendItems(self, rows):
+            given["append"] = rows
+
+    rows = [Row(kind="you", label="You: hi", payload="hi", response_number=1)]
+    panel = type(
+        "PanelStub",
+        (),
+        {
+            "responses": _List(),
+            "_rows": rows,
+            "_displayed": [],
+            "_search_term": "",
+            "_selected_row": lambda self: -1,
+            "_select_row": lambda self, i: None,
+        },
+    )()
+    monkeypatch.setattr(blindpilot_app.SETTINGS, "text_view", False)
+
+    blindpilot_app.SessionPanel._refresh_list(panel)
+
+    assert given["set"] == rows, "the list should receive Row objects so it can draw by kind"

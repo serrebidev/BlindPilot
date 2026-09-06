@@ -1,0 +1,127 @@
+[
+ {
+  "note": "Recorded 2026-09-05 19:40 on the wrapping ConversationList, NVDA 2026.1.1 through the bridge in live mode, on an audit copy of BlindPilot (visual/responses-list at 774954b) in list mode with the first past conversation loaded. Each entry is one key as sent with SendKeys and every utterance get_speech returned before the next key, after wait_for_speech_to_finish. Keys with an empty list produced no speech. The conversation's last row was the selected row when the list was entered. get_speech returns speech after NVDA's symbol processing, so backslashes read as spaces and CamelCase is split; the baseline was taken from the log before that step."
+ },
+ {
+  "key": "^{UP}",
+  "spoken": [
+   "Responses  list",
+   "I'll report back as results come in."
+  ]
+ },
+ {
+  "key": "DOWN-1",
+  "spoken": []
+ },
+ {
+  "key": "DOWN-2",
+  "spoken": []
+ },
+ {
+  "key": "DOWN-3",
+  "spoken": []
+ },
+ {
+  "key": "DOWN-4",
+  "spoken": []
+ },
+ {
+  "key": "DOWN-5",
+  "spoken": []
+ },
+ {
+  "key": "{HOME}",
+  "spoken": [
+   "You: Launch 5 general-purpose subagents in parallel with the Task tool to audit C: Users blind gitrepos Blind Pilot. Give each one a separate area: (1) security, (2) agent backends py, (3) blindpilot app py and the GUI, (4) accessibility, (5) tests and CI. Each agent should read the relevant code and report concrete findings. Launch all five in one message so they run at the same time."
+  ]
+ },
+ {
+  "key": "{END}",
+  "spoken": [
+   "I'll report back as results come in."
+  ]
+ },
+ {
+  "key": "^{DOWN}",
+  "spoken": []
+ },
+ {
+  "key": "{ENTER}",
+  "spoken": [
+   "I'll report back as results come in.  dialog",
+   "edit  read only  multi line  I'll report back as results come in."
+  ]
+ },
+ {
+  "key": "{ESC}",
+  "spoken": [
+   "Blind Pilot AUDIT COPY - ignore this window",
+   "Responses  list",
+   "I'll report back as results come in."
+  ]
+ },
+ {
+  "key": "+{F10}",
+  "spoken": [
+   "Context  menu"
+  ]
+ },
+ {
+  "key": "{ESC}-menu",
+  "spoken": [
+   "Blind Pilot AUDIT COPY - ignore this window",
+   "Responses  list",
+   "I'll report back as results come in."
+  ]
+ },
+ {
+  "key": "+{TAB}",
+  "spoken": [
+   "tab control",
+   "Launch 5 general-purpose subage...  tab  selected"
+  ]
+ },
+ {
+  "key": "^f",
+  "spoken": [
+   "Find in Responses  dialog",
+   "Search responses (leave blank to show all):  edit  blank"
+  ]
+ },
+ {
+  "key": "the",
+  "spoken": []
+ },
+ {
+  "key": "{ENTER}-find",
+  "spoken": [
+   "Blind Pilot AUDIT COPY - ignore this window",
+   "Responses  list",
+   "You: Launch 5 general-purpose subagents in parallel with the Task tool to audit C: Users blind gitrepos Blind Pilot. Give each one a separate area: (1) security, (2) agent backends py, (3) blindpilot app py and the GUI, (4) accessibility, (5) tests and CI. Each agent should read the relevant code and report concrete findings. Launch all five in one message so they run at the same time."
+  ]
+ },
+ {
+  "key": "^{UP}-after-find",
+  "spoken": []
+ },
+ {
+  "key": "{DOWN}-after-find",
+  "spoken": [
+   "Response 1"
+  ]
+ },
+ {
+  "key": "focus-after-{DOWN}-after-find",
+  "focus": {
+   "name": "Response 1",
+   "role": "LISTITEM",
+   "states": [
+    "SELECTABLE",
+    "FOCUSABLE",
+    "FOCUSED",
+    "SELECTED"
+   ]
+  },
+  "note": "Identical to the baseline's focus record."
+ }
+]

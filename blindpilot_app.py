@@ -28,6 +28,7 @@ terminal sessions in different project folders.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import importlib.util
 import difflib
@@ -62,6 +63,7 @@ from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 import backend_pool
 import diagnostics
 from certificates import open_url
+from conversation_list import make_conversation_list
 from app_updater import (
     ReleaseInfo,
     UpdateError,
@@ -2303,11 +2305,29 @@ def _flatten(text: str) -> str:
 
 
 def _one_line(label: str) -> str:
-    """A row's label on a single line, for the text view where a line is a row.
+    """Fold a row's label onto one logical line, so `_row_starts` stays in
+    step with the text even though rows now wrap to several visual lines.
 
     Labels are already flattened; a stray newline would break that mapping.
     """
     return " ".join(label.split())
+
+
+def _row_at(starts: List[int], position: int) -> int:
+    """Which row a caret position is in, by each row's start offset."""
+    if not starts:
+        return -1
+    return max(0, bisect.bisect_right(starts, position) - 1)
+
+
+def _starts_of(lines: List[str]) -> List[int]:
+    """Each line's start offset once every line is joined with a newline."""
+    starts: List[int] = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line) + 1
+    return starts
 
 
 def _result_label(text: str) -> str:
@@ -4862,8 +4882,7 @@ class HistoryDialog(wx.Dialog):
         self.filter_box.Bind(wx.EVT_TEXT, lambda _e: self._refresh())
 
         list_label = wx.StaticText(self, label="&Conversations:")
-        self.list_box = wx.ListBox(self, style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
-        self.list_box.SetName("Conversations")
+        self.list_box = make_conversation_list(self, name="Conversations")
         self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
 
         self.summary = wx.StaticText(self, label="")
@@ -5079,8 +5098,7 @@ class HermesSessionsDialog(wx.Dialog):
         self.running_only.Bind(wx.EVT_CHECKBOX, lambda _e: self._refresh())
 
         list_label = wx.StaticText(self, label="&Conversations:")
-        self.list_box = wx.ListBox(self, style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
-        self.list_box.SetName("Conversations")
+        self.list_box = make_conversation_list(self, name="Conversations")
         self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
         # The consequence of the selected row, spoken on arrow keys: attaching
         # and reopening are different acts and the difference must be heard
@@ -5229,6 +5247,61 @@ class HermesSessionsDialog(wx.Dialog):
         event.Skip()
 
 
+class SlashCommandDialog(wx.Dialog):
+    """Pick a slash command from a labeled list, in place of a stock choice dialog."""
+
+    def __init__(self, parent: wx.Window, message: str, labels: List[str]):
+        super().__init__(
+            parent,
+            title="Slash Commands",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        message_text = wx.StaticText(self, label=message)
+
+        self.list_box = make_conversation_list(self, name="Slash commands")
+        self.list_box.Set(labels)
+        if labels:
+            self.list_box.SetSelection(0)
+        self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
+
+        buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+
+        pad = self.FromDIP(PAD_DIALOG)
+        self.list_box.SetMinSize(self.FromDIP(wx.Size(480, 220)))
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(message_text, 0, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.list_box, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        if buttons is not None:
+            sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+
+        self.Bind(wx.EVT_BUTTON, lambda _e: self._accept(), id=wx.ID_OK)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.list_box.SetFocus()
+        self.CentreOnParent()
+
+    def GetSelection(self) -> int:
+        return self.list_box.GetSelection()
+
+    def _accept(self) -> None:
+        self.EndModal(wx.ID_OK)
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        key = event.GetKeyCode()
+        if key == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            # CHAR_HOOK sees Enter before the focused button does. Enter on
+            # Cancel has to cancel, not choose the highlighted row.
+            if isinstance(self.FindFocus(), wx.Button):
+                event.Skip()
+                return
+            self._accept()
+            return
+        event.Skip()
+
+
 class SessionPanel(wx.Panel):
     """One conversation tab. Owns its session_id, rows, and worker.
 
@@ -5274,6 +5347,9 @@ class SessionPanel(wx.Panel):
         self._turns: List[Turn] = []
         self._rows: List[Row] = []  # every row across every response, in order
         self._displayed: List[Row] = []  # rows currently shown (after search)
+        # Start offset of each displayed row's line in the text view, kept in
+        # step with _displayed so a caret position can be mapped to a row.
+        self._row_starts: List[int] = []
         self._search_term = ""
         self._response_count = 0
         # Response number of the turn currently streaming in (None between turns).
@@ -5325,7 +5401,7 @@ class SessionPanel(wx.Panel):
         cwd_label.SetName("Working directory")
 
         responses_label = wx.StaticText(self, label="Responses:")
-        self.responses = wx.ListBox(self, style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
+        self.responses = make_conversation_list(self)
         self.responses.SetName("Responses")
         self.responses.Bind(wx.EVT_LISTBOX_DCLICK, self._on_list_activate)
         self.responses.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
@@ -5337,7 +5413,7 @@ class SessionPanel(wx.Panel):
         # which of the two controls is shown; only the visible one is filled.
         self.responses_text = wx.TextCtrl(
             self,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP | wx.TE_RICH2,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
         )
         self.responses_text.SetName("Responses")
         self.responses_text.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
@@ -5388,6 +5464,11 @@ class SessionPanel(wx.Panel):
         self.stop_btn.Bind(wx.EVT_BUTTON, lambda _e: self._on_stop())
         self.stop_btn.Disable()
 
+        # Sighted only. It is never focusable and has no name for the reader;
+        # the earcon and the status line already say a turn is running.
+        self.working = wx.ActivityIndicator(self)
+        self.working.Hide()
+
         self.attach_btn = wx.Button(self, label="Attach")
         self.attach_btn.SetName("Attach files")
         self.attach_btn.Bind(wx.EVT_BUTTON, lambda _e: self.attach_files())
@@ -5411,6 +5492,7 @@ class SessionPanel(wx.Panel):
         bottom_row.Add(self.send_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         bottom_row.Add(self.steer_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         bottom_row.Add(self.stop_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
+        bottom_row.Add(self.working, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
         bottom_row.Add(self.attach_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         bottom_row.Add(self.slash_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
         bottom_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
@@ -5430,6 +5512,18 @@ class SessionPanel(wx.Panel):
         self.SetSizer(sizer)
         self.apply_view_mode()
         self.backend_changed()
+
+    def _show_working(self) -> None:
+        if not self.working.IsRunning():
+            self.working.Show()
+            self.working.Start()
+            self.Layout()
+
+    def _hide_working(self) -> None:
+        if self.working.IsRunning():
+            self.working.Stop()
+            self.working.Hide()
+            self.Layout()
 
     # ----- Responses view (list box or read-only edit field) -----
     def apply_view_mode(self) -> None:
@@ -5465,12 +5559,8 @@ class SessionPanel(wx.Panel):
         if not self._displayed:
             return wx.NOT_FOUND
         if SETTINGS.text_view:
-            ok, _col, line = self.responses_text.PositionToXY(
-                self.responses_text.GetInsertionPoint()
-            )
-            if not ok or not (0 <= line < len(self._displayed)):
-                return wx.NOT_FOUND
-            return line
+            line = _row_at(self._row_starts, self.responses_text.GetInsertionPoint())
+            return line if 0 <= line < len(self._displayed) else wx.NOT_FOUND
         sel = self.responses.GetSelection()
         return sel if 0 <= sel < len(self._displayed) else wx.NOT_FOUND
 
@@ -5481,7 +5571,7 @@ class SessionPanel(wx.Panel):
             return
         index = max(0, min(index, count - 1))
         if SETTINGS.text_view:
-            self.responses_text.SetInsertionPoint(self.responses_text.XYToPosition(0, index))
+            self.responses_text.SetInsertionPoint(self._row_starts[index])
         else:
             self.responses.SetSelection(index)
 
@@ -5826,10 +5916,9 @@ class SessionPanel(wx.Panel):
         """Slash-command picker: choose a command to insert into the prompt."""
         commands = _slash_commands_for_backend(self.selected_backend(), self.cwd)
         labels = [f"{cmd}. {desc}" for cmd, desc in commands]
-        dlg = wx.SingleChoiceDialog(
+        dlg = SlashCommandDialog(
             self,
             "Choose a slash command. It will be placed in the prompt ready to send.",
-            "Slash Commands",
             labels,
         )
         try:
@@ -6053,6 +6142,7 @@ class SessionPanel(wx.Panel):
         # The progress loop means "still working", and it is not: the run is
         # waiting on this dialog, and a loop under a question is only noise.
         self._earcons.stop_progress()
+        self._hide_working()
         dlg = QuestionDialog(self, backend, questions)
         self._question_dialog = dlg
         try:
@@ -6065,6 +6155,7 @@ class SessionPanel(wx.Panel):
             dlg.Destroy()
             if self._worker is not None:
                 self._earcons.start_progress()
+                self._show_working()
         self._announce("Answer sent")
         return answers
 
@@ -6290,6 +6381,7 @@ class SessionPanel(wx.Panel):
         # response arrives (or the request fails).
         self._earcons.play_send()
         self._earcons.start_progress()
+        self._show_working()
 
         worker_type = worker_class(selected_backend, ClaudeWorker)
         extra = dict(worker_extra or {})
@@ -6322,6 +6414,7 @@ class SessionPanel(wx.Panel):
             # keeps a failure here from leaving Send refused for good.
             self._worker = None
             self._earcons.stop_progress()
+            self._hide_working()
             self.send_btn.Enable()
             self._announce(f"Error: The turn could not be started: {exc}")
             return
@@ -6412,6 +6505,7 @@ class SessionPanel(wx.Panel):
     def _finish_stopped_turn(self) -> None:
         """Close out a turn the user stopped, without reporting it as failed."""
         self._earcons.stop_progress()
+        self._hide_working()
         partial = self._streamed_assistant.strip()
         if self._turns and not self._turns[-1].response:
             self._turns[-1].response = partial
@@ -6666,6 +6760,7 @@ class SessionPanel(wx.Panel):
         extra["resume_only"] = True
         self._announce("Attaching" if attaching else "Reopening")
         self._earcons.start_progress()
+        self._show_working()
         self._worker = worker_class(BACKEND_HERMES, ClaudeWorker)(
             "",
             self._session_id,
@@ -6920,6 +7015,7 @@ class SessionPanel(wx.Panel):
             # for it, so it is not news, and it is not an error.
             return
         self._earcons.stop_progress()
+        self._hide_working()
         self._earcons.play_error()
         if self._turns and not self._turns[-1].response:
             self._turns.pop()
@@ -6952,6 +7048,7 @@ class SessionPanel(wx.Panel):
     def _on_worker_finished(self) -> None:
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()
+        self._hide_working()
         if self._stopping:
             self._stopping = False
             self._finish_stopped_turn()
@@ -6977,12 +7074,7 @@ class SessionPanel(wx.Panel):
         # control only the visible one ever fills, so the append path asks
         # the control what it is actually showing before trusting the record.
         if SETTINGS.text_view:
-            # An empty multi-line control reports one line on Windows.
-            shown = (
-                self.responses_text.GetNumberOfLines()
-                if self.responses_text.GetLastPosition()
-                else 0
-            )
+            shown = len(self._row_starts) if self.responses_text.GetLastPosition() else 0
         else:
             shown = self.responses.GetCount()
         trustworthy = shown == len(previous)
@@ -6997,29 +7089,37 @@ class SessionPanel(wx.Panel):
             self._displayed.append(row)
 
         if trustworthy and labels[: len(previous)] == previous:
-            added = labels[len(previous) :]
-            if added:
-                self._append_rows(added)
+            added_rows = self._displayed[len(previous) :]
+            if added_rows:
+                self._append_rows(added_rows)
             return
 
         # The rows really did change shape - a search, a new turn, a response
         # replaced by its parsed form - so there is no way around a rebuild,
         # and restoring the selection afterwards is right rather than wrong.
         if SETTINGS.text_view:
-            self.responses_text.ChangeValue("\n".join(_one_line(label) for label in labels))
+            lines = [_one_line(row.label) for row in self._displayed]
+            self._row_starts = _starts_of(lines)
+            self.responses_text.ChangeValue("\n".join(lines))
         else:
-            self.responses.Set(labels)
+            self.responses.Set(self._displayed)
         if keep != wx.NOT_FOUND and labels:
             self._select_row(keep)
 
-    def _append_rows(self, labels: List[str]) -> None:
+    def _append_rows(self, rows: List[Row]) -> None:
         """Add rows to the end, leaving the reader exactly where they are."""
         if not SETTINGS.text_view:
-            self.responses.AppendItems(list(labels))
+            self.responses.AppendItems(rows)
             return
-        text = "\n".join(_one_line(label) for label in labels)
+        lines = [_one_line(row.label) for row in rows]
+        last = self.responses_text.GetLastPosition()
+        base = last + (1 if last else 0)
+        for line in lines:
+            self._row_starts.append(base)
+            base += len(line) + 1
+        text = "\n".join(lines)
         was_at = self.responses_text.GetInsertionPoint()
-        lead = "\n" if self.responses_text.GetLastPosition() else ""
+        lead = "\n" if last else ""
         # Appending moves the caret to the end, which is itself a move worth
         # announcing, so it goes straight back to the line being read.
         self.responses_text.AppendText(lead + text)
@@ -7076,9 +7176,20 @@ class SessionPanel(wx.Panel):
                     self._jump_to_next_response(sel)
                 return
             # The responses are one focus region. At the bottom, consume Down
-            # and remain on the final row; only Tab may enter the prompt.
+            # and remain on the final row; only Tab may enter the prompt. In
+            # text view a row wraps to several visual lines and Down moves by
+            # visual line, so the guard only applies once the caret is on the
+            # last row's own last visual line; before that, Down must still
+            # move the caret so the rest of the row can be read.
             if sel != wx.NOT_FOUND and sel == self._row_count() - 1:
-                return
+                if SETTINGS.text_view:
+                    _ok, _col, line = self.responses_text.PositionToXY(
+                        self.responses_text.GetInsertionPoint()
+                    )
+                    if line == self.responses_text.GetNumberOfLines() - 1:
+                        return
+                else:
+                    return
             event.Skip()
             return
 
@@ -7276,6 +7387,7 @@ class SessionPanel(wx.Panel):
         """
         self._close_question_dialog()
         self._earcons.stop_progress()
+        self._hide_working()
         if self._dictation_timer is not None:
             # It fires a second and a half after the text landed, by which
             # time this panel's widgets may not exist.

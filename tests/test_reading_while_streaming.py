@@ -36,13 +36,15 @@ class _ListBox:
         self.rebuilds = 0
         self.selection_events = 0
 
-    def Set(self, labels):
-        self.labels = list(labels)
+    def Set(self, rows):
+        # The list is given rows now, not labels, but this stub still tracks
+        # labels for its assertions.
+        self.labels = [row.label for row in rows]
         self.selection = app.wx.NOT_FOUND
         self.rebuilds += 1
 
-    def AppendItems(self, labels):
-        self.labels.extend(labels)
+    def AppendItems(self, rows):
+        self.labels.extend(row.label for row in rows)
 
     def SetSelection(self, index):
         self.selection = index
@@ -110,6 +112,10 @@ def _panel(monkeypatch, *, text_view, displayed, rows, control):
     panel._search_term = ""
     if text_view:
         panel.responses_text = control
+        # Mirrors what a prior text-mode refresh would have recorded for the
+        # rows the control already holds, so the fast/rebuild-path check that
+        # compares it against `_displayed` sees the same state the control does.
+        panel._row_starts = app._starts_of(control.text.split("\n")) if control.text else []
     else:
         panel.responses = control
     panel._selected_row = lambda: app.SessionPanel._selected_row(panel)

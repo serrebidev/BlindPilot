@@ -51,6 +51,8 @@ class _Worker:
 def panel():
     stub = type("PanelStub", (), {})()
     stub._earcons = _Earcons()
+    stub._show_working = lambda: None
+    stub._hide_working = lambda: None
     stub._worker = None
     stub._dictation_timer = None
     stub._close_question_dialog = lambda: None

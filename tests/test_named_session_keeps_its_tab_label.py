@@ -100,6 +100,8 @@ def _panel(session_title: str, prompt: str = "start", session_id=None):
     panel.cwd = ""
     panel.mode = "default"
     panel._earcons = _Earcons()
+    panel._show_working = lambda: None
+    panel._hide_working = lambda: None
     panel.send_btn = _Button()
     panel.steer_btn = _Button()
     panel.stop_btn = _Button()

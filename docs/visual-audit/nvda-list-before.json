@@ -1,0 +1,121 @@
+[
+  {
+    "note": "Recorded 2026-09-05 13:40 on the native wx.ListBox, NVDA 2026.1.1 through the bridge in live mode with input logging, on an audit copy of BlindPilot (visual/responses-list at c8b2ab9) in list mode with the first past conversation loaded. Each entry is one key as sent with SendKeys and every utterance NVDA logged before the next key. Keys with an empty list produced no speech. The conversation's last row was the selected row when the list was entered."
+  },
+  {
+    "key": "^{UP}",
+    "spoken": [
+      "Responses:  list",
+      "I'll report back as results come in."
+    ]
+  },
+  {
+    "key": "DOWN-1",
+    "spoken": []
+  },
+  {
+    "key": "DOWN-2",
+    "spoken": []
+  },
+  {
+    "key": "DOWN-3",
+    "spoken": []
+  },
+  {
+    "key": "DOWN-4",
+    "spoken": []
+  },
+  {
+    "key": "DOWN-5",
+    "spoken": []
+  },
+  {
+    "key": "{HOME}",
+    "spoken": [
+      "You: Launch 5 general-purpose subagents in parallel with the Task tool to audit C:\\Users\\blind\\gitrepos\\BlindPilot. Give each one a separate area: (1) security, (2) agent_backends.py, (3) blindpilot_app.py and the GUI, (4) accessibility, (5) tests and CI. Each agent should read the relevant code and report concrete findings. Launch all five in one message so they run at the same time."
+    ]
+  },
+  {
+    "key": "{END}",
+    "spoken": [
+      "I'll report back as results come in."
+    ]
+  },
+  {
+    "key": "^{DOWN}",
+    "spoken": []
+  },
+  {
+    "key": "{ENTER}",
+    "spoken": []
+  },
+  {
+    "key": "{ESC}",
+    "spoken": []
+  },
+  {
+    "key": "+{F10}",
+    "spoken": [
+      "Context  menu"
+    ]
+  },
+  {
+    "key": "{ESC}-menu",
+    "spoken": [
+      "BlindPilot AUDIT COPY - ignore this window",
+      "Responses:  list",
+      "I'll report back as results come in."
+    ]
+  },
+  {
+    "key": "+{TAB}",
+    "spoken": [
+      "tab control",
+      "Launch 5 general-purpose subage…  tab  selected"
+    ]
+  },
+  {
+    "key": "^f",
+    "spoken": [
+      "Find in Responses  dialog",
+      "Search responses (leave blank to show all):  edit  blank"
+    ]
+  },
+  {
+    "key": "the",
+    "spoken": []
+  },
+  {
+    "key": "{ENTER}-find",
+    "spoken": [
+      "BlindPilot AUDIT COPY - ignore this window",
+      "Responses:  list",
+      "List: Security — credentials, subprocess, updater, deserialization, network, tool-execution surface agent_backends.py — backend abstraction, streaming resilience (including the in-flight uncommitted work), retries, concurrency blindpilot_app.py + GUI — threading, state, lifecycle, error handling in callbacks, plus the uncommitted diff Accessibility — screen reader announcements across NVDA/JAWS/VoiceOver/Orca, keyboard nav, labels, silent failures Tests + CI — coverage gaps, test quality, flakiness, the modified conftest and new stream-resilience test, and an actual test run  not selected",
+      "You: Launch 5 general-purpose subagents in parallel with the Task tool to audit C:\\Users\\blind\\gitrepos\\BlindPilot. Give each one a separate area: (1) security, (2) agent_backends.py, (3) blindpilot_app.py and the GUI, (4) accessibility, (5) tests and CI. Each agent should read the relevant code and report concrete findings. Launch all five in one message so they run at the same time."
+    ]
+  },
+  {
+    "key": "^{UP}-after-find",
+    "spoken": []
+  },
+  {
+    "key": "{DOWN}-after-find",
+    "spoken": [
+      "Response 1"
+    ]
+  },
+  {
+    "key": "focus-after-{DOWN}-after-find",
+    "focus": {
+      "name": "Response 1",
+      "role": "LISTITEM",
+      "states": [
+        "SELECTABLE",
+        "FOCUSABLE",
+        "FOCUSED",
+        "SELECTED"
+      ]
+    },
+    "note": "NVDA's presentation.reportObjectPositionInformation was true and still no position was spoken on the native list."
+  }
+]

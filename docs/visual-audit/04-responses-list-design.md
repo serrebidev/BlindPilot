@@ -25,8 +25,10 @@ native list gives today.
 
 ## What stays the same
 
-- Every string a screen reader hears. Row labels are unchanged, and the
-  position is spoken as "N of M" as it is now.
+- Every string a screen reader hears. Row labels are unchanged. The native
+  list does not speak a position on this NVDA even with position reporting
+  on (recorded 2026-09-05, `nvda-list-before.json`), so the new list does not
+  add one: the accessible description is empty.
 - Every key. Up, Down, Home, End, Ctrl+Up, Ctrl+Down, Enter for Read View,
   the Menu key and context gesture for the row menu, Tab and Shift+Tab out
   of the control, and the search filter.
@@ -106,7 +108,7 @@ indexes; 0 is the list itself.
 |---|---|---|
 | `GetRole` | `wx.ROLE_SYSTEM_LIST` | `wx.ROLE_SYSTEM_LISTITEM` |
 | `GetName` | the control's name | `rows[n-1].label` |
-| `GetDescription` | "" | `f"{n} of {count}"` |
+| `GetDescription` | "" | "" (a position here would be spoken, and the native list speaks none) |
 | `GetState` | focusable, plus focused when the control has focus | selectable and focusable, plus selected and focused for the selected row, plus invisible when scrolled out |
 | `GetLocation` | screen rect of the control | screen rect of the row from `GetItemRect` |
 | `GetChildCount` | row count | not called |
@@ -117,11 +119,11 @@ indexes; 0 is the list itself.
 | `HitTest` | the row under the point from `VirtualHitTest`, or the list | |
 | `GetValue`, `GetHelpText`, `GetKeyboardShortcut` | "" | "" |
 
-Events: on every selection change and whenever the control gains focus, the
-list calls `wx.Accessible.NotifyEvent` with `wx.ACC_EVENT_OBJECT_FOCUS` and
-then `wx.ACC_EVENT_OBJECT_SELECTION` for `wx.OBJID_CLIENT` and the selected
-row's id. When the control gains focus with no selection and at least one
-row, it selects row 0 first, as the native list does.
+Events: on every selection change only, the list calls `wx.Accessible.NotifyEvent`
+with `wx.ACC_EVENT_OBJECT_FOCUS` and then `wx.ACC_EVENT_OBJECT_SELECTION` for
+`wx.OBJID_CLIENT` and the selected row's id. When the control gains focus with
+no selection and at least one row, it selects row 0 first; the reader finds
+the focused row through GetFocus by itself.
 
 ### `SessionPanel` changes (`blindpilot_app.py`)
 
@@ -171,16 +173,18 @@ the position within the filtered list, as now.
   unwrapped; the measure then reports one line, and the row clips at the
   edge instead of raising. This only happens while the window is being made
   very small.
-- If `SetAccessible` is unavailable (wx built without accessibility, which
-  is not the case for any supported build), the list still works; the
-  screen reader then sees a generic client area. A warning is logged once at
-  startup so the case is visible in the diagnostics log.
+- `wx.Accessible` only exists on the Windows build of wxWidgets. The GTK and
+  macOS builds have no `wx.Accessible`, so on those platforms
+  `make_conversation_list` hands back a plain `wx.ListBox`
+  (`NativeConversationList`) instead of the wrapping list, and their screen
+  readers read that native control by themselves. The wrapping list with its
+  accessible object is Windows only for now.
 
 ## Testing
 
 Unit, on stubs, no display needed:
 
-- `RowsAccessible` over a fake control: name, description "N of M", role,
+- `RowsAccessible` over a fake control: name, empty description, role,
   states for the selected and unselected row and for the list, `GetFocus`,
   `GetSelections`, `Navigate` at both ends, `HitTest` outside any row.
 - The measure cache: same width hits the cache, a resize clears it, `Set`
