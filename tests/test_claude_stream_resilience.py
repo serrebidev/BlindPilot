@@ -89,19 +89,30 @@ class _PipeStderr:
 class _FakeProc:
     def __init__(self, stdout_iter, stderr=None, returncode=0):
         self.stdin = _FakeStdin()
-        self.stdout = stdout_iter
+        self.stdout_done = False
+        self.stdout = self._watch(stdout_iter)
         self.stderr = stderr if stderr is not None else io.StringIO("")
         self.returncode = returncode
         self.killed = False
+
+    def _watch(self, it):
+        try:
+            for line in it:
+                yield line
+        finally:
+            self.stdout_done = True
 
     def wait(self, timeout=None):
         return self.returncode
 
     def poll(self):
-        return self.returncode
+        return self.returncode if self.stdout_done else None
 
     def kill(self):
         self.killed = True
+        self.stdout_done = True
+        if self.returncode is None:
+            self.returncode = 1
 
 
 def _drive(proc, on_activity=None, timeout=10.0):
@@ -121,8 +132,10 @@ def _drive(proc, on_activity=None, timeout=10.0):
         if on_activity is not None:
             on_activity(kind, text)
 
-    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
-    subprocess.Popen = lambda *_a, **_k: proc  # type: ignore[assignment]
+    import claude_session
+
+    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    claude_session._popen = lambda *_a, **_k: proc  # type: ignore[assignment]
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
 
     worker = blindpilot_app.ClaudeWorker(
@@ -149,8 +162,11 @@ def _drive(proc, on_activity=None, timeout=10.0):
     thread.join(timeout)
     finished = not thread.is_alive()
 
-    subprocess.Popen = real_popen  # type: ignore[assignment]
+    claude_session._popen = real_popen  # type: ignore[assignment]
     blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+    import backend_pool
+
+    backend_pool.pool().drop_all()
     return activity, completed, failures, raised, finished
 
 
