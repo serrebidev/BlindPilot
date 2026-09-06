@@ -1,23 +1,21 @@
-# BlindPilot 0.22.0
+# BlindPilot 0.22.1
 
-Chat mode can start new conversations again, the Responses list wraps the way it used to, and the checks CI runs now run on the machine before a commit is made.
+Claude Code keeps its process between turns now, so the background agents a turn leaves running stop dying with it.
 
-## Chat mode: new conversations
+## The agents that died with the turn
 
-Start New Conversation carries Ctrl+Shift+N in the Conversation menu, and its handler was written to serve both of BlindPilot's modes. The menu item, though, was built as an agent-only command - one of the set that acts on the visible session tab - so the moment Chat mode was shown, `_set_app_mode` greyed the item out along with the rest of them, and the chord went dead with it. Nothing said so. The small New conversation button on the chat panel still worked, but a person following the menu - and a screen reader user following the menu is the ordinary path - pressed Ctrl+Shift+N or opened the Conversation menu, found the item greyed, and kept typing into the conversation they had been trying to leave. The chat log shows it plainly: four sends of the same first message in an hour, three of them landing in a conversation that was supposed to have been abandoned.
+A BlindPilot turn used to be a process. Each message started a fresh `claude -p --input-format stream-json`, the conversation carried on through `--resume`, and when the turn's result arrived, BlindPilot closed the process's stdin. The CLI then shut itself down - and took with it anything still running inside it. The worker did wait on `subagent_stats` before closing, which protected agents spawned in the background. It could not protect an agent resumed with SendMessage: in Claude Code 2.1.258, `started_in_background` is counted only in the Agent tool's spawn path, and a resume records nothing, so a running resumed agent was invisible to the count and the turn ended anyway. The log showed it as `turn ended early: exit_code=1 completed=True`, five times in one day on September 5, each followed by the app being restarted and the agent's work lost.
 
-The item now stands outside the agent-only set. It stays enabled in both modes, and the one handler routes to whichever mode is showing: the session tab's clear-conversation in Agent mode, the chat panel's new-conversation in Chat mode. Two regression tests pin the menu item's enabled state in each mode and the routing itself, so the next mode that arrives cannot quietly swallow the chord again.
+## One process per tab
 
-## The Responses list wraps again
+PR #39 moves the process to the tab in a new `claude_session.py`, registered with the same pool Codex and Hermes already use, with the same fifteen-minute idle reaper. A turn borrows the process, writes its message, reads the stream to its result and detaches; the process stays. The first turn starts it, later turns reuse it, and closing the tab, switching backend, changing the working directory or the reasoning effort, or quitting ends it through paths that were already tested. Model and permission-mode changes travel down the stream as control requests and keep the process; a session that refuses the change is replaced with one started under the new setting.
 
-A contributor's visual pass (PR #37) replaces the flat list of responses with one that wraps long rows to the width of the window instead of cutting paragraphs off at the right edge, and draws each row by its kind - your lines bold, thinking muted, code monospaced. Wrapping lists cannot be drawn by a native control, and a native screen reader sees nothing inside a custom-drawn one, so on Windows the list carries its own accessible object and announces rows as a list should. On Linux and macOS the toolkit has no accessible object to give - constructing one there raises, and on macOS it aborts the process outright - so those builds keep the platform's own list, which their screen readers already read by themselves. Every construction site in the window went through a single factory, so the platform split happens once.
+What an agent reports after its turn has ended arrives as a late turn the panel starts on its own: the working indicator and earcon run, rows appear, the question dialog opens if the agent asks one, and the answer lands as a new response. Nobody typed anything, so there is no "You:" row. The announcement is one new sentence, "A background agent has reported. Receiving response". Two sentences the pool has always had become reachable for Claude Code - "Claude Code had stopped running. Restarting it, which takes a moment." and "Claude Code was idle and has been closed. The next message will restart it." - and two old ones are gone because nothing can say them any more: "Waiting for N background agents to finish" and "No response received". A process that ends without a return code says "Claude Code exited without a code". Stop sends the CLI an interrupt and waits up to five seconds for its confirmation, dropping the process only if none comes.
 
-## Checks before the commit
+Because the process no longer starts per turn, the MCP servers no longer reconnect at the top of every message. Codex, opencode and Hermes already held their connections across turns; this closes the one backend that tore its process down.
 
-PR #38 adds a pre-commit configuration running what CI runs: ruff's checks, ruff's formatting and mypy on every commit, and the full test suite with warnings as errors on push. The suites take about three minutes, and a CI run spent discovering a formatting nit is a run wasted; what these hooks cannot catch - a failure that only shows on Linux or macOS - the runners remain the only check for, and the configuration says so.
+## What was verified
 
-## Also in this release
+The design's live check - spawn a foreground agent, resume it with SendMessage, confirm the follow-up arrives as a late turn and the process id holds across the three turns - has not run yet. The machine this was built on does have a signed-in CLI, but its weekly usage limit is spent until September 7, so the check runs after the reset and will be reported on the pull request.
 
-- A scratch CI-fix report that rode along with PR #37 and failed formatting on every runner has been removed, along with the formatting failure itself.
-
-Verified with the full regression suite (1468 tests), lint, formatting, type checks, and the startup, GUI, and Chat GUI smoke runs.
+Verified with the full regression suite (1507 tests with warnings as errors), ruff's checks and formatting, mypy over sixteen files, the startup GUI smoke run, and CI on Windows, macOS and Linux.

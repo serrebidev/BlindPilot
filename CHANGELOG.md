@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.22.1 - 2026-09-06
+
+- Claude Code keeps one process per tab between turns instead of starting a fresh one for every message, so the agents a turn leaves running survive the turn's end (PR #39).
+
 ## v0.22.0 - 2026-09-06
 
 - Chat mode can start new conversations again. The menu's Start New Conversation item was built as an agent-only command, so switching to Chat mode greyed it out and left its Ctrl+Shift+N chord dead; every message sent afterwards kept landing in the same conversation. The item is now enabled in both modes, and the handler routes to whichever mode is showing.
