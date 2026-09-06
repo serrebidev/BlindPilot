@@ -529,3 +529,37 @@ def test_the_idle_sink_is_registered_on_take(monkeypatch):
     session = cs.take_or_start(_Panel(), WANTS, "claude", idle_sink=lambda: woken.append(1))
     session._proc.stdout.feed({"type": "assistant"})
     assert _settle(lambda: woken == [1])
+
+
+def test_one_tabs_slow_model_change_does_not_block_another_tab(monkeypatch):
+    _fresh_pool(monkeypatch)
+    made = _starting(monkeypatch, [_Proc(), _Proc(), _Proc()])
+    monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
+    monkeypatch.setattr(cs, "_CONTROL_SECONDS", 1.0)
+    panel_a = _Panel()
+    panel_b = _Panel()
+    first = cs.take_or_start(panel_a, WANTS, "claude")
+    first.session_id = "s1"
+    # Nobody answers control requests on this process, so the model change
+    # below waits out the CLI's silence before it gives up and replaces it.
+
+    result = {}
+
+    def change_a_model():
+        result["a"] = cs.take_or_start(
+            panel_a, replace_wants(WANTS, session_id="s1", model="c"), "claude"
+        )
+
+    thread = threading.Thread(target=change_a_model)
+    thread.start()
+    time.sleep(0.05)  # let the thread take panel A's lock and start waiting
+
+    start = time.monotonic()
+    second = cs.take_or_start(panel_b, WANTS, "claude")
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.3, "tab B waited on tab A's slow model change"
+
+    thread.join()
+    replaced_a = result["a"]
+    assert len(made) == 3
+    assert replaced_a.alive() and second.alive()

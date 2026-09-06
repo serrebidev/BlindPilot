@@ -17,6 +17,7 @@ import queue
 import subprocess
 import threading
 import uuid
+import weakref
 from dataclasses import dataclass, replace
 from typing import Callable, Optional, cast
 
@@ -411,10 +412,26 @@ def claude_adapter() -> backend_pool.Adapter:
     )
 
 
-# Taking and starting happen under one lock so two turns in two tabs cannot
-# each decide the other's process is theirs, and a settings change is applied
-# to a process before anyone else takes it.
-_START_LOCK = threading.Lock()
+# Taking and starting happen under one lock per tab, so two turns in the same
+# tab can never both start a process, while one tab's slow model change never
+# holds up another tab's turn.
+_panel_locks: "weakref.WeakKeyDictionary[object, threading.Lock]" = weakref.WeakKeyDictionary()
+_panel_locks_guard = threading.Lock()
+# Panels are weakly referenced above, and None cannot be, so the shared slot
+# backend_pool.pool_key uses when there is no panel keeps a lock of its own.
+_no_panel_lock = threading.Lock()
+
+
+def _lock_for(panel: object) -> threading.Lock:
+    """The lock that guards taking and starting for one tab."""
+    if panel is None:
+        return _no_panel_lock
+    with _panel_locks_guard:
+        lock = _panel_locks.get(panel)
+        if lock is None:
+            lock = threading.Lock()
+            _panel_locks[panel] = lock
+        return lock
 
 
 def take_or_start(
@@ -425,7 +442,7 @@ def take_or_start(
     idle_sink: Optional[Callable[[], None]] = None,
     popen_kwargs: Optional[dict] = None,
 ) -> ClaudeSession:
-    """The process this turn speaks through: the tab's held one, or a new one.
+    """The process this turn speaks through, the tab's held one or a new one.
 
     A held process is reused when it can serve the conversation and accepts
     the turn's model and permission mode. Otherwise it is stopped and a new
@@ -434,7 +451,7 @@ def take_or_start(
     """
     key = backend_pool.pool_key(BACKEND_CLAUDE, panel)
     shared = backend_pool.pool()
-    with _START_LOCK:
+    with _lock_for(panel):
         held = shared.take(key)
         session = cast(Optional[ClaudeSession], held.handle if held is not None else None)
         if session is not None and not (session.can_serve(wants) and session.adopt(wants)):
