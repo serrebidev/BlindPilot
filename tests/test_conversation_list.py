@@ -238,7 +238,8 @@ def test_moving_the_selection_tells_the_screen_reader_which_row_has_focus(frame,
     lst = cl.ConversationList(frame)
     lst.Set(["a", "b", "c"])
     lst.SetSelection(2)
-    lst._announce_selection()
+    ev = wx.CommandEvent(wx.wxEVT_LISTBOX, lst.GetId())
+    lst.GetEventHandler().ProcessEvent(ev)
     assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 3), (wx.ACC_EVENT_OBJECT_SELECTION, 3)]
 
 
@@ -252,4 +253,6 @@ def test_focus_with_nothing_selected_lands_on_the_first_row(frame, monkeypatch):
     lst = cl.ConversationList(frame)
     lst.Set(["a", "b"])
     lst._on_focus(wx.FocusEvent())
+    wx.GetApp().ProcessPendingEvents()
     assert lst.GetSelection() == 0
+    assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 1), (wx.ACC_EVENT_OBJECT_SELECTION, 1)]
