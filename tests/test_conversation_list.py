@@ -221,3 +221,35 @@ def test_the_default_action_is_open_and_the_rest_is_silent():
     assert acc.GetDefaultAction(0) == (wx.ACC_OK, "")
     for method in (acc.GetValue, acc.GetHelpText, acc.GetKeyboardShortcut):
         assert method(1) == (wx.ACC_OK, "")
+
+
+def test_the_control_carries_the_accessible_object(frame):
+    lst = cl.ConversationList(frame)
+    assert isinstance(lst.GetAccessible(), cl.RowsAccessible)
+
+
+def test_moving_the_selection_tells_the_screen_reader_which_row_has_focus(frame, monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        wx.Accessible,
+        "NotifyEvent",
+        staticmethod(lambda ev, win, objid, child: events.append((ev, child))),
+    )
+    lst = cl.ConversationList(frame)
+    lst.Set(["a", "b", "c"])
+    lst.SetSelection(2)
+    lst._announce_selection()
+    assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 3), (wx.ACC_EVENT_OBJECT_SELECTION, 3)]
+
+
+def test_focus_with_nothing_selected_lands_on_the_first_row(frame, monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        wx.Accessible,
+        "NotifyEvent",
+        staticmethod(lambda ev, win, objid, child: events.append((ev, child))),
+    )
+    lst = cl.ConversationList(frame)
+    lst.Set(["a", "b"])
+    lst._on_focus(wx.FocusEvent())
+    assert lst.GetSelection() == 0

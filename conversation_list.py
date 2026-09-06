@@ -67,6 +67,10 @@ class ConversationList(wx.VListBox):
         # (row index, client width) -> height. Cleared when either changes.
         self._measured: dict[tuple[int, int], int] = {}
         self.Bind(wx.EVT_SIZE, self._on_size)
+        self._accessible = RowsAccessible(self)
+        self.SetAccessible(self._accessible)
+        self.Bind(wx.EVT_LISTBOX, self._on_select)
+        self.Bind(wx.EVT_SET_FOCUS, self._on_focus)
 
     # ----- rows -----
     def GetRows(self) -> list[Row]:
@@ -173,6 +177,26 @@ class ConversationList(wx.VListBox):
     def _on_size(self, event: wx.SizeEvent) -> None:
         self._measured.clear()
         self.RefreshAll()
+        event.Skip()
+
+    # ----- what the screen reader is told -----
+    def _announce_selection(self) -> None:
+        sel = self.GetSelection()
+        if sel == wx.NOT_FOUND:
+            return
+        wx.Accessible.NotifyEvent(wx.ACC_EVENT_OBJECT_FOCUS, self, wx.OBJID_CLIENT, sel + 1)
+        wx.Accessible.NotifyEvent(wx.ACC_EVENT_OBJECT_SELECTION, self, wx.OBJID_CLIENT, sel + 1)
+
+    def _on_select(self, event: wx.CommandEvent) -> None:
+        self._announce_selection()
+        event.Skip()
+
+    def _on_focus(self, event: wx.FocusEvent) -> None:
+        if self.GetSelection() == wx.NOT_FOUND and self._rows:
+            super().SetSelection(0)
+        # After the focus change has settled, so the reader hears the list
+        # first and the row second, as it does for the native control.
+        wx.CallAfter(self._announce_selection)
         event.Skip()
 
 
