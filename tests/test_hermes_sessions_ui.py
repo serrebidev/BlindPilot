@@ -117,7 +117,7 @@ def test_the_dialog_lists_every_surface_and_marks_the_live_one(monkeypatch, fram
     _install_catalog(monkeypatch)
     dialog = HermesSessionsDialog(frame, cwd=".")
     try:
-        labels = [dialog.list_box.GetString(i) for i in range(dialog.list_box.GetCount())]
+        labels = [row.label for row in dialog.list_box.GetRows()]
         assert len(labels) == 3
         assert labels[0].startswith("Running now")
         # The point of the dialog: a CLI conversation on the far machine is
@@ -135,7 +135,7 @@ def test_running_only_narrows_the_list_to_what_can_be_attached(monkeypatch, fram
         dialog.running_only.SetValue(True)
         dialog._refresh()
 
-        labels = [dialog.list_box.GetString(i) for i in range(dialog.list_box.GetCount())]
+        labels = [row.label for row in dialog.list_box.GetRows()]
         assert len(labels) == 1
         assert labels[0].startswith("Running now")
     finally:

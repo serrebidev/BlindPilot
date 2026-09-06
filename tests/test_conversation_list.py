@@ -256,3 +256,14 @@ def test_focus_with_nothing_selected_lands_on_the_first_row(frame, monkeypatch):
     wx.GetApp().ProcessPendingEvents()
     assert lst.GetSelection() == 0
     assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 1), (wx.ACC_EVENT_OBJECT_SELECTION, 1)]
+
+
+def test_the_conversation_pickers_use_the_wrapping_list():
+    import inspect
+
+    import blindpilot_app as app
+
+    for cls in (app.HistoryDialog, app.HermesSessionsDialog, app.SlashCommandDialog):
+        source = inspect.getsource(cls.__init__)
+        assert "ConversationList(" in source, f"{cls.__name__} still builds a wx.ListBox"
+        assert "wx.ListBox(" not in source
