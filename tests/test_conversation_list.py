@@ -115,3 +115,109 @@ def test_fonts_follow_the_style(frame):
     assert lst._font_for(cl.style_for("code")).IsFixedWidth()
     assert not lst._font_for(cl.style_for("prose")).IsFixedWidth()
     assert lst._font_for(cl.style_for("prose")).GetPointSize() == base.GetPointSize()
+
+
+class _FakeList:
+    """What the accessible object needs from the control, and nothing else."""
+
+    def __init__(self, labels, selected=wx.NOT_FOUND, focused=False):
+        self._rows = cl.as_rows(labels)
+        self._sel = selected
+        self._focused = focused
+
+    def GetRows(self):
+        return list(self._rows)
+
+    def GetCount(self):
+        return len(self._rows)
+
+    def GetSelection(self):
+        return self._sel
+
+    def GetName(self):
+        return "Responses"
+
+    def HasFocus(self):
+        return self._focused
+
+    def IsVisible(self, n):
+        return True
+
+    def GetItemRect(self, n):
+        return wx.Rect(0, 20 * n, 100, 20)
+
+    def ClientToScreen(self, pt):
+        return wx.Point(pt.x + 5, pt.y + 5)
+
+    def ScreenToClient(self, pt):
+        return wx.Point(pt.x - 5, pt.y - 5)
+
+    def GetScreenRect(self):
+        return wx.Rect(5, 5, 100, 100)
+
+    def VirtualHitTest(self, y):
+        n = y // 20
+        return n if 0 <= n < len(self._rows) else wx.NOT_FOUND
+
+
+def test_the_list_and_its_rows_have_the_roles_a_screen_reader_expects():
+    acc = cl.RowsAccessible(_FakeList(["a", "b"]))
+    assert acc.GetRole(0) == (wx.ACC_OK, wx.ROLE_SYSTEM_LIST)
+    assert acc.GetRole(1) == (wx.ACC_OK, wx.ROLE_SYSTEM_LISTITEM)
+    assert acc.GetChildCount() == (wx.ACC_OK, 2)
+
+
+def test_a_row_is_named_by_its_label_and_has_no_description():
+    acc = cl.RowsAccessible(_FakeList(["first row", "second row", "third row"]))
+    assert acc.GetName(0) == (wx.ACC_OK, "Responses")
+    assert acc.GetName(2) == (wx.ACC_OK, "second row")
+    # The native list speaks no position on NVDA, so neither may this one.
+    assert acc.GetDescription(2) == (wx.ACC_OK, "")
+    assert acc.GetDescription(0) == (wx.ACC_OK, "")
+
+
+def test_states_say_which_row_is_selected_and_whether_it_has_focus():
+    acc = cl.RowsAccessible(_FakeList(["a", "b"], selected=1, focused=True))
+    ok, state = acc.GetState(2)
+    assert state & wx.ACC_STATE_SYSTEM_SELECTED and state & wx.ACC_STATE_SYSTEM_FOCUSED
+    ok, state = acc.GetState(1)
+    assert not state & wx.ACC_STATE_SYSTEM_SELECTED and state & wx.ACC_STATE_SYSTEM_SELECTABLE
+    ok, state = acc.GetState(0)
+    assert state & wx.ACC_STATE_SYSTEM_FOCUSED
+    acc = cl.RowsAccessible(_FakeList(["a", "b"], selected=1, focused=False))
+    ok, state = acc.GetState(2)
+    assert state & wx.ACC_STATE_SYSTEM_SELECTED and not state & wx.ACC_STATE_SYSTEM_FOCUSED
+
+
+def test_focus_and_selection_report_the_selected_row_or_nothing():
+    acc = cl.RowsAccessible(_FakeList(["a", "b"], selected=0))
+    assert acc.GetFocus(0) == (wx.ACC_OK, 1, None)
+    assert acc.GetSelections() == (wx.ACC_OK, 1)
+    acc = cl.RowsAccessible(_FakeList(["a", "b"]))
+    assert acc.GetFocus(0) == (wx.ACC_OK, 0, None)
+    assert acc.GetSelections() == (wx.ACC_OK, None)
+
+
+def test_navigation_walks_the_rows_and_stops_at_the_ends():
+    acc = cl.RowsAccessible(_FakeList(["a", "b", "c"]))
+    assert acc.Navigate(wx.NAVDIR_FIRSTCHILD, 0) == (wx.ACC_OK, 1, None)
+    assert acc.Navigate(wx.NAVDIR_LASTCHILD, 0) == (wx.ACC_OK, 3, None)
+    assert acc.Navigate(wx.NAVDIR_NEXT, 1) == (wx.ACC_OK, 2, None)
+    assert acc.Navigate(wx.NAVDIR_PREVIOUS, 1)[0] == wx.ACC_FALSE
+    assert acc.Navigate(wx.NAVDIR_DOWN, 3)[0] == wx.ACC_FALSE
+
+
+def test_a_row_is_located_on_screen_and_found_under_a_point():
+    acc = cl.RowsAccessible(_FakeList(["a", "b"]))
+    assert acc.GetLocation(2) == (wx.ACC_OK, wx.Rect(5, 25, 100, 20))
+    assert acc.GetLocation(0) == (wx.ACC_OK, wx.Rect(5, 5, 100, 100))
+    assert acc.HitTest(wx.Point(10, 30)) == (wx.ACC_OK, 2, None)
+    assert acc.HitTest(wx.Point(10, 500)) == (wx.ACC_OK, 0, None)
+
+
+def test_the_default_action_is_open_and_the_rest_is_silent():
+    acc = cl.RowsAccessible(_FakeList(["a"]))
+    assert acc.GetDefaultAction(1) == (wx.ACC_OK, "Open")
+    assert acc.GetDefaultAction(0) == (wx.ACC_OK, "")
+    for method in (acc.GetValue, acc.GetHelpText, acc.GetKeyboardShortcut):
+        assert method(1) == (wx.ACC_OK, "")

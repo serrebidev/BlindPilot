@@ -174,3 +174,98 @@ class ConversationList(wx.VListBox):
         self._measured.clear()
         self.RefreshAll()
         event.Skip()
+
+
+class RowsAccessible(wx.Accessible):
+    """Each row is a list item to MSAA; the control is the list.
+
+    Child ids are 1-based row indexes. Zero is the list itself. NVDA speaks
+    the name on every move and the description after it, so the description
+    stays empty to match the native list.
+    """
+
+    def __init__(self, ctrl):
+        super().__init__(ctrl if isinstance(ctrl, wx.Window) else None)
+        self._ctrl = ctrl
+
+    def _count(self) -> int:
+        return self._ctrl.GetCount()
+
+    def GetChildCount(self):
+        return (wx.ACC_OK, self._count())
+
+    def GetChild(self, childId):
+        return (wx.ACC_OK, None)
+
+    def GetRole(self, childId):
+        return (wx.ACC_OK, wx.ROLE_SYSTEM_LIST if childId == 0 else wx.ROLE_SYSTEM_LISTITEM)
+
+    def GetName(self, childId):
+        if childId == 0:
+            return (wx.ACC_OK, self._ctrl.GetName())
+        rows = self._ctrl.GetRows()
+        if not 1 <= childId <= len(rows):
+            return (wx.ACC_INVALID_ARG, "")
+        return (wx.ACC_OK, rows[childId - 1].label)
+
+    def GetDescription(self, childId):
+        return (wx.ACC_OK, "")
+
+    def GetState(self, childId):
+        focused = self._ctrl.HasFocus()
+        if childId == 0:
+            state = wx.ACC_STATE_SYSTEM_FOCUSABLE
+            if focused:
+                state |= wx.ACC_STATE_SYSTEM_FOCUSED
+            return (wx.ACC_OK, state)
+        state = wx.ACC_STATE_SYSTEM_SELECTABLE | wx.ACC_STATE_SYSTEM_FOCUSABLE
+        if self._ctrl.GetSelection() == childId - 1:
+            state |= wx.ACC_STATE_SYSTEM_SELECTED
+            if focused:
+                state |= wx.ACC_STATE_SYSTEM_FOCUSED
+        if not self._ctrl.IsVisible(childId - 1):
+            state |= wx.ACC_STATE_SYSTEM_INVISIBLE
+        return (wx.ACC_OK, state)
+
+    def GetLocation(self, childId):
+        if childId == 0:
+            return (wx.ACC_OK, self._ctrl.GetScreenRect())
+        rect = self._ctrl.GetItemRect(childId - 1)
+        pos = self._ctrl.ClientToScreen(rect.GetPosition())
+        return (wx.ACC_OK, wx.Rect(pos, rect.GetSize()))
+
+    def GetFocus(self, childId):
+        sel = self._ctrl.GetSelection()
+        return (wx.ACC_OK, 0 if sel == wx.NOT_FOUND else sel + 1, None)
+
+    def GetSelections(self):
+        sel = self._ctrl.GetSelection()
+        return (wx.ACC_OK, None if sel == wx.NOT_FOUND else sel + 1)
+
+    def GetDefaultAction(self, childId):
+        return (wx.ACC_OK, "Open" if childId else "")
+
+    def GetValue(self, childId):
+        return (wx.ACC_OK, "")
+
+    def GetHelpText(self, childId):
+        return (wx.ACC_OK, "")
+
+    def GetKeyboardShortcut(self, childId):
+        return (wx.ACC_OK, "")
+
+    def HitTest(self, pt):
+        item = self._ctrl.VirtualHitTest(self._ctrl.ScreenToClient(pt).y)
+        return (wx.ACC_OK, 0 if item == wx.NOT_FOUND else item + 1, None)
+
+    def Navigate(self, navDir, fromId):
+        count = self._count()
+        if fromId == 0 and navDir == wx.NAVDIR_FIRSTCHILD:
+            return (wx.ACC_OK, 1, None) if count else (wx.ACC_FALSE, 0, None)
+        if fromId == 0 and navDir == wx.NAVDIR_LASTCHILD:
+            return (wx.ACC_OK, count, None) if count else (wx.ACC_FALSE, 0, None)
+        if navDir in (wx.NAVDIR_NEXT, wx.NAVDIR_DOWN) and 0 < fromId < count:
+            return (wx.ACC_OK, fromId + 1, None)
+        if navDir in (wx.NAVDIR_PREVIOUS, wx.NAVDIR_UP) and fromId > 1:
+            return (wx.ACC_OK, fromId - 1, None)
+        return (wx.ACC_FALSE, 0, None)
