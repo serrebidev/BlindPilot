@@ -73,7 +73,17 @@ class ConversationList(wx.VListBox):
         self._rows: list[Row] = []
         # (row index, client width) -> height. Cleared when either changes.
         self._measured: dict[tuple[int, int], int] = {}
+        # The width measurements are taken at, captured so a measure started
+        # before a resize finishes cannot key on two different widths. On GTK
+        # SetSize reaches the window through the event loop, so asking the
+        # control for its client size during that gap returns first the old
+        # width and then the new one, and one measurement is cached under a
+        # width the control no longer has - an entry nothing would ever read,
+        # and an EVT_SIZE clears the cache anyway once the resize lands.
+        self._frozen_width: int | None = None
         self.Bind(wx.EVT_SIZE, self._on_size)
+        self.Bind(wx.EVT_ENTER_WINDOW, self._freeze_width)
+        self.Bind(wx.EVT_LEAVE_WINDOW, self._unfreeze_width)
         self._accessible: RowsAccessible | None = None
         if ACCESSIBLE_AVAILABLE:
             self._accessible = RowsAccessible(self)
@@ -116,6 +126,17 @@ class ConversationList(wx.VListBox):
             self.ScrollToRow(index)
 
     # ----- measuring and drawing -----
+    def _freeze_width(self, _event: wx.MouseEvent) -> None:
+        self._frozen_width = self.GetClientSize().width
+
+    def _unfreeze_width(self, _event: wx.MouseEvent) -> None:
+        self._frozen_width = None
+
+    def _measure_width(self) -> int:
+        if self._frozen_width is not None:
+            return self._frozen_width
+        return self.GetClientSize().width
+
     def _pad(self) -> int:
         return self.FromDIP(6)
 
@@ -146,7 +167,7 @@ class ConversationList(wx.VListBox):
         return wordwrap(row.label, self._text_width(style), dc) if row.label else ""
 
     def OnMeasureItem(self, n: int) -> int:
-        key = (n, self.GetClientSize().width)
+        key = (n, self._measure_width())
         cached = self._measured.get(key)
         if cached is not None:
             return cached
