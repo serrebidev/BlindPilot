@@ -62,6 +62,7 @@ from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 import backend_pool
 import diagnostics
 from certificates import open_url
+from conversation_list import ConversationList
 from app_updater import (
     ReleaseInfo,
     UpdateError,
@@ -5325,7 +5326,7 @@ class SessionPanel(wx.Panel):
         cwd_label.SetName("Working directory")
 
         responses_label = wx.StaticText(self, label="Responses:")
-        self.responses = wx.ListBox(self, style=wx.LB_SINGLE | wx.LB_NEEDED_SB)
+        self.responses = ConversationList(self)
         self.responses.SetName("Responses")
         self.responses.Bind(wx.EVT_LISTBOX_DCLICK, self._on_list_activate)
         self.responses.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
@@ -6997,9 +6998,9 @@ class SessionPanel(wx.Panel):
             self._displayed.append(row)
 
         if trustworthy and labels[: len(previous)] == previous:
-            added = labels[len(previous) :]
-            if added:
-                self._append_rows(added)
+            added_rows = self._displayed[len(previous) :]
+            if added_rows:
+                self._append_rows(added_rows)
             return
 
         # The rows really did change shape - a search, a new turn, a response
@@ -7008,16 +7009,16 @@ class SessionPanel(wx.Panel):
         if SETTINGS.text_view:
             self.responses_text.ChangeValue("\n".join(_one_line(label) for label in labels))
         else:
-            self.responses.Set(labels)
+            self.responses.Set(self._displayed)
         if keep != wx.NOT_FOUND and labels:
             self._select_row(keep)
 
-    def _append_rows(self, labels: List[str]) -> None:
+    def _append_rows(self, rows: List[Row]) -> None:
         """Add rows to the end, leaving the reader exactly where they are."""
         if not SETTINGS.text_view:
-            self.responses.AppendItems(list(labels))
+            self.responses.AppendItems(rows)
             return
-        text = "\n".join(_one_line(label) for label in labels)
+        text = "\n".join(_one_line(row.label) for row in rows)
         was_at = self.responses_text.GetInsertionPoint()
         lead = "\n" if self.responses_text.GetLastPosition() else ""
         # Appending moves the caret to the end, which is itself a move worth
