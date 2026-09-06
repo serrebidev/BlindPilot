@@ -112,5 +112,6 @@ def test_fonts_follow_the_style(frame):
     lst = cl.ConversationList(frame)
     base = lst.GetFont()
     assert lst._font_for(cl.style_for("you")).GetWeight() == wx.FONTWEIGHT_BOLD
-    assert lst._font_for(cl.style_for("code")).GetFamily() == wx.FONTFAMILY_TELETYPE
+    assert lst._font_for(cl.style_for("code")).IsFixedWidth()
+    assert not lst._font_for(cl.style_for("prose")).IsFixedWidth()
     assert lst._font_for(cl.style_for("prose")).GetPointSize() == base.GetPointSize()
