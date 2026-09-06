@@ -331,6 +331,10 @@ class ClaudeSession:
         start. The model and the permission mode travel down the stream, so
         they do not decide this; `adopt` applies them.
         """
+        # A stream that has ended is a process on its way out, and `poll()`
+        # has no code to say so until it has been reaped.
+        if self._ended.is_set():
+            return False
         if not self.alive():
             return False
         if (self.wants.cwd, self.wants.effort) != (wants.cwd, wants.effort):
@@ -457,19 +461,31 @@ def take_or_start(
     prompt_tool: str = "",
     idle_sink: Optional[Callable[[], None]] = None,
     popen_kwargs: Optional[dict] = None,
-) -> ClaudeSession:
+    *,
+    late: bool = False,
+) -> Optional[ClaudeSession]:
     """The process this turn speaks through, the tab's held one or a new one.
 
     A held process is reused when it can serve the conversation and accepts
     the turn's model and permission mode. Otherwise it is stopped and a new
     one started with everything on the command line. Raises OSError when the
     binary cannot be started.
+
+    `late` is a turn woken by something the process already said. It takes the
+    held process as it stands or nothing at all, and returns None for nothing.
     """
     key = backend_pool.pool_key(BACKEND_CLAUDE, panel)
     shared = backend_pool.pool()
     with _lock_for(panel):
         held = shared.take(key)
         session = cast(Optional[ClaudeSession], held.handle if held is not None else None)
+        if late:
+            # The events this turn was woken for are in that process. Stopping
+            # it to apply a model change, or starting a fresh one, would throw
+            # them away and leave the turn reading a stream with nothing to
+            # say on it. Its idle sink is already registered: that is how the
+            # wake-up reached the tab.
+            return session
         if session is not None and not (session.can_serve(wants) and session.adopt(wants)):
             shared.drop(key)
             session = None

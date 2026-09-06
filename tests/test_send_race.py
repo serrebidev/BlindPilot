@@ -89,6 +89,7 @@ def _panel(prompt_text: str = "the second question"):
     panel._stopping = False
     panel._session_id = "session-1"
     panel._session_backend = app.BACKEND_CLAUDE
+    panel._claude_generation = 0
     panel._assistant_narrated_this_turn = True
     panel.model = ""
     panel.effort = ""

@@ -114,11 +114,13 @@ class _FakeProc:
             self.returncode = 1
 
 
-def _drive(proc, on_activity=None, timeout=10.0, on_worker=None):
+def _drive(proc, on_activity=None, timeout=10.0, on_worker=None, prompt="hi"):
     """Run one worker turn over `proc`, off the main thread so a stall shows up.
 
     `on_worker` is handed the worker before it starts, so a test can stop the
-    turn from its own thread while the worker is reading.
+    turn from its own thread while the worker is reading. `prompt=None` builds
+    the worker a late turn builds: nothing to send, only what has arrived to
+    read.
 
     Returns (activity, completed, failures, raised, finished).
     """
@@ -142,7 +144,7 @@ def _drive(proc, on_activity=None, timeout=10.0, on_worker=None):
 
     try:
         worker = blindpilot_app.ClaudeWorker(
-            "hi",
+            prompt,
             None,
             os.getcwd(),
             "default",
@@ -573,3 +575,79 @@ def test_the_panel_join_budget_outlasts_an_interrupt_and_its_drain():
     # Codex derives its verify budget from _CANCEL_JOIN_SECONDS, which stays
     # the plain teardown budget rather than the worker's own stop_seconds.
     assert blindpilot_app._CANCEL_JOIN_SECONDS == 3.0
+
+
+def test_a_late_turn_with_no_process_to_read_ends_at_once():
+    """A late turn woken for a process that is gone must not start one.
+
+    The tab holds nothing, so there is no stream carrying the agent's report
+    and no turn running to produce one. Starting a process here left the
+    worker reading a silent stream for good, with Send disabled behind it.
+    """
+    proc = _FakeProc(iter([]))
+    activity, completed, failures, raised, finished = _drive(proc, prompt=None, timeout=5.0)
+
+    assert finished and not raised, f"the late turn never ended: {raised}"
+    assert not failures, f"nothing went wrong, but it said: {failures}"
+    assert not completed, "a late turn that read nothing has no answer to give"
+    assert activity == [("notice", "Claude Code finished the turn without saying anything.")]
+    assert not proc.stdin.written, "a late turn wrote to a process it was not woken for"
+
+
+def test_a_stopped_turn_ends_at_its_deadline_however_long_the_cli_keeps_talking(monkeypatch):
+    """The drain is a deadline from Stop, not a gap between events.
+
+    The reader asked for each event with the whole drain as its timeout, so a
+    CLI that kept narrating put the clock back to the start every time. Stop
+    then never landed: the turn ran on, and the tab's process with it.
+    """
+    import blindpilot_app
+
+    monkeypatch.setattr(blindpilot_app, "_CANCEL_DRAIN_SECONDS", 0.3)
+    workers: list = []
+    first_row = threading.Event()
+
+    def stdout():
+        yield _line(ANSWER)
+        yield _line(
+            {
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": _interrupt_id(proc.stdin)},
+            }
+        )
+        # The interrupted turn's result never comes. What does come is more
+        # narration, faster than the drain, for as long as anyone listens.
+        while not proc.killed:
+            yield _line(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": "still talking"}]},
+                }
+            )
+            time.sleep(0.02)
+
+    proc = _FakeProc(stdout())
+
+    def note_first_row(kind, _text):
+        if kind == "assistant":
+            first_row.set()
+
+    def stop_after_the_first_row():
+        first_row.wait(3.0)
+        if workers:
+            workers[0].cancel()
+
+    stopper = threading.Thread(target=stop_after_the_first_row, daemon=True)
+    stopper.start()
+    try:
+        _activity, completed, failures, raised, finished = _drive(
+            proc, on_activity=note_first_row, timeout=3.0, on_worker=workers.append
+        )
+    finally:
+        stopper.join(3.0)
+
+    assert finished, "the stop never landed: every event put the drain's clock back"
+    assert not raised, f"the worker thread died: {raised}"
+    assert proc.killed, "the process that would not stop talking was left running"
+    assert not failures, f"a cancelled turn is not a failure, but it said: {failures}"
+    assert not completed, completed

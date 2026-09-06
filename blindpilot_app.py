@@ -48,12 +48,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import weakref
 import webbrowser
 import zipfile
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, cast
 
 from linux_accessibility import announce as _linux_native_announce
 
@@ -3148,6 +3149,9 @@ class ClaudeWorker(threading.Thread):
         # is parked on it.
         self._events: Optional[queue.Queue] = None
         self._cancelled = False
+        # When the drain that follows Stop runs out. Set by `cancel`, so the
+        # budget is counted from Stop rather than from the last event.
+        self._cancel_deadline: Optional[float] = None
         # Set once the session is up and the opening prompt has gone in, cleared
         # when the turn ends. Guards `steer()` against writing to a session that
         # is not there yet (or is already gone).
@@ -3228,6 +3232,9 @@ class ClaudeWorker(threading.Thread):
         confirm means the process cannot be trusted with the next turn, so
         it is dropped from the pool, which stops it.
         """
+        # Before `_cancelled`, because that is what the reader watches: it
+        # must never find the turn cancelled with no deadline to drain to.
+        self._cancel_deadline = time.monotonic() + _CANCEL_DRAIN_SECONDS
         self._accepting_input.clear()
         self._cancelled = True
         session = self._session
@@ -3417,19 +3424,32 @@ class ClaudeWorker(threading.Thread):
     def _take(
         self, wants: "claude_session.Wants", binary: str
     ) -> Optional["claude_session.ClaudeSession"]:
-        """The tab's process for this turn, or None once the failure is told."""
+        """The tab's process for this turn, or None once it has been accounted for."""
         try:
-            return claude_session.take_or_start(
+            session = claude_session.take_or_start(
                 self._held_for,
                 wants,
                 binary,
                 _CLAUDE_PERMISSION_PROMPT_TOOL,
                 idle_sink=self._on_unsolicited,
                 popen_kwargs=_no_window_kwargs(),
+                # A turn with no prompt is a late one: it reads the process it
+                # was woken for or it reads nothing. A replacement has no turn
+                # running and would never send the result it waits for.
+                late=self._prompt is None,
             )
-        except OSError as exc:
+        except Exception as exc:
+            # OSError is the launch failing. Anything else is the pool or the
+            # session objecting, and a turn that ends without a word over it
+            # leaves Send disabled with nothing said.
             self._fail(f"Failed to launch Claude Code: {exc}")
             return None
+        if session is None:
+            # Late, and the process that woke this tab is already gone. There
+            # is nothing to read and nothing went wrong, so the turn ends the
+            # way any turn that reached its end in silence ends.
+            self._on_activity("notice", "Claude Code finished the turn without saying anything.")
+        return session
 
     def _read_turn(
         self, session: claude_session.ClaudeSession, events: "queue.Queue", mark: int
@@ -3449,10 +3469,19 @@ class ClaudeWorker(threading.Thread):
         died = False
 
         while True:
-            try:
+            timeout: Optional[float] = None
+            if self._cancelled:
                 # After Stop, the CLI's result for the interrupted turn is due
-                # at once; a process that keeps it is not trusted with the next.
-                event = events.get(timeout=_CANCEL_DRAIN_SECONDS if self._cancelled else None)
+                # at once; a process that keeps it is not trusted with the
+                # next. The budget runs from Stop, so a CLI that keeps talking
+                # cannot put the deadline back for ever.
+                deadline = self._cancel_deadline
+                timeout = _CANCEL_DRAIN_SECONDS if deadline is None else deadline - time.monotonic()
+                if timeout <= 0:
+                    self._drop_process()
+                    return
+            try:
+                event = events.get(timeout=timeout)
             except queue.Empty:
                 self._drop_process()
                 return
@@ -5167,9 +5196,14 @@ class SessionPanel(wx.Panel):
         # the run can close it: the worker thread is blocked on the answer, and
         # the thread that would stop it is the one the dialog is running on.
         self._question_dialog: Optional["QuestionDialog"] = None
-        # Set when the CLI spoke with no turn running while the last turn's
-        # `done` was still in the mailbox; the late turn starts once it drains.
-        self._late_turn_waiting = False
+        # Which conversation the tab's held Claude process belongs to. Bumped
+        # whenever those processes are let go, so a wake-up queued before that
+        # cannot open a late turn on whatever the tab holds now.
+        self._claude_generation = 0
+        # The generation of a wake-up that arrived while the last turn's `done`
+        # was still in the mailbox, or None. The late turn starts once it
+        # drains, if the conversation it belongs to is still the one here.
+        self._late_turn_waiting: Optional[int] = None
         self._session_id: Optional[str] = None
         self._session_backend = normalize_backend(self._get_backend())
         self._worker: Optional[AgentWorker] = None
@@ -6029,7 +6063,9 @@ class SessionPanel(wx.Panel):
                 elif name == "done":
                     self._on_worker_finished()
                 elif name == "late_turn":
-                    self._start_late_turn()
+                    # The mailbox carries plain objects. This one is the
+                    # generation `_claude_worker_extra` put in it.
+                    self._start_late_turn(cast(int, args[0]))
             handled += 1
 
         if rows_changed:
@@ -6236,25 +6272,43 @@ class SessionPanel(wx.Panel):
     def _claude_worker_extra(self) -> dict:
         """What a Claude turn needs beyond the message, namely whose process
         it borrows and how to wake this tab when the CLI speaks with no turn
-        running."""
-        return {
-            "held_for": self,
-            "on_unsolicited": lambda: self._queue_worker_event("late_turn"),
-        }
+        running.
 
-    def _start_late_turn(self) -> None:
+        The wake-up holds the tab weakly. The process keeps it for as long as
+        the pool keeps the process, so a strong reference would mean a tab
+        closed without teardown could never be collected. It carries the
+        generation it was made in, so a report cannot land on a conversation
+        it has nothing to do with.
+        """
+        tab = weakref.ref(self)
+        generation = self._claude_generation
+
+        def wake() -> None:
+            panel = tab()
+            if panel is not None:
+                panel._queue_worker_event("late_turn", generation)
+
+        return {"held_for": self, "on_unsolicited": wake}
+
+    def _start_late_turn(self, generation: int) -> None:
         """Receive what the CLI says with no turn of ours running.
 
         An agent this tab started in the background, or resumed, has finished,
         and Claude is answering what it found. It is a turn like any other
         except that nobody typed anything, so there is no "You:" row.
+
+        `generation` is the conversation the wake-up was queued for. The tab
+        can have started a new conversation, restored one or moved to another
+        backend since, and the report belongs to none of them.
         """
         if not self:
             return
-        if self._run_in_progress():
-            self._late_turn_waiting = True
+        if generation != self._claude_generation or self._session_backend != BACKEND_CLAUDE:
             return
-        self._late_turn_waiting = False
+        if self._run_in_progress():
+            self._late_turn_waiting = generation
+            return
+        self._late_turn_waiting = None
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
         self._stopping = False
@@ -6310,10 +6364,12 @@ class SessionPanel(wx.Panel):
     def _on_stop(self) -> None:
         """Stop the run in progress, keeping whatever it produced first.
 
-        Cancelling kills the backend process, so the rows and text already
-        streamed are all there will be — they stay in the list, and the turn
-        keeps them as its response so the transcript is not left with a
-        question and no answer.
+        Stop asks the backend to end the turn. A backend that holds its
+        process between turns, Claude Code and Codex, keeps that process when
+        it confirms the stop, so what was already streamed is all this turn
+        will say and the next message goes to the same process. The rows stay
+        in the list, and the turn keeps their text as its response, so the
+        transcript is not left with a question and no answer.
         """
         worker = self._worker
         if worker is None or not worker.is_alive():
@@ -6650,6 +6706,10 @@ class SessionPanel(wx.Panel):
             # A key never held is a documented no-op, so this stays correct
             # while Hermes and FreeBuff still start fresh each turn.
             shared.drop(backend_pool.pool_key(backend, self))
+        # A wake-up queued by the process that just went belonged to the
+        # conversation it went with. Read through getattr because this also
+        # runs on half-built panels and on test stand-ins.
+        self._claude_generation = getattr(self, "_claude_generation", 0) + 1
 
     def _on_session_started(self, session_id: str) -> None:
         if not self._session_id:
@@ -6903,10 +6963,17 @@ class SessionPanel(wx.Panel):
             self.steer_btn.Disable()
         if self.stop_btn:
             self.stop_btn.Disable()
+        if self._turns and self._turns[-1].prompt == "" and not self._turns[-1].response:
+            # A late turn appends a turn for its answer to land in. One woken
+            # for a process that had already gone reads nothing, and a blank
+            # question with a blank answer is not an entry in a transcript.
+            self._turns.pop()
         self._worker = None
         self._replaying = False
-        if getattr(self, "_late_turn_waiting", False):
-            self._start_late_turn()
+        waiting = getattr(self, "_late_turn_waiting", None)
+        self._late_turn_waiting = None
+        if waiting is not None:
+            self._start_late_turn(waiting)
 
     # ----- List + find -----
     def _refresh_list(self) -> None:

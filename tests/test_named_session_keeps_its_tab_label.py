@@ -91,6 +91,7 @@ def _panel(session_title: str, prompt: str = "start", session_id=None):
     panel._stopping = False
     panel._session_id = session_id
     panel._session_backend = app.BACKEND_HERMES
+    panel._claude_generation = 0
     panel._session_title = session_title
     panel._assistant_narrated_this_turn = False
     panel.model = ""

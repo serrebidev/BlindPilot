@@ -63,7 +63,6 @@ class _Proc:
         self.stdout = stdout if stdout is not None else _FeedStdout()
         self.stderr = stderr if stderr is not None else io.StringIO("")
         self.returncode = None
-        self.pid = 4242
 
     def poll(self):
         return self.returncode
@@ -396,6 +395,24 @@ def test_can_serve_needs_the_same_directory_effort_and_session():
     assert not session.can_serve(same), "a dead process serves nobody"
 
 
+def test_can_serve_refuses_a_session_whose_stream_has_already_ended():
+    """A stream that ended is a process on its way out, code or no code.
+
+    `poll()` has nothing to report between the CLI closing stdout and the
+    process being reaped, so `alive()` alone said yes to a session that could
+    never answer another turn.
+    """
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    session.session_id = "s1"
+    wants = replace_wants(WANTS, session_id="s1")
+    assert session.can_serve(wants)
+    proc.stdout.close()
+    assert _settle(lambda: session._ended.is_set())
+    assert session.alive(), "the fake has not been reaped, which is the case under test"
+    assert not session.can_serve(wants)
+
+
 def replace_wants(wants, **changes):
     from dataclasses import replace
 
@@ -414,9 +431,16 @@ def test_adopt_applies_model_then_mode_and_fails_on_a_refusal():
     assert not session2.adopt(cs.Wants(cwd="C:/work", permission_mode="plan"))
 
 
-def _fresh_pool(monkeypatch):
+def _fresh_pool(monkeypatch, request):
+    """A pool of this test's own, emptied when the test ends.
+
+    conftest's sweep empties `backend_pool`'s singleton, and this one is not
+    it, so without this every process a take_or_start test starts keeps its
+    reader thread for the rest of the run.
+    """
     pool = backend_pool.BackendPool()
     monkeypatch.setattr(backend_pool, "pool", lambda: pool)
+    request.addfinalizer(pool.drop_all)
     return pool
 
 
@@ -449,8 +473,8 @@ def test_the_adapter_reports_the_session_alive_busy_and_stops_it(monkeypatch):
     assert not adapter.alive(session)
 
 
-def test_the_first_turn_starts_a_process_and_keeps_it(monkeypatch):
-    pool = _fresh_pool(monkeypatch)
+def test_the_first_turn_starts_a_process_and_keeps_it(monkeypatch, request):
+    pool = _fresh_pool(monkeypatch, request)
     made = _starting(monkeypatch, [_Proc()])
     panel = _Panel()
     session = cs.take_or_start(panel, WANTS, "claude", "stdio")
@@ -460,8 +484,8 @@ def test_the_first_turn_starts_a_process_and_keeps_it(monkeypatch):
     assert "--permission-prompt-tool" in made[0].cmd
 
 
-def test_the_next_turn_reuses_the_process_when_the_conversation_matches(monkeypatch):
-    _fresh_pool(monkeypatch)
+def test_the_next_turn_reuses_the_process_when_the_conversation_matches(monkeypatch, request):
+    _fresh_pool(monkeypatch, request)
     made = _starting(monkeypatch, [_Proc(), _Proc()])
     panel = _Panel()
     first = cs.take_or_start(panel, WANTS, "claude")
@@ -471,8 +495,8 @@ def test_the_next_turn_reuses_the_process_when_the_conversation_matches(monkeypa
     assert len(made) == 1
 
 
-def test_a_different_effort_or_directory_or_conversation_starts_a_new_process(monkeypatch):
-    _fresh_pool(monkeypatch)
+def test_a_different_effort_or_directory_or_conversation_starts_a_new_process(monkeypatch, request):
+    _fresh_pool(monkeypatch, request)
     made = _starting(monkeypatch, [_Proc(), _Proc(), _Proc()])
     monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
     panel = _Panel()
@@ -486,8 +510,8 @@ def test_a_different_effort_or_directory_or_conversation_starts_a_new_process(mo
     assert len(made) == 3
 
 
-def test_a_model_change_is_sent_down_the_stream_to_the_held_process(monkeypatch):
-    _fresh_pool(monkeypatch)
+def test_a_model_change_is_sent_down_the_stream_to_the_held_process(monkeypatch, request):
+    _fresh_pool(monkeypatch, request)
     procs = [_Proc()]
     made = _starting(monkeypatch, list(procs))
     panel = _Panel()
@@ -499,8 +523,8 @@ def test_a_model_change_is_sent_down_the_stream_to_the_held_process(monkeypatch)
     assert len(made) == 1
 
 
-def test_a_model_change_the_cli_does_not_answer_restarts_the_process(monkeypatch):
-    _fresh_pool(monkeypatch)
+def test_a_model_change_the_cli_does_not_answer_restarts_the_process(monkeypatch, request):
+    _fresh_pool(monkeypatch, request)
     made = _starting(monkeypatch, [_Proc(), _Proc()])
     monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
     monkeypatch.setattr(cs, "_CONTROL_SECONDS", 0.2)
@@ -515,16 +539,16 @@ def test_a_model_change_the_cli_does_not_answer_restarts_the_process(monkeypatch
     assert len(made) == 2 and "--model" in made[1].cmd
 
 
-def test_two_tabs_get_two_processes(monkeypatch):
-    _fresh_pool(monkeypatch)
+def test_two_tabs_get_two_processes(monkeypatch, request):
+    _fresh_pool(monkeypatch, request)
     made = _starting(monkeypatch, [_Proc(), _Proc()])
     one = cs.take_or_start(_Panel(), WANTS, "claude")
     two = cs.take_or_start(_Panel(), WANTS, "claude")
     assert one is not two and len(made) == 2
 
 
-def test_the_idle_sink_is_registered_on_take(monkeypatch):
-    _fresh_pool(monkeypatch)
+def test_the_idle_sink_is_registered_on_take(monkeypatch, request):
+    _fresh_pool(monkeypatch, request)
     _starting(monkeypatch, [_Proc()])
     woken = []
     session = cs.take_or_start(_Panel(), WANTS, "claude", idle_sink=lambda: woken.append(1))
@@ -532,8 +556,8 @@ def test_the_idle_sink_is_registered_on_take(monkeypatch):
     assert _settle(lambda: woken == [1])
 
 
-def test_one_tabs_slow_model_change_does_not_block_another_tab(monkeypatch):
-    _fresh_pool(monkeypatch)
+def test_one_tabs_slow_model_change_does_not_block_another_tab(monkeypatch, request):
+    _fresh_pool(monkeypatch, request)
     made = _starting(monkeypatch, [_Proc(), _Proc(), _Proc()])
     monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
     monkeypatch.setattr(cs, "_CONTROL_SECONDS", 0.2)
@@ -565,3 +589,36 @@ def test_one_tabs_slow_model_change_does_not_block_another_tab(monkeypatch):
     replaced_a = result["a"]
     assert len(made) == 3
     assert replaced_a.alive() and second.alive()
+
+
+def test_a_late_turn_with_nothing_held_gets_nothing_and_starts_no_process(monkeypatch, request):
+    """A late turn reads the process it was woken for, or reads nothing.
+
+    Starting one here would block for ever: a fresh process has no turn
+    running and nothing to say, and the late turn would wait on its silence.
+    """
+    pool = _fresh_pool(monkeypatch, request)
+    made = _starting(monkeypatch, [_Proc()])
+    assert cs.take_or_start(_Panel(), WANTS, "claude", late=True) is None
+    assert made == [], "a late turn started a process of its own"
+    assert pool.held_count() == 0
+
+
+def test_a_late_turn_takes_the_held_process_exactly_as_it_is(monkeypatch, request):
+    """Never replace or adopt for a late turn.
+
+    Its events are already in the held process. Stopping that process to
+    apply a model change would throw them away and leave the late turn
+    waiting on a replacement that has nothing to say.
+    """
+    _fresh_pool(monkeypatch, request)
+    made = _starting(monkeypatch, [_Proc(), _Proc()])
+    panel = _Panel()
+    first = cs.take_or_start(panel, WANTS, "claude")
+    first.session_id = "s1"
+    wanted = replace_wants(WANTS, session_id="s1", model="b", effort="high")
+    again = cs.take_or_start(panel, wanted, "claude", late=True)
+    assert again is first
+    assert len(made) == 1, "the late turn replaced the process it was woken for"
+    assert first.alive() and first.wants.model == ""
+    assert [p for p in made[0].stdin.payloads() if p["type"] == "control_request"] == []
