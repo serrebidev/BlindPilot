@@ -68,14 +68,53 @@ def _panel(rows):
 def test_offsets_follow_the_rows_through_a_rebuild_and_an_append(monkeypatch):
     monkeypatch.setattr(app.SETTINGS, "text_view", True)
     panel = _panel(["hello", "world!!"])
+    # This first call appends. panel._displayed starts empty, so previous is
+    # [] and labels[:0] == [] is vacuously true, so trustworthy is always
+    # satisfied for a call made from an empty control.
     app.SessionPanel._refresh_list(panel)
     assert panel._row_starts == [0, 6]
-    panel._rows.append(
-        type(panel._rows[0])(kind="prose", label="last", payload="last", response_number=1)
-    )
+
+    Row = type(panel._rows[0])
+    panel._rows[0] = Row(kind="prose", label="changed", payload="changed", response_number=1)
+    panel._rows.append(Row(kind="prose", label="last", payload="last", response_number=1))
+    # This second call rebuilds. The first row's label no longer matches what
+    # was last displayed, so labels[:len(previous)] != previous even though
+    # shown == len(previous) still holds, and the rebuild branch runs
+    # _row_starts = _starts_of(lines) directly.
     app.SessionPanel._refresh_list(panel)
-    assert panel._row_starts == [0, 6, 14]
-    assert panel.responses_text.value == "hello\nworld!!\nlast"
+    assert panel._row_starts == [0, 8, 16]
+    assert panel.responses_text.value == "changed\nworld!!\nlast"
+
+    panel._rows.append(Row(kind="prose", label="more", payload="more", response_number=1))
+    # This third call appends again. The three rows above are still an
+    # unchanged prefix of the new rows, so trustworthy and the prefix check
+    # both hold and only the new row is appended.
+    app.SessionPanel._refresh_list(panel)
+    assert panel._row_starts == [0, 8, 16, 21]
+    assert panel.responses_text.value == "changed\nworld!!\nlast\nmore"
+
+
+def test_a_folded_label_keeps_rebuilt_offsets_in_step_with_the_text(monkeypatch):
+    monkeypatch.setattr(app.SETTINGS, "text_view", True)
+    panel = _panel(["hello", "world!!"])
+    # First call appends, same as above.
+    app.SessionPanel._refresh_list(panel)
+
+    Row = type(panel._rows[0])
+    multiline_label = "line one\nline two"
+    panel._rows[0] = Row(
+        kind="prose", label=multiline_label, payload=multiline_label, response_number=1
+    )
+    # The first row's raw label now differs from what was last displayed, so
+    # this call rebuilds, and the rebuild must fold the label with _one_line
+    # before computing offsets, or _row_starts would drift from the text
+    # actually written.
+    app.SessionPanel._refresh_list(panel)
+    folded = app._one_line(multiline_label)
+    assert folded == "line one line two"
+    expected_lines = [folded, "world!!"]
+    assert panel._row_starts == app._starts_of(expected_lines)
+    assert panel.responses_text.value == "\n".join(expected_lines)
 
 
 def test_selecting_a_row_puts_the_caret_at_its_start(monkeypatch):
