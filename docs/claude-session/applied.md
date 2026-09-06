@@ -103,15 +103,29 @@ live on this machine. Spec: `01-design.md`. Branch
 - `tests/test_shutdown_patience.py` deleted. It tested only the shutdown
   code this branch removes.
 
-## The announcement a late turn makes
+## The announcements this branch changes
 
 "A background agent has reported. Receiving response", spoken when the idle
-sink wakes a tab and `_start_late_turn` opens the turn. Two things that used
-to be spoken are gone because nothing left in the code can say them: "Waiting
-for N background agents to finish", because the process no longer waits for
-them before ending the turn, and "No response received", now unreachable. A
-process that dies without a return code says "Claude Code exited without a
-code" (`_do_run`'s existing wording, unchanged).
+sink wakes a tab and `_start_late_turn` opens the turn. New wording.
+
+Two sentences the pool has always had are now reachable for Claude, because
+Claude now has a process for the pool to hold. Both come from the reaper's
+existing announcement, `MainFrame._announce_reap`, unchanged, and both are
+new for Claude only in that a Claude tab can now be the one to hear them:
+
+- "Claude Code had stopped running. Restarting it, which takes a moment."
+  Spoken on the next message after the held process died between turns.
+- "Claude Code was idle and has been closed. The next message will restart
+  it." Spoken by the fifteen-minute idle reaper.
+
+Two things that used to be spoken are gone because nothing left in the code
+can say them: "Waiting for N background agents to finish", because the process
+no longer waits for them before ending the turn, and "No response received",
+now unreachable. A process that dies without a return code says "Claude Code
+exited without a code" (`_do_run`'s existing wording, unchanged). A late turn
+woken for a process that has already gone says "Claude Code finished the turn
+without saying anything", the sentence a turn that reached its result in
+silence already said.
 
 ## What the other backends do
 
