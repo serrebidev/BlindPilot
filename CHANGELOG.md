@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.22.0 - 2026-09-06
+
+- Chat mode can start new conversations again. The menu's Start New Conversation item was built as an agent-only command, so switching to Chat mode greyed it out and left its Ctrl+Shift+N chord dead; every message sent afterwards kept landing in the same conversation. The item is now enabled in both modes, and the handler routes to whichever mode is showing.
+- The Responses list wraps long rows to the window's width again, drawn by a list that carries its own accessible object on Windows; on Linux and macOS, where the toolkit has no accessible object to give, a native list stands in so the screen reader still reads it (PR #37).
+- A pre-commit configuration runs the same checks CI does - ruff, the formatter and mypy on every commit, the test suite on push - so a lint error is caught before a run is spent on it (PR #38).
+
 ## v0.21.6 - 2026-09-05
 
 - Bypass permissions now works on Hermes. The gateway has no yolo parameter on session.create, so the one BlindPilot sent was silently ignored; the bypass is applied the way Hermes' own /yolo command does it, per session, on every turn, and a mode picked between messages takes effect.

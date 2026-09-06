@@ -1,24 +1,23 @@
-# BlindPilot 0.21.6
+# BlindPilot 0.22.0
 
-Hermes' permission modes now do what they say, plus the first visual pass from a sighted contributor.
+Chat mode can start new conversations again, the Responses list wraps the way it used to, and the checks CI runs now run on the machine before a commit is made.
 
-## Hermes approvals and bypass
+## Chat mode: new conversations
 
-Two defects kept commands from running, and both were only found by reading the live gateway's own source rather than trusting the protocol we had written against.
+Start New Conversation carries Ctrl+Shift+N in the Conversation menu, and its handler was written to serve both of BlindPilot's modes. The menu item, though, was built as an agent-only command - one of the set that acts on the visible session tab - so the moment Chat mode was shown, `_set_app_mode` greyed the item out along with the rest of them, and the chord went dead with it. Nothing said so. The small New conversation button on the chat panel still worked, but a person following the menu - and a screen reader user following the menu is the ordinary path - pressed Ctrl+Shift+N or opened the Conversation menu, found the item greyed, and kept typing into the conversation they had been trying to leave. The chat log shows it plainly: four sends of the same first message in an hour, three of them landing in a conversation that was supposed to have been abandoned.
 
-- The approval reply was sent with a key and values the gateway does not read. BlindPilot answered a request with `decision: approve`, while the gateway reads a `choice` that must be `once`, `session`, `always`, or `deny` — anything else falls through to its default, which is deny. So every answer, including the automatic ones sent in bypass mode, landed as a denial, and a turn died on the first dangerous command it met with "couldn't be run because I couldn't approve it". The reply now speaks the gateway's own vocabulary.
-- Bypass permissions never reached the session. The `yolo` field was sent on session.create, but the gateway's handler reads model, reasoning, and title there and silently drops the rest — so the session kept asking approvals with nobody to answer them. The bypass is now applied the way Hermes' own /yolo command does it: a per-session config.set on every turn, sent before the prompt, so a mode picked between messages takes effect on the conversation already under way, and a gateway too old to know the key still works because approvals are answered per request regardless.
-- In the asking modes the request is no longer denied unheard. It is put in front of the person as a question carrying the gateway's own once, session, always, and deny choices, and what is picked goes back as the choice. A turn with no dialog to ask through — a resume replay, say — still cannot hang: it answers with the mode's own decision and says so.
+The item now stands outside the agent-only set. It stays enabled in both modes, and the one handler routes to whichever mode is showing: the session tab's clear-conversation in Agent mode, the chat panel's new-conversation in Chat mode. Two regression tests pin the menu item's enabled state in each mode and the routing itself, so the next mode that arrives cannot quietly swallow the chord again.
 
-## Visual pass 1
+## The Responses list wraps again
 
-- A real application icon, with the display-scaling awareness a laptop at 150 percent needs, and packaging checks so the icon and its manifest cannot silently fall out of the installer.
-- Menu layouts that match what they announce, the error cue and the update dialog made presentable, and dialogs a sighted user had seen broken put right.
-- Ruff's formatter is scoped out of the documentation's code samples where reformatting them changed their meaning, and the audit screenshots are no longer kept in the repository.
+A contributor's visual pass (PR #37) replaces the flat list of responses with one that wraps long rows to the width of the window instead of cutting paragraphs off at the right edge, and draws each row by its kind - your lines bold, thinking muted, code monospaced. Wrapping lists cannot be drawn by a native control, and a native screen reader sees nothing inside a custom-drawn one, so on Windows the list carries its own accessible object and announces rows as a list should. On Linux and macOS the toolkit has no accessible object to give - constructing one there raises, and on macOS it aborts the process outright - so those builds keep the platform's own list, which their screen readers already read by themselves. Every construction site in the window went through a single factory, so the platform split happens once.
 
-## Visual pass 2
+## Checks before the commit
 
-- The windows follow the system's dark mode, or light or dark can be forced from a new Appearance section in Preferences. wxWidgets applies the appearance once, before the first window exists, so the dialog says the choice takes effect at the next start and announces it when it saves something new; a wxPython too old to have the appearance API notes it and carries on as it was.
-- Two test suites now ask the running toolkit what it can carry rather than assuming every platform shows a chord or has the appearance enum, which is what the Linux job was telling us.
+PR #38 adds a pre-commit configuration running what CI runs: ruff's checks, ruff's formatting and mypy on every commit, and the full test suite with warnings as errors on push. The suites take about three minutes, and a CI run spent discovering a formatting nit is a run wasted; what these hooks cannot catch - a failure that only shows on Linux or macOS - the runners remain the only check for, and the configuration says so.
 
-Verified with the regression suite, lint, formatting, and type checks, plus the startup and GUI smoke runs.
+## Also in this release
+
+- A scratch CI-fix report that rode along with PR #37 and failed formatting on every runner has been removed, along with the formatting failure itself.
+
+Verified with the full regression suite (1468 tests), lint, formatting, type checks, and the startup, GUI, and Chat GUI smoke runs.

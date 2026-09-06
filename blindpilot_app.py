@@ -281,7 +281,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.21.6"
+APP_VERSION = "0.22.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -10111,10 +10111,14 @@ class MainFrame(wx.Frame):
             "Summarise this conversation so the backend has room to keep going",
             self._compact_active,
         )
-        add(
+        # Not an agent item: the handler routes by mode already, and Chat
+        # mode needs this chord just as much. Left in the agent list it was
+        # greyed out there, and a Chat conversation with no way to start a
+        # fresh one kept taking every message that followed.
+        self._menu_item(
             menu,
             "Start N&ew Conversation	Ctrl+Shift+N",
-            "Forget this conversation and start a fresh one in this tab",
+            "Forget this conversation and start a fresh one",
             self._new_conversation_active,
         )
         menu.AppendSeparator()
