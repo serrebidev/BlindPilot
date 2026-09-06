@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import queue
+import threading
 import time
 
 import claude_session as cs
@@ -292,3 +293,112 @@ def test_an_idle_sink_that_raises_is_logged_not_propagated(caplog):
     assert any(r.levelname == "ERROR" for r in caplog.records if r.name == "blindpilot.claude")
     events = session.attach()
     assert events.get(timeout=1) == {"type": "assistant"}
+
+
+def _answer_controls(proc, subtype="success"):
+    """A CLI that answers every control request it is sent, on a thread."""
+
+    def worker():
+        seen = 0
+        while True:
+            time.sleep(0.005)
+            payloads = proc.stdin.payloads()
+            for payload in payloads[seen:]:
+                if payload.get("type") == "control_request":
+                    proc.stdout.feed(
+                        {
+                            "type": "control_response",
+                            "response": {"subtype": subtype, "request_id": payload["request_id"]},
+                        }
+                    )
+            seen = len(payloads)
+            if proc.returncode is not None:
+                return
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def test_an_interrupt_the_cli_confirms_is_true_and_leaves_the_process_alive():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    _answer_controls(proc)
+    assert session.interrupt(timeout=2.0)
+    sent = [p for p in proc.stdin.payloads() if p["type"] == "control_request"]
+    assert sent[0]["request"] == {"subtype": "interrupt"}
+    assert session.alive()
+
+
+def test_an_interrupt_nobody_answers_is_false():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    assert not session.interrupt(timeout=0.1)
+
+
+def test_an_interrupt_the_cli_refuses_is_false():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    _answer_controls(proc, subtype="error")
+    assert not session.interrupt(timeout=2.0)
+
+
+def test_a_model_change_goes_down_the_stream_and_is_remembered():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, cs.Wants(cwd="C:/work", permission_mode="default", model="a"))
+    _answer_controls(proc)
+    assert session.set_model("b")
+    sent = [p for p in proc.stdin.payloads() if p["type"] == "control_request"]
+    assert sent[-1]["request"] == {"subtype": "set_model", "model": "b"}
+    assert session.wants.model == "b"
+    assert session.set_model("b"), "the model it already runs costs no request"
+    assert len([p for p in proc.stdin.payloads() if p["type"] == "control_request"]) == 1
+
+
+def test_a_permission_mode_change_goes_down_the_stream():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    _answer_controls(proc)
+    assert session.set_permission_mode("plan")
+    sent = [p for p in proc.stdin.payloads() if p["type"] == "control_request"]
+    assert sent[-1]["request"] == {"subtype": "set_permission_mode", "mode": "plan"}
+    assert session.wants.permission_mode == "plan"
+
+
+def test_the_default_model_cannot_be_asked_for_by_name():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, cs.Wants(cwd="C:/work", permission_mode="default", model="a"))
+    _answer_controls(proc)
+    assert not session.set_model(""), (
+        "there is no request for 'the default', so the process restarts"
+    )
+
+
+def test_can_serve_needs_the_same_directory_effort_and_session():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, cs.Wants(cwd="C:/work", permission_mode="default"))
+    session.session_id = "s1"
+    same = cs.Wants(cwd="C:/work", permission_mode="plan", model="b", session_id="s1")
+    assert session.can_serve(same), "model and mode differ but both travel down the stream"
+    assert not session.can_serve(replace_wants(same, cwd="D:/other"))
+    assert not session.can_serve(replace_wants(same, effort="high"))
+    assert not session.can_serve(replace_wants(same, session_id="s2"))
+    assert not session.can_serve(replace_wants(same, session_id=None))
+    proc.returncode = 0
+    assert not session.can_serve(same), "a dead process serves nobody"
+
+
+def replace_wants(wants, **changes):
+    from dataclasses import replace
+
+    return replace(wants, **changes)
+
+
+def test_adopt_applies_model_then_mode_and_fails_on_a_refusal():
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, cs.Wants(cwd="C:/work", permission_mode="default", model="a"))
+    _answer_controls(proc)
+    assert session.adopt(cs.Wants(cwd="C:/work", permission_mode="plan", model="b"))
+    assert session.wants.model == "b" and session.wants.permission_mode == "plan"
+    refusing = _Proc()
+    session2 = cs.ClaudeSession(refusing, cs.Wants(cwd="C:/work", permission_mode="default"))
+    _answer_controls(refusing, subtype="error")
+    assert not session2.adopt(cs.Wants(cwd="C:/work", permission_mode="plan"))

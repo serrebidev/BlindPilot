@@ -16,7 +16,8 @@ import logging
 import queue
 import subprocess
 import threading
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 import backend_pool  # noqa: F401 - wired up by the pool adapter task
@@ -265,6 +266,74 @@ class ClaudeSession:
                 "message": {"role": "user", "content": [{"type": "text", "text": text}]},
             }
         )
+
+    def send_control(
+        self, subtype: str, timeout: float = _CONTROL_SECONDS, **fields: object
+    ) -> Optional[dict]:
+        """Ask the CLI something and wait for its answer, or None on silence."""
+        request_id = uuid.uuid4().hex
+        done = threading.Event()
+        slot: dict = {}
+        with self._state:
+            self._waiting[request_id] = (done, slot)
+        try:
+            sent = self.write_json(
+                {
+                    "type": "control_request",
+                    "request_id": request_id,
+                    "request": {"subtype": subtype, **fields},
+                }
+            )
+            if not sent or not done.wait(timeout):
+                return None
+            return slot.get("response")
+        finally:
+            with self._state:
+                self._waiting.pop(request_id, None)
+
+    @staticmethod
+    def _confirmed(response: Optional[dict]) -> bool:
+        return response is not None and response.get("subtype") == "success"
+
+    def interrupt(self, timeout: float = _INTERRUPT_SECONDS) -> bool:
+        """Whether the CLI confirmed the running turn was stopped."""
+        return self._confirmed(self.send_control("interrupt", timeout=timeout))
+
+    def set_model(self, model: str) -> bool:
+        if model == self.wants.model:
+            return True
+        if not model:
+            # The CLI has a request for a named model and none for "whatever
+            # the default is", so that change restarts the process.
+            return False
+        if not self._confirmed(self.send_control("set_model", model=model)):
+            return False
+        self.wants = replace(self.wants, model=model)
+        return True
+
+    def set_permission_mode(self, mode: str) -> bool:
+        if mode == self.wants.permission_mode:
+            return True
+        if not mode or not self._confirmed(self.send_control("set_permission_mode", mode=mode)):
+            return False
+        self.wants = replace(self.wants, permission_mode=mode)
+        return True
+
+    def can_serve(self, wants: Wants) -> bool:
+        """Whether this process can carry the turn, given what the stream can change.
+
+        The working directory, the effort and the conversation are fixed at
+        start. The model and the permission mode travel down the stream, so
+        they do not decide this; `adopt` applies them.
+        """
+        if not self.alive():
+            return False
+        if (self.wants.cwd, self.wants.effort) != (wants.cwd, wants.effort):
+            return False
+        return wants.session_id is not None and wants.session_id == self.session_id
+
+    def adopt(self, wants: Wants) -> bool:
+        return self.set_model(wants.model) and self.set_permission_mode(wants.permission_mode)
 
     def _settle(self, event: dict) -> None:
         raw = event.get("response")
