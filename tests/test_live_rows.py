@@ -16,9 +16,11 @@ import sys
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from blindpilot_app import _result_label, _tool_result_text, _tool_use_label  # noqa: E402
 from markdown_rows import Row, reassemble, reassemble_all  # noqa: E402
+from test_claude_stream_resilience import _FakeProc as _ClaudeFakeProc  # noqa: E402
 
 
 def test_live_narration_is_enabled_for_a_fresh_configuration(monkeypatch):
@@ -166,49 +168,19 @@ def test_reassemble_all_covers_the_whole_list_with_response_markers():
 
 
 # ----- Stream wiring: which events become live activity -----
-class _FakeStdin:
-    """Captures what the worker writes into the process."""
-
-    def __init__(self):
-        self.written: list[str] = []
-        self.closed = False
-
-    def write(self, data):
-        if self.closed:
-            raise ValueError("write to closed pipe")
-        self.written.append(data)
-
-    def flush(self):
-        pass
-
-    def close(self):
-        self.closed = True
-
-
-class _FakeProc:
-    """Stands in for the Claude Code subprocess, replaying canned stdout."""
-
-    def __init__(self, lines):
-        import io
-
-        self.stdin = _FakeStdin()
-        self.stdout = iter(lines)
-        self.stderr = io.StringIO("")
-        self.returncode = 0
-
-    def wait(self, timeout=None):
-        return 0
-
-    def poll(self):
-        return 0
+# `_FakeProc` is the resilience file's own stand-in for the Claude Code
+# process: its `poll()` reports the process alive for as long as its stdout
+# has lines left, which is what a worker that no longer closes stdin at the
+# end of a turn needs from a fake it is driven over more than once.
+_FakeProc = _ClaudeFakeProc
 
 
 def _run_worker(events, on_activity=None):
     """Drive ClaudeWorker over `events` and collect its activity callbacks."""
     import json
-    import subprocess
 
     import blindpilot_app
+    import claude_session
 
     lines = [json.dumps(e) + "\n" for e in events]
     activity: list[tuple[str, str]] = []
@@ -216,13 +188,8 @@ def _run_worker(events, on_activity=None):
     procs: list[_FakeProc] = []
 
     def fake_popen(cmd, *_a, **_k):
-        proc = _FakeProc(lines)
-        # On macOS the worker's first act is to ask a login shell for its
-        # PATH, via subprocess.run -> subprocess.Popen — which this patch has
-        # intercepted too. That probe is none of this test's business: it must
-        # not become `procs[0]` and push the worker's real process to [1].
-        if cmd and cmd[0] == "claude":
-            procs.append(proc)
+        proc = _FakeProc(iter(lines))
+        procs.append(proc)
         return proc
 
     def record(kind, text):
@@ -230,8 +197,8 @@ def _run_worker(events, on_activity=None):
         if on_activity is not None:
             on_activity(procs[0] if procs else None, kind, text)
 
-    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
-    subprocess.Popen = fake_popen  # type: ignore[assignment]
+    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    claude_session._popen = fake_popen  # type: ignore[assignment]
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
         worker = blindpilot_app.ClaudeWorker(
@@ -248,8 +215,12 @@ def _run_worker(events, on_activity=None):
         )
         worker.run()
     finally:
-        subprocess.Popen = real_popen  # type: ignore[assignment]
+        claude_session._popen = real_popen  # type: ignore[assignment]
         blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        # Not this function's job to drop the held process: a caller that
+        # asserts on `procs[0]` needs it exactly as the worker left it.
+        # `no_backend_process_outlives_its_test` in conftest.py empties the
+        # pool around every test regardless.
     return activity, completed, procs[0]
 
 
@@ -295,8 +266,9 @@ def test_stream_emits_thinking_tool_result_and_text_in_order():
     first = _json.loads(proc.stdin.written[0])
     assert first["type"] == "user"
     assert first["message"]["content"][0]["text"] == "hi"
-    # ...and stdin was closed once the turn's result arrived, so the CLI can exit.
-    assert proc.stdin.closed
+    # ...and stdin stays open once the turn's result arrives: the process
+    # belongs to the tab now, not the turn, and nothing here ends it.
+    assert not proc.stdin.closed
 
 
 def test_redacted_thinking_still_announces_something():
@@ -343,21 +315,18 @@ def test_steer_writes_a_second_message_into_the_running_process():
     ]
 
     import blindpilot_app
-    import subprocess
+    import claude_session
 
     lines = [_json.dumps(e) + "\n" for e in events]
     procs = []
 
     def fake_popen(cmd, *_a, **_k):
-        proc = _FakeProc(lines)
-        # The macOS login-shell PATH probe also goes through Popen; it is not
-        # the process under test and must not become `procs[0]`.
-        if cmd and cmd[0] == "claude":
-            procs.append(proc)
+        proc = _FakeProc(iter(lines))
+        procs.append(proc)
         return proc
 
-    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
-    subprocess.Popen = fake_popen  # type: ignore[assignment]
+    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    claude_session._popen = fake_popen  # type: ignore[assignment]
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
         worker = blindpilot_app.ClaudeWorker(
@@ -375,7 +344,7 @@ def test_steer_writes_a_second_message_into_the_running_process():
         running["worker"] = worker
         worker.run()
     finally:
-        subprocess.Popen = real_popen  # type: ignore[assignment]
+        claude_session._popen = real_popen  # type: ignore[assignment]
         blindpilot_app._find_claude = real_find  # type: ignore[assignment]
 
     assert sent.get("steered") is True
@@ -794,9 +763,9 @@ def test_there_is_nothing_to_compact_before_the_first_message():
 def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
     """Drive ClaudeWorker over `events`, answering any question it asks."""
     import json
-    import subprocess
 
     import blindpilot_app
+    import claude_session
 
     lines = [json.dumps(event) + "\n" for event in events]
     asked: list[tuple] = []
@@ -805,21 +774,17 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
     commands: list[list[str]] = []
 
     def fake_popen(cmd, *_a, **_k):
-        proc = _FakeProc(lines)
-        # The macOS login-shell PATH probe also goes through Popen; it is not
-        # the process under test and must not become `procs[0]` or
-        # `commands[0]`.
-        if cmd and cmd[0] == "claude":
-            commands.append(list(cmd))
-            procs.append(proc)
+        proc = _FakeProc(iter(lines))
+        commands.append(list(cmd))
+        procs.append(proc)
         return proc
 
     def on_question(questions):
         asked.append(tuple(questions))
         return answer
 
-    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
-    subprocess.Popen = fake_popen  # type: ignore[assignment]
+    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    claude_session._popen = fake_popen  # type: ignore[assignment]
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
         worker = blindpilot_app.ClaudeWorker(
@@ -837,7 +802,7 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
         )
         worker.run()
     finally:
-        subprocess.Popen = real_popen  # type: ignore[assignment]
+        claude_session._popen = real_popen  # type: ignore[assignment]
         blindpilot_app._find_claude = real_find  # type: ignore[assignment]
     written = [json.loads(line) for line in procs[0].stdin.written]
     return asked, written, activity, commands[0]
