@@ -279,3 +279,16 @@ def test_start_runs_the_command_in_the_working_directory(monkeypatch):
     assert seen["kwargs"]["creationflags"] == 7
     assert seen["kwargs"]["errors"] == "replace"
     assert session.alive()
+
+
+def test_an_idle_sink_that_raises_is_logged_not_propagated(caplog):
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    proc.stdout.feed({"type": "assistant"})
+    assert _settle(lambda: session._pending)
+    with caplog.at_level("ERROR", logger="blindpilot.claude"):
+        session.set_idle_sink(lambda: (_ for _ in ()).throw(RuntimeError("sink broke")))
+    assert "the Claude session's idle sink raised" in caplog.text
+    assert any(r.levelname == "ERROR" for r in caplog.records if r.name == "blindpilot.claude")
+    events = session.attach()
+    assert events.get(timeout=1) == {"type": "assistant"}

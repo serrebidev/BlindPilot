@@ -172,7 +172,10 @@ class ClaudeSession:
                 self._idle_told = True
                 tell = callback
         if tell is not None:
-            tell()
+            try:
+                tell()
+            except Exception:
+                _log.exception("the Claude session's idle sink raised")
 
     def busy(self) -> bool:
         with self._state:
@@ -243,7 +246,9 @@ class ClaudeSession:
     def write_json(self, payload: dict) -> bool:
         """Write one JSON line to the process. False if it could not be."""
         stdin = self._proc.stdin
-        if stdin is None or self._stopped:
+        with self._state:
+            stopped = self._stopped
+        if stdin is None or stopped:
             return False
         try:
             with self._write_lock:
@@ -275,7 +280,9 @@ class ClaudeSession:
 
     # ----- the process -----
     def alive(self) -> bool:
-        return not self._stopped and self._proc.poll() is None
+        with self._state:
+            stopped = self._stopped
+        return not stopped and self._proc.poll() is None
 
     def returncode(self) -> Optional[int]:
         return self._proc.poll()
