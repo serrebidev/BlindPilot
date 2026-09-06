@@ -46,7 +46,9 @@ live on this machine. Spec: `01-design.md`. Branch
   `_CANCEL_DRAIN_SECONDS` deadline instead of blocking on a queue nothing
   more will arrive on. `_deny` answers a control request with a refusal
   while the turn is stopping, so a question asked mid-cancel gets an answer
-  rather than a hang. `_CANCEL_JOIN_SECONDS` rose from 3 to 12 seconds, so
+  rather than a hang. `ClaudeWorker.stop_seconds`, at 12, is what the panel's
+  Stop joins the worker thread with, longer than `_CANCEL_JOIN_SECONDS`
+  (unchanged, at 3, and still what Codex derives its verify budget from), so
   Stop is not reported as failed while the CLI confirms the interrupt and
   the worker thread answers it.
 - Deleted: `_close_stdin`, `_wait_for_shutdown`, `_reap_in_background`,
@@ -62,9 +64,8 @@ live on this machine. Spec: `01-design.md`. Branch
   same path a sent turn does. `_start_late_turn` builds a worker with no
   prompt when the idle sink's callback reaches the GUI thread through the
   `late_turn` mailbox event: it disables Send, enables Stop, plays the
-  earcon, reaches the working indicator through `getattr` (that indicator
-  lands with another change, so this stays a no-op until then), appends
-  `Turn(prompt="")`, and adds no "You:" row, because nobody typed anything.
+  earcon, shows the working indicator, appends `Turn(prompt="")`, and adds
+  no "You:" row, because nobody typed anything.
   `_late_turn_waiting` defers the late turn if one is already running,
   and the turn's `done` handler starts the deferred one.
 

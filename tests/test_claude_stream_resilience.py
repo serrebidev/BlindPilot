@@ -567,6 +567,9 @@ def test_the_panel_join_budget_outlasts_an_interrupt_and_its_drain():
     import blindpilot_app
     import claude_session
 
-    assert blindpilot_app._CANCEL_JOIN_SECONDS > (
+    assert blindpilot_app.ClaudeWorker.stop_seconds > (
         claude_session._INTERRUPT_SECONDS + blindpilot_app._CANCEL_DRAIN_SECONDS
     )
+    # Codex derives its verify budget from _CANCEL_JOIN_SECONDS, which stays
+    # the plain teardown budget rather than the worker's own stop_seconds.
+    assert blindpilot_app._CANCEL_JOIN_SECONDS == 3.0

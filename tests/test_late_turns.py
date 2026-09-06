@@ -53,6 +53,7 @@ def _panel(worker=None):
     panel.announced: list[str] = []
     panel._announce = lambda text, urgent=False: panel.announced.append(text)
     panel._show_working = lambda: panel._earcons.calls.append("indicator")
+    panel._hide_working = lambda: panel._earcons.calls.append("indicator off")
     panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
     panel._claude_worker_extra = lambda: app.SessionPanel._claude_worker_extra(panel)
     panel._launch_turn = lambda send_text, backend, extra: launched.append(

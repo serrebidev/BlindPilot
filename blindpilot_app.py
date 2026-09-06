@@ -3101,6 +3101,11 @@ class ClaudeWorker(threading.Thread):
     responsible for marshalling them back to the GUI thread (wx.CallAfter).
     """
 
+    # Stop may wait for the CLI to confirm the interrupt and then for the
+    # interrupted turn's result, so the panel must wait longer than both
+    # before it says the stop did not land.
+    stop_seconds = 12.0
+
     def __init__(
         self,
         prompt: Optional[str],
@@ -4794,13 +4799,10 @@ class HistoryDialog(wx.Dialog):
         event.Skip()
 
 
-# How long a cancelled turn is waited for. Stop may spend five seconds waiting
-# for the CLI to confirm the interrupt and five more waiting for the
-# interrupted turn's result, so the wait here is longer than both together
-# before the panel says the stop did not land. At quit the turns still running
-# are cancelled at the same time and share this, rather than each being given
-# the whole of it.
-_CANCEL_JOIN_SECONDS = 12.0
+# How long the application waits, in total, for the turns still running when it
+# quits. They are cancelled at the same time and share this, rather than each
+# being given the whole of it.
+_CANCEL_JOIN_SECONDS = 3.0
 
 
 # How long the prompt has to stop changing before dictated or pasted text is
@@ -6260,10 +6262,7 @@ class SessionPanel(wx.Panel):
         self._announce("A background agent has reported. Receiving response")
         self.send_btn.Disable()
         self._earcons.start_progress()
-        # The working indicator arrives with another change and is a no-op until then
-        show = getattr(self, "_show_working", None)
-        if show is not None:
-            show()
+        self._show_working()
         self._launch_turn(None, BACKEND_CLAUDE, self._claude_worker_extra())
 
     def _add_your_message(self, text: str, steering: bool = False) -> None:
@@ -6329,7 +6328,8 @@ class SessionPanel(wx.Panel):
         def cancel() -> None:
             # cancel() waits on the process, so it must not run on the UI thread.
             worker.cancel()
-            worker.join(timeout=_CANCEL_JOIN_SECONDS)
+            # A backend that needs longer to land a stop says so.
+            worker.join(timeout=getattr(worker, "stop_seconds", _CANCEL_JOIN_SECONDS))
             wx.CallAfter(self._after_cancel, worker)
 
         threading.Thread(target=cancel, daemon=True).start()
