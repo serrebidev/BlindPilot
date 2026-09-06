@@ -66,6 +66,8 @@ def _panel(worker=None):
     panel = _Page()
     panel._worker = worker
     panel._earcons = type("E", (), {"stop_progress": lambda self: None})()
+    panel._show_working = lambda: None
+    panel._hide_working = lambda: None
     panel._dictation_timer = None
     panel._close_question_dialog = lambda: None
     return panel

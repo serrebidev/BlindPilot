@@ -451,6 +451,8 @@ def _stub_panel(app, **overrides):
     """A SessionPanel stand-in carrying only the state these handlers use."""
     panel = type("PanelStub", (), {})()
     panel._earcons = _Earcons()
+    panel._show_working = lambda: None
+    panel._hide_working = lambda: None
     panel._turns = []
     panel._rows = []
     panel._response_count = 0

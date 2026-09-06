@@ -48,6 +48,8 @@ def _panel(monkeypatch):
     panel._response_count = 0
     panel._worker = None
     panel._earcons = _Earcons()
+    panel._show_working = lambda: None
+    panel._hide_working = lambda: None
     panel.announced: list[tuple] = []
     panel._announce = lambda text, urgent=False: panel.announced.append((text, urgent))
     panel.refreshed = 0
@@ -252,3 +254,31 @@ def test_an_ordinary_failure_keeps_the_session(monkeypatch):
     app.SessionPanel._on_failed(panel, "the turn stopped")
 
     assert panel._session_id == "thread-1"
+
+
+def test_the_working_indicator_runs_with_the_progress_cue():
+    import blindpilot_app
+
+    state = []
+
+    class _Indicator:
+        def Start(self):
+            state.append("start")
+
+        def Stop(self):
+            state.append("stop")
+
+        def IsRunning(self):
+            return bool(state) and state[-1] == "start"
+
+        def Show(self):
+            pass
+
+        def Hide(self):
+            pass
+
+    panel = type("PanelStub", (), {"working": _Indicator(), "Layout": lambda self: None})()
+    blindpilot_app.SessionPanel._show_working(panel)
+    blindpilot_app.SessionPanel._hide_working(panel)
+    blindpilot_app.SessionPanel._hide_working(panel)
+    assert state == ["start", "stop"], "stopping twice must not stop twice"

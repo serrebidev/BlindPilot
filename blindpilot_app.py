@@ -5410,6 +5410,11 @@ class SessionPanel(wx.Panel):
         self.stop_btn.Bind(wx.EVT_BUTTON, lambda _e: self._on_stop())
         self.stop_btn.Disable()
 
+        # Sighted only. It is never focusable and has no name for the reader;
+        # the earcon and the status line already say a turn is running.
+        self.working = wx.ActivityIndicator(self)
+        self.working.Hide()
+
         self.attach_btn = wx.Button(self, label="Attach")
         self.attach_btn.SetName("Attach files")
         self.attach_btn.Bind(wx.EVT_BUTTON, lambda _e: self.attach_files())
@@ -5433,6 +5438,7 @@ class SessionPanel(wx.Panel):
         bottom_row.Add(self.send_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         bottom_row.Add(self.steer_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         bottom_row.Add(self.stop_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
+        bottom_row.Add(self.working, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
         bottom_row.Add(self.attach_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         bottom_row.Add(self.slash_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, group_gap)
         bottom_row.Add(mode_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
@@ -5452,6 +5458,18 @@ class SessionPanel(wx.Panel):
         self.SetSizer(sizer)
         self.apply_view_mode()
         self.backend_changed()
+
+    def _show_working(self) -> None:
+        if not self.working.IsRunning():
+            self.working.Show()
+            self.working.Start()
+            self.Layout()
+
+    def _hide_working(self) -> None:
+        if self.working.IsRunning():
+            self.working.Stop()
+            self.working.Hide()
+            self.Layout()
 
     # ----- Responses view (list box or read-only edit field) -----
     def apply_view_mode(self) -> None:
@@ -6071,6 +6089,7 @@ class SessionPanel(wx.Panel):
         # The progress loop means "still working", and it is not: the run is
         # waiting on this dialog, and a loop under a question is only noise.
         self._earcons.stop_progress()
+        self._hide_working()
         dlg = QuestionDialog(self, backend, questions)
         self._question_dialog = dlg
         try:
@@ -6083,6 +6102,7 @@ class SessionPanel(wx.Panel):
             dlg.Destroy()
             if self._worker is not None:
                 self._earcons.start_progress()
+                self._show_working()
         self._announce("Answer sent")
         return answers
 
@@ -6308,6 +6328,7 @@ class SessionPanel(wx.Panel):
         # response arrives (or the request fails).
         self._earcons.play_send()
         self._earcons.start_progress()
+        self._show_working()
 
         worker_type = worker_class(selected_backend, ClaudeWorker)
         extra = dict(worker_extra or {})
@@ -6340,6 +6361,7 @@ class SessionPanel(wx.Panel):
             # keeps a failure here from leaving Send refused for good.
             self._worker = None
             self._earcons.stop_progress()
+            self._hide_working()
             self.send_btn.Enable()
             self._announce(f"Error: The turn could not be started: {exc}")
             return
@@ -6430,6 +6452,7 @@ class SessionPanel(wx.Panel):
     def _finish_stopped_turn(self) -> None:
         """Close out a turn the user stopped, without reporting it as failed."""
         self._earcons.stop_progress()
+        self._hide_working()
         partial = self._streamed_assistant.strip()
         if self._turns and not self._turns[-1].response:
             self._turns[-1].response = partial
@@ -6684,6 +6707,7 @@ class SessionPanel(wx.Panel):
         extra["resume_only"] = True
         self._announce("Attaching" if attaching else "Reopening")
         self._earcons.start_progress()
+        self._show_working()
         self._worker = worker_class(BACKEND_HERMES, ClaudeWorker)(
             "",
             self._session_id,
@@ -6938,6 +6962,7 @@ class SessionPanel(wx.Panel):
             # for it, so it is not news, and it is not an error.
             return
         self._earcons.stop_progress()
+        self._hide_working()
         self._earcons.play_error()
         if self._turns and not self._turns[-1].response:
             self._turns.pop()
@@ -6970,6 +6995,7 @@ class SessionPanel(wx.Panel):
     def _on_worker_finished(self) -> None:
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()
+        self._hide_working()
         if self._stopping:
             self._stopping = False
             self._finish_stopped_turn()
@@ -7297,6 +7323,7 @@ class SessionPanel(wx.Panel):
         """
         self._close_question_dialog()
         self._earcons.stop_progress()
+        self._hide_working()
         if self._dictation_timer is not None:
             # It fires a second and a half after the text landed, by which
             # time this panel's widgets may not exist.
