@@ -48,12 +48,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import weakref
 import webbrowser
 import zipfile
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, cast
 
 from linux_accessibility import announce as _linux_native_announce
 
@@ -61,6 +62,7 @@ import wx
 from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
+import claude_session
 import diagnostics
 from certificates import open_url
 from conversation_list import make_conversation_list
@@ -3081,34 +3083,33 @@ def _claude_questions(raw: list) -> tuple[Question, ...]:
     return tuple(questions)
 
 
-# How long a CLI that did *not* finish its turn may say nothing before
-# BlindPilot stops waiting for it. Only that case waits: a turn that reached
-# its result is not waited on at all (see `_reap_in_background`), because the
-# exit code of a process that has already finished its turn changes nothing
-# anybody hears.
-#
-# Here the wait earns its keep. A CLI that died mid-turn is usually writing the
-# reason to stderr, and that reason is the only thing BlindPilot can offer, so
-# the clock restarts while it is still arriving.
-_SHUTDOWN_QUIET_SECONDS = 30.0
+# How long a stopped turn waits for the CLI's result before the tab's process
+# is dropped. A confirmed interrupt is answered with the interrupted turn's
+# result straight away, so a process that stays silent this long is one that
+# cannot be trusted to carry the next turn.
+_CANCEL_DRAIN_SECONDS = 5.0
 
-# A process that answered, and then never exited at all. Long enough that no
-# real shutdown is cut short, short enough that a long session does not collect
-# one of these per turn. Nothing is said when it fires: the turn it belonged to
-# ended correctly minutes earlier.
-_REAP_SECONDS = 300.0
+# Put on a stopped turn's queue by cancel(), so a reader parked on a queue with
+# no timeout wakes up and asks again with the drain's clock running. It carries
+# nothing and means nothing else.
+_CANCEL_WAKE = {"type": "cancel_wake"}
 
 
 class ClaudeWorker(threading.Thread):
-    """Runs the Claude Code CLI subprocess and delivers results via callbacks.
+    """Runs one Claude turn on the tab's held process and reports it back.
 
     All callbacks are invoked from this worker thread; the caller is
     responsible for marshalling them back to the GUI thread (wx.CallAfter).
     """
 
+    # Stop may wait for the CLI to confirm the interrupt and then for the
+    # interrupted turn's result, so the panel must wait longer than both
+    # before it says the stop did not land.
+    stop_seconds = 12.0
+
     def __init__(
         self,
-        prompt: str,
+        prompt: Optional[str],
         session_id: Optional[str],
         cwd: str,
         permission_mode: str,
@@ -3122,6 +3123,8 @@ class ClaudeWorker(threading.Thread):
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
         on_question: Optional[AskQuestions] = None,
+        held_for: object = None,
+        on_unsolicited: Optional[Callable[[], None]] = None,
     ):
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -3137,20 +3140,22 @@ class ClaudeWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
-        self._proc: Optional[subprocess.Popen] = None
+        # Which tab's held process this turn borrows, and who to tell when the
+        # CLI speaks with no turn attached.
+        self._held_for = held_for
+        self._on_unsolicited = on_unsolicited
+        self._session: Optional[claude_session.ClaudeSession] = None
+        # The queue this turn is reading, kept so Stop can wake a reader that
+        # is parked on it.
+        self._events: Optional[queue.Queue] = None
         self._cancelled = False
-        self._stopped_by_us = False
-        # Set once the process is up and the opening prompt has gone in, cleared
-        # when the turn ends. Guards `steer()` against writing to a pipe that is
-        # not there yet (or is already gone).
+        # When the drain that follows Stop runs out. Set by `cancel`, so the
+        # budget is counted from Stop rather than from the last event.
+        self._cancel_deadline: Optional[float] = None
+        # Set once the session is up and the opening prompt has gone in, cleared
+        # when the turn ends. Guards `steer()` against writing to a session that
+        # is not there yet (or is already gone).
         self._accepting_input = threading.Event()
-        self._write_lock = threading.Lock()
-        # stderr is read on its own thread from the moment the process starts.
-        # Waiting until it exited meant a child that wrote more than the pipe
-        # holds blocked on its own diagnostics, and a turn that fans out
-        # subagents is the loudest one there is.
-        self._stderr_lines: list[str] = []
-        self._stderr_thread: Optional[threading.Thread] = None
         # A failure is reported once, so a crash late in the turn cannot talk
         # over the explanation the turn already gave.
         self._failed = False
@@ -3162,107 +3167,15 @@ class ClaudeWorker(threading.Thread):
         self._failed = True
         self._on_failed(message)
 
-    def _drain_stderr(self) -> None:
-        """Keep stderr empty for as long as the process is running.
-
-        Whatever it says is kept: when the CLI exits without finishing a turn,
-        its stderr is usually the only account of why.
-        """
-        proc = self._proc
-        stream = proc.stderr if proc is not None else None
-        if stream is None:
-            return
-        try:
-            for line in stream:
-                self._stderr_lines.append(line)
-                # A runaway child must not become a runaway list. The tail is
-                # the part that says how it ended.
-                if len(self._stderr_lines) > 4000:
-                    del self._stderr_lines[:2000]
-        except Exception:
-            # The pipe closed under us, which is what exiting looks like.
-            pass
-
-    def _stderr_text(self) -> str:
-        """Everything stderr said, once the draining thread has caught up."""
-        thread = self._stderr_thread
-        if thread is not None:
-            thread.join(timeout=2)
-        return "".join(self._stderr_lines).strip()
-
-    def _wait_for_shutdown(self) -> bool:
-        """Wait for a CLI that did not finish its turn, once its input closed.
-
-        True if it exited by itself, False if it has gone quiet and should be
-        stopped. The clock restarts whenever it writes to stderr, because a CLI
-        failing mid-turn is usually explaining itself there and that
-        explanation is all BlindPilot has to report. Only for that case: a
-        healthy CLI shutting down writes nothing to stderr, so for it this
-        would be a flat timeout.
-        """
-        proc = self._proc
-        if proc is None:
-            return True
-        heard = len(self._stderr_lines)
-        last_heard = time.monotonic()
-        while True:
-            try:
-                proc.wait(timeout=0.25)
-                return True
-            except subprocess.TimeoutExpired:
-                pass
-            said = len(self._stderr_lines)
-            if said != heard:
-                heard = said
-                last_heard = time.monotonic()
-            if time.monotonic() - last_heard >= _SHUTDOWN_QUIET_SECONDS:
-                return False
-
-    def _reap_in_background(self) -> None:
-        """Let a CLI that has answered shut down in its own time, off the turn.
-
-        Shutting down means writing the session file the next resume reads and
-        stopping MCP servers rather than cutting them off, and on a turn that
-        fanned out agents there is the most of it to do. None of that is
-        BlindPilot's business once the answer is in, so the turn ends now and
-        the process is left to finish. It is still waited on, on a thread
-        nobody is listening to, so a session of many turns does not accumulate
-        one of these per turn.
-        """
-        proc = self._proc
-        if proc is None:
-            return
-        threading.Thread(
-            target=self._reap, args=(proc,), name="claude-shutdown", daemon=True
-        ).start()
-
-    @staticmethod
-    def _reap(proc: subprocess.Popen) -> None:
-        try:
-            proc.wait(timeout=_REAP_SECONDS)
-        except subprocess.TimeoutExpired:
-            # Stuck rather than slow. Worth not leaking, not worth telling
-            # anybody: the turn this belonged to ended correctly long ago.
-            try:
-                proc.kill()
-            except (OSError, ValueError):
-                pass
-
     def _ending_note(self, rc: object, detail: str) -> str:
-        """How the run ended, saying who ended it.
+        """How the run ended, with its exit code when there is one.
 
-        A kill is BlindPilot's doing, and on Windows it is also BlindPilot's
-        number: a terminated process reports exactly 1. Reporting that as
-        "Claude Code exited with code 1" blamed the CLI for something this
-        application had just done, and made the two indistinguishable in a bug
-        report.
+        A process whose stream has ended has not always been reaped, so there
+        is not always a code to give. "Claude Code exited with code None" read
+        as a bug in BlindPilot; saying there was no code says what happened.
         """
-        if self._stopped_by_us:
-            return (
-                "BlindPilot stopped Claude Code: it had not finished shutting down "
-                f"{int(_SHUTDOWN_QUIET_SECONDS)} seconds after it went quiet. "
-                "Whatever the turn had already produced is kept."
-            )
+        if rc is None:
+            return f"Claude Code exited without a code{detail}"
         return f"Claude Code exited with code {rc}{detail}"
 
     @staticmethod
@@ -3270,36 +3183,6 @@ class ClaudeWorker(threading.Thread):
         """A count, or zero. `True` is an `int` in Python and is not a count:
         `started_in_background: true` would otherwise mean one agent forever."""
         return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-    @staticmethod
-    def _background_agents_running(event: dict, previously: int = 0) -> int:
-        """How many agents this run started in the background are still going.
-
-        A turn that launches background agents finishes while they are still
-        working: the CLI stays up, and what each one finds arrives as a further
-        turn on this same stream. Treating that first result as the end of the
-        run closed the CLI's stdin, and stopping the CLI stops every agent it
-        had running — which is a whole fan-out of work lost at once.
-        """
-        stats = event.get("subagent_stats")
-        if not isinstance(stats, dict):
-            # No account of the agents at all. If none were ever running this
-            # is an ordinary turn and the answer is nought either way; if some
-            # were, this event simply does not mention them, and reading
-            # silence as "they have finished" is precisely what killed a whole
-            # fan-out before. What was last known stands until something says
-            # otherwise.
-            return previously
-        started = ClaudeWorker._count(stats.get("started_in_background"))
-        settled = sum(ClaudeWorker._count(stats.get(field)) for field in ("completed", "failed"))
-        killed = stats.get("killed")
-        if isinstance(killed, dict):
-            settled += sum(ClaudeWorker._count(value) for value in killed.values())
-        elif killed is not None:
-            # A shape nobody here understands. Counting it as nothing settled
-            # would leave the run waiting on agents that can never come back.
-            settled += ClaudeWorker._count(killed)
-        return max(0, started - settled)
 
     @staticmethod
     def _diagnostic_path() -> Path:
@@ -3328,30 +3211,8 @@ class ClaudeWorker(threading.Thread):
         return self._accepting_input.is_set() and not self._cancelled
 
     def _write_json(self, payload: dict) -> bool:
-        """Write one JSON line to the running process. False if it failed."""
-        proc = self._proc
-        if proc is None or proc.stdin is None:
-            return False
-        try:
-            with self._write_lock:
-                proc.stdin.write(json.dumps(payload) + "\n")
-                proc.stdin.flush()
-        except (OSError, ValueError):
-            # Pipe closed underneath us — the turn finished as we wrote.
-            return False
-        return True
-
-    def _write_message(self, text: str) -> bool:
-        """Push one user message into the running process. False if it failed."""
-        return self._write_json(
-            {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": text}],
-                },
-            }
-        )
+        session = self._session
+        return session is not None and session.write_json(payload)
 
     def steer(self, text: str) -> bool:
         """Send a follow-up message into the turn that is already running.
@@ -3361,36 +3222,53 @@ class ClaudeWorker(threading.Thread):
         """
         if not self.accepting_input():
             return False
-        return self._write_message(text)
-
-    def _close_stdin(self) -> None:
-        self._accepting_input.clear()
-        proc = self._proc
-        if proc is not None and proc.stdin is not None:
-            try:
-                with self._write_lock:
-                    proc.stdin.close()
-            except (OSError, ValueError):
-                pass
+        return self._session is not None and self._session.send_user(text)
 
     def cancel(self) -> None:
+        """Stop the turn, and only the turn when the CLI lets us.
+
+        An interrupt the CLI confirms ends this turn with a result and leaves
+        the process, and every agent it holds, running. One it does not
+        confirm means the process cannot be trusted with the next turn, so
+        it is dropped from the pool, which stops it.
+        """
+        # Before `_cancelled`, because that is what the reader watches: it
+        # must never find the turn cancelled with no deadline to drain to.
+        self._cancel_deadline = time.monotonic() + _CANCEL_DRAIN_SECONDS
         self._accepting_input.clear()
         self._cancelled = True
-        proc = self._proc
-        if proc and proc.poll() is None:
-            end_process_group(proc)
+        session = self._session
+        if session is None:
+            return
+        if not session.interrupt(claude_session._INTERRUPT_SECONDS):
+            self._drop_process()
+        # The reader may have been parked on the queue with no timeout since
+        # before Stop was pressed, and the drain's clock only starts when it
+        # asks for the next event. This is what makes it ask.
+        events = self._events
+        if events is not None:
+            events.put(_CANCEL_WAKE)
+
+    def _drop_process(self) -> None:
+        """Stop the process this turn borrowed and take it out of the pool.
+
+        The pool holds it under the tab's key, but a process already dropped
+        by somebody else is still this turn's to stop, so both are done.
+        """
+        backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CLAUDE, self._held_for))
+        session = self._session
+        if session is not None:
+            session.stop()
 
     def run(self) -> None:
         try:
             self._do_run()
         except Exception as exc:
-            # Anything thrown here used to end the turn without a word: the
-            # `finally` closed stdin, the CLI saw EOF in the middle of its work
-            # and exited, and the exit code was the whole explanation. Say what
-            # actually happened instead.
+            # Anything thrown here used to end the turn without a word, leaving
+            # the exit code as the whole explanation. Say what actually
+            # happened instead.
             self._fail(f"BlindPilot stopped reading Claude Code: {exc}")
         finally:
-            self._close_stdin()
             self._on_done()
 
     @staticmethod
@@ -3445,6 +3323,10 @@ class ClaudeWorker(threading.Thread):
         # tool existed, and it still does. Headless Claude Code denies whatever
         # its mode leaves to a prompt, so denying here keeps every mode behaving
         # exactly as it did.
+        self._deny(request_id, tool)
+
+    def _deny(self, request_id: str, tool: str = "") -> None:
+        """Refuse one tool call, in the words the permission mode gives it."""
         self._write_json(
             {
                 "type": "control_response",
@@ -3511,78 +3393,72 @@ class ClaudeWorker(threading.Thread):
             self._on_failed("Claude Code not installed. Install from claude.com/claude-code")
             return
 
-        # Streaming *input* mode: the prompt goes in over stdin as a JSON message
-        # and stdin stays open, so further messages can be pushed into the run
-        # while it is still working. That is what makes steering possible — the
-        # CLI picks the new message up mid-turn and changes course.
-        cmd = [
-            binary,
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ]
-        # AskUserQuestion is the tool Claude Code stops a turn to ask with, and
-        # in headless mode the CLI leaves it out of the tool set unless the
-        # host says it can render a permission prompt. "stdio" is how it is
-        # told that: the prompt then arrives as a `can_use_tool` control
-        # request on this same stream, and the answer goes back the same way.
-        # Nothing else changes — every other tool's decision still comes from
-        # the permission mode, exactly as it did before.
-        if _CLAUDE_PERMISSION_PROMPT_TOOL:
-            cmd.extend(["--permission-prompt-tool", _CLAUDE_PERMISSION_PROMPT_TOOL])
-        if self._permission_mode:
-            cmd.extend(["--permission-mode", self._permission_mode])
-        # Left off entirely when unset, so the CLI's own default applies.
-        if self._model:
-            cmd.extend(["--model", self._model])
-        if self._effort:
-            cmd.extend(["--effort", self._effort])
-        if self._session_id:
-            cmd.extend(["--resume", self._session_id])
-
-        # `claude` is typically a shim that needs to find `node`, and a window
-        # started from the macOS Dock has a PATH that holds neither.
-        env = subprocess_env(binary)
-
-        try:
-            self._proc = subprocess.Popen(
-                cmd,
-                cwd=self._cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                encoding="utf-8",
-                # One malformed byte anywhere in a long run used to raise
-                # mid-stream and take the turn with it. A replacement character
-                # in a row of output costs nothing by comparison.
-                errors="replace",
-                env=env,
-                # `claude` may be a launcher with the real agent as its child;
-                # stopping a task has to stop that too.
-                **own_group_kwargs(),
-                **_no_window_kwargs(),
-            )
-        except OSError as exc:
-            self._fail(f"Failed to launch Claude Code: {exc}")
-            return
-
-        # Started before anything is sent, so the child never waits on a pipe
-        # nobody is emptying. The list is replaced rather than kept, so a retry
-        # does not inherit the first attempt's complaints.
-        self._stderr_lines = []
-        self._stderr_thread = threading.Thread(
-            target=self._drain_stderr,
-            name="claude-stderr",
-            daemon=True,
+        wants = claude_session.Wants(
+            cwd=self._cwd,
+            permission_mode=self._permission_mode,
+            model=self._model,
+            effort=self._effort,
+            session_id=self._session_id,
         )
-        self._stderr_thread.start()
+        session = self._take(wants, binary)
+        if session is None:
+            return
+        if session is self._session:
+            # This turn is being retried after that same process died, and
+            # its exit has not reached the pool yet. Reading its stream again
+            # only reaches the end of it again.
+            self._drop_process()
+            session = self._take(wants, binary)
+            if session is None:
+                return
+        self._session = session
+        events = session.attach()
+        self._events = events
+        try:
+            mark = session.stderr_mark()
+            self._read_turn(session, events, mark)
+        finally:
+            session.detach()
+            self._accepting_input.clear()
 
-        if not self._write_message(self._prompt):
+    def _take(
+        self, wants: "claude_session.Wants", binary: str
+    ) -> Optional["claude_session.ClaudeSession"]:
+        """The tab's process for this turn, or None once it has been accounted for."""
+        try:
+            session = claude_session.take_or_start(
+                self._held_for,
+                wants,
+                binary,
+                _CLAUDE_PERMISSION_PROMPT_TOOL,
+                idle_sink=self._on_unsolicited,
+                popen_kwargs=_no_window_kwargs(),
+                # A turn with no prompt is a late one: it reads the process it
+                # was woken for or it reads nothing. A replacement has no turn
+                # running and would never send the result it waits for.
+                late=self._prompt is None,
+            )
+        except Exception as exc:
+            # OSError is the launch failing. Anything else is the pool or the
+            # session objecting, and a turn that ends without a word over it
+            # leaves Send disabled with nothing said.
+            self._fail(f"Failed to launch Claude Code: {exc}")
+            return None
+        if session is None:
+            # Late, and the process that woke this tab is already gone. There
+            # is nothing to read and nothing went wrong, so the turn ends the
+            # way any turn that reached its end in silence ends.
+            self._on_activity("notice", "Claude Code finished the turn without saying anything.")
+        return session
+
+    def _read_turn(
+        self, session: claude_session.ClaudeSession, events: "queue.Queue", mark: int
+    ) -> None:
+        if self._cancelled:
+            # Stop landed before there was a process to stop. Sending the
+            # prompt now would start the very turn that was called off.
+            return
+        if self._prompt is not None and not session.send_user(self._prompt):
             self._fail("Could not send the prompt to Claude Code")
             return
         self._accepting_input.set()
@@ -3590,28 +3466,47 @@ class ClaudeWorker(threading.Thread):
         text_parts: list[str] = []
         first_assistant_seen = False
         complete = False
-        # How many background agents the last wait was announced for, so the
-        # count is only spoken when it changes rather than at every result.
-        announced_waiting = 0
-        # Remembered across events: an event that says nothing about the agents
-        # must not be read as saying they have finished.
-        still_working = 0
+        died = False
 
-        assert self._proc.stdout is not None
-        for raw_line in self._proc.stdout:
+        while True:
+            timeout: Optional[float] = None
             if self._cancelled:
-                break
-            line = raw_line.strip()
-            if not line:
-                continue
-
+                # After Stop, the CLI's result for the interrupted turn is due
+                # at once; a process that keeps it is not trusted with the
+                # next. The budget runs from Stop, so a CLI that keeps talking
+                # cannot put the deadline back for ever.
+                deadline = self._cancel_deadline
+                timeout = _CANCEL_DRAIN_SECONDS if deadline is None else deadline - time.monotonic()
+                if timeout <= 0:
+                    self._drop_process()
+                    return
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                print(
-                    f"[blindpilot] malformed Claude JSON line: {line!r}",
-                    file=sys.stderr,
-                )
+                event = events.get(timeout=timeout)
+            except queue.Empty:
+                self._drop_process()
+                return
+            if event is _CANCEL_WAKE:
+                # Stop put this here to be woken by. Ask again, now with the
+                # drain's clock running.
+                continue
+            if event is claude_session.EOF:
+                died = True
+                break
+            if self._cancelled:
+                if event.get("type") == "control_request":
+                    # A request left unanswered holds the CLI for ever, and a
+                    # stopped turn is still the only one listening.
+                    request_id = event.get("request_id")
+                    if isinstance(request_id, str):
+                        self._deny(request_id)
+                    continue
+                # Read to the result so it is not left for a late turn to find.
+                if event.get("type") == "result":
+                    if not event.get("is_error") and self._count(event.get("queued_turn_count")):
+                        # Somebody else's result, as on the live path. Ours is
+                        # the one that leaves nothing queued behind it.
+                        continue
+                    return
                 continue
 
             etype = event.get("type")
@@ -3689,33 +3584,13 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
-                still_working = self._background_agents_running(event, still_working)
                 queued = self._count(event.get("queued_turn_count"))
                 if not event.get("is_error") and queued:
-                    # A resumed CLI can have a turn of its own to run first,
-                    # such as the notice about a background command its last
-                    # process left unfinished. That turn's result arrives
-                    # before ours and says nothing. Reading it as the end of
-                    # our turn closed stdin with the prompt still queued
-                    # inside the CLI, and thirty seconds later the CLI was
-                    # stopped and the stop reported as the answer.
+                    # A resumed CLI can have a turn of its own to run first.
+                    # That turn's result arrives before ours and says nothing.
                     logging.getLogger("blindpilot.claude").info(
                         "result for another turn: %d still queued, reading on", queued
                     )
-                    continue
-                if not event.get("is_error") and still_working:
-                    # The turn is over, the run is not: agents it started in
-                    # the background are still going, and what they find comes
-                    # back as further turns on this same stream. Ending here
-                    # stopped the CLI and took every one of them with it.
-                    if still_working != announced_waiting:
-                        announced_waiting = still_working
-                        self._on_activity(
-                            "notice",
-                            f"Waiting for {still_working} background "
-                            f"{'agent' if still_working == 1 else 'agents'} to finish. "
-                            "Stop Task ends the run now.",
-                        )
                     continue
                 if event.get("is_error"):
                     detail = (event.get("result") or "").strip()
@@ -3724,96 +3599,50 @@ class ClaudeWorker(threading.Thread):
                         return
                     note = detail or "Claude Code returned an error"
                     if text_parts:
-                        # Waiting for background agents made a late error
-                        # result reachable for the first time, and this threw
-                        # away a turn that had already answered. How it ended
-                        # is worth saying; saying it *instead of* the answer
-                        # loses work that was already done, which is what the
-                        # exit-code path below is careful not to do.
+                        # The turn answered before it ended badly. Saying how it
+                        # ended instead of the answer threw away work.
                         self._on_activity("notice", note)
-                        self._close_stdin()
                         break
                     self._fail(note)
                     return
-                # In streaming-input mode the process waits for more messages
-                # rather than ending at EOF, so the turn's own result event is
-                # what tells us to stop reading and let it shut down.
-                self._close_stdin()
+                # The turn is over. The process is not: it belongs to the tab,
+                # and whatever it left running keeps running.
                 break
-
-        self._close_stdin()
-        if complete and not self._cancelled:
-            # The turn ended, so how this process ends cannot change what is
-            # said. It is never waited for and never killed: shutting down means
-            # writing the session file the next resume reads and stopping MCP
-            # servers rather than cutting them off, and interrupting that to
-            # announce an exit code nobody needs cost a good turn its ending.
-            #
-            # Asking whether it has already gone costs nothing, though, and a
-            # bad code it reached on its own is still worth a word - that being
-            # the difference this never used to draw.
-            rc = self._proc.poll()
-            if rc:
-                stderr_text = self._stderr_text()
-                detail = f": {stderr_text}" if stderr_text else ""
-                self._on_activity("notice", self._ending_note(rc, detail))
-            elif rc is None:
-                self._reap_in_background()
-            if not text_parts:
-                # Completed, with nothing to say. This used to be waited on
-                # for thirty seconds and then killed, and the kill was
-                # reported as the reason the turn failed.
-                self._on_activity(
-                    "notice", "Claude Code finished the turn without saying anything."
-                )
-            self._on_complete("\n\n".join(text_parts).strip())
-            return
-
-        if not self._wait_for_shutdown():
-            self._stopped_by_us = True
-            self._proc.kill()
-            self._proc.wait()
 
         if self._cancelled:
             return
 
-        rc = self._proc.returncode
-        if rc != 0:
-            stderr_text = self._stderr_text()
+        if died:
+            # The stream ends before the process is reaped, so the code is
+            # waited for rather than asked for once.
+            rc = session.wait()
+            session.wait_stderr()
+            stderr_text = session.stderr_since(mark)
             if _looks_like_auth_error(stderr_text):
                 self._fail(AUTH_HINT)
                 return
             if self._retry_without_prompt_tool(stderr_text):
                 # The installed Claude Code is older than the flag. Turn it off
-                # for the rest of the session and send the message again, so a
-                # missing question feature never costs somebody their turn.
+                # for the rest of the session and send the message again.
                 self._do_run()
                 return
             self._log_unfinished_turn(rc, complete, stderr_text)
             detail = f": {stderr_text}" if stderr_text else ""
-            if not detail and not complete:
-                # An exit code on its own explains nothing, and this is the
-                # shape a turn takes when the CLI dies in the middle of one.
+            if not detail:
                 detail = (
                     " without finishing the turn, and without saying why. "
                     f"BlindPilot kept a note of it in {self._diagnostic_path()}."
                 )
             note = self._ending_note(rc, detail)
-            if not complete and not text_parts:
+            if not text_parts:
                 self._fail(note)
                 return
-            # The turn answered before the process ended badly. How it ended is
-            # worth saying, but saying it instead of the answer threw away work
-            # that had already been done.
             self._on_activity("notice", note)
-
-        if not complete and not text_parts:
-            self._log_unfinished_turn(rc, complete, self._stderr_text())
-            self._fail("No response received")
+            self._on_complete("\n\n".join(text_parts).strip())
             return
 
-        # Blank line between blocks: a turn now usually has several (the running
-        # narration, then the answer), and they are separate paragraphs.
+        if not text_parts:
+            self._on_activity("notice", "Claude Code finished the turn without saying anything.")
         self._on_complete("\n\n".join(text_parts).strip())
 
 
@@ -5367,6 +5196,14 @@ class SessionPanel(wx.Panel):
         # the run can close it: the worker thread is blocked on the answer, and
         # the thread that would stop it is the one the dialog is running on.
         self._question_dialog: Optional["QuestionDialog"] = None
+        # Which conversation the tab's held Claude process belongs to. Bumped
+        # whenever those processes are let go, so a wake-up queued before that
+        # cannot open a late turn on whatever the tab holds now.
+        self._claude_generation = 0
+        # The generation of a wake-up that arrived while the last turn's `done`
+        # was still in the mailbox, or None. The late turn starts once it
+        # drains, if the conversation it belongs to is still the one here.
+        self._late_turn_waiting: Optional[int] = None
         self._session_id: Optional[str] = None
         self._session_backend = normalize_backend(self._get_backend())
         self._worker: Optional[AgentWorker] = None
@@ -6225,6 +6062,10 @@ class SessionPanel(wx.Panel):
                     self._on_failed(str(args[0]))
                 elif name == "done":
                     self._on_worker_finished()
+                elif name == "late_turn":
+                    # The mailbox carries plain objects. This one is the
+                    # generation `_claude_worker_extra` put in it.
+                    self._start_late_turn(cast(int, args[0]))
             handled += 1
 
         if rows_changed:
@@ -6383,13 +6224,20 @@ class SessionPanel(wx.Panel):
         self._earcons.start_progress()
         self._show_working()
 
-        worker_type = worker_class(selected_backend, ClaudeWorker)
         extra = dict(worker_extra or {})
         if selected_backend == BACKEND_HERMES:
             # No condition on "does this backend upload" here: this branch IS
             # the uploading backend. Guarding it twice would be a line no test
             # could ever hold to account.
             extra.update(self._hermes_worker_extra(outgoing_files))
+        elif selected_backend == BACKEND_CLAUDE:
+            extra.update(self._claude_worker_extra())
+        self._launch_turn(send_text, selected_backend, extra)
+
+    def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
+        """Start the worker for one turn. `send_text` is None for a late turn,
+        which has nothing to send and only reads what has already arrived."""
+        worker_type = worker_class(selected_backend, ClaudeWorker)
         self._worker = worker_type(
             send_text,
             self._session_id,
@@ -6420,6 +6268,56 @@ class SessionPanel(wx.Panel):
             return
         self.steer_btn.Enable()
         self.stop_btn.Enable()
+
+    def _claude_worker_extra(self) -> dict:
+        """What a Claude turn needs beyond the message, namely whose process
+        it borrows and how to wake this tab when the CLI speaks with no turn
+        running.
+
+        The wake-up holds the tab weakly. The process keeps it for as long as
+        the pool keeps the process, so a strong reference would mean a tab
+        closed without teardown could never be collected. It carries the
+        generation it was made in, so a report cannot land on a conversation
+        it has nothing to do with.
+        """
+        tab = weakref.ref(self)
+        generation = self._claude_generation
+
+        def wake() -> None:
+            panel = tab()
+            if panel is not None:
+                panel._queue_worker_event("late_turn", generation)
+
+        return {"held_for": self, "on_unsolicited": wake}
+
+    def _start_late_turn(self, generation: int) -> None:
+        """Receive what the CLI says with no turn of ours running.
+
+        An agent this tab started in the background, or resumed, has finished,
+        and Claude is answering what it found. It is a turn like any other
+        except that nobody typed anything, so there is no "You:" row.
+
+        `generation` is the conversation the wake-up was queued for. The tab
+        can have started a new conversation, restored one or moved to another
+        backend since, and the report belongs to none of them.
+        """
+        if not self:
+            return
+        if generation != self._claude_generation or self._session_backend != BACKEND_CLAUDE:
+            return
+        if self._run_in_progress():
+            self._late_turn_waiting = generation
+            return
+        self._late_turn_waiting = None
+        self._assistant_narrated_this_turn = False
+        self._streamed_assistant = ""
+        self._stopping = False
+        self._turns.append(Turn(prompt=""))
+        self._announce("A background agent has reported. Receiving response")
+        self.send_btn.Disable()
+        self._earcons.start_progress()
+        self._show_working()
+        self._launch_turn(None, BACKEND_CLAUDE, self._claude_worker_extra())
 
     def _add_your_message(self, text: str, steering: bool = False) -> None:
         """Put the user's own message in the list, ahead of the answer to it.
@@ -6466,10 +6364,12 @@ class SessionPanel(wx.Panel):
     def _on_stop(self) -> None:
         """Stop the run in progress, keeping whatever it produced first.
 
-        Cancelling kills the backend process, so the rows and text already
-        streamed are all there will be — they stay in the list, and the turn
-        keeps them as its response so the transcript is not left with a
-        question and no answer.
+        Stop asks the backend to end the turn. A backend that holds its
+        process between turns, Claude Code and Codex, keeps that process when
+        it confirms the stop, so what was already streamed is all this turn
+        will say and the next message goes to the same process. The rows stay
+        in the list, and the turn keeps their text as its response, so the
+        transcript is not left with a question and no answer.
         """
         worker = self._worker
         if worker is None or not worker.is_alive():
@@ -6484,7 +6384,8 @@ class SessionPanel(wx.Panel):
         def cancel() -> None:
             # cancel() waits on the process, so it must not run on the UI thread.
             worker.cancel()
-            worker.join(timeout=_CANCEL_JOIN_SECONDS)
+            # A backend that needs longer to land a stop says so.
+            worker.join(timeout=getattr(worker, "stop_seconds", _CANCEL_JOIN_SECONDS))
             wx.CallAfter(self._after_cancel, worker)
 
         threading.Thread(target=cancel, daemon=True).start()
@@ -6803,8 +6704,12 @@ class SessionPanel(wx.Panel):
         shared = backend_pool.pool()
         for backend in (BACKEND_CLAUDE, BACKEND_HERMES, BACKEND_FREEBUFF):
             # A key never held is a documented no-op, so this stays correct
-            # while those three backends are still starting fresh each turn.
+            # while Hermes and FreeBuff still start fresh each turn.
             shared.drop(backend_pool.pool_key(backend, self))
+        # A wake-up queued by the process that just went belonged to the
+        # conversation it went with. Read through getattr because this also
+        # runs on half-built panels and on test stand-ins.
+        self._claude_generation = getattr(self, "_claude_generation", 0) + 1
 
     def _on_session_started(self, session_id: str) -> None:
         if not self._session_id:
@@ -7058,8 +6963,17 @@ class SessionPanel(wx.Panel):
             self.steer_btn.Disable()
         if self.stop_btn:
             self.stop_btn.Disable()
+        if self._turns and self._turns[-1].prompt == "" and not self._turns[-1].response:
+            # A late turn appends a turn for its answer to land in. One woken
+            # for a process that had already gone reads nothing, and a blank
+            # question with a blank answer is not an entry in a transcript.
+            self._turns.pop()
         self._worker = None
         self._replaying = False
+        waiting = getattr(self, "_late_turn_waiting", None)
+        self._late_turn_waiting = None
+        if waiting is not None:
+            self._start_late_turn(waiting)
 
     # ----- List + find -----
     def _refresh_list(self) -> None:

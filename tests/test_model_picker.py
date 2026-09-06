@@ -11,13 +11,13 @@ Run from the project root:
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import blindpilot_app  # noqa: E402
+import claude_session  # noqa: E402
 from blindpilot_app import (  # noqa: E402
     BACKEND_CODEX,
     BACKEND_FREEBUFF,
@@ -236,20 +236,23 @@ def test_the_keep_entry_drops_the_backticks_a_cli_puts_round_the_model_name():
 
 
 def _worker_command(**kwargs) -> list[str]:
-    """Build a worker, let it launch, and return the argv it tried to run."""
+    """Build a worker, let it launch, and return the argv it tried to run.
+
+    The worker starts its process through `claude_session._popen` rather
+    than `subprocess.Popen` directly, so that is what gets patched here (see
+    `tests/test_claude_stream_resilience.py`'s `_drive` for the same
+    pattern). Raising stops the worker before it needs a real process; `_take`
+    in blindpilot_app.py catches the OSError and fails the turn, which is all
+    that is wanted since the command line is already captured.
+    """
     captured: list[list[str]] = []
 
     def fake_popen(cmd, **_k):
-        # The macOS login-shell PATH probe also goes through Popen; it is not
-        # the command line under test. It fails on its own, which is fine —
-        # the probe is best-effort.
-        if cmd and cmd[0] != "claude":
-            return
         captured.append(list(cmd))
         raise OSError("stop here — the command line is all we need")
 
-    real_popen, real_find = subprocess.Popen, blindpilot_app._find_claude
-    subprocess.Popen = fake_popen  # type: ignore[assignment]
+    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    claude_session._popen = fake_popen  # type: ignore[assignment]
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
         blindpilot_app.ClaudeWorker(
@@ -266,7 +269,7 @@ def _worker_command(**kwargs) -> list[str]:
             **kwargs,
         ).run()
     finally:
-        subprocess.Popen = real_popen  # type: ignore[assignment]
+        claude_session._popen = real_popen  # type: ignore[assignment]
         blindpilot_app._find_claude = real_find  # type: ignore[assignment]
     return captured[0]
 

@@ -118,3 +118,17 @@ def test_the_contract_rejects_a_pool_that_leaves_a_dead_process_registered(monke
     monkeypatch.setattr(backend_pool, "BackendPool", _KeepsTheCorpse)
     with pytest.raises(ContractViolation, match="left in the registry"):
         check_pool_contract(_real, "HeldProcess")
+
+
+def test_the_claude_adapter_keeps_the_contract(monkeypatch):
+    import claude_session as cs
+    from tests.test_claude_session import _Proc
+
+    monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
+
+    def build() -> backend_pool.HeldProcess:
+        return backend_pool.HeldProcess(
+            cs.ClaudeSession(_Proc(), cs.Wants("C:/w", "default")), cs.claude_adapter()
+        )
+
+    check_pool_contract(build, "claude")

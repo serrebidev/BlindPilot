@@ -89,6 +89,7 @@ def _panel(prompt_text: str = "the second question"):
     panel._stopping = False
     panel._session_id = "session-1"
     panel._session_backend = app.BACKEND_CLAUDE
+    panel._claude_generation = 0
     panel._assistant_narrated_this_turn = True
     panel.model = ""
     panel.effort = ""
@@ -117,6 +118,13 @@ def _panel(prompt_text: str = "the second question"):
     panel._queue_worker_event = lambda *_a, **_k: None
     panel._ask_questions = None
     panel._on_title = lambda *_a: None
+    # The real methods, not stand-ins: Task 5 moved the worker-building tail
+    # of _on_send into _launch_turn, and a Claude turn is now given
+    # _claude_worker_extra() as well.
+    panel._claude_worker_extra = lambda: app.SessionPanel._claude_worker_extra(panel)
+    panel._launch_turn = lambda send_text, backend, extra: app.SessionPanel._launch_turn(
+        panel, send_text, backend, extra
+    )
     return panel
 
 
