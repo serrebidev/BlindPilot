@@ -58,6 +58,7 @@ def _panel(worker=None):
     panel._launch_turn = lambda send_text, backend, extra: launched.append(
         (send_text, backend, extra)
     )
+    panel._start_late_turn = lambda: app.SessionPanel._start_late_turn(panel)
     panel._queue_worker_event = lambda name, *args: panel.queued.append((name, args))
     panel.queued: list[tuple] = []
     panel._finish_stopped_turn = lambda: None
@@ -84,6 +85,7 @@ def test_a_late_turn_starts_a_prompt_less_claude_turn_with_the_earcon_running():
     assert panel._streamed_assistant == "" and panel._assistant_narrated_this_turn is False
     assert panel._turns and panel._turns[-1].prompt == "", "the answer needs a turn to land in"
     assert any("background" in text.lower() for text in panel.announced)
+    assert not panel.send_btn.enabled
 
 
 def test_a_late_turn_waits_while_a_turn_is_still_finishing_and_starts_after_it():

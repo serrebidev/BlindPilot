@@ -6258,15 +6258,13 @@ class SessionPanel(wx.Panel):
         self._stopping = False
         self._turns.append(Turn(prompt=""))
         self._announce("A background agent has reported. Receiving response")
+        self.send_btn.Disable()
         self._earcons.start_progress()
-        self._show_working()
+        # The working indicator arrives with another change and is a no-op until then
+        show = getattr(self, "_show_working", None)
+        if show is not None:
+            show()
         self._launch_turn(None, BACKEND_CLAUDE, self._claude_worker_extra())
-
-    def _show_working(self) -> None:
-        """A sighted working indicator is not built yet; the earcon and the
-        status line carry this until it is. Kept as its own method so a late
-        turn calls the same thing a sent turn will once that lands."""
-        return
 
     def _add_your_message(self, text: str, steering: bool = False) -> None:
         """Put the user's own message in the list, ahead of the answer to it.
@@ -6908,10 +6906,7 @@ class SessionPanel(wx.Panel):
         self._worker = None
         self._replaying = False
         if getattr(self, "_late_turn_waiting", False):
-            # A qualified call, not `self._start_late_turn()`: a stub that
-            # reaches this line without a bound stand-in still gets the real
-            # method, the same one a direct call to it would run.
-            SessionPanel._start_late_turn(self)
+            self._start_late_turn()
 
     # ----- List + find -----
     def _refresh_list(self) -> None:
