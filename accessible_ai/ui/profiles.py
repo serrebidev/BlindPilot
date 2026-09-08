@@ -375,6 +375,13 @@ class ProfilesDialog(wx.Dialog):
         self.listbox.SetName("Conversation profiles")
         outer.Add(self.listbox, 1, wx.EXPAND | wx.ALL, pad_dialog)
 
+        # Under the list for the same reason as in Accounts: which profile is
+        # the one, rather than a setting belonging to any of them.
+        self.default_check = wx.CheckBox(panel, label="Use as de&fault profile")
+        self.default_check.SetName("Use as default profile")
+        self.default_check.SetToolTip("Chat mode starts on this profile")
+        outer.Add(self.default_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
+
         # One row. The actions sit on the left; Close goes through the
         # standard button sizer so it lands where the platform puts it.
         row = wx.BoxSizer(wx.HORIZONTAL)
@@ -401,14 +408,49 @@ class ProfilesDialog(wx.Dialog):
         # Escape presses the Close button, as it does in every other dialog.
         self.SetEscapeId(wx.ID_CLOSE)
         self.listbox.Bind(wx.EVT_LISTBOX_DCLICK, self.on_edit)
+        self.listbox.Bind(wx.EVT_LISTBOX, self.on_selection_changed)
+        self.default_check.Bind(wx.EVT_CHECKBOX, self.on_default_changed)
         self.reload()
         self.CentreOnParent()
 
-    def reload(self) -> None:
+    def reload(self, select_profile_id: int | None = None) -> None:
         self.profiles = self.db.list_profiles()
-        self.listbox.Set([p.name for p in self.profiles])
+        self.listbox.Set([self._row_label(profile) for profile in self.profiles])
         if self.profiles:
-            self.listbox.SetSelection(0)
+            selection = 0
+            if select_profile_id is not None:
+                for index, profile in enumerate(self.profiles):
+                    if profile.id == select_profile_id:
+                        selection = index
+                        break
+            self.listbox.SetSelection(selection)
+        self._sync_default_check()
+
+    @staticmethod
+    def _row_label(profile: Profile) -> str:
+        """The row, saying in words which profile is the default one."""
+        return f"{profile.name}, default" if profile.is_default else profile.name
+
+    def _sync_default_check(self) -> None:
+        """Point the checkbox at whichever profile the cursor is on."""
+        profile = self.selected()
+        self.default_check.Enable(profile is not None)
+        self.default_check.SetValue(bool(profile and profile.is_default))
+
+    def on_selection_changed(self, event: wx.CommandEvent) -> None:
+        self._sync_default_check()
+        event.Skip()
+
+    def on_default_changed(self, event: wx.CommandEvent) -> None:
+        """Move the default onto this profile, or take it off nothing."""
+        profile = self.selected()
+        if profile is None or profile.id is None:
+            self._sync_default_check()
+            return
+        wanted = self.default_check.GetValue()
+        self.db.set_default_profile(int(profile.id) if wanted else None)
+        self.reload(profile.id)
+        self.default_check.SetFocus()
 
     def selected(self) -> Profile | None:
         index = self.listbox.GetSelection()

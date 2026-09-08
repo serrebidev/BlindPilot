@@ -497,6 +497,15 @@ class AccountsDialog(wx.Dialog):
         self.listbox.SetName("Accounts")
         outer.Add(self.listbox, 1, wx.EXPAND | wx.ALL, pad_dialog)
 
+        # Under the list rather than inside the editor, because it is a choice
+        # about which of the accounts is the one, not a setting belonging to
+        # any of them: arrow to an account, tick the box, and the tick moves
+        # off whichever account had it.
+        self.default_check = wx.CheckBox(panel, label="Use as de&fault account")
+        self.default_check.SetName("Use as default account")
+        self.default_check.SetToolTip("Chat mode starts on this account")
+        outer.Add(self.default_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
+
         # One row. The actions sit on the left; Close goes through the
         # standard button sizer so it lands where the platform puts it.
         row = wx.BoxSizer(wx.HORIZONTAL)
@@ -531,16 +540,17 @@ class AccountsDialog(wx.Dialog):
         # Escape presses the Close button, as it does in every other dialog.
         self.SetEscapeId(wx.ID_CLOSE)
         self.listbox.Bind(wx.EVT_LISTBOX_DCLICK, self.on_edit)
+        self.listbox.Bind(wx.EVT_LISTBOX, self.on_selection_changed)
+        self.default_check.Bind(wx.EVT_CHECKBOX, self.on_default_changed)
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.reload()
         self.CentreOnParent()
 
     def reload(self, select_account_id: int | None = None) -> None:
         self.accounts = self.db.list_accounts()
-        self.listbox.Set(
-            [f"{a.name}, {PROVIDER_LABELS.get(a.provider, a.provider)}" for a in self.accounts]
-        )
+        self.listbox.Set([self._row_label(account) for account in self.accounts])
         if not self.accounts:
+            self._sync_default_check()
             return
         selection = 0
         if select_account_id is not None:
@@ -549,6 +559,41 @@ class AccountsDialog(wx.Dialog):
                     selection = index
                     break
         self.listbox.SetSelection(selection)
+        self._sync_default_check()
+
+    @staticmethod
+    def _row_label(account: Account) -> str:
+        """The row, saying in words which account is the default one.
+
+        The checkbox says it for the account under the cursor; the row has to
+        say it too, or finding the default means arrowing the whole list and
+        listening to a checkbox change behind you.
+        """
+        label = f"{account.name}, {PROVIDER_LABELS.get(account.provider, account.provider)}"
+        return f"{label}, default" if account.is_default else label
+
+    def _sync_default_check(self) -> None:
+        """Point the checkbox at whichever account the cursor is on."""
+        account = self.selected()
+        self.default_check.Enable(account is not None)
+        self.default_check.SetValue(bool(account and account.is_default))
+
+    def on_selection_changed(self, event: wx.CommandEvent) -> None:
+        self._sync_default_check()
+        event.Skip()
+
+    def on_default_changed(self, event: wx.CommandEvent) -> None:
+        """Move the default onto this account, or take it off nothing."""
+        account = self.selected()
+        if account is None or account.id is None:
+            self._sync_default_check()
+            return
+        wanted = self.default_check.GetValue()
+        self.db.set_default_account(int(account.id) if wanted else None)
+        logger.info("Default Chat account is now name=%s", account.name if wanted else "(none)")
+        # The rows carry the word "default", and it has just moved.
+        self.reload(account.id)
+        self.default_check.SetFocus()
 
     def selected(self) -> Account | None:
         index = self.listbox.GetSelection()
