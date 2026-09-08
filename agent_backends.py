@@ -1159,23 +1159,52 @@ def _codex_window_name(minutes: Optional[float]) -> str:
     return f"{length}-minute"
 
 
+def _codex_mirrors_a_known_limit(default: dict, known: set[str], groups: Sequence[dict]) -> bool:
+    """Is the unnamed snapshot one of the limits already read out of the map?
+
+    `rateLimits` is one of the account's limits repeated outside the map that
+    holds them all, so reading both would report that limit's windows twice.
+    It is matched by its limit id, which is what the map is keyed by. A
+    snapshot that names no id is matched on what its windows say instead: an
+    id is the better answer, but two windows agreeing on their length, their
+    percentage and their reset are the same window whichever key they arrived
+    under.
+    """
+    limit_id = str(default.get("limitId") or "")
+    if limit_id:
+        return limit_id in known
+    return any(
+        all(default.get(field) == group.get(field) for field in _CODEX_WINDOW_FIELDS)
+        for group in groups
+    )
+
+
 def _codex_usage_windows(result: object) -> list[UsageWindow]:
-    """Read `account/rateLimits/read`. Anything not reported is left out."""
+    """Read `account/rateLimits/read`. Anything not reported is left out.
+
+    Every window a limit reports is kept. Two of them can be written the same
+    way -- a limit that names neither of its windows' lengths has two called
+    "Usage limit" -- and dropping the second would take a real window off the
+    report to avoid a repeated caption. The only thing left out is the account
+    limit that arrives twice, once inside the map and once beside it.
+    """
     if not isinstance(result, dict):
         return []
     groups: list[dict] = []
-    # The per-limit map first: it names the windows a plan meters for one
-    # model, and the account's own limit appears in it as well. The unnamed
-    # `rateLimits` is the same entry again, so it is read last and its
-    # duplicate lines drop out.
+    known: set[str] = set()
     by_limit = result.get("rateLimitsByLimitId")
     if isinstance(by_limit, dict):
-        groups.extend(entry for entry in by_limit.values() if isinstance(entry, dict))
+        for limit_id, entry in by_limit.items():
+            if not isinstance(entry, dict):
+                continue
+            # The map's own key is the limit id; the entry repeats it, and is
+            # trusted first for the case where a future release stops.
+            known.add(str(entry.get("limitId") or limit_id))
+            groups.append(entry)
     default = result.get("rateLimits")
-    if isinstance(default, dict):
+    if isinstance(default, dict) and not _codex_mirrors_a_known_limit(default, known, groups):
         groups.append(default)
     windows: list[UsageWindow] = []
-    seen: set[str] = set()
     for group in groups:
         name = str(group.get("limitName") or "").strip()
         for field in _CODEX_WINDOW_FIELDS:
@@ -1187,13 +1216,9 @@ def _codex_usage_windows(result: object) -> list[UsageWindow]:
                 continue
             minutes = _as_number(entry.get("windowDurationMins"))
             base = _codex_window_name(minutes)
-            label = f"{base} {name} limit" if name else f"{base} limit"
-            if label in seen:
-                continue
-            seen.add(label)
             windows.append(
                 UsageWindow(
-                    label,
+                    f"{base} {name} limit" if name else f"{base} limit",
                     percent,
                     _as_number(entry.get("resetsAt")),
                     minutes,

@@ -2621,6 +2621,53 @@ def test_usage_names_a_codex_window_by_its_length_not_its_position():
     ]
 
 
+def test_usage_keeps_two_codex_windows_that_are_written_the_same_way():
+    """A limit that names neither window's length has two called the same thing.
+
+    Both are real, and dropping the second to avoid a repeated caption would
+    take a window the account is metered by off the report.
+    """
+    windows = agent_backends._codex_usage_windows(
+        {
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitName": None,
+                    "primary": {
+                        "usedPercent": 5,
+                        "windowDurationMins": None,
+                        "resetsAt": 1789436033,
+                    },
+                    "secondary": {
+                        "usedPercent": 40,
+                        "windowDurationMins": None,
+                        "resetsAt": 1789445156,
+                    },
+                }
+            }
+        }
+    )
+    lines = [
+        agent_backends._usage_window_line(window)
+        for window in agent_backends._ordered_windows(windows)
+    ]
+    assert _usage_labels(lines) == ["Usage limit", "Usage limit"]
+    assert "5% used" in lines[0]
+    assert "40% used" in lines[1]
+
+
+def test_usage_reads_the_account_limit_once_when_it_names_no_id():
+    """The snapshot beside the map is one of its limits, told apart by what it says."""
+    limit = {
+        "limitName": None,
+        "primary": {"usedPercent": 5, "windowDurationMins": 10080, "resetsAt": 1789436033},
+        "secondary": None,
+    }
+    windows = agent_backends._codex_usage_windows(
+        {"rateLimits": dict(limit), "rateLimitsByLimitId": {"codex": dict(limit)}}
+    )
+    assert [window.label for window in windows] == ["Weekly limit"]
+
+
 def test_usage_is_not_offered_by_a_backend_that_meters_nothing_of_its_own():
     for backend in (BACKEND_FREEBUFF, BACKEND_OPENCODE, agent_backends.BACKEND_HERMES):
         assert agent_backends.backend_usage_lines(backend, "cli") == []
