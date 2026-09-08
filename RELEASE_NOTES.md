@@ -1,29 +1,33 @@
-# BlindPilot 0.24.0
+# BlindPilot 0.25.0
 
-Chat mode opens on the account and profile you chose, and the keyboard reaches all of it.
+A chat belongs to the profile it was started on, and there is a way back into one.
 
-## The account you actually use
+## Two ways a chat ran on the wrong profile
 
-Chat mode opened on whichever account sorted first alphabetically and on no profile at all. With more than one account that meant re-picking yours on every launch, and a conversation profile was something you set again each time or did without.
+This began as an audit: build a chat panel with two accounts and profiles that name the one which does *not* sort first, then look at what actually reaches the request. Two things came out of it.
 
-There is now a **Use as default** checkbox under the list in Accounts and under the list in Conversation profiles. Arrow to a row, tick the box, and the tick comes off whichever row had it. Chat mode opens on that account and that profile from then on.
+**A default profile was shown but never applied.** Picking a profile from the list moves the account and model pickers to the ones it names. A profile restored at startup because it is the default only put its name in the picker — the account and model were left as they were. A conversation is created on whatever account and model are showing, so the first conversation of every session was started on the wrong account and the wrong model while being recorded against a profile that names another one. Both routes go through one place now, so a profile means the same thing however it was selected. A profile whose account has since been deleted applies its model rather than applying nothing.
 
-The box sits under the list rather than inside the editor because it says which of them is the one, not what any of them is set to — so marking a default is arrow, Tab, space, rather than opening an editor and saving it. Each row also says "default" in its own text, so finding the current one does not mean arrowing the whole list with an ear on a checkbox behind you. Unticking leaves none marked, which is a state the window understands: it opens on the first account and on "No profile", exactly as it did before. The database keeps at most one marked in the same statement that marks it, so "the default" cannot quietly become two, and a database written by an earlier release has the column added to it when it opens.
+**A conversation ran on half of one profile and half of another.** The system prompt was snapshotted onto the conversation; the temperature, the token limit and the OpenRouter tools were re-read from the database on every request. Editing a profile part-way through a conversation therefore changed those settings while leaving the prompt it was started with. A conversation now holds the profile it was created on, so it is one thing from the first message to the last. The picker still says what the *next* conversation will start on.
 
-## Four things NVDA found
+What was already right, and now has tests saying so: the conversation records the profile it was started on, and moving the picker mid-conversation does not change the conversation underneath.
 
-Driving the window with a screen reader turned up four defects that had nothing to do with defaults. All four are fixed.
+## Recent conversations
 
-**The Chat menu could not be opened from the keyboard.** "&Chat" and "&Conversation" both claimed Alt+C. Windows opens the first match and pressing the key again does not move on to the second, so Accounts, Conversation profiles, Refresh models, History view and Diagnostics — every Chat-only command there is — sat behind Alt and four right arrows, and the menu you landed in was greyed out end to end. The Chat menu is **Alt+T** now, and Alt+C still opens Conversation. Every letter of "Chat" was already spoken for, and a menu takes an access key from a button rather than sharing it, so three buttons that were shadowed anyway give theirs up: Stop generation is **Alt+G**, Clear all is **Alt+L** and Remove selected is **Alt+E**. A test asserts no two menus share a letter and no chat button claims one a menu has.
+The `conversations` table was write-only. Every conversation recorded its profile, its account, its model and the system prompt it was started with — and the database had only `create_conversation` to put them there. No read, no list, and nothing in the window to open one again. Every launch started fresh, and the conversations behind it were reachable only by opening the database file by hand. The machine this was built on had sixty-nine of them.
 
-**An empty History said "unknown" and then nothing.** A native list box with no items has nothing for focus to land on, so landing there announced the list, then "unknown", and the arrow keys answered in silence — which reads as a control that has broken rather than a conversation that has not started. It holds one row saying "No messages yet" now. It is not an entry: nothing offers to copy or edit it, and it goes the moment a real message arrives.
+**Chat menu → Recent conversations** (Alt+T, then E) opens the list. It is laid out like Accounts and Profiles because it is read by the same people: a filter box, a list, and Open, Delete and Close. Each row says what actually separates two conversations that opened with similar words:
 
-**Chat mode started with focus inside the Agent page nobody could see.** Making a session queues its prompt's focus so the page is shown first; in Chat mode that queued call outlived the mode switch and arrived after the window was up, landing on a control inside the hidden notebook. Tab and Shift+Tab then walked a page that was not on screen until something later moved focus back. One method decides where a mode starts now, it is asked once after the window is on screen rather than before it exists, and a page that is not shown refuses focus it was queued for.
+```
+Give me this prompt in a way that uses less tocans, 5 messages, MBE profile, openRouter, Mon 08 Sep 06:11
+```
 
-**A Hermes tab's status named opencode's providers** — carried over from 0.23.0's own audit and already released there.
+Times are this machine's, not the UTC the database stores. An empty list says "No conversations yet" and a filter that matches nothing says so, rather than leaving a silent list to be arrowed through.
+
+Opening one restores everything from the conversation rather than from the pickers: the profile it was started on, the prompt it was started with, and the account and model it was talking to — with the pickers moved to match, so the window is not showing one thing while the next message goes somewhere else. A conversation whose profile has since been deleted still carries the prompt it was started with, and takes no temperature from a profile that is gone rather than inventing one. The lookups behind the list are left joins, so deleting a profile or an account loses the label rather than the conversation.
 
 ## What was verified
 
-Live-checked on Windows with NVDA: the window opens in the Message box, the pickers open on the marked account and profile, History reads "No messages yet" as a list item with a name and a role, Alt+T opens the Chat menu and Alt+C still opens Conversation.
+Verified with the full regression suite (1566 tests with warnings as errors), ruff's checks and formatting, and mypy over sixteen files. The two defects above were found by driving the real panel and are covered by tests stating the behaviour they broke.
 
-Verified with the full regression suite (1544 tests with warnings as errors), ruff's checks and formatting, and mypy over sixteen files.
+The new dialog was not driven with a screen reader this time: it is built from the same controls as Accounts and Profiles, which were checked with NVDA for 0.24.0, and it joins those two in the shared dialog tests.
