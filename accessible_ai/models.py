@@ -57,6 +57,9 @@ class Account:
     streaming: bool = True
     custom_headers: dict[str, str] = field(default_factory=dict)
     custom_body: dict[str, Any] = field(default_factory=dict)
+    # Whether Chat mode starts on this account. At most one account carries it,
+    # which the database enforces rather than the caller remembering to.
+    is_default: bool = False
 
 
 @dataclass(slots=True)
@@ -70,6 +73,8 @@ class Profile:
     max_output_tokens: int | None = None
     streaming: bool | None = None
     openrouter: "OpenRouterFeatures" = field(default_factory=lambda: OpenRouterFeatures())
+    # Whether Chat mode starts on this profile. At most one profile carries it.
+    is_default: bool = False
 
 
 @dataclass(slots=True)
