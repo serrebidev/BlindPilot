@@ -88,6 +88,25 @@ class Conversation:
 
 
 @dataclass(slots=True)
+class ConversationSummary:
+    """One row of the conversation list, with what a listener needs to pick it.
+
+    A title on its own does not separate two conversations that opened with
+    similar words. How many messages are in it, which profile it runs on and
+    when it was last touched are what tell them apart, so they are read out of
+    the database with the row rather than fetched one at a time afterwards.
+    """
+
+    id: int
+    title: str
+    updated_at: str = ""
+    message_count: int = 0
+    profile_name: str = ""
+    account_name: str = ""
+    model: str = ""
+
+
+@dataclass(slots=True)
 class MessageAttachment:
     id: int | None = None
     message_id: int | None = None

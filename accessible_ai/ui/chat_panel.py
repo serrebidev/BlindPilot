@@ -23,6 +23,7 @@ from accessible_ai.services.model_service import ModelService
 from accessible_ai.storage.credentials import CredentialStore
 from accessible_ai.storage.database import Database
 from accessible_ai.ui.accounts import AccountsDialog
+from accessible_ai.ui.conversations import ConversationsDialog
 from accessible_ai.ui.diagnostics import DiagnosticsDialog
 from accessible_ai.ui.profiles import ProfilesDialog
 
@@ -94,6 +95,12 @@ class ChatPanel(wx.Panel):
         self.current_conversation_id: int | None = None
         self.current_system_prompt = ""
         self.current_profile_id: int | None = None
+        # The profile as it stood when this conversation was created. The
+        # system prompt has always been snapshotted onto the conversation; the
+        # rest of the profile is held here so that the whole of it is the one
+        # thing, rather than the prompt coming from the profile as it was and
+        # the temperature from the profile as it is now.
+        self.current_profile: Profile | None = None
         self.generation_cancel: Event | None = None
         self.generating = False
         self.assistant_buffer = ""
@@ -122,6 +129,10 @@ class ChatPanel(wx.Panel):
         self.SetStatusText("Ready")
         self.reload_accounts()
         self.reload_profiles()
+        # A default profile is a profile that was chosen, so it applies exactly
+        # as one picked from the list does -- otherwise the first conversation
+        # of every session runs on an account its profile does not name.
+        self.apply_selected_profile()
         self.Bind(wx.EVT_CHAR_HOOK, self.on_char_hook)
         self.message_input.SetFocus()
 
@@ -705,16 +716,36 @@ class ChatPanel(wx.Panel):
         self.load_cached_models()
         event.Skip()
 
-    def on_profile_changed(self, event: wx.CommandEvent) -> None:
+    def apply_selected_profile(self) -> None:
+        """Move the account and model pickers to the ones this profile names.
+
+        Shared by the two ways a profile becomes the selected one -- picked
+        from the list, or restored at startup because it is the default -- so
+        that a profile means the same thing either way. It said the same thing
+        either way before only in the picker: the account and the model were
+        moved for a profile chosen by hand and left alone for the same profile
+        restored as the default, and the conversation was then created on
+        whatever account happened to be showing.
+        """
         profile = self.selected_profile()
-        if profile and profile.default_account_id is not None:
+        if profile is None:
+            return
+        if profile.default_account_id is not None:
             for index, account in enumerate(self.accounts):
                 if account.id == profile.default_account_id:
                     self.account_choice.SetSelection(index)
                     self.load_cached_models(profile.default_model)
-                    break
-        elif profile and profile.default_model:
+                    return
+            # The account it named is gone. Its model is still worth applying;
+            # the one on screen belongs to whichever account is selected now.
+            if profile.default_model:
+                self.model_combo.SetValue(profile.default_model)
+            return
+        if profile.default_model:
             self.model_combo.SetValue(profile.default_model)
+
+    def on_profile_changed(self, event: wx.CommandEvent) -> None:
+        self.apply_selected_profile()
         if self.current_conversation_id is not None:
             self.SetStatusText("Profile selection will apply to the next new conversation.")
         event.Skip()
@@ -727,6 +758,72 @@ class ChatPanel(wx.Panel):
             dialog.Destroy()
         self.reload_accounts()
         self.reload_profiles()
+
+    def on_conversations(self, event: wx.CommandEvent) -> None:
+        """Pick a past conversation and carry on with it."""
+        if self.generating:
+            wx.MessageBox(
+                "Stop the current generation before opening another conversation.",
+                "Recent Conversations",
+                wx.OK | wx.ICON_INFORMATION,
+                self,
+            )
+            return
+        dialog = ConversationsDialog(self, self.db)
+        try:
+            if dialog.ShowModal() != wx.ID_OK or dialog.chosen is None:
+                return
+            chosen_id = dialog.chosen.id
+        finally:
+            dialog.Destroy()
+        self.open_conversation(chosen_id)
+
+    def open_conversation(self, conversation_id: int) -> None:
+        """Carry on with a conversation that was started earlier.
+
+        Everything comes off the conversation rather than off the pickers: the
+        profile it was started on, the system prompt it was started with, and
+        the account and model it was talking to. The pickers are then moved to
+        match, so the window is not showing one thing while the next message
+        goes somewhere else -- which is the whole reason the conversation
+        carries them.
+        """
+        conversation = self.db.get_conversation(conversation_id)
+        if conversation is None:
+            self.SetStatusText("That conversation is no longer there.")
+            return
+        self.current_conversation_id = conversation_id
+        self.current_system_prompt = conversation.system_prompt_snapshot
+        self.current_profile_id = conversation.profile_id
+        # The profile as it stands now, for the settings the conversation did
+        # not snapshot. It is None where the profile has since been deleted,
+        # and the prompt it was started with still applies either way.
+        self.current_profile = (
+            self.db.get_profile(conversation.profile_id)
+            if conversation.profile_id is not None
+            else None
+        )
+        for index, profile in enumerate(self.profiles, start=1):
+            if profile.id == conversation.profile_id:
+                self.profile_choice.SetSelection(index)
+                break
+        else:
+            self.profile_choice.SetSelection(0)
+        for index, account in enumerate(self.accounts):
+            if account.id == conversation.account_id:
+                self.account_choice.SetSelection(index)
+                break
+        self.load_cached_models(conversation.model)
+        self.regenerating_message_id = None
+        self.pending_attachments.clear()
+        self._refresh_attachment_list()
+        self.message_input.Clear()
+        self._render_conversation()
+        self._update_regenerate_enabled()
+        said = conversation.title or "conversation"
+        self.SetStatusText(f"Opened: {said}")
+        self._speak(f"Opened {said}")
+        self.message_input.SetFocus()
 
     def on_profiles(self, event: wx.CommandEvent) -> None:
         dialog = ProfilesDialog(self, self.db)
@@ -802,6 +899,7 @@ class ChatPanel(wx.Panel):
         self.current_conversation_id = None
         self.current_system_prompt = ""
         self.current_profile_id = None
+        self.current_profile = None
         self.transcript.Clear()
         self._replace_history_entries([])
         self.message_input.Clear()
@@ -818,6 +916,7 @@ class ChatPanel(wx.Panel):
         profile = self.selected_profile()
         self.current_system_prompt = profile.system_prompt if profile else ""
         self.current_profile_id = profile.id if profile else None
+        self.current_profile = profile
         title = " ".join(first_message.split())[:80] or "New conversation"
         conversation = Conversation(
             title=title,
@@ -847,9 +946,10 @@ class ChatPanel(wx.Panel):
                 item["attachments"] = message.attachments
             messages.append(item)
 
-        profile = None
-        if self.current_profile_id is not None:
-            profile = self.db.get_profile(self.current_profile_id)
+        # The profile this conversation was started on, not whatever the
+        # picker says now and not whatever the profile has since been edited
+        # to: one conversation, one set of settings.
+        profile = self.current_profile
         streaming = (
             account.streaming if not profile or profile.streaming is None else profile.streaming
         )

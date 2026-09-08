@@ -9065,6 +9065,12 @@ class MainFrame(wx.Frame):
             "Conversation &profiles...",
             "Manage Chat system prompts and generation defaults",
         )
+        # R&ecent rather than &Recent: Refresh models below already has R.
+        self._chat_conversations_item = chat_menu.Append(
+            wx.ID_ANY,
+            "R&ecent conversations...",
+            "Open a past Chat conversation and carry on with it",
+        )
         chat_menu.AppendSeparator()
         self._chat_refresh_item = chat_menu.Append(
             wx.ID_ANY,
@@ -9091,6 +9097,7 @@ class MainFrame(wx.Frame):
         self._chat_menu_items = [
             self._chat_accounts_item,
             self._chat_profiles_item,
+            self._chat_conversations_item,
             self._chat_refresh_item,
             self._chat_history_list_item,
             self._chat_history_text_item,
@@ -9163,6 +9170,11 @@ class MainFrame(wx.Frame):
             wx.EVT_MENU,
             lambda _e: self._show_chat_profiles(),
             self._chat_profiles_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            lambda _e: self._show_chat_conversations(),
+            self._chat_conversations_item,
         )
         self.Bind(
             wx.EVT_MENU,
@@ -9548,6 +9560,10 @@ class MainFrame(wx.Frame):
     def _show_chat_profiles(self) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
             self.chat_panel.on_profiles(wx.CommandEvent())
+
+    def _show_chat_conversations(self) -> None:
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.on_conversations(wx.CommandEvent())
 
     def _set_chat_history_view(self, view: str) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
