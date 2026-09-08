@@ -5,7 +5,7 @@ import mimetypes
 import threading
 from pathlib import Path
 from threading import Event
-from typing import Any
+from typing import Any, Sequence
 
 import wx
 
@@ -35,6 +35,15 @@ RESPONSE_ANNOUNCEMENT_INTERVAL_MS = 300
 # Sizer borders in device independent pixels. Every one goes through FromDIP.
 PAD = 8
 PAD_DIALOG = 12
+
+# What the History list holds while a conversation has nothing in it yet. An
+# empty native list box has no item for the screen reader to move to, so
+# landing on one announces the list and then "unknown" -- and arrowing says
+# nothing at all, which reads as a control that has broken rather than as a
+# conversation that has not started. One row, which is not an entry and is
+# never treated as one, gives focus something to land on and says why it is
+# empty.
+HISTORY_EMPTY_ROW = "No messages yet"
 
 MESSAGE_INPUT_HEIGHT = 90
 ATTACHMENT_LIST_HEIGHT = 62
@@ -106,6 +115,10 @@ class ChatPanel(wx.Panel):
         self.history_list_view_item = _ActionState(checked=True)
         self.history_text_view_item = _ActionState()
         self._build_ui()
+        # A window that opens on a conversation nobody has started yet never
+        # renders one, so the empty-list row has to be put in here rather than
+        # waiting for a render that is not coming.
+        self._show_history_placeholder()
         self.SetStatusText("Ready")
         self.reload_accounts()
         self.reload_profiles()
@@ -149,6 +162,7 @@ class ChatPanel(wx.Panel):
         outer.Add(transcript_label, 0, wx.LEFT | wx.RIGHT, pad)
         self.history_list = wx.ListBox(panel, style=wx.LB_SINGLE)
         self.history_list.SetName("History")
+        self._history_placeholder = False
         outer.Add(self.history_list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self.transcript = wx.TextCtrl(
             panel,
@@ -191,8 +205,12 @@ class ChatPanel(wx.Panel):
 
         attachment_row = wx.BoxSizer(wx.HORIZONTAL)
         self.add_files_button = wx.Button(panel, label="&Add files...")
-        self.remove_files_button = wx.Button(panel, label="Re&move selected")
-        self.clear_files_button = wx.Button(panel, label="&Clear all")
+        # Not "Re&move": the Model menu has Alt+M, so this button never
+        # received it. E is free.
+        self.remove_files_button = wx.Button(panel, label="Remov&e selected")
+        # Not "&Clear": the Conversation menu has always had Alt+C, so this
+        # button never received it. L is free.
+        self.clear_files_button = wx.Button(panel, label="C&lear all")
         self.remove_files_button.Disable()
         self.clear_files_button.Disable()
         attachment_row.Add(self.add_files_button, 0, wx.RIGHT, pad)
@@ -203,7 +221,9 @@ class ChatPanel(wx.Panel):
         button_row = wx.BoxSizer(wx.HORIZONTAL)
         self.send_button = wx.Button(panel, label="&Send")
         self.regenerate_button = wx.Button(panel, label="&Regenerate response")
-        self.stop_button = wx.Button(panel, label="S&top generation")
+        # Not "S&top": the Chat menu has Alt+T, and a menu takes an access key
+        # from a button rather than sharing it. G is free.
+        self.stop_button = wx.Button(panel, label="Stop &generation")
         self.new_button = wx.Button(panel, label="&New conversation")
         self.regenerate_button.Disable()
         self.stop_button.Disable()
@@ -287,7 +307,9 @@ class ChatPanel(wx.Panel):
         reviewing_list = self.history_list.HasFocus()
         self.history_entries = list(entries)
         self.history_list.Set([self._history_list_label(entry) for entry in self.history_entries])
+        self._history_placeholder = False
         if not self.history_entries:
+            self._show_history_placeholder()
             return
         selection = wx.NOT_FOUND
         if previous_id is not None:
@@ -301,7 +323,25 @@ class ChatPanel(wx.Panel):
             selection = len(self.history_entries) - 1
         self.history_list.SetSelection(selection)
 
+    def _show_history_placeholder(self) -> None:
+        """Put the one empty-conversation row in, and leave the cursor on it."""
+        self.history_list.Set([HISTORY_EMPTY_ROW])
+        self.history_list.SetSelection(0)
+        self._history_placeholder = True
+
+    def _drop_history_placeholder(self) -> None:
+        """Take it out again before a real entry goes in.
+
+        The list is read by position against `history_entries`, so the
+        placeholder has to be gone before anything is appended or inserted, or
+        every row afterwards would describe the entry before it.
+        """
+        if self._history_placeholder:
+            self.history_list.Clear()
+            self._history_placeholder = False
+
     def _append_history_entry(self, entry: Message) -> None:
+        self._drop_history_placeholder()
         self.history_entries.append(entry)
         self.history_list.Append(self._history_list_label(entry))
         if not self.history_list.HasFocus():
@@ -320,6 +360,7 @@ class ChatPanel(wx.Panel):
         response goes in front of it rather than on the end. Whatever was
         selected stays selected.
         """
+        self._drop_history_placeholder()
         index = len(self.history_entries)
         last = self.history_entries[-1] if self.history_entries else None
         if last is not None and last.role == "assistant" and last.id is None:
@@ -607,7 +648,10 @@ class ChatPanel(wx.Panel):
                     selection = index
                     break
         if selection == wx.NOT_FOUND and self.accounts:
-            selection = 0
+            # Nothing was selected before, so this is the window opening: the
+            # account marked as the default is the one to open on, and the
+            # first alphabetically only where no default has been marked.
+            selection = self._default_index(self.accounts, 0)
         if selection != wx.NOT_FOUND:
             self.account_choice.SetSelection(selection)
             self.load_cached_models()
@@ -619,13 +663,29 @@ class ChatPanel(wx.Panel):
         previous = self.selected_profile().id if self.profiles and self.selected_profile() else None
         self.profiles = self.db.list_profiles()
         self.profile_choice.Set(["No profile"] + [profile.name for profile in self.profiles])
-        selection = 0
+        # "No profile" is row zero, so a profile's own row is its index plus
+        # one -- and a fallback of -1 lands back on "No profile" where nothing
+        # has been marked as the default.
+        selection = self._default_index(self.profiles, -1) + 1
         if previous is not None:
             for index, profile in enumerate(self.profiles, start=1):
                 if profile.id == previous:
                     selection = index
                     break
         self.profile_choice.SetSelection(selection)
+
+    @staticmethod
+    def _default_index(items: Sequence[Any], fallback: int) -> int:
+        """Where the one marked as the default sits, or *fallback* if none is.
+
+        The database keeps at most one of them marked, so the first match is
+        the only match, and the fallback is what the window did before there
+        were defaults to honour.
+        """
+        for index, item in enumerate(items):
+            if getattr(item, "is_default", False):
+                return index
+        return fallback
 
     def load_cached_models(self, preferred_model: str = "") -> None:
         account = self.selected_account()
