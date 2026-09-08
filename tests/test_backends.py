@@ -2323,6 +2323,17 @@ def test_opencode_is_stopped_with_its_tree_on_windows(monkeypatch):
 # written the same way, so the report reads the same whichever is selected.
 
 
+def _hermes_pool(monkeypatch, tmp_path, pool: dict, active: str = "") -> None:
+    """Point Hermes at a credential pool of this test's own making."""
+    home = tmp_path / "hermes-home"
+    home.mkdir(exist_ok=True)
+    payload: dict = {"version": 1, "credential_pool": pool}
+    if active:
+        payload["active_provider"] = active
+    (home / "auth.json").write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+
 def _status_lines(report: str) -> dict[str, str]:
     return {
         caption.strip(): value.strip()
@@ -2363,6 +2374,7 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path):
     (data / "auth.json").write_text(json.dumps({"anthropic": {"type": "api"}}), encoding="utf-8")
     monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: data)
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    _hermes_pool(monkeypatch, tmp_path, {"anthropic": [{"id": "1", "label": "claude_code"}]})
 
     for backend in agent_backends.BACKEND_IDS:
         fields = _status_lines(backend_status(backend))
@@ -2421,6 +2433,7 @@ def test_status_reports_a_signed_out_backend_rather_than_guessing(monkeypatch, t
     empty.mkdir()
     monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: empty)
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    _hermes_pool(monkeypatch, tmp_path, {})
 
     for backend in agent_backends.BACKEND_IDS:
         fields = _status_lines(backend_status(backend))
@@ -2502,3 +2515,314 @@ def test_status_reports_the_freebuff_account_from_its_stored_credentials(monkeyp
     # The stored token is what the account is reached with. A report opened on
     # a shared screen, or read out loud in a room, must not carry it.
     assert "secret" not in report
+
+
+def _usage_labels(lines: list[str]) -> list[str]:
+    return [line.split(":", 1)[0] for line in lines]
+
+
+def test_usage_reports_the_windows_claude_code_names_and_no_others(monkeypatch):
+    """A plan window the account does not have is left out, not written as unknown."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {
+            "rate_limits_available": True,
+            "rate_limits": {
+                # Out of order on purpose: the shortest window is what a
+                # listener needs first, and the answer arrives in whatever
+                # order the endpoint sends.
+                "seven_day": {"utilization": 40, "resets_at": "2026-09-15T02:00:00+00:00"},
+                "five_hour": {"utilization": 3, "resets_at": "2026-09-08T08:50:00+00:00"},
+                "seven_day_opus": None,
+                "seven_day_sonnet": {"utilization": None, "resets_at": None},
+            },
+        },
+    )
+    lines = agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude")
+    assert _usage_labels(lines) == ["Five-hour limit", "Weekly limit"]
+    assert "3% used" in lines[0]
+    assert "40% used" in lines[1]
+
+
+def test_usage_puts_the_accounts_own_weekly_window_before_one_models(monkeypatch):
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {
+            "rate_limits_available": True,
+            "rate_limits": {
+                "seven_day": {"utilization": 2, "resets_at": "2026-09-15T02:00:00+00:00"},
+                "model_scoped": [
+                    {
+                        "display_name": "Fable",
+                        "utilization": 9,
+                        "resets_at": "2026-09-15T02:00:00+00:00",
+                    }
+                ],
+            },
+        },
+    )
+    assert _usage_labels(agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude")) == [
+        "Weekly limit",
+        "Weekly Fable limit",
+    ]
+
+
+def test_usage_says_nothing_when_the_plan_windows_do_not_apply(monkeypatch):
+    """An API key, Bedrock or Vertex session is metered by none of this."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {"rate_limits_available": False, "rate_limits": None},
+    )
+    assert agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude") == []
+
+
+def test_usage_says_nothing_when_the_backend_could_not_be_asked(monkeypatch):
+    monkeypatch.setattr(agent_backends, "_claude_usage_payload", lambda _binary, _timeout: None)
+    monkeypatch.setattr(agent_backends, "_codex_usage_result", lambda _binary, _timeout: None)
+    assert agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude") == []
+    assert agent_backends.backend_usage_lines(BACKEND_CODEX, "codex") == []
+
+
+def test_usage_names_a_codex_window_by_its_length_not_its_position():
+    """Codex's `primary` is the weekly window on some plans and the five-hour one on others."""
+    windows = agent_backends._codex_usage_windows(
+        {
+            "rateLimits": {
+                "limitName": None,
+                "primary": {"usedPercent": 5, "windowDurationMins": 10080, "resetsAt": 1789436033},
+                "secondary": None,
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitName": None,
+                    "primary": {
+                        "usedPercent": 5,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1789436033,
+                    },
+                    "secondary": None,
+                },
+                "codex_spark": {
+                    "limitName": "Spark",
+                    "primary": {
+                        "usedPercent": 0,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1788858356,
+                    },
+                    "secondary": {
+                        "usedPercent": 1,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1789445156,
+                    },
+                },
+            },
+        }
+    )
+    lines = [
+        agent_backends._usage_window_line(window)
+        for window in agent_backends._ordered_windows(windows)
+    ]
+    # The same window arrives twice -- once under its limit id and once as the
+    # account's own -- and is reported once.
+    assert _usage_labels(lines) == [
+        "Five-hour Spark limit",
+        "Weekly limit",
+        "Weekly Spark limit",
+    ]
+
+
+def test_usage_is_not_offered_by_the_backend_that_meters_nothing_of_its_own():
+    """opencode spends whichever provider account is connected and meters none."""
+    assert agent_backends.backend_usage_lines(BACKEND_OPENCODE, "cli") == []
+
+
+def test_usage_keeps_two_codex_windows_that_would_be_called_the_same_thing():
+    """A window is dropped as a repeat only when the figures say it is one.
+
+    `limitName` and `windowDurationMins` are both nullable, so a limit can
+    report two real windows that no name can tell apart. Losing one of those
+    would lose a limit rather than a duplicate.
+    """
+    windows = agent_backends._codex_usage_windows(
+        {
+            "rateLimits": {
+                "limitName": None,
+                "primary": {"usedPercent": 12, "windowDurationMins": None, "resetsAt": 1788858356},
+                "secondary": {
+                    "usedPercent": 40,
+                    "windowDurationMins": None,
+                    "resetsAt": 1789445156,
+                },
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitName": None,
+                    "primary": {
+                        "usedPercent": 12,
+                        "windowDurationMins": None,
+                        "resetsAt": 1788858356,
+                    },
+                    "secondary": {
+                        "usedPercent": 40,
+                        "windowDurationMins": None,
+                        "resetsAt": 1789445156,
+                    },
+                },
+            },
+        }
+    )
+    lines = [agent_backends._usage_window_line(window) for window in windows]
+    # Two windows, reported once each: the default snapshot is the same limit
+    # as the one in the map, and is recognised by its figures rather than by
+    # the name the line would carry.
+    assert _usage_labels(lines) == ["Primary limit", "Secondary limit"]
+    assert "12% used" in lines[0]
+    assert "40% used" in lines[1]
+
+
+def test_usage_reports_the_freebuff_credit_balance_and_when_the_cycle_refills(monkeypatch):
+    """FreeBuff counts credits rather than filling a window, and says so."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_freebuff_usage_payload",
+        lambda _timeout: {
+            "type": "usage-response",
+            "usage": 250,
+            "remainingBalance": 750,
+            "next_quota_reset": "2026-10-08T04:25:51.218Z",
+        },
+    )
+    lines = agent_backends.backend_usage_lines(BACKEND_FREEBUFF, "freebuff")
+    assert _usage_labels(lines) == ["Credits"]
+    # What is left is the figure worth hearing first; the fraction follows it.
+    assert "750 credits left" in lines[0]
+    assert "250 credits used this cycle" in lines[0]
+    assert "25% used" in lines[0]
+    assert "resets" in lines[0]
+
+
+def test_usage_says_what_is_left_even_when_the_cycle_held_nothing(monkeypatch):
+    """An empty balance has no fraction to report, and still has a figure."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_freebuff_usage_payload",
+        lambda _timeout: {"usage": 0, "remainingBalance": 0, "next_quota_reset": None},
+    )
+    lines = agent_backends.backend_usage_lines(BACKEND_FREEBUFF, "freebuff")
+    assert lines == ["Credits: 0 credits left, 0 credits used this cycle"]
+
+
+# Held before the fixture that keeps the rest of the suite off the network
+# replaces it, so the reading itself can still be exercised.
+_REAL_FREEBUFF_USAGE_PAYLOAD = agent_backends._freebuff_usage_payload
+
+
+def test_the_freebuff_balance_is_not_asked_for_when_nobody_is_signed_in(monkeypatch):
+    """Signed out there is nothing to ask with, so no request is made."""
+    reached = []
+    monkeypatch.setattr(agent_backends, "_freebuff_account", lambda: None)
+    monkeypatch.setattr(agent_backends, "_freebuff_app_url", lambda: reached.append("url") or "")
+    assert _REAL_FREEBUFF_USAGE_PAYLOAD(5) is None
+    assert reached == []
+
+
+def test_usage_names_the_hermes_credentials_that_have_stopped_spending(monkeypatch, tmp_path):
+    """Hermes runs on a pool, so what it meters is which of them are spent."""
+    _hermes_pool(
+        monkeypatch,
+        tmp_path,
+        {
+            "anthropic": [
+                {
+                    "id": "31033c",
+                    "label": "claude_code",
+                    "last_status": "exhausted",
+                    "last_error_code": 429,
+                    "last_error_reason": "usage_limit_reached",
+                    "last_error_reset_at": time.time() + 3600,
+                }
+            ],
+            "opencode-go": [
+                {
+                    "id": "96e19e",
+                    "label": "opencode-go",
+                    "last_status": "exhausted",
+                    "last_error_code": 401,
+                    "last_error_reason": "CreditsError",
+                    "last_error_message": "Insufficient balance. Manage your billing here: "
+                    "https://opencode.ai/workspace/wrk_01/billing",
+                    "last_error_reset_at": None,
+                }
+            ],
+            "openrouter": [{"id": "59022e", "label": "openrouter", "last_status": "ok"}],
+        },
+    )
+    lines = agent_backends.backend_usage_lines(agent_backends.BACKEND_HERMES, "hermes")
+    # The credential still spending is not news, and is left out.
+    assert _usage_labels(lines) == ["Provider anthropic (claude_code)", "Provider opencode-go"]
+    # A rate limit comes back on its own and an empty wallet does not, which is
+    # the difference worth saying out loud.
+    assert "rate limit reached" in lines[0]
+    assert "resets" in lines[0]
+    assert "out of credits" in lines[1]
+    # The provider's own message carries a billing URL, which a report read out
+    # loud has no use for.
+    assert "opencode.ai" not in "\n".join(lines)
+
+
+def test_hermes_reports_nothing_while_every_credential_is_still_spending(monkeypatch, tmp_path):
+    _hermes_pool(
+        monkeypatch,
+        tmp_path,
+        {"anthropic": [{"id": "1", "label": "claude_code", "last_status": "ok"}]},
+    )
+    assert agent_backends.backend_usage_lines(agent_backends.BACKEND_HERMES, "hermes") == []
+
+
+def test_status_names_the_providers_hermes_signed_in_to_rather_than_opencodes(
+    monkeypatch, tmp_path
+):
+    """Hermes holds a credential per provider, and the report names its own."""
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "hermes")
+    monkeypatch.setattr(
+        agent_backends, "_probe_backend", lambda _binary, _args, _timeout: (0, "1.2.3")
+    )
+    data = tmp_path / "opencode-data"
+    data.mkdir()
+    (data / "auth.json").write_text(json.dumps({"opencode-go": {"type": "api"}}), encoding="utf-8")
+    monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: data)
+    _hermes_pool(
+        monkeypatch,
+        tmp_path,
+        {"anthropic": [{"id": "1", "label": "claude_code"}], "copilot": [{"id": "2"}]},
+        active="anthropic",
+    )
+    fields = _status_lines(backend_status(agent_backends.BACKEND_HERMES))
+    assert fields["Signed in"] == "yes"
+    assert fields["Provider in use"] == "anthropic"
+    assert fields["Connected providers"] == "anthropic, copilot"
+
+
+def test_status_carries_the_usage_windows(monkeypatch):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "claude")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda _binary, args, _timeout: (
+            (0, "2.1.263 (Claude Code)") if args == ["--version"] else (0, '{"loggedIn": true}')
+        ),
+    )
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {
+            "rate_limits_available": True,
+            "rate_limits": {
+                "five_hour": {"utilization": 3, "resets_at": "2026-09-08T08:50:00+00:00"}
+            },
+        },
+    )
+    assert "Five-hour limit" in _status_lines(backend_status(BACKEND_CLAUDE))

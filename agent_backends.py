@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import atexit
 import collections
+import datetime
 import json
 import logging
 import ntpath
@@ -38,9 +39,10 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional, Protocol, Sequence, cast
+from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import backend_pool
 import diagnostics
@@ -836,6 +838,730 @@ def _opencode_account_lines() -> list[str]:
     return ["Signed in: yes", f"Connected providers: {', '.join(providers)}"]
 
 
+# ----- Plan usage limits -----
+#
+# Every backend that meters an account of its own is asked how much of it is
+# left, and each is asked in the way it can answer:
+#
+#   Claude Code  fixed windows -- five-hour, weekly, sometimes weekly for one
+#                model -- reported as a percentage and a reset time. There is
+#                no command line for it: it answers a `get_usage` control
+#                request on the same stream-json channel a turn is driven over.
+#   Codex        the same shape, from the `account/rateLimits/read` method on
+#                its app-server, reusing the pooled one where a tab has it.
+#   FreeBuff     a credit balance rather than a window, spent down over a cycle
+#                that refills on a date. Its CLI has no command for this
+#                either; the balance comes from the same account endpoint its
+#                own usage banner reads, with the credentials it signed in
+#                with.
+#   Hermes       a pool of provider credentials rather than one account, so
+#                what it meters is which of them are spent. It writes each
+#                credential's last outcome to the pool file, and a spent one
+#                carries the time it may be used again where the provider
+#                said so.
+#   opencode     nothing of its own. It spends whichever provider account is
+#                connected, its server offers no route that reports one, and
+#                the rate-limit headers it does read are used to decide a
+#                retry rather than kept anywhere that could be asked. So it
+#                reports nothing, rather than a number that would be a guess.
+#
+# What is metered is the account's business, not BlindPilot's. A plan may have
+# a five-hour window and no weekly one, a weekly window for one model and not
+# another, or none at all while the session runs on an API key, on Bedrock or
+# on Vertex. A limit the backend does not report is left out rather than
+# written as unknown, and an account that reports none at all leaves the status
+# report with no usage section, which is what says there is nothing to show.
+
+
+@dataclass(frozen=True)
+class UsageWindow:
+    """One metered window of a subscription, as the backend reports it.
+
+    `minutes` is how long the window is, which is only ever used to order the
+    lines: a listener wants the window that empties soonest first, and the
+    backends hand them over in the order that suits their own protocol.
+
+    `percent` is how full the window is where the backend measures it that way,
+    and None where it does not. Not every backend does: FreeBuff counts credits
+    off a balance and Hermes reports a credential as spent or not, so those say
+    what they know in `detail` instead of inventing a fraction to say it in.
+    """
+
+    label: str
+    percent: Optional[float] = None
+    resets_at: Optional[float] = None
+    minutes: Optional[float] = None
+    scoped: bool = False
+    detail: str = ""
+
+
+def _as_number(value: object) -> Optional[float]:
+    """A number the backend really sent, or None. Booleans are not numbers."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _epoch_from_iso(value: object) -> Optional[float]:
+    """Claude Code times a window's end as an ISO 8601 string; Codex uses epoch."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        # A time with no zone on it is the server's, and the server speaks UTC.
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    try:
+        return when.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _until_words(seconds: float) -> str:
+    """How long until a window empties, in words rather than a bare timestamp.
+
+    A time of day alone makes the listener do the arithmetic, and "resets at
+    08:50" is no help at all to somebody who does not already know what time it
+    is now.
+    """
+    if seconds <= 0:
+        return "now"
+    minutes = max(1, int(seconds // 60))
+    if minutes < 60:
+        return f"in {minutes} minute{'' if minutes == 1 else 's'}"
+    hours, rest = divmod(minutes, 60)
+    if hours < 24:
+        if rest:
+            return (
+                f"in {hours} hour{'' if hours == 1 else 's'} "
+                f"{rest} minute{'' if rest == 1 else 's'}"
+            )
+        return f"in {hours} hour{'' if hours == 1 else 's'}"
+    days, hours = divmod(hours, 24)
+    if hours:
+        return f"in {days} day{'' if days == 1 else 's'} {hours} hour{'' if hours == 1 else 's'}"
+    return f"in {days} day{'' if days == 1 else 's'}"
+
+
+def _reset_words(epoch: Optional[float]) -> str:
+    """When the window empties, said in local time and as a wait."""
+    if epoch is None:
+        return ""
+    try:
+        when = datetime.datetime.fromtimestamp(epoch).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return f"resets {when.strftime('%a %d %b %H:%M')} ({_until_words(epoch - time.time())})"
+
+
+def _percent_words(percent: float) -> str:
+    """A fraction of a window, rounded the way it is worth saying out loud."""
+    if percent <= 0:
+        return "0% used"
+    if percent < 1:
+        return "under 1% used"
+    return f"{percent:.0f}% used"
+
+
+def _usage_window_line(window: UsageWindow) -> str:
+    parts = [window.detail] if window.detail else []
+    if window.percent is not None:
+        parts.append(_percent_words(window.percent))
+    reset = _reset_words(window.resets_at)
+    if reset:
+        parts.append(reset)
+    if not parts:
+        # Nothing but a name is not a report, and a line ending in a colon
+        # reads as a value that went missing.
+        return ""
+    return f"{window.label}: {', '.join(parts)}"
+
+
+def _ordered_windows(windows: Sequence[UsageWindow]) -> list[UsageWindow]:
+    """Shortest window first, and the account's own windows before one model's.
+
+    Neither backend hands them over in an order worth reading out: Codex sends
+    a map keyed by limit id, and a plan that meters one model separately would
+    otherwise put that model's weekly window above the account's own.
+    """
+    return sorted(windows, key=lambda window: (window.minutes or 0.0, window.scoped))
+
+
+# Claude Code fetches the utilization figures in the background, so the first
+# answer after a process starts often carries `rate_limits: null` -- not "this
+# account has no windows", just "not fetched yet". The question is asked again
+# a couple of times before that is believed. Measured: the fetch has landed
+# within a second or two of start-up.
+_CLAUDE_USAGE_ATTEMPTS = 3
+_CLAUDE_USAGE_RETRY_SECONDS = 2.0
+
+_CLAUDE_USAGE_WINDOWS = (
+    ("five_hour", "Five-hour limit", 300.0),
+    ("seven_day", "Weekly limit", 10080.0),
+    ("seven_day_opus", "Weekly Opus limit", 10080.0),
+    ("seven_day_sonnet", "Weekly Sonnet limit", 10080.0),
+)
+
+
+def _claude_usage_windows(payload: Optional[dict]) -> list[UsageWindow]:
+    """Read the `get_usage` answer. Anything not reported is left out."""
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("rate_limits_available") is False:
+        # An API key, Bedrock or Vertex session: the plan windows do not apply
+        # to it at all, and `rate_limits` is null for that reason rather than
+        # because the figures have not arrived.
+        return []
+    limits = payload.get("rate_limits")
+    if not isinstance(limits, dict):
+        return []
+    windows: list[UsageWindow] = []
+    for field, label, minutes in _CLAUDE_USAGE_WINDOWS:
+        entry = limits.get(field)
+        if not isinstance(entry, dict):
+            continue
+        percent = _as_number(entry.get("utilization"))
+        if percent is None:
+            continue
+        windows.append(
+            UsageWindow(label, percent, _epoch_from_iso(entry.get("resets_at")), minutes)
+        )
+    # Weekly windows the server names itself, for the models a plan meters
+    # separately. Additive, and only ever present when the server sends them.
+    scoped = limits.get("model_scoped")
+    if isinstance(scoped, list):
+        for entry in scoped:
+            if not isinstance(entry, dict):
+                continue
+            percent = _as_number(entry.get("utilization"))
+            name = str(entry.get("display_name") or "").strip()
+            if percent is None or not name:
+                continue
+            windows.append(
+                UsageWindow(
+                    f"Weekly {name} limit",
+                    percent,
+                    _epoch_from_iso(entry.get("resets_at")),
+                    10080.0,
+                    scoped=True,
+                )
+            )
+    return windows
+
+
+def _claude_usage_reply(stdout: "IO[str]", request_id: str) -> Optional[dict]:
+    """Read the stream until this control request is answered, or it ends."""
+    for raw in stdout:
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "control_response":
+            continue
+        response = event.get("response")
+        if not isinstance(response, dict) or response.get("request_id") != request_id:
+            continue
+        if response.get("subtype") != "success":
+            # A release that does not know this request says so rather than
+            # answering it, and there is nothing to report.
+            return None
+        return response.get("response")
+    return None
+
+
+def _claude_usage_exchange(proc: "subprocess.Popen[str]") -> Optional[dict]:
+    """Ask a running process for its usage, retrying while the fetch lands."""
+    stdin, stdout = proc.stdin, proc.stdout
+    if stdin is None or stdout is None:
+        return None
+    payload: Optional[dict] = None
+    for attempt in range(_CLAUDE_USAGE_ATTEMPTS):
+        request_id = uuid.uuid4().hex
+        try:
+            stdin.write(
+                json.dumps(
+                    {
+                        "type": "control_request",
+                        "request_id": request_id,
+                        "request": {"subtype": "get_usage", "skip_behaviors": True},
+                    }
+                )
+                + "\n"
+            )
+            stdin.flush()
+        except (OSError, ValueError):
+            return payload
+        answer = _claude_usage_reply(stdout, request_id)
+        if answer is None:
+            return payload
+        payload = answer
+        if _claude_usage_windows(payload) or answer.get("rate_limits_available") is False:
+            return payload
+        if attempt + 1 < _CLAUDE_USAGE_ATTEMPTS:
+            time.sleep(_CLAUDE_USAGE_RETRY_SECONDS)
+    return payload
+
+
+def _claude_usage_payload(binary: str, timeout: int) -> Optional[dict]:
+    """Ask a short-lived Claude Code process what the plan windows look like.
+
+    A process of its own rather than the tab's: the pooled one belongs to a
+    conversation that may be mid-turn, and the report is asked for from the
+    window's own thread. `--no-session-persistence` keeps the question out of
+    the conversation list, where a session holding nothing but a control
+    request would be offered as something to resume.
+
+    `skip_behaviors` skips a scan of every transcript on this machine. That
+    scan is what the CLI's own usage dialog draws its attribution from, and
+    none of it is wanted here.
+    """
+    command = [
+        binary,
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+    ]
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(Path.home()),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=subprocess_env(binary),
+            **own_group_kwargs(),
+            **no_window_kwargs(),
+        )
+    except (OSError, ValueError):
+        return None
+    # Reading a pipe has no deadline of its own, so the deadline is the
+    # process: ending it is what turns a silent CLI into an end of stream
+    # rather than a status dialog that never opens.
+    watchdog = threading.Timer(max(1.0, float(timeout)), lambda: end_process_group(proc))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        return _claude_usage_exchange(proc)
+    finally:
+        watchdog.cancel()
+        end_process_group(proc)
+        # Ending the process does not hand its pipes back. /status can be asked
+        # as often as somebody presses it, and two file handles a press is a
+        # leak in an application that stays open all day.
+        for pipe in (proc.stdin, proc.stdout):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (OSError, ValueError):
+                    pass
+        try:
+            proc.wait(timeout=5)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+
+
+_CODEX_WINDOW_FIELDS = ("primary", "secondary")
+
+
+def _codex_window_name(minutes: Optional[float], field: str = "") -> str:
+    """What to call a window of this length.
+
+    Codex names its windows only by how long they are, and which of primary
+    and secondary is the five-hour one differs by account: on a plan whose
+    default limit is weekly, primary *is* the weekly window. So the length is
+    what the line is named after, and the position is fallen back on only
+    where the length is missing -- two windows of one limit both reported
+    without a duration have nothing else left to tell them apart.
+    """
+    if minutes is None:
+        return field.capitalize() if field else "Usage"
+    length = int(minutes)
+    if length == 300:
+        return "Five-hour"
+    if length == 10080:
+        return "Weekly"
+    if length % 1440 == 0:
+        days = length // 1440
+        return f"{days}-day"
+    if length % 60 == 0:
+        hours = length // 60
+        return f"{hours}-hour"
+    return f"{length}-minute"
+
+
+def _codex_limit_identity(group: dict) -> tuple:
+    """What makes one snapshot the same metered limit as another.
+
+    The figures themselves, rather than what the lines would be called: two
+    genuinely different windows can end up under the same name -- a limit with
+    no `limitName` and no `windowDurationMins` on either window is named twice
+    over by its position alone -- and telling those apart by name would lose
+    one of them.
+    """
+    parts = [str(group.get("limitName") or "").strip()]
+    for field in _CODEX_WINDOW_FIELDS:
+        entry = group.get(field)
+        if not isinstance(entry, dict):
+            parts.append("")
+            continue
+        parts.append(
+            "/".join(
+                str(_as_number(entry.get(key)))
+                for key in ("usedPercent", "windowDurationMins", "resetsAt")
+            )
+        )
+    return tuple(parts)
+
+
+def _codex_usage_windows(result: object) -> list[UsageWindow]:
+    """Read `account/rateLimits/read`. Anything not reported is left out."""
+    if not isinstance(result, dict):
+        return []
+    groups: list[dict] = []
+    # The per-limit map first: it is keyed by the metered limit's own id, and
+    # it names the windows a plan meters for one model.
+    identities: set[tuple] = set()
+    by_limit = result.get("rateLimitsByLimitId")
+    if isinstance(by_limit, dict):
+        for entry in by_limit.values():
+            if isinstance(entry, dict):
+                groups.append(entry)
+                identities.add(_codex_limit_identity(entry))
+    # `rateLimits` is the account's default snapshot, which is one of the
+    # limits above again under a different key rather than a window of its own.
+    # It is added only where the map did not already carry the same figures.
+    default = result.get("rateLimits")
+    if isinstance(default, dict) and _codex_limit_identity(default) not in identities:
+        groups.append(default)
+    windows: list[UsageWindow] = []
+    for group in groups:
+        name = str(group.get("limitName") or "").strip()
+        for field in _CODEX_WINDOW_FIELDS:
+            entry = group.get(field)
+            if not isinstance(entry, dict):
+                continue
+            percent = _as_number(entry.get("usedPercent"))
+            if percent is None:
+                continue
+            minutes = _as_number(entry.get("windowDurationMins"))
+            base = _codex_window_name(minutes, field)
+            label = f"{base} {name} limit" if name else f"{base} limit"
+            windows.append(
+                UsageWindow(
+                    label,
+                    percent,
+                    _as_number(entry.get("resetsAt")),
+                    minutes,
+                    scoped=bool(name),
+                )
+            )
+    return windows
+
+
+def _codex_usage_handshake(server: "CodexServer") -> bool:
+    """Introduce BlindPilot to a server started for this question alone."""
+    sent = server.send(
+        {
+            "method": "initialize",
+            "id": server.next_id(),
+            "params": {
+                "clientInfo": {
+                    "name": "blindpilot",
+                    "title": "BlindPilot",
+                    "version": _app_version(),
+                }
+            },
+        }
+    )
+    return sent and server.send({"method": "initialized", "params": {}})
+
+
+def _codex_rate_limits(server: "CodexServer", timeout: int) -> object:
+    """Ask one app-server for the account's windows and wait for the reply."""
+    inbox = server.inbox()
+    request_id = server.next_id()
+    server.expect(request_id, inbox)
+    try:
+        if not server.send({"method": "account/rateLimits/read", "id": request_id, "params": {}}):
+            return None
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                message = inbox.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if not isinstance(message, dict):
+                # The server closed under the question.
+                return None
+            if message.get("id") != request_id:
+                continue
+            return message.get("result")
+    finally:
+        server.unexpect([request_id])
+
+
+def _codex_usage_result(binary: str, timeout: int) -> object:
+    """Ask Codex for the account's windows, sharing the app-server if there is one.
+
+    The pooled process is used where one is running: it has been through the
+    handshake already, several tabs may be mid-turn on it, and this question
+    is a read that does not touch any of their conversations. It is borrowed
+    for the length of the question so the reaper cannot stop it underneath.
+    Where no process is held, one is started for the question and stopped
+    again, the way every other part of this report is asked.
+    """
+    key = backend_pool.pool_key(BACKEND_CODEX)
+    shared = backend_pool.pool()
+    server: Optional[CodexServer] = None
+    with _CODEX_START_LOCK:
+        held = shared.take(key)
+        if held is not None:
+            shared.keep(key, held)
+            server = cast(CodexServer, held.handle)
+            server.borrow()
+    if server is not None:
+        try:
+            return _codex_rate_limits(server, timeout)
+        finally:
+            server.give_back()
+    try:
+        started = _start_codex_server(binary)
+    except OSError:
+        return None
+    try:
+        if not _codex_usage_handshake(started):
+            return None
+        return _codex_rate_limits(started, timeout)
+    finally:
+        started.stop()
+
+
+# FreeBuff's own banner reads this, and reaching it is one request against an
+# account that is already signed in, so the report does not wait on a CLI to
+# start. The app URL is the one its CLI compiles in, overridable by the same
+# environment variable the CLI reads, for anyone pointed at another deployment.
+_FREEBUFF_APP_URL = "https://www.codebuff.com"
+_FREEBUFF_USAGE_PATH = "/api/v1/usage"
+# A cycle runs a month, which is only ever used to order the lines.
+_FREEBUFF_CYCLE_MINUTES = 43200.0
+
+
+def _freebuff_app_url() -> str:
+    return (os.environ.get("NEXT_PUBLIC_CODEBUFF_APP_URL", "").strip() or _FREEBUFF_APP_URL).rstrip(
+        "/"
+    )
+
+
+def _freebuff_usage_payload(timeout: int) -> Optional[dict]:
+    """Ask FreeBuff's account endpoint what this balance looks like.
+
+    Signed out there is nothing to ask with, and asking anyway would be a
+    request that can only come back rejected.
+    """
+    import urllib.error
+    import urllib.request
+
+    account = _freebuff_account()
+    if account is None or not _freebuff_signed_in(account):
+        return None
+    body = json.dumps(
+        {
+            "fingerprintId": str(account.get("fingerprintId") or ""),
+            "authToken": str(account.get("authToken") or ""),
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        _freebuff_app_url() + _FREEBUFF_USAGE_PATH,
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": f"BlindPilot/{_app_version()}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(1, min(timeout, 10))) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (OSError, ValueError, urllib.error.HTTPError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _credit_words(amount: float) -> str:
+    count = int(round(amount))
+    return f"{count:,} credit{'' if count == 1 else 's'}"
+
+
+def _freebuff_usage_windows(payload: Optional[dict]) -> list[UsageWindow]:
+    """Read the balance. What is left is the figure; the fraction is derived.
+
+    The endpoint reports what has been spent this cycle and what is left, and
+    what is left is the number worth hearing first -- a percentage of a balance
+    that top-ups and referrals move around is the less honest half of it, so it
+    is only added where the two figures together say what the cycle held.
+    """
+    if not isinstance(payload, dict):
+        return []
+    used = _as_number(payload.get("usage"))
+    remaining = _as_number(payload.get("remainingBalance"))
+    if used is None and remaining is None:
+        return []
+    said = []
+    if remaining is not None:
+        said.append(f"{_credit_words(remaining)} left")
+    if used is not None:
+        said.append(f"{_credit_words(used)} used this cycle")
+    granted = (used or 0.0) + (remaining or 0.0)
+    percent = used / granted * 100.0 if used is not None and granted > 0 else None
+    return [
+        UsageWindow(
+            "Credits",
+            percent,
+            _epoch_from_iso(payload.get("next_quota_reset")),
+            _FREEBUFF_CYCLE_MINUTES,
+            detail=", ".join(said),
+        )
+    ]
+
+
+# What Hermes writes against a credential once it has stopped taking work. Any
+# other value is a credential that is still spending, and a pool that is all
+# still spending has nothing to report.
+_HERMES_SPENT_STATUSES = ("exhausted", "rate_limited", "cooldown", "disabled")
+
+
+def _hermes_limit_words(credential: dict) -> str:
+    """Why this credential stopped, in words rather than the provider's code.
+
+    A rate limit and an empty wallet both stop a credential, and they are not
+    the same news: one comes back on its own and the other does not.
+    """
+    reason = str(credential.get("last_error_reason") or "").strip()
+    lowered = reason.lower()
+    code = _as_number(credential.get("last_error_code"))
+    if code == 429 or "rate" in lowered or "usage_limit" in lowered or "quota" in lowered:
+        return "rate limit reached"
+    if "credit" in lowered or "balance" in lowered or "billing" in lowered or "payment" in lowered:
+        return "out of credits"
+    return f"unavailable ({reason})" if reason else "unavailable"
+
+
+def _hermes_usage_windows(payload: Optional[dict]) -> list[UsageWindow]:
+    """Read Hermes' credential pool for the ones it has stopped spending.
+
+    Hermes runs on a pool rather than on one account, and a pool has no single
+    figure to be a percentage of. What it does know is which credentials are
+    spent and, where the provider said so, when each may be used again -- so
+    that is what is reported, and a pool with nothing spent reports nothing.
+    """
+    if not isinstance(payload, dict):
+        return []
+    pool = payload.get("credential_pool")
+    if not isinstance(pool, dict):
+        return []
+    windows: list[UsageWindow] = []
+    for provider, credentials in sorted(pool.items()):
+        if not isinstance(credentials, list):
+            continue
+        for credential in credentials:
+            if not isinstance(credential, dict):
+                continue
+            status = str(credential.get("last_status") or "").strip().lower()
+            if status not in _HERMES_SPENT_STATUSES:
+                continue
+            label = str(credential.get("label") or "").strip()
+            named = f"{provider} ({label})" if label and label != provider else str(provider)
+            # "Provider" in front of it, because these sit under the account
+            # lines in the report and a bare credential name there reads as a
+            # heading rather than as a limit that has been reached.
+            name = f"Provider {named}"
+            windows.append(
+                UsageWindow(
+                    name,
+                    None,
+                    _as_number(credential.get("last_error_reset_at")),
+                    detail=_hermes_limit_words(credential),
+                )
+            )
+    return windows
+
+
+def _hermes_pool_payload() -> Optional[dict]:
+    """The pool file Hermes keeps its credential outcomes in.
+
+    Read off disk rather than asked of the CLI: `hermes auth list` prints this
+    same state, but starting Hermes to print it costs seconds the status report
+    should not spend. A Hermes reached over the network keeps its own pool on
+    its own machine, and this file is the local one -- the same caveat the
+    settings entry for Hermes' config carries.
+    """
+    try:
+        payload = json.loads((_hermes_home() / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def backend_usage_lines(backend: str, binary: str, timeout: int = 20) -> list[str]:
+    """How much of this account's metered allowance is left, as report lines.
+
+    Empty for opencode, which meters nothing of its own, and empty for an
+    account whose backend reports no limits: there is nothing truthful to say
+    about a limit the backend has not named, and a line saying so would be one
+    more thing to arrow past on every other account.
+    """
+    backend = normalize_backend(backend)
+    if backend == BACKEND_CLAUDE:
+        windows = _claude_usage_windows(_claude_usage_payload(binary, timeout))
+    elif backend == BACKEND_CODEX:
+        windows = _codex_usage_windows(_codex_usage_result(binary, timeout))
+    elif backend == BACKEND_FREEBUFF:
+        windows = _freebuff_usage_windows(_freebuff_usage_payload(timeout))
+    elif backend == BACKEND_HERMES:
+        windows = _hermes_usage_windows(_hermes_pool_payload())
+    else:
+        return []
+    return [line for line in map(_usage_window_line, _ordered_windows(windows)) if line]
+
+
+def _hermes_account_lines() -> list[str]:
+    """Hermes signs in to a pool of providers, and the pool file is the answer.
+
+    Its `hermes status` does print this, among four screens of everything else
+    it knows, and starting Hermes to read it costs seconds. What signing in
+    means here is also not one account: Hermes holds a credential per provider
+    and moves between them, so what the report names is the provider it is set
+    to use and the ones it could fall back to.
+    """
+    payload = _hermes_pool_payload()
+    pool = payload.get("credential_pool") if isinstance(payload, dict) else None
+    providers = sorted(
+        str(name)
+        for name, credentials in (pool or {}).items()
+        if isinstance(credentials, list) and credentials
+    )
+    if not providers:
+        return ["Signed in: no", "Connected providers: none"]
+    lines = ["Signed in: yes", f"Connected providers: {', '.join(providers)}"]
+    active = str((payload or {}).get("active_provider") or "").strip()
+    if active:
+        lines.insert(1, f"Provider in use: {active}")
+    return lines
+
+
 def backend_status(backend: str, timeout: int = 20) -> str:
     """What the chosen backend can say about itself, as lines of plain text.
 
@@ -843,11 +1569,11 @@ def backend_status(backend: str, timeout: int = 20) -> str:
     them answers it themselves in the headless mode BlindPilot drives them in:
     Claude Code's own ``/status`` is interactive-only and replies "/status
     isn't available in this environment" when it is sent as a message, and
-    Codex, FreeBuff and opencode have no status command at all. So each one is
-    asked in the way it can actually answer — a CLI subcommand where there is
-    one, the credentials it stored where there is not — and the answers are
-    written the same way, so the report reads the same whichever backend is
-    selected.
+    Codex, FreeBuff and opencode have no status command at all, and Hermes'
+    prints four screens of everything it knows. So each one is asked in the way
+    it can actually answer — a CLI subcommand where there is one, the
+    credentials it stored where there is not — and the answers are written the
+    same way, so the report reads the same whichever backend is selected.
     """
     backend = normalize_backend(backend)
     lines = [f"Backend: {backend_label(backend)}"]
@@ -865,8 +1591,11 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         lines.extend(_codex_account_lines(*_probe_backend(binary, ["login", "status"], timeout)))
     elif backend == BACKEND_FREEBUFF:
         lines.extend(_freebuff_account_lines())
+    elif backend == BACKEND_HERMES:
+        lines.extend(_hermes_account_lines())
     else:
         lines.extend(_opencode_account_lines())
+    lines.extend(backend_usage_lines(backend, binary, timeout))
     return "\n".join(lines)
 
 
@@ -2203,9 +2932,9 @@ def _app_version() -> str:
     return str(getattr(app, "APP_VERSION", "") or "unknown")
 
 
-def _start_codex_server() -> CodexServer:
+def _start_codex_server(binary: str = "") -> CodexServer:
     """Launch the shared app-server. Raises OSError if it cannot be started."""
-    binary = find_backend_cli(BACKEND_CODEX)
+    binary = binary or find_backend_cli(BACKEND_CODEX) or ""
     if not binary:
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
