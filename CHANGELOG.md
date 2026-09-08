@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.23.0 - 2026-09-07
+
+- Session Status reports how much of the account's allowance is left and when it comes back, for every backend that meters one: Claude Code and Codex in the five-hour and weekly windows they report, FreeBuff in the credits it counts off a balance, and Hermes in the pooled provider credentials it has stopped spending. opencode meters nothing of its own and reports nothing (PR #41).
+- A Hermes tab's status named opencode's connected providers as its own, having no branch of its own in the report. It now names the providers Hermes holds credentials for, and the one it is set to use.
+
 ## v0.22.1 - 2026-09-06
 
 - Claude Code keeps one process per tab between turns instead of starting a fresh one for every message, so the agents a turn leaves running survive the turn's end (PR #39).
