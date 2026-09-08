@@ -2502,3 +2502,147 @@ def test_status_reports_the_freebuff_account_from_its_stored_credentials(monkeyp
     # The stored token is what the account is reached with. A report opened on
     # a shared screen, or read out loud in a room, must not carry it.
     assert "secret" not in report
+
+
+def _usage_labels(lines: list[str]) -> list[str]:
+    return [line.split(":", 1)[0] for line in lines]
+
+
+def test_usage_reports_the_windows_claude_code_names_and_no_others(monkeypatch):
+    """A plan window the account does not have is left out, not written as unknown."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {
+            "rate_limits_available": True,
+            "rate_limits": {
+                # Out of order on purpose: the shortest window is what a
+                # listener needs first, and the answer arrives in whatever
+                # order the endpoint sends.
+                "seven_day": {"utilization": 40, "resets_at": "2026-09-15T02:00:00+00:00"},
+                "five_hour": {"utilization": 3, "resets_at": "2026-09-08T08:50:00+00:00"},
+                "seven_day_opus": None,
+                "seven_day_sonnet": {"utilization": None, "resets_at": None},
+            },
+        },
+    )
+    lines = agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude")
+    assert _usage_labels(lines) == ["Five-hour limit", "Weekly limit"]
+    assert "3% used" in lines[0]
+    assert "40% used" in lines[1]
+
+
+def test_usage_puts_the_accounts_own_weekly_window_before_one_models(monkeypatch):
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {
+            "rate_limits_available": True,
+            "rate_limits": {
+                "seven_day": {"utilization": 2, "resets_at": "2026-09-15T02:00:00+00:00"},
+                "model_scoped": [
+                    {
+                        "display_name": "Fable",
+                        "utilization": 9,
+                        "resets_at": "2026-09-15T02:00:00+00:00",
+                    }
+                ],
+            },
+        },
+    )
+    assert _usage_labels(agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude")) == [
+        "Weekly limit",
+        "Weekly Fable limit",
+    ]
+
+
+def test_usage_says_nothing_when_the_plan_windows_do_not_apply(monkeypatch):
+    """An API key, Bedrock or Vertex session is metered by none of this."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {"rate_limits_available": False, "rate_limits": None},
+    )
+    assert agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude") == []
+
+
+def test_usage_says_nothing_when_the_backend_could_not_be_asked(monkeypatch):
+    monkeypatch.setattr(agent_backends, "_claude_usage_payload", lambda _binary, _timeout: None)
+    monkeypatch.setattr(agent_backends, "_codex_usage_result", lambda _binary, _timeout: None)
+    assert agent_backends.backend_usage_lines(BACKEND_CLAUDE, "claude") == []
+    assert agent_backends.backend_usage_lines(BACKEND_CODEX, "codex") == []
+
+
+def test_usage_names_a_codex_window_by_its_length_not_its_position():
+    """Codex's `primary` is the weekly window on some plans and the five-hour one on others."""
+    windows = agent_backends._codex_usage_windows(
+        {
+            "rateLimits": {
+                "limitName": None,
+                "primary": {"usedPercent": 5, "windowDurationMins": 10080, "resetsAt": 1789436033},
+                "secondary": None,
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitName": None,
+                    "primary": {
+                        "usedPercent": 5,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1789436033,
+                    },
+                    "secondary": None,
+                },
+                "codex_spark": {
+                    "limitName": "Spark",
+                    "primary": {
+                        "usedPercent": 0,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1788858356,
+                    },
+                    "secondary": {
+                        "usedPercent": 1,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1789445156,
+                    },
+                },
+            },
+        }
+    )
+    lines = [
+        agent_backends._usage_window_line(window)
+        for window in agent_backends._ordered_windows(windows)
+    ]
+    # The same window arrives twice -- once under its limit id and once as the
+    # account's own -- and is reported once.
+    assert _usage_labels(lines) == [
+        "Five-hour Spark limit",
+        "Weekly limit",
+        "Weekly Spark limit",
+    ]
+
+
+def test_usage_is_not_offered_by_a_backend_that_meters_nothing_of_its_own():
+    for backend in (BACKEND_FREEBUFF, BACKEND_OPENCODE, agent_backends.BACKEND_HERMES):
+        assert agent_backends.backend_usage_lines(backend, "cli") == []
+
+
+def test_status_carries_the_usage_windows(monkeypatch):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "claude")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda _binary, args, _timeout: (
+            (0, "2.1.263 (Claude Code)") if args == ["--version"] else (0, '{"loggedIn": true}')
+        ),
+    )
+    monkeypatch.setattr(
+        agent_backends,
+        "_claude_usage_payload",
+        lambda _binary, _timeout: {
+            "rate_limits_available": True,
+            "rate_limits": {
+                "five_hour": {"utilization": 3, "resets_at": "2026-09-08T08:50:00+00:00"}
+            },
+        },
+    )
+    assert "Five-hour limit" in _status_lines(backend_status(BACKEND_CLAUDE))

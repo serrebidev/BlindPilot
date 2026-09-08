@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import atexit
 import collections
+import datetime
 import json
 import logging
 import ntpath
@@ -38,9 +39,10 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional, Protocol, Sequence, cast
+from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import backend_pool
 import diagnostics
@@ -836,6 +838,470 @@ def _opencode_account_lines() -> list[str]:
     return ["Signed in: yes", f"Connected providers: {', '.join(providers)}"]
 
 
+# ----- Plan usage windows -----
+#
+# Claude Code and Codex both meter a subscription in fixed windows -- a
+# five-hour one, a weekly one, sometimes a weekly one for a single model -- and
+# both can say how full the current window is and when it empties. Neither
+# answers it on a command line. Claude Code answers a `get_usage` control
+# request on the same stream-json channel a turn is driven over; Codex answers
+# the `account/rateLimits/read` method on its app-server. FreeBuff, opencode
+# and Hermes have no plan window of their own -- they spend whatever provider
+# account is configured -- so they report nothing here.
+#
+# Which windows exist is the account's business, not BlindPilot's. A plan may
+# have a five-hour window and no weekly one, a weekly window for one model and
+# not another, or none at all while the session runs on an API key, on Bedrock
+# or on Vertex. A window the backend does not report is left out rather than
+# written as unknown, and an account that reports none at all leaves the status
+# report with no usage section, which is what says there is nothing to show.
+
+
+@dataclass(frozen=True)
+class UsageWindow:
+    """One metered window of a subscription, as the backend reports it.
+
+    `minutes` is how long the window is, which is only ever used to order the
+    lines: a listener wants the window that empties soonest first, and the two
+    backends hand them over in the order that suits their own protocol.
+    """
+
+    label: str
+    percent: float
+    resets_at: Optional[float] = None
+    minutes: Optional[float] = None
+    scoped: bool = False
+
+
+def _as_number(value: object) -> Optional[float]:
+    """A number the backend really sent, or None. Booleans are not numbers."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _epoch_from_iso(value: object) -> Optional[float]:
+    """Claude Code times a window's end as an ISO 8601 string; Codex uses epoch."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        when = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        # A time with no zone on it is the server's, and the server speaks UTC.
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    try:
+        return when.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _until_words(seconds: float) -> str:
+    """How long until a window empties, in words rather than a bare timestamp.
+
+    A time of day alone makes the listener do the arithmetic, and "resets at
+    08:50" is no help at all to somebody who does not already know what time it
+    is now.
+    """
+    if seconds <= 0:
+        return "now"
+    minutes = max(1, int(seconds // 60))
+    if minutes < 60:
+        return f"in {minutes} minute{'' if minutes == 1 else 's'}"
+    hours, rest = divmod(minutes, 60)
+    if hours < 24:
+        if rest:
+            return (
+                f"in {hours} hour{'' if hours == 1 else 's'} "
+                f"{rest} minute{'' if rest == 1 else 's'}"
+            )
+        return f"in {hours} hour{'' if hours == 1 else 's'}"
+    days, hours = divmod(hours, 24)
+    if hours:
+        return f"in {days} day{'' if days == 1 else 's'} {hours} hour{'' if hours == 1 else 's'}"
+    return f"in {days} day{'' if days == 1 else 's'}"
+
+
+def _reset_words(epoch: Optional[float]) -> str:
+    """When the window empties, said in local time and as a wait."""
+    if epoch is None:
+        return ""
+    try:
+        when = datetime.datetime.fromtimestamp(epoch).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return f"resets {when.strftime('%a %d %b %H:%M')} ({_until_words(epoch - time.time())})"
+
+
+def _percent_words(percent: float) -> str:
+    """A fraction of a window, rounded the way it is worth saying out loud."""
+    if percent <= 0:
+        return "0% used"
+    if percent < 1:
+        return "under 1% used"
+    return f"{percent:.0f}% used"
+
+
+def _usage_window_line(window: UsageWindow) -> str:
+    parts = [_percent_words(window.percent)]
+    reset = _reset_words(window.resets_at)
+    if reset:
+        parts.append(reset)
+    return f"{window.label}: {', '.join(parts)}"
+
+
+def _ordered_windows(windows: Sequence[UsageWindow]) -> list[UsageWindow]:
+    """Shortest window first, and the account's own windows before one model's.
+
+    Neither backend hands them over in an order worth reading out: Codex sends
+    a map keyed by limit id, and a plan that meters one model separately would
+    otherwise put that model's weekly window above the account's own.
+    """
+    return sorted(windows, key=lambda window: (window.minutes or 0.0, window.scoped))
+
+
+# Claude Code fetches the utilization figures in the background, so the first
+# answer after a process starts often carries `rate_limits: null` -- not "this
+# account has no windows", just "not fetched yet". The question is asked again
+# a couple of times before that is believed. Measured: the fetch has landed
+# within a second or two of start-up.
+_CLAUDE_USAGE_ATTEMPTS = 3
+_CLAUDE_USAGE_RETRY_SECONDS = 2.0
+
+_CLAUDE_USAGE_WINDOWS = (
+    ("five_hour", "Five-hour limit", 300.0),
+    ("seven_day", "Weekly limit", 10080.0),
+    ("seven_day_opus", "Weekly Opus limit", 10080.0),
+    ("seven_day_sonnet", "Weekly Sonnet limit", 10080.0),
+)
+
+
+def _claude_usage_windows(payload: Optional[dict]) -> list[UsageWindow]:
+    """Read the `get_usage` answer. Anything not reported is left out."""
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("rate_limits_available") is False:
+        # An API key, Bedrock or Vertex session: the plan windows do not apply
+        # to it at all, and `rate_limits` is null for that reason rather than
+        # because the figures have not arrived.
+        return []
+    limits = payload.get("rate_limits")
+    if not isinstance(limits, dict):
+        return []
+    windows: list[UsageWindow] = []
+    for field, label, minutes in _CLAUDE_USAGE_WINDOWS:
+        entry = limits.get(field)
+        if not isinstance(entry, dict):
+            continue
+        percent = _as_number(entry.get("utilization"))
+        if percent is None:
+            continue
+        windows.append(
+            UsageWindow(label, percent, _epoch_from_iso(entry.get("resets_at")), minutes)
+        )
+    # Weekly windows the server names itself, for the models a plan meters
+    # separately. Additive, and only ever present when the server sends them.
+    scoped = limits.get("model_scoped")
+    if isinstance(scoped, list):
+        for entry in scoped:
+            if not isinstance(entry, dict):
+                continue
+            percent = _as_number(entry.get("utilization"))
+            name = str(entry.get("display_name") or "").strip()
+            if percent is None or not name:
+                continue
+            windows.append(
+                UsageWindow(
+                    f"Weekly {name} limit",
+                    percent,
+                    _epoch_from_iso(entry.get("resets_at")),
+                    10080.0,
+                    scoped=True,
+                )
+            )
+    return windows
+
+
+def _claude_usage_reply(stdout: "IO[str]", request_id: str) -> Optional[dict]:
+    """Read the stream until this control request is answered, or it ends."""
+    for raw in stdout:
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "control_response":
+            continue
+        response = event.get("response")
+        if not isinstance(response, dict) or response.get("request_id") != request_id:
+            continue
+        if response.get("subtype") != "success":
+            # A release that does not know this request says so rather than
+            # answering it, and there is nothing to report.
+            return None
+        return response.get("response")
+    return None
+
+
+def _claude_usage_exchange(proc: "subprocess.Popen[str]") -> Optional[dict]:
+    """Ask a running process for its usage, retrying while the fetch lands."""
+    stdin, stdout = proc.stdin, proc.stdout
+    if stdin is None or stdout is None:
+        return None
+    payload: Optional[dict] = None
+    for attempt in range(_CLAUDE_USAGE_ATTEMPTS):
+        request_id = uuid.uuid4().hex
+        try:
+            stdin.write(
+                json.dumps(
+                    {
+                        "type": "control_request",
+                        "request_id": request_id,
+                        "request": {"subtype": "get_usage", "skip_behaviors": True},
+                    }
+                )
+                + "\n"
+            )
+            stdin.flush()
+        except (OSError, ValueError):
+            return payload
+        answer = _claude_usage_reply(stdout, request_id)
+        if answer is None:
+            return payload
+        payload = answer
+        if _claude_usage_windows(payload) or answer.get("rate_limits_available") is False:
+            return payload
+        if attempt + 1 < _CLAUDE_USAGE_ATTEMPTS:
+            time.sleep(_CLAUDE_USAGE_RETRY_SECONDS)
+    return payload
+
+
+def _claude_usage_payload(binary: str, timeout: int) -> Optional[dict]:
+    """Ask a short-lived Claude Code process what the plan windows look like.
+
+    A process of its own rather than the tab's: the pooled one belongs to a
+    conversation that may be mid-turn, and the report is asked for from the
+    window's own thread. `--no-session-persistence` keeps the question out of
+    the conversation list, where a session holding nothing but a control
+    request would be offered as something to resume.
+
+    `skip_behaviors` skips a scan of every transcript on this machine. That
+    scan is what the CLI's own usage dialog draws its attribution from, and
+    none of it is wanted here.
+    """
+    command = [
+        binary,
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+    ]
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(Path.home()),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=subprocess_env(binary),
+            **own_group_kwargs(),
+            **no_window_kwargs(),
+        )
+    except (OSError, ValueError):
+        return None
+    # Reading a pipe has no deadline of its own, so the deadline is the
+    # process: ending it is what turns a silent CLI into an end of stream
+    # rather than a status dialog that never opens.
+    watchdog = threading.Timer(max(1.0, float(timeout)), lambda: end_process_group(proc))
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        return _claude_usage_exchange(proc)
+    finally:
+        watchdog.cancel()
+        end_process_group(proc)
+
+
+_CODEX_WINDOW_FIELDS = ("primary", "secondary")
+
+
+def _codex_window_name(minutes: Optional[float]) -> str:
+    """What to call a window of this length.
+
+    Codex names its windows only by how long they are, and which of primary
+    and secondary is the five-hour one differs by account: on a plan whose
+    default limit is weekly, primary *is* the weekly window. So the length is
+    what the line is named after, never the position.
+    """
+    if minutes is None:
+        return "Usage"
+    length = int(minutes)
+    if length == 300:
+        return "Five-hour"
+    if length == 10080:
+        return "Weekly"
+    if length % 1440 == 0:
+        days = length // 1440
+        return f"{days}-day"
+    if length % 60 == 0:
+        hours = length // 60
+        return f"{hours}-hour"
+    return f"{length}-minute"
+
+
+def _codex_usage_windows(result: object) -> list[UsageWindow]:
+    """Read `account/rateLimits/read`. Anything not reported is left out."""
+    if not isinstance(result, dict):
+        return []
+    groups: list[dict] = []
+    # The per-limit map first: it names the windows a plan meters for one
+    # model, and the account's own limit appears in it as well. The unnamed
+    # `rateLimits` is the same entry again, so it is read last and its
+    # duplicate lines drop out.
+    by_limit = result.get("rateLimitsByLimitId")
+    if isinstance(by_limit, dict):
+        groups.extend(entry for entry in by_limit.values() if isinstance(entry, dict))
+    default = result.get("rateLimits")
+    if isinstance(default, dict):
+        groups.append(default)
+    windows: list[UsageWindow] = []
+    seen: set[str] = set()
+    for group in groups:
+        name = str(group.get("limitName") or "").strip()
+        for field in _CODEX_WINDOW_FIELDS:
+            entry = group.get(field)
+            if not isinstance(entry, dict):
+                continue
+            percent = _as_number(entry.get("usedPercent"))
+            if percent is None:
+                continue
+            minutes = _as_number(entry.get("windowDurationMins"))
+            base = _codex_window_name(minutes)
+            label = f"{base} {name} limit" if name else f"{base} limit"
+            if label in seen:
+                continue
+            seen.add(label)
+            windows.append(
+                UsageWindow(
+                    label,
+                    percent,
+                    _as_number(entry.get("resetsAt")),
+                    minutes,
+                    scoped=bool(name),
+                )
+            )
+    return windows
+
+
+def _codex_usage_handshake(server: "CodexServer") -> bool:
+    """Introduce BlindPilot to a server started for this question alone."""
+    sent = server.send(
+        {
+            "method": "initialize",
+            "id": server.next_id(),
+            "params": {
+                "clientInfo": {
+                    "name": "blindpilot",
+                    "title": "BlindPilot",
+                    "version": _app_version(),
+                }
+            },
+        }
+    )
+    return sent and server.send({"method": "initialized", "params": {}})
+
+
+def _codex_rate_limits(server: "CodexServer", timeout: int) -> object:
+    """Ask one app-server for the account's windows and wait for the reply."""
+    inbox = server.inbox()
+    request_id = server.next_id()
+    server.expect(request_id, inbox)
+    try:
+        if not server.send({"method": "account/rateLimits/read", "id": request_id, "params": {}}):
+            return None
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                message = inbox.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if not isinstance(message, dict):
+                # The server closed under the question.
+                return None
+            if message.get("id") != request_id:
+                continue
+            return message.get("result")
+    finally:
+        server.unexpect([request_id])
+
+
+def _codex_usage_result(binary: str, timeout: int) -> object:
+    """Ask Codex for the account's windows, sharing the app-server if there is one.
+
+    The pooled process is used where one is running: it has been through the
+    handshake already, several tabs may be mid-turn on it, and this question
+    is a read that does not touch any of their conversations. It is borrowed
+    for the length of the question so the reaper cannot stop it underneath.
+    Where no process is held, one is started for the question and stopped
+    again, the way every other part of this report is asked.
+    """
+    key = backend_pool.pool_key(BACKEND_CODEX)
+    shared = backend_pool.pool()
+    server: Optional[CodexServer] = None
+    with _CODEX_START_LOCK:
+        held = shared.take(key)
+        if held is not None:
+            shared.keep(key, held)
+            server = cast(CodexServer, held.handle)
+            server.borrow()
+    if server is not None:
+        try:
+            return _codex_rate_limits(server, timeout)
+        finally:
+            server.give_back()
+    try:
+        started = _start_codex_server(binary)
+    except OSError:
+        return None
+    try:
+        if not _codex_usage_handshake(started):
+            return None
+        return _codex_rate_limits(started, timeout)
+    finally:
+        started.stop()
+
+
+def backend_usage_lines(backend: str, binary: str, timeout: int = 20) -> list[str]:
+    """How full this account's metered windows are, as lines for the report.
+
+    Empty for a backend that meters nothing of its own, and empty for an
+    account whose plan reports no windows: there is nothing truthful to say
+    about a limit the backend has not named, and a line saying so would be one
+    more thing to arrow past on every other account.
+    """
+    backend = normalize_backend(backend)
+    if backend == BACKEND_CLAUDE:
+        windows = _claude_usage_windows(_claude_usage_payload(binary, timeout))
+    elif backend == BACKEND_CODEX:
+        windows = _codex_usage_windows(_codex_usage_result(binary, timeout))
+    else:
+        return []
+    return [_usage_window_line(window) for window in _ordered_windows(windows)]
+
+
 def backend_status(backend: str, timeout: int = 20) -> str:
     """What the chosen backend can say about itself, as lines of plain text.
 
@@ -867,6 +1333,7 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         lines.extend(_freebuff_account_lines())
     else:
         lines.extend(_opencode_account_lines())
+    lines.extend(backend_usage_lines(backend, binary, timeout))
     return "\n".join(lines)
 
 
@@ -2203,9 +2670,9 @@ def _app_version() -> str:
     return str(getattr(app, "APP_VERSION", "") or "unknown")
 
 
-def _start_codex_server() -> CodexServer:
+def _start_codex_server(binary: str = "") -> CodexServer:
     """Launch the shared app-server. Raises OSError if it cannot be started."""
-    binary = find_backend_cli(BACKEND_CODEX)
+    binary = binary or find_backend_cli(BACKEND_CODEX) or ""
     if not binary:
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
