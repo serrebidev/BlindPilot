@@ -46,6 +46,25 @@ def diagnostics_stay_out_of_the_real_log(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def the_usage_report_stays_off_the_network(monkeypatch):
+    """No test asks a provider's account service how much credit is left.
+
+    FreeBuff's usage line is one request against the account it signed in with.
+    A test that reached it would depend on a network being there, on a live
+    account, and on whatever that account's balance happened to be that day.
+    The tests that mean to exercise the reading hand it a payload of their own,
+    which replaces this.
+    """
+    try:
+        import agent_backends
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(agent_backends, "_freebuff_usage_payload", lambda _timeout: None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def chat_data_stays_out_of_the_real_folder(monkeypatch):
     """Point Chat mode's data folder at a throwaway directory for every test.
 
