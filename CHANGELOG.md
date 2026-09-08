@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.25.0 - 2026-09-07
+
+- A Chat conversation belongs to the profile it was started on. A profile restored as the default was shown but never applied, so the first conversation of every session was created on the wrong account and model while being recorded against a profile naming another; and a conversation re-read its temperature, token limit and OpenRouter tools from the profile on every request while keeping the system prompt it started with, so editing a profile changed a conversation half way through. Both fixed (PR #43).
+- Chat mode can open a past conversation again. The conversations table had been written on every conversation since Chat mode shipped and never read: no list, no get, and nothing in the window to reach one. Chat menu, Recent conversations, with a filter, message counts, the profile and account each ran on, and Delete. Opening one restores the profile, system prompt, account and model it was started on.
+
 ## v0.24.0 - 2026-09-07
 
 - Chat mode opens on the account and conversation profile you chose. A Use as default checkbox sits under the list in Accounts and in Conversation profiles; each row says "default" in its own text, and unticking leaves none marked, which opens on the first account and no profile as before (PR #42).
