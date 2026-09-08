@@ -227,7 +227,11 @@ def _panel_for(profile: Profile):
         current_conversation_id=1,
         current_system_prompt="",
         current_profile_id=profile.id,
-        db=SimpleNamespace(list_messages=lambda _id: [], get_profile=lambda _id: profile),
+        # The profile as the conversation was started on it. A request is
+        # built from this rather than from a fresh read, so that editing a
+        # profile does not change a conversation already running on it.
+        current_profile=profile,
+        db=SimpleNamespace(list_messages=lambda _id: []),
     )
 
 
