@@ -1,49 +1,29 @@
-# BlindPilot 0.23.0
+# BlindPilot 0.24.0
 
-Session Status now says how much of your account's allowance is left and when it comes back - for every backend that meters one.
+Chat mode opens on the account and profile you chose, and the keyboard reaches all of it.
 
-## What /status was not saying
+## The account you actually use
 
-The report named the backend, its version and the account signed in to it, and stopped there. How much of the plan was spent, and how long until it refilled, was the question people were actually opening it to ask, and the only way to find out was to leave BlindPilot and ask the provider's own tool.
+Chat mode opened on whichever account sorted first alphabetically and on no profile at all. With more than one account that meant re-picking yours on every launch, and a conversation profile was something you set again each time or did without.
 
-Claude Code and Codex both answer it, and neither answers it on a command line. Claude Code takes a `get_usage` control request on the same stream-json channel a turn is driven over; Codex answers `account/rateLimits/read` on its app-server, which BlindPilot borrows from the pool where a tab already has one running. Both report the same shape: a five-hour window, a weekly one, sometimes a weekly one for a single model, each with how full it is and when it empties.
+There is now a **Use as default** checkbox under the list in Accounts and under the list in Conversation profiles. Arrow to a row, tick the box, and the tick comes off whichever row had it. Chat mode opens on that account and that profile from then on.
 
-```
-Five-hour limit: 41% used, resets Tue 08 Sep 00:59 (in 3 hours)
-Weekly limit: 8% used, resets Mon 14 Sep 13:59 (in 6 days 16 hours)
-```
+The box sits under the list rather than inside the editor because it says which of them is the one, not what any of them is set to — so marking a default is arrow, Tab, space, rather than opening an editor and saving it. Each row also says "default" in its own text, so finding the current one does not mean arrowing the whole list with an ear on a checkbox behind you. Unticking leaves none marked, which is a state the window understands: it opens on the first account and on "No profile", exactly as it did before. The database keeps at most one marked in the same statement that marks it, so "the default" cannot quietly become two, and a database written by an earlier release has the column added to it when it opens.
 
-The reset is said as a time and as a wait, because "resets at 08:50" is no help to somebody who does not already know what time it is now. A window the backend does not report is left out rather than written as unknown, and an account the windows do not apply to at all - an API key, Bedrock, Vertex - gets no usage section, which is what says there is nothing to show.
+## Four things NVDA found
 
-## The other three backends
+Driving the window with a screen reader turned up four defects that had nothing to do with defaults. All four are fixed.
 
-The issue this began from said FreeBuff, opencode and Hermes have no plan of their own and cannot answer. Two of the three do meter an account. What they do not do is meter it in windows.
+**The Chat menu could not be opened from the keyboard.** "&Chat" and "&Conversation" both claimed Alt+C. Windows opens the first match and pressing the key again does not move on to the second, so Accounts, Conversation profiles, Refresh models, History view and Diagnostics — every Chat-only command there is — sat behind Alt and four right arrows, and the menu you landed in was greyed out end to end. The Chat menu is **Alt+T** now, and Alt+C still opens Conversation. Every letter of "Chat" was already spoken for, and a menu takes an access key from a button rather than sharing it, so three buttons that were shadowed anyway give theirs up: Stop generation is **Alt+G**, Clear all is **Alt+L** and Remove selected is **Alt+E**. A test asserts no two menus share a letter and no chat button claims one a menu has.
 
-FreeBuff counts credits off a balance that refills on a date. Its CLI has no command for that either, but its own usage banner reads an account endpoint, and one request against the credentials it signed in with returns what has been spent this cycle, what is left, and when the cycle turns over. What is left is the figure worth hearing first, so the line leads with it. The percentage is derived from the two figures together, and only where they say what the cycle held - a balance that top-ups and referrals move around is the less honest half of the answer.
+**An empty History said "unknown" and then nothing.** A native list box with no items has nothing for focus to land on, so landing there announced the list, then "unknown", and the arrow keys answered in silence — which reads as a control that has broken rather than a conversation that has not started. It holds one row saying "No messages yet" now. It is not an entry: nothing offers to copy or edit it, and it goes the moment a real message arrives.
 
-```
-Credits: 750 credits left, 250 credits used this cycle, resets Wed 07 Oct 21:25 (in 29 days 23 hours)
-```
+**Chat mode started with focus inside the Agent page nobody could see.** Making a session queues its prompt's focus so the page is shown first; in Chat mode that queued call outlived the mode switch and arrived after the window was up, landing on a control inside the hidden notebook. Tab and Shift+Tab then walked a page that was not on screen until something later moved focus back. One method decides where a mode starts now, it is asked once after the window is on screen rather than before it exists, and a page that is not shown refuses focus it was queued for.
 
-Hermes runs on a pool of provider credentials rather than on one account, so there is no single figure for a percentage to be a fraction of. What it does have is the outcome it wrote against each credential, and a spent one carries the time it may be used again where the provider said so. Those are the lines it reports, with a rate limit and an empty wallet named apart because one comes back on its own and the other does not. A pool with nothing spent reports nothing.
-
-```
-Provider anthropic (claude_code): rate limit reached, resets Tue 08 Sep 05:49 (in 1 hour)
-Provider opencode-go: out of credits
-```
-
-opencode is the one backend that really meters nothing. It spends whichever provider account is connected, its server offers no route that reports one, and the rate-limit headers it does read go into deciding a retry rather than anywhere that could be asked. Saying nothing there is the truthful answer.
-
-None of this waits on a CLI it does not have to. FreeBuff's balance is one HTTP request and Hermes' pool is a file read - measured at 0.19 and 0.01 seconds against live accounts - and Codex reuses a running app-server rather than starting one.
-
-## Two other things this fixed
-
-A Hermes tab's /status was reporting opencode's connected providers as its own: Hermes had no branch of its own in the status report and fell through into opencode's. It now names the providers Hermes holds credentials for and the one it is set to use.
-
-The Claude Code usage probe never handed back the pipes of the process it started, leaking two file handles every time /status was pressed.
+**A Hermes tab's status named opencode's providers** — carried over from 0.23.0's own audit and already released there.
 
 ## What was verified
 
-Live-checked on Windows against Claude Code 2.1.263, codex-cli 0.153.4, FreeBuff 0.0.171 and Hermes 0.21.0, with real windows, a real credit balance and a real exhausted credential coming back in each. Not run on macOS or Linux.
+Live-checked on Windows with NVDA: the window opens in the Message box, the pickers open on the marked account and profile, History reads "No messages yet" as a list item with a name and a role, Alt+T opens the Chat menu and Alt+C still opens Conversation.
 
-Verified with the full regression suite (1521 tests with warnings as errors), ruff's checks and formatting, and mypy over sixteen files.
+Verified with the full regression suite (1544 tests with warnings as errors), ruff's checks and formatting, and mypy over sixteen files.

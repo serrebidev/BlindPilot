@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.24.0 - 2026-09-07
+
+- Chat mode opens on the account and conversation profile you chose. A Use as default checkbox sits under the list in Accounts and in Conversation profiles; each row says "default" in its own text, and unticking leaves none marked, which opens on the first account and no profile as before (PR #42).
+- The Chat menu could not be opened from the keyboard: it shared Alt+C with the Conversation menu, and Windows gives a shared access key to the first menu only. It is Alt+T now. Three chat buttons that were shadowed the same way move too - Stop generation to Alt+G, Clear all to Alt+L, Remove selected to Alt+E.
+- An empty History list announced "unknown" and answered no arrow key, having no item for focus to land on. It holds one "No messages yet" row now, which is not an entry and goes when a message arrives.
+- Chat mode no longer starts with focus inside the hidden Agent page, where Tab and Shift+Tab moved around a panel that was not on screen until something later moved focus back.
+
 ## v0.23.0 - 2026-09-07
 
 - Session Status reports how much of the account's allowance is left and when it comes back, for every backend that meters one: Claude Code and Codex in the five-hour and weekly windows they report, FreeBuff in the credits it counts off a balance, and Hermes in the pooled provider credentials it has stopped spending. opencode meters nothing of its own and reports nothing (PR #41).
