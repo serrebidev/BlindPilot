@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     timeout_seconds REAL NOT NULL DEFAULT 120,
     streaming INTEGER NOT NULL DEFAULT 1,
     custom_headers_json TEXT NOT NULL DEFAULT '{}',
-    custom_body_json TEXT NOT NULL DEFAULT '{}'
+    custom_body_json TEXT NOT NULL DEFAULT '{}',
+    is_default INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS profiles (
@@ -45,7 +46,8 @@ CREATE TABLE IF NOT EXISTS profiles (
     temperature REAL NULL,
     max_output_tokens INTEGER NULL,
     streaming INTEGER NULL,
-    openrouter_json TEXT NOT NULL DEFAULT '{}'
+    openrouter_json TEXT NOT NULL DEFAULT '{}',
+    is_default INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -89,7 +91,11 @@ class Database:
     # a database made by an older release needs the new column added to it or
     # every read of that table fails.
     ADDED_COLUMNS: dict[str, dict[str, str]] = {
-        "profiles": {"openrouter_json": "TEXT NOT NULL DEFAULT '{}'"},
+        "profiles": {
+            "openrouter_json": "TEXT NOT NULL DEFAULT '{}'",
+            "is_default": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "accounts": {"is_default": "INTEGER NOT NULL DEFAULT 0"},
     }
 
     def __init__(self, path: Path):
@@ -182,6 +188,24 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
+    def set_default_account(self, account_id: int | None) -> None:
+        """Make this the account Chat mode starts on, or leave none marked.
+
+        One statement clears whatever was marked before, so "the default" is a
+        fact about the table rather than something every caller has to
+        remember to tidy up after itself. None un-marks without marking
+        another, which is what unticking the box means.
+        """
+        with self.connect() as conn:
+            conn.execute("UPDATE accounts SET is_default = 0 WHERE is_default != 0")
+            if account_id is not None:
+                conn.execute("UPDATE accounts SET is_default = 1 WHERE id = ?", (account_id,))
+
+    def default_account(self) -> Account | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM accounts WHERE is_default != 0 LIMIT 1").fetchone()
+        return self._account_from_row(row) if row else None
+
     def _account_from_row(self, row: sqlite3.Row) -> Account:
         return Account(
             id=row["id"],
@@ -198,6 +222,7 @@ class Database:
             streaming=bool(row["streaming"]),
             custom_headers=json.loads(row["custom_headers_json"] or "{}"),
             custom_body=json.loads(row["custom_body_json"] or "{}"),
+            is_default=self._flag_column(row, "is_default"),
         )
 
     def list_profiles(self) -> list[Profile]:
@@ -251,6 +276,18 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
 
+    def set_default_profile(self, profile_id: int | None) -> None:
+        """Make this the profile Chat mode starts on, or leave none marked."""
+        with self.connect() as conn:
+            conn.execute("UPDATE profiles SET is_default = 0 WHERE is_default != 0")
+            if profile_id is not None:
+                conn.execute("UPDATE profiles SET is_default = 1 WHERE id = ?", (profile_id,))
+
+    def default_profile(self) -> Profile | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM profiles WHERE is_default != 0 LIMIT 1").fetchone()
+        return self._profile_from_row(row) if row else None
+
     def _profile_from_row(self, row: sqlite3.Row) -> Profile:
         streaming_raw = row["streaming"]
         streaming = None if streaming_raw is None else bool(streaming_raw)
@@ -264,7 +301,21 @@ class Database:
             max_output_tokens=row["max_output_tokens"],
             streaming=streaming,
             openrouter=OpenRouterFeatures.from_dict(self._json_column(row, "openrouter_json")),
+            is_default=self._flag_column(row, "is_default"),
         )
+
+    @staticmethod
+    def _flag_column(row: sqlite3.Row, name: str) -> bool:
+        """Read a boolean column, tolerating a row that predates it.
+
+        Same reasoning as `_json_column`: a row read back before the migration
+        has run does not carry the column, and "no default is marked" is the
+        right answer there rather than an exception.
+        """
+        try:
+            return bool(row[name])
+        except (IndexError, KeyError):
+            return False
 
     @staticmethod
     def _json_column(row: sqlite3.Row, name: str) -> object:

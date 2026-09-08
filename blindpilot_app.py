@@ -5421,6 +5421,13 @@ class SessionPanel(wx.Panel):
             # screen. Guarded here rather than at the four call sites, because
             # a fifth would not know to guard itself.
             return
+        if not self.IsShownOnScreen():
+            # Chat mode hides the whole notebook, and this is called from a
+            # CallAfter queued when the session was made. A control nobody can
+            # see must not take focus: Tab and Shift+Tab would walk a page that
+            # is not on screen, and the window would look like it had lost
+            # focus altogether until something moved it back.
+            return
         self.prompt.SetFocus()
 
     def focus_first_control(self) -> None:
@@ -9091,7 +9098,11 @@ class MainFrame(wx.Frame):
         ]
         for item in self._chat_menu_items:
             item.Enable(False)
-        menubar.Append(chat_menu, "&Chat")
+        # Cha&t rather than &Chat: the Conversation menu already has Alt+C, and
+        # a second menu claiming it is a menu with no access key at all --
+        # Windows opens the first and pressing it again does not move on. T is
+        # free once Stop generation gives it up, which it does in chat_panel.
+        menubar.Append(chat_menu, "Cha&t")
 
         help_menu = wx.Menu()
         update_item = help_menu.Append(
@@ -9298,6 +9309,12 @@ class MainFrame(wx.Frame):
         self._add_session(initial_cwd)
         self._fit_tab_strip()
         self._set_app_mode(self._app_mode, announce_change=False)
+        # Setting focus before the frame is on screen does not stick: Windows
+        # has no visible window to give it to. Asking again after everything
+        # queued during construction has run is what makes the mode that was
+        # restored the mode the first keystroke lands in.
+        if not _STARTUP_CHECK:
+            wx.CallAfter(self.focus_for_mode)
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
 
@@ -9501,14 +9518,24 @@ class MainFrame(wx.Frame):
         _save_config(cfg)
         # A startup check shows no window, so there is nothing here to focus
         # into, and asking for focus would take it from whoever is running it.
-        if not _STARTUP_CHECK:
-            page = self.notebook.GetCurrentPage()
-            if show_agent and isinstance(page, SessionPanel):
-                page.focus_prompt()
-            elif not show_agent and chat_panel is not None:
-                chat_panel.message_input.SetFocus()
+        self.focus_for_mode()
         if announce_change:
             self._announce_setting(f"{APP_MODE_LABELS[mode]} mode")
+
+    def focus_for_mode(self) -> None:
+        """Put focus where the mode that is showing actually starts.
+
+        One place decides it, so the answer cannot depend on the order two
+        deferred calls happen to run in.
+        """
+        if _STARTUP_CHECK or not self:
+            return
+        if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
+            self.chat_panel.message_input.SetFocus()
+            return
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.focus_prompt()
 
     def _refresh_chat_models(self) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:

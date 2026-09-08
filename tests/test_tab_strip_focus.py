@@ -101,6 +101,9 @@ def test_switching_sessions_from_elsewhere_still_lands_in_the_conversation(monke
         frame = _frame(monkeypatch, tmp_path)
         try:
             frame._add_session(str(tmp_path))
+            # The window asks for its own opening focus once it is up. Let that
+            # run before watching, or the switch below is credited with it.
+            wx.Yield()
             spoken: list[str] = []
             monkeypatch.setattr(blindpilot_app, "announce", lambda text: spoken.append(text))
             monkeypatch.setattr(
