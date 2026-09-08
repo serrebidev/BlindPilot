@@ -1,21 +1,49 @@
-# BlindPilot 0.22.1
+# BlindPilot 0.23.0
 
-Claude Code keeps its process between turns now, so the background agents a turn leaves running stop dying with it.
+Session Status now says how much of your account's allowance is left and when it comes back - for every backend that meters one.
 
-## The agents that died with the turn
+## What /status was not saying
 
-A BlindPilot turn used to be a process. Each message started a fresh `claude -p --input-format stream-json`, the conversation carried on through `--resume`, and when the turn's result arrived, BlindPilot closed the process's stdin. The CLI then shut itself down - and took with it anything still running inside it. The worker did wait on `subagent_stats` before closing, which protected agents spawned in the background. It could not protect an agent resumed with SendMessage: in Claude Code 2.1.258, `started_in_background` is counted only in the Agent tool's spawn path, and a resume records nothing, so a running resumed agent was invisible to the count and the turn ended anyway. The log showed it as `turn ended early: exit_code=1 completed=True`, five times in one day on September 5, each followed by the app being restarted and the agent's work lost.
+The report named the backend, its version and the account signed in to it, and stopped there. How much of the plan was spent, and how long until it refilled, was the question people were actually opening it to ask, and the only way to find out was to leave BlindPilot and ask the provider's own tool.
 
-## One process per tab
+Claude Code and Codex both answer it, and neither answers it on a command line. Claude Code takes a `get_usage` control request on the same stream-json channel a turn is driven over; Codex answers `account/rateLimits/read` on its app-server, which BlindPilot borrows from the pool where a tab already has one running. Both report the same shape: a five-hour window, a weekly one, sometimes a weekly one for a single model, each with how full it is and when it empties.
 
-PR #39 moves the process to the tab in a new `claude_session.py`, registered with the same pool Codex and Hermes already use, with the same fifteen-minute idle reaper. A turn borrows the process, writes its message, reads the stream to its result and detaches; the process stays. The first turn starts it, later turns reuse it, and closing the tab, switching backend, changing the working directory or the reasoning effort, or quitting ends it through paths that were already tested. Model and permission-mode changes travel down the stream as control requests and keep the process; a session that refuses the change is replaced with one started under the new setting.
+```
+Five-hour limit: 41% used, resets Tue 08 Sep 00:59 (in 3 hours)
+Weekly limit: 8% used, resets Mon 14 Sep 13:59 (in 6 days 16 hours)
+```
 
-What an agent reports after its turn has ended arrives as a late turn the panel starts on its own: the working indicator and earcon run, rows appear, the question dialog opens if the agent asks one, and the answer lands as a new response. Nobody typed anything, so there is no "You:" row. The announcement is one new sentence, "A background agent has reported. Receiving response". Two sentences the pool has always had become reachable for Claude Code - "Claude Code had stopped running. Restarting it, which takes a moment." and "Claude Code was idle and has been closed. The next message will restart it." - and two old ones are gone because nothing can say them any more: "Waiting for N background agents to finish" and "No response received". A process that ends without a return code says "Claude Code exited without a code". Stop sends the CLI an interrupt and waits up to five seconds for its confirmation, dropping the process only if none comes.
+The reset is said as a time and as a wait, because "resets at 08:50" is no help to somebody who does not already know what time it is now. A window the backend does not report is left out rather than written as unknown, and an account the windows do not apply to at all - an API key, Bedrock, Vertex - gets no usage section, which is what says there is nothing to show.
 
-Because the process no longer starts per turn, the MCP servers no longer reconnect at the top of every message. Codex, opencode and Hermes already held their connections across turns; this closes the one backend that tore its process down.
+## The other three backends
+
+The issue this began from said FreeBuff, opencode and Hermes have no plan of their own and cannot answer. Two of the three do meter an account. What they do not do is meter it in windows.
+
+FreeBuff counts credits off a balance that refills on a date. Its CLI has no command for that either, but its own usage banner reads an account endpoint, and one request against the credentials it signed in with returns what has been spent this cycle, what is left, and when the cycle turns over. What is left is the figure worth hearing first, so the line leads with it. The percentage is derived from the two figures together, and only where they say what the cycle held - a balance that top-ups and referrals move around is the less honest half of the answer.
+
+```
+Credits: 750 credits left, 250 credits used this cycle, resets Wed 07 Oct 21:25 (in 29 days 23 hours)
+```
+
+Hermes runs on a pool of provider credentials rather than on one account, so there is no single figure for a percentage to be a fraction of. What it does have is the outcome it wrote against each credential, and a spent one carries the time it may be used again where the provider said so. Those are the lines it reports, with a rate limit and an empty wallet named apart because one comes back on its own and the other does not. A pool with nothing spent reports nothing.
+
+```
+Provider anthropic (claude_code): rate limit reached, resets Tue 08 Sep 05:49 (in 1 hour)
+Provider opencode-go: out of credits
+```
+
+opencode is the one backend that really meters nothing. It spends whichever provider account is connected, its server offers no route that reports one, and the rate-limit headers it does read go into deciding a retry rather than anywhere that could be asked. Saying nothing there is the truthful answer.
+
+None of this waits on a CLI it does not have to. FreeBuff's balance is one HTTP request and Hermes' pool is a file read - measured at 0.19 and 0.01 seconds against live accounts - and Codex reuses a running app-server rather than starting one.
+
+## Two other things this fixed
+
+A Hermes tab's /status was reporting opencode's connected providers as its own: Hermes had no branch of its own in the status report and fell through into opencode's. It now names the providers Hermes holds credentials for and the one it is set to use.
+
+The Claude Code usage probe never handed back the pipes of the process it started, leaking two file handles every time /status was pressed.
 
 ## What was verified
 
-The design's live check - spawn a foreground agent, resume it with SendMessage, confirm the follow-up arrives as a late turn and the process id holds across the three turns - has not run yet. The machine this was built on does have a signed-in CLI, but its weekly usage limit is spent until September 7, so the check runs after the reset and will be reported on the pull request.
+Live-checked on Windows against Claude Code 2.1.263, codex-cli 0.153.4, FreeBuff 0.0.171 and Hermes 0.21.0, with real windows, a real credit balance and a real exhausted credential coming back in each. Not run on macOS or Linux.
 
-Verified with the full regression suite (1507 tests with warnings as errors), ruff's checks and formatting, mypy over sixteen files, the startup GUI smoke run, and CI on Windows, macOS and Linux.
+Verified with the full regression suite (1521 tests with warnings as errors), ruff's checks and formatting, and mypy over sixteen files.
