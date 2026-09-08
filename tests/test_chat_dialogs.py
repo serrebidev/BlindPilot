@@ -18,6 +18,7 @@ from accessible_ai.services.model_service import ModelService
 from accessible_ai.storage.credentials import CredentialStore
 from accessible_ai.storage.database import Database
 from accessible_ai.ui.accounts import AccountsDialog
+from accessible_ai.ui.conversations import ConversationsDialog
 from accessible_ai.ui.diagnostics import DiagnosticsDialog
 from accessible_ai.ui.profiles import ProfilesDialog
 
@@ -31,6 +32,7 @@ def _dialogs(tmp_path: Path) -> list[wx.Dialog]:
     return [
         AccountsDialog(None, db, credentials, ModelService(db, credentials)),
         ProfilesDialog(None, db),
+        ConversationsDialog(None, db),
         DiagnosticsDialog(None),
     ]
 

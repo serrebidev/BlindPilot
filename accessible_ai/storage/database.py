@@ -9,6 +9,7 @@ from typing import Iterator
 from accessible_ai.models import (
     Account,
     Conversation,
+    ConversationSummary,
     Message,
     MessageAttachment,
     OpenRouterFeatures,
@@ -387,6 +388,62 @@ class Database:
                 "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (row["conversation_id"],),
             )
+
+    def list_conversations(self, limit: int = 500) -> list[ConversationSummary]:
+        """Every conversation on this machine, most recently touched first.
+
+        Conversations were written and never read: the table has been filled
+        since Chat mode shipped and nothing could open one again. The joins are
+        left ones on purpose -- a conversation outlives the profile or account
+        it was started on, and losing either must not lose the conversation.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.id, c.title, c.updated_at, c.model,
+                       p.name AS profile_name, a.name AS account_name,
+                       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id)
+                           AS message_count
+                FROM conversations c
+                LEFT JOIN profiles p ON p.id = c.profile_id
+                LEFT JOIN accounts a ON a.id = c.account_id
+                ORDER BY c.updated_at DESC, c.id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [
+            ConversationSummary(
+                id=int(row["id"]),
+                title=row["title"] or "",
+                updated_at=row["updated_at"] or "",
+                message_count=int(row["message_count"] or 0),
+                profile_name=row["profile_name"] or "",
+                account_name=row["account_name"] or "",
+                model=row["model"] or "",
+            )
+            for row in rows
+        ]
+
+    def get_conversation(self, conversation_id: int) -> Conversation | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return Conversation(
+            id=row["id"],
+            title=row["title"],
+            profile_id=row["profile_id"],
+            account_id=row["account_id"],
+            model=row["model"],
+            system_prompt_snapshot=row["system_prompt_snapshot"],
+        )
+
+    def delete_conversation(self, conversation_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
     def last_message(self, conversation_id: int) -> Message | None:
         """The newest message alone, without its attachments.
