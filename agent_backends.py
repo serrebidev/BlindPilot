@@ -314,12 +314,14 @@ BACKEND_CODEX = "codex"
 BACKEND_FREEBUFF = "freebuff"
 BACKEND_OPENCODE = "opencode"
 BACKEND_HERMES = "hermes"
+BACKEND_MUSE = "muse"
 BACKEND_IDS = (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_FREEBUFF,
     BACKEND_OPENCODE,
     BACKEND_HERMES,
+    BACKEND_MUSE,
 )
 BACKEND_LABELS = {
     BACKEND_CLAUDE: "Claude Code",
@@ -327,6 +329,7 @@ BACKEND_LABELS = {
     BACKEND_FREEBUFF: "FreeBuff",
     BACKEND_OPENCODE: "opencode",
     BACKEND_HERMES: "Hermes",
+    BACKEND_MUSE: "Muse Code",
 }
 
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
@@ -537,6 +540,22 @@ BACKENDS = {
         # the same whether Hermes is here, in WSL, or on another machine.
         uploads_attachments=True,
     ),
+    BACKEND_MUSE: BackendInfo(
+        BACKEND_MUSE,
+        "Muse Code",
+        "muse",
+        "See https://developer.meta.com/ai/products/muse-code/ -- one-line install: "
+        "curl -fsSL https://dev.meta.ai/install.sh | bash",
+        # `muse login` is the device flow: it prints the sign-in address and
+        # waits for the browser approval. It needs no code typed back, so the
+        # login runner watches for the URL like Claude's and Codex's.
+        ("login",),
+        True,
+        True,
+        True,
+        True,
+        supports_compaction=True,
+    ),
 }
 
 # What a "compact this conversation" turn looks like per provider: the text to
@@ -555,6 +574,9 @@ _COMPACTION_REQUESTS: dict[str, tuple[str, dict]] = {
     # for the command is /compress; the text shown to the user says what was
     # asked for in BlindPilot's words, and the worker acts on the flag.
     BACKEND_HERMES: ("/compact", {"compact": True}),
+    # Muse compacts the same way, over session/compact; the worker turns the
+    # flag into that request.
+    BACKEND_MUSE: ("/compact", {"compact": True}),
 }
 
 
@@ -578,6 +600,9 @@ def normalize_backend(value: object) -> str:
         "hermes": BACKEND_HERMES,
         "hermesagent": BACKEND_HERMES,
         "nous": BACKEND_HERMES,
+        "muse": BACKEND_MUSE,
+        "musecode": BACKEND_MUSE,
+        "meta": BACKEND_MUSE,
     }
     return aliases.get(compact, BACKEND_CLAUDE)
 
@@ -630,6 +655,16 @@ def find_backend_cli(backend: str) -> Optional[str]:
         from hermes_backend import find_hermes_cli
 
         return find_hermes_cli()
+    if info.id == BACKEND_MUSE:
+        # Muse's launcher is a bash script that only runs on macOS and Linux,
+        # and on this machine that means inside WSL. The ordinary fallback
+        # search would happily find the same-named launcher a user copied into
+        # ~/.local/bin on the Windows side -- a file Popen cannot run -- and
+        # then every turn would die on WinError 193, so Muse answers from its
+        # own adapter, which knows about WSL, before any path-based search.
+        from muse_backend import muse_cli_path
+
+        return muse_cli_path()
     # A backend BlindPilot installed itself is complete, writable by this user,
     # and updated through the same prefix. Prefer it over an older system/npm
     # copy that happens to occur earlier on PATH.
@@ -664,6 +699,30 @@ def find_backend_cli(backend: str) -> Optional[str]:
     return None
 
 
+def _muse_version_probe() -> str:
+    """Muse's version through its own bridge, patchable like the rest.
+
+    Same indirection as `_muse_signed_in_checked`: the tests that loop over
+    every backend patch this rather than booting the real WSL distribution
+    this machine happens to have.
+    """
+    from muse_backend import muse_version
+
+    return muse_version()
+
+
+def _muse_signed_in_checked() -> bool:
+    """The Muse signed-in answer, behind an indirection the suite can patch.
+
+    Hermes gets the same treatment: a name in this module's own namespace is
+    what monkeypatch can reach, and the tests that loop over every backend
+    must never reach into the real WSL distribution on a machine that has one.
+    """
+    from muse_backend import muse_signed_in
+
+    return muse_signed_in()
+
+
 def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
     """Best-effort non-interactive authentication check."""
     backend = normalize_backend(backend)
@@ -671,6 +730,8 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
         from hermes_backend import hermes_auth_ok
 
         return hermes_auth_ok(timeout=max(timeout, 25))
+    if backend == BACKEND_MUSE:
+        return _muse_signed_in_checked()
     binary = find_backend_cli(backend)
     if not binary:
         return False
@@ -1562,6 +1623,18 @@ def _hermes_account_lines() -> list[str]:
     return lines
 
 
+def _muse_account_lines() -> list[str]:
+    """Muse signs in with one Meta account, and what it stored is the answer.
+
+    Muse has no auth-status subcommand, so the credential file is read the
+    way FreeBuff's is. The reading itself lives in muse_backend, which knows
+    whether the file is on this side of a WSL boundary or not.
+    """
+    from muse_backend import muse_account_lines
+
+    return muse_account_lines()
+
+
 def backend_status(backend: str, timeout: int = 20) -> str:
     """What the chosen backend can say about itself, as lines of plain text.
 
@@ -1582,9 +1655,16 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         lines.append("Command line: not installed")
         return "\n".join(lines)
     lines.append(f"Command line: {binary}")
-    _code, version = _probe_backend(binary, ["--version"], min(timeout, 20))
-    if version:
-        lines.append(f"Version: {version.splitlines()[0].strip()}")
+    if backend == BACKEND_MUSE:
+        # The "binary" is a bash launcher inside WSL on Windows; Popen cannot
+        # run it from here, so the version is asked through Muse's own bridge.
+        version = _muse_version_probe()
+        if version:
+            lines.append(f"Version: {version.splitlines()[0].strip()}")
+    else:
+        _code, version = _probe_backend(binary, ["--version"], min(timeout, 20))
+        if version:
+            lines.append(f"Version: {version.splitlines()[0].strip()}")
     if backend == BACKEND_CLAUDE:
         lines.extend(_claude_account_lines(*_probe_backend(binary, ["auth", "status"], timeout)))
     elif backend == BACKEND_CODEX:
@@ -1593,6 +1673,8 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         lines.extend(_freebuff_account_lines())
     elif backend == BACKEND_HERMES:
         lines.extend(_hermes_account_lines())
+    elif backend == BACKEND_MUSE:
+        lines.extend(_muse_account_lines())
     else:
         lines.extend(_opencode_account_lines())
     lines.extend(backend_usage_lines(backend, binary, timeout))
@@ -1722,6 +1804,13 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             "Applies to every project. YAML rather than JSON, and it belongs to "
             "the Hermes this backend talks to: a Hermes reached over the network "
             "reads the file on that machine, not this one.",
+        ),
+        SettingsFile(
+            BACKEND_MUSE,
+            "global",
+            home / ".config" / "muse" / "auth.json",
+            "Muse's stored sign-in and provider credentials. On Windows this file "
+            "lives inside the WSL distribution the CLI runs in, not on this side.",
         ),
     ]
     if project is not None:
@@ -7036,4 +7125,10 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         from hermes_worker import HermesWorker
 
         return HermesWorker
+    if backend == BACKEND_MUSE:
+        # Same shape as Hermes: imported on demand, so a machine without Muse
+        # (and, on Windows, without WSL) pays nothing for it.
+        from muse_worker import MuseWorker
+
+        return MuseWorker
     return claude_worker

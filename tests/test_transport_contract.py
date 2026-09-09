@@ -120,6 +120,9 @@ FAKES: list[tuple[str, str, str, bool]] = [
     # script and ends like a pipe when it runs out.
     ("test_hermes_questions", "_RecordingTransport", "kl()", False),
     ("test_hermes_slash", "_ScriptedTransport", "kl([])", True),
+    # The Muse worker's scripted MSP host: replays a canned JSON-RPC
+    # conversation and ends like a pipe when it runs out.
+    ("test_muse_worker", "_ScriptedMuseTransport", "kl([])", True),
 ]
 
 REAL: list[tuple[str, object, bool]] = [

@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.26.0 - 2026-09-08
+
+- Muse Code, Meta's terminal coding agent, is now a backend BlindPilot can drive. Its CLI ships for macOS and Linux, so on Windows it is reached inside WSL through the same bridge Hermes uses: the working directory is translated on the way over and always handed over absolute, because WSL's own `--cd` rejects a relative one (measured: `Wsl/E_INVALIDARG`, printed on the stream the protocol reads). Turns ride Muse's own host protocol, MSP — JSON-RPC 2.0 over the stdio of `muse serve` — with the answer streamed a fragment at a time and spoken only in whole sentences, steering and cancelling mid-turn, tool approvals and the agent's own clarifying questions put in front of the person, compaction on request, and past conversations reopened by session id.
+- The setup wizard installs Muse through its official script (inside WSL on Windows, where the script cannot run natively) and signs you in through its device flow: the sign-in page is opened in your browser and the wizard reports whether the CLI came back signed in. `/status` names the launcher, its version, and the account Muse stored at sign-in, and the settings dialog points at Muse's own credential file.
+- The model picker reads Muse's live catalog from a real `muse serve` host — the same request a mid-conversation model switch is served by — and offers the reasoning-effort levels the CLI documents, filtered to the vocabulary MSP itself accepts so a tier the protocol would refuse is never offered.
+
 ## v0.25.0 - 2026-09-07
 
 - A Chat conversation belongs to the profile it was started on. A profile restored as the default was shown but never applied, so the first conversation of every session was created on the wrong account and model while being recorded against a profile naming another; and a conversation re-read its temperature, token limit and OpenRouter tools from the profile on every request while keeping the system prompt it started with, so editing a profile changed a conversation half way through. Both fixed (PR #43).

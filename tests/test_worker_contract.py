@@ -17,6 +17,7 @@ from __future__ import annotations
 import agent_backends
 import blindpilot_app
 from hermes_worker import HermesWorker
+from muse_worker import MuseWorker
 
 WORKERS = [
     blindpilot_app.ClaudeWorker,
@@ -24,6 +25,7 @@ WORKERS = [
     agent_backends.FreebuffWorker,
     agent_backends.OpencodeWorker,
     HermesWorker,
+    MuseWorker,
 ]
 
 

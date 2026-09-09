@@ -82,6 +82,7 @@ from agent_backends import (
     BACKEND_HERMES,
     BACKEND_IDS,
     BACKEND_LABELS,
+    BACKEND_MUSE,
     BACKEND_OPENCODE,
     BACKENDS,
     FREEBUFF_PREFERRED_MODEL,
@@ -127,6 +128,12 @@ from hermes_backend import (
     hermes_session_catalog,
     remote_ws_url,
     wsl_path_to_windows,
+)
+from muse_backend import (
+    muse_cli_path,
+    muse_installed,
+    wsl_exe as muse_wsl_exe,
+    reset_discovery as reset_muse_discovery,
 )
 
 from markdown_rows import (
@@ -283,7 +290,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.25.0"
+APP_VERSION = "0.26.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -944,6 +951,74 @@ def install_hermes(log: Callable[[str], None]) -> Optional[str]:
     return binary
 
 
+MUSE_INSTALL_SH_URL = "https://dev.meta.ai/install.sh"
+
+
+def _muse_install_argv() -> Optional[List[str]]:
+    """Muse's official installer, run wherever Muse can actually live.
+
+    Muse's CLI ships for macOS and Linux only, so on Windows there is no
+    PowerShell one-liner to run natively: the install happens inside WSL, if
+    WSL is here, and cannot happen at all if it is not.
+    """
+    if platform.system() == "Windows":
+        if not muse_installed():
+            return None
+        launcher = muse_wsl_exe()
+        if launcher is None:
+            return None
+        # curl inside the distribution, bash inside it: the script is
+        # POSIX-only, so running it from Windows is not an option to fall
+        # back to.
+        return [launcher, "-e", "bash", "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]
+    if shutil.which("curl") is None:
+        return None
+    shell = shutil.which("bash") or shutil.which("sh")
+    if shell is None:
+        return None
+    return [shell, "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]
+
+
+def _muse_missing_prereq_message() -> str:
+    if platform.system() == "Windows":
+        return (
+            "Muse Code runs on macOS and Linux, so on Windows it is installed "
+            "inside WSL -- and WSL with a working distribution was not found on "
+            "this computer. Install WSL first, then try again."
+        )
+    return _missing_prereq_message("Muse's installer")
+
+
+def install_muse(log: Callable[[str], None]) -> Optional[str]:
+    """Run Muse's official installer for this platform and report the result.
+
+    Same discipline as install_hermes: the installer's exit code is advisory,
+    and a working `muse` afterwards is the fact that counts. On Windows that
+    launcher lives inside WSL, so discovery is reset before the check -- the
+    first probe's answer predates the install and must not outlive it.
+    """
+    argv = _muse_install_argv()
+    if argv is None:
+        log(_muse_missing_prereq_message())
+        return None
+
+    log(
+        "Downloading and running the official Muse Code installer. "
+        "This usually takes under a minute."
+    )
+    rc = _run_logged_process(argv, log)
+    if rc is None:
+        return None
+
+    reset_muse_discovery()
+    if not muse_installed():
+        log(f"The installer finished with exit code {rc} but `muse` was not found afterwards.")
+        return None
+    path = muse_cli_path()
+    log(f"Installed: {path}")
+    return path
+
+
 def _path_shells() -> str:
     """The shells worth naming when telling the user to open a new terminal."""
     if platform.system() == "Windows":
@@ -1302,6 +1377,8 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
         # Hermes is not on npm. Its official per-platform script installer is
         # the install path, the same shape as Claude's.
         return install_hermes(log)
+    if backend == BACKEND_MUSE:
+        return install_muse(log)
     label = backend_label(backend)
     npm = _find_npm()
     if npm is None:
@@ -1444,6 +1521,23 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
             return False
         if _hermes_binary_after_install() is None:
             log(f"{label} update finished, but `hermes` was not found afterwards.")
+            return False
+        log(f"{label} is up to date.")
+        return True
+    elif backend == BACKEND_MUSE:
+        # Same shape as Hermes: the official script installer upgrades in
+        # place, and success is a working launcher afterwards -- inside WSL
+        # on Windows.
+        muse_argv = _muse_install_argv()
+        if muse_argv is None:
+            log(_muse_missing_prereq_message())
+            return False
+        log(f"Running the official {label} installer to update...")
+        rc = _run_logged_process(muse_argv, log)
+        if rc is None:
+            return False
+        if not muse_installed():
+            log(f"{label} update finished, but `muse` was not found afterwards.")
             return False
         log(f"{label} is up to date.")
         return True
@@ -1762,6 +1856,19 @@ def probe_model_options(
         models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
         options = ModelOptions(models, efforts, current_model, current_effort, error)
         if models:
+            _remember_model_options(backend, cwd, binary, options)
+        return options
+
+    if backend == BACKEND_MUSE:
+        # The catalog comes from Muse's own `model/list` on a live `muse
+        # serve` host, which is the same request a model switch is served
+        # by. On Windows that host runs inside WSL, so the probe is asked
+        # of the translated directory rather than this one.
+        from muse_backend import muse_model_options
+
+        models, efforts, current_model, current_effort, error = muse_model_options(cwd)
+        options = ModelOptions(models, efforts, current_model, current_effort, error)
+        if models and binary is not None:
             _remember_model_options(backend, cwd, binary, options)
         return options
 
@@ -7847,6 +7954,14 @@ class SetupWizard(wx.Dialog):
     def _find_selected_cli(self) -> Optional[str]:
         if self.backend == BACKEND_CLAUDE:
             return _find_claude()
+        if self.backend == BACKEND_MUSE:
+            # The launcher lives inside WSL on Windows, where a Windows
+            # process cannot run it; asking the ordinary search would find
+            # nothing and the wizard would offer an install that already
+            # happened. The Muse adapter knows where its own CLI is.
+            from muse_backend import muse_cli_path
+
+            return muse_cli_path()
         return find_backend_cli(self.backend)
 
     def _selected_install_argv(self) -> Optional[List[str]]:
@@ -7854,6 +7969,8 @@ class SetupWizard(wx.Dialog):
             return _install_argv()
         if self.backend == BACKEND_HERMES:
             return _hermes_install_argv()
+        if self.backend == BACKEND_MUSE:
+            return _muse_install_argv()
         argv = _npm_install_argv(self.backend)
         if argv is not None:
             return argv
@@ -8019,7 +8136,8 @@ class SetupWizard(wx.Dialog):
             # own. Offer it when the prerequisites are here, and name what is
             # missing when they are not. npm is never named, since saying it
             # would send the user after the wrong thing.
-            if _hermes_install_argv() is not None:
+            argv = self._selected_install_argv()
+            if argv is not None:
                 self._cli_status.SetLabel(f"{info.label} is not installed.")
                 self._cli_detail.SetLabel(
                     f"Choose Install {info.label} to run its official installer. No "
@@ -8036,7 +8154,7 @@ class SetupWizard(wx.Dialog):
             else:
                 self._cli_status.SetLabel(f"{info.label} was not found.")
                 self._cli_detail.SetLabel(
-                    f"{_hermes_missing_prereq_message()}\n\n"
+                    f"{_muse_missing_prereq_message() if self.backend == BACKEND_MUSE else _hermes_missing_prereq_message()}\n\n"
                     f"Install {info.label} by running this in a terminal:\n\n"
                     f"{info.install_command}\n\n"
                     "Then choose Check Again, or go Back and select another backend."
@@ -8130,6 +8248,8 @@ class SetupWizard(wx.Dialog):
             # nothing; say what is missing in the backend's own terms.
             if _backend_installs_with_npm(self.backend):
                 announce(_missing_prereq_message())
+            elif self.backend == BACKEND_MUSE:
+                announce(_muse_missing_prereq_message())
             else:
                 announce(_hermes_missing_prereq_message())
             return
@@ -8294,10 +8414,18 @@ class SetupWizard(wx.Dialog):
         self._open_page_btn.Disable()
         # A setup that asks its questions in a terminal is not watched for a
         # browser address; `_run_login` opens a console for it instead.
+        # Muse's launcher is a bash script inside WSL on Windows, which Popen
+        # cannot execute; its wrapper rebuilds the argv through the same
+        # bridge every other Muse path takes.
+        muse_popen = None
+        if self.backend == BACKEND_MUSE:
+            from muse_backend import muse_popen_wrapper
+
+            muse_popen = muse_popen_wrapper()
         self._login = (
             None
             if BACKENDS[self.backend].login_needs_terminal
-            else BackendLogin(self.backend, self._backend_path)
+            else BackendLogin(self.backend, self._backend_path, popen=muse_popen)
         )
         self._signin_status.SetLabel(
             "Waiting for sign-in… Complete authentication in your browser, then return here."
