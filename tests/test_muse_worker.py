@@ -164,11 +164,15 @@ def test_the_client_introduces_itself_with_a_protocol_valid_name(monkeypatch):
 
 def test_permission_modes_map_onto_the_protocol_vocabulary(monkeypatch):
     # The window's mode names are what the user picked from; what the wire
-    # takes is MSP's own closed enum. Both sides are pinned here.
+    # takes is MSP's own closed enum. The host seals its approval ceiling at
+    # startup -- allowAll and onRequest are refused on a stock `muse serve`
+    # (measured) -- so every asking mode starts promptUnmatched and bypass is
+    # honoured by auto-approving client-side. Both sides are pinned here.
     cases = {
-        "bypassPermissions": "allowAll",
+        "bypassPermissions": "promptUnmatched",
         "default": "promptUnmatched",
-        "acceptEdits": "onRequest",
+        "acceptEdits": "promptUnmatched",
+        "dontAsk": "denyUnmatched",
     }
     for window_mode, protocol_mode in cases.items():
         transport = _with_script(
@@ -326,10 +330,21 @@ def test_cancelling_sends_the_cancel_with_a_command_id():
 # --------------------------------------------------------------------------
 
 
-def test_an_approval_is_answered_with_the_choice_and_the_requirement_carried_through(monkeypatch):
-    # currentRequirementId is the multi-stage race guard: a decision aimed at
-    # one stage must never satisfy another, so it is passed through verbatim.
-    requirement = {"stage": 2, "nonce": "abc"}
+def _approval_choices() -> list[dict]:
+    """The choices a real request carries: server ids, each naming its decision."""
+    return [
+        {"choiceId": "c-approve", "decision": "approved", "label": "Approve"},
+        {
+            "choiceId": "c-session",
+            "decision": "approvedForSession",
+            "label": "Approve for session",
+        },
+        {"choiceId": "c-deny", "decision": "denied", "label": "Deny"},
+    ]
+
+
+def _approval_turn(monkeypatch, params_extra: dict) -> _ScriptedMuseTransport:
+    """A full turn whose one event is an approval request, wired in."""
     frames = [
         _init_reply(101),
         {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
@@ -341,28 +356,99 @@ def test_an_approval_is_answered_with_the_choice_and_the_requirement_carried_thr
                 "approvalId": "ap-1",
                 "sessionId": "sess-1",
                 "toolName": "shell",
-                "subject": {"command": "rm -rf /"},
-                "currentRequirementId": requirement,
+                "subject": {"command": "make all"},
+                "currentRequirementId": {"stage": 1, "nonce": "k1"},
+                **params_extra,
             },
         },
         {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
     ]
-    transport = _with_script(monkeypatch, frames)
-    recorder = _Recorder()
-    answers = [["Allow once"]]
+    return _with_script(monkeypatch, frames)
+
+
+def test_bypass_auto_approves_without_asking(monkeypatch):
+    # The host refuses allowAll outright (the approval ceiling is sealed at
+    # startup), so bypass is done here: every request is approved as it
+    # arrives, and the question callback is never called.
+    transport = _approval_turn(monkeypatch, {"availableChoices": _approval_choices()})
+    asked: list = []
     worker = MuseWorker(
         "go",
         None,
         ".",
         "bypassPermissions",
-        on_question=lambda questions: answers,
-        **recorder.callbacks(),
+        on_question=lambda questions: asked.append(questions) or [["Deny"]],
+        **_Recorder().callbacks(),
     )
 
     _run(worker)
 
     decide = transport.sent_with_method("approval/decide")
-    assert decide and decide[0]["params"]["choiceId"] == "approved"
+    assert decide and decide[0]["params"]["choiceId"] == "c-approve"
+    assert decide[0]["params"]["approvalId"] == "ap-1"
+    assert asked == [], "bypass must never put the request in front of the person"
+
+
+def test_a_cancel_arriving_during_an_approval_denies_it_rather_than_resuming_work(monkeypatch):
+    transport = _approval_turn(monkeypatch, {"availableChoices": _approval_choices()})
+
+    def cancel_then_answer(questions):
+        worker.cancel()
+        return [["Allow once"]]
+
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "default",
+        on_question=cancel_then_answer,
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    decide = transport.sent_with_method("approval/decide")
+    assert decide and decide[0]["params"]["choiceId"] == "c-deny"
+
+
+def test_command_ids_are_uuidv7():
+    # Measured: session/start answers invalidParams for a v4 commandId
+    # ("expected UUIDv7"), so a valid-looking id that is not v7 breaks every
+    # session. The version nibble is what the host checks.
+    import uuid as _uuid
+
+    value = muse_worker._uuid()
+    parsed = _uuid.UUID(value)
+    assert parsed.version == 7, value
+
+
+def test_an_approval_is_answered_with_the_choice_and_the_requirement_carried_through(monkeypatch):
+    # currentRequirementId is the multi-stage race guard: a decision aimed at
+    # one stage must never satisfy another, so it is passed through verbatim.
+    # The choiceId is the server's own id (c-approve), not the decision string
+    # -- the schema answers -32052 for an id that is not one of the current
+    # availableChoices.
+    requirement = {"stage": 2, "nonce": "abc"}
+    transport = _approval_turn(
+        monkeypatch,
+        {
+            "availableChoices": _approval_choices(),
+            "currentRequirementId": requirement,
+        },
+    )
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "default",
+        on_question=lambda questions: [["Allow once"]],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    decide = transport.sent_with_method("approval/decide")
+    assert decide and decide[0]["params"]["choiceId"] == "c-approve"
     assert decide[0]["params"]["approvalId"] == "ap-1"
     assert decide[0]["params"]["requirementId"] == requirement
 
@@ -370,44 +456,22 @@ def test_an_approval_is_answered_with_the_choice_and_the_requirement_carried_thr
 def test_an_approval_nobody_is_here_to_answer_is_denied(monkeypatch):
     # Leaving the run wedged on an approval nobody can see is the one outcome
     # worse than refusing it.
-    frames = [
-        _init_reply(101),
-        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
-        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
-        {
-            "jsonrpc": "2.0",
-            "method": "approval/requested",
-            "params": {"approvalId": "ap-2", "sessionId": "sess-1", "toolName": "shell"},
-        },
-        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
-    ]
-    transport = _with_script(monkeypatch, frames)
-    worker = MuseWorker("go", None, ".", "bypassPermissions", **_Recorder().callbacks())
+    transport = _approval_turn(monkeypatch, {"availableChoices": _approval_choices()})
+    worker = MuseWorker("go", None, ".", "default", **_Recorder().callbacks())
 
     _run(worker)
 
     decide = transport.sent_with_method("approval/decide")
-    assert decide and decide[0]["params"]["choiceId"] == "denied"
+    assert decide and decide[0]["params"]["choiceId"] == "c-deny"
 
 
 def test_an_approval_for_the_session_maps_to_the_session_choice(monkeypatch):
-    frames = [
-        _init_reply(101),
-        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
-        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
-        {
-            "jsonrpc": "2.0",
-            "method": "approval/requested",
-            "params": {"approvalId": "ap-3", "sessionId": "sess-1", "toolName": "edit"},
-        },
-        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
-    ]
-    transport = _with_script(monkeypatch, frames)
+    transport = _approval_turn(monkeypatch, {"availableChoices": _approval_choices()})
     worker = MuseWorker(
         "go",
         None,
         ".",
-        "bypassPermissions",
+        "default",
         on_question=lambda questions: [["Allow for this conversation"]],
         **_Recorder().callbacks(),
     )
@@ -415,7 +479,28 @@ def test_an_approval_for_the_session_maps_to_the_session_choice(monkeypatch):
     _run(worker)
 
     decide = transport.sent_with_method("approval/decide")
-    assert decide and decide[0]["params"]["choiceId"] == "approvedForSession"
+    assert decide and decide[0]["params"]["choiceId"] == "c-session"
+
+
+def test_a_decision_not_on_the_menu_falls_back_to_the_denial_choice(monkeypatch):
+    # The host offered only allow-once and deny; answering with a session-wide
+    # approval would be an invalid choiceId, so the refusal is answered
+    # instead -- the one choice that cannot push work forward.
+    choices = [c for c in _approval_choices() if c["decision"] != "approvedForSession"]
+    transport = _approval_turn(monkeypatch, {"availableChoices": choices})
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "default",
+        on_question=lambda questions: [["Allow for this conversation"]],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    decide = transport.sent_with_method("approval/decide")
+    assert decide and decide[0]["params"]["choiceId"] == "c-deny"
 
 
 def test_a_mid_run_question_is_answered_with_the_picked_label(monkeypatch):

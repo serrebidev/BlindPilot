@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.26.1 - 2026-09-08
+
+- The Muse backend starts sessions again. MSP validates `session/start`'s command id as UUIDv7 — a random v4, which every other command tolerated, is refused with `invalid session/start commandId: expected UUIDv7` before any conversation begins. Ids are v7 now.
+- The same live probing found the approval mode the wire advertises is sealed by the host at startup and cannot be lifted from the client, so a default host only ever accepts `promptUnmatched` and `denyUnmatched` — the bypass mode BlindPilot asked for was rejected outright, killing the session before it began. The worker starts in `promptUnmatched` and, when the window is in bypass, answers each approval itself instead of asking; a decision must also pick from the approval's own `availableChoices` ids rather than a fixed word, and a cancel pressed while the dialog is up beats a stale answer.
+- `workspaceRoot` must be absolute on the wire too; a relative one is refused. It is already translated and absolutised in the WSL bridge, so only the fallback path needed it.
+
 ## v0.26.0 - 2026-09-08
 
 - Muse Code, Meta's terminal coding agent, is now a backend BlindPilot can drive. Its CLI ships for macOS and Linux, so on Windows it is reached inside WSL through the same bridge Hermes uses: the working directory is translated on the way over and always handed over absolute, because WSL's own `--cd` rejects a relative one (measured: `Wsl/E_INVALIDARG`, printed on the stream the protocol reads). Turns ride Muse's own host protocol, MSP — JSON-RPC 2.0 over the stdio of `muse serve` — with the answer streamed a fragment at a time and spoken only in whole sentences, steering and cancelling mid-turn, tool approvals and the agent's own clarifying questions put in front of the person, compaction on request, and past conversations reopened by session id.
