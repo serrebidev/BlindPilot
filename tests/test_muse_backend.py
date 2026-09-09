@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import platform
 import shutil
+from pathlib import Path
 
 import agent_backends
 import muse_backend
@@ -77,7 +78,9 @@ def test_a_workspace_is_made_absolute_before_it_is_handed_to_wsl(monkeypatch, tm
 
     assert received, "the workspace never reached the translator"
     resolved = received[0]
-    assert resolved.startswith(("C:", "/")), resolved
+    # Absolute in this process's own terms - whatever drive the suite's temp
+    # directory lands on - with nothing relative left to resolve.
+    assert Path(resolved).is_absolute(), resolved
     assert ".." not in resolved
 
 
