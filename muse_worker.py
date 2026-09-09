@@ -35,6 +35,7 @@ import subprocess
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from agent_backends import (
@@ -52,15 +53,28 @@ from muse_backend import muse_command
 # Permission-mode mapping. MSP approval modes are fixed enum values, and the
 # window's own mode names are what the user picked from, so the window's
 # vocabulary is translated here rather than leaking into the window.
+#
+# The host seals an approval ceiling from its own startup configuration and
+# rejects any session/start or setApprovalMode that exceeds it (measured on
+# 1.0.3: "approval mode exceeds or is incomparable with the sealed startup
+# mode", for allowAll and onRequest alike, and setApprovalMode cannot lift it
+# either). A stock `muse serve` therefore accepts exactly two modes:
+# promptUnmatched and denyUnmatched. The window's richer vocabulary is
+# expressed on top of those, client-side:
+#
+#   bypassPermissions  starts promptUnmatched and auto-approves every
+#                      approval request as it arrives -- the run never stops
+#                      to ask, which is what bypass means here
+#   acceptEdits, plan  start promptUnmatched; the host asks about anything
+#                      its rules do not cover, and the person answers
+#   default, auto      promptUnmatched, the same asking behaviour
+#   dontAsk            denyUnmatched, where the host refuses by itself
 _MUSE_APPROVAL_MODES = {
-    # "default" and "auto" both mean "the backend's own policy": MSP's
-    # promptUnmatched asks the person when a tool is not covered by a rule,
-    # which is what a policy that has not been told otherwise does.
-    "bypassPermissions": "allowAll",
+    "bypassPermissions": "promptUnmatched",
     "default": "promptUnmatched",
     "auto": "promptUnmatched",
-    "acceptEdits": "onRequest",
-    "plan": "onRequest",
+    "acceptEdits": "promptUnmatched",
+    "plan": "promptUnmatched",
     "dontAsk": "denyUnmatched",
 }
 _MUSE_DEFAULT_MODE = "promptUnmatched"
@@ -73,10 +87,22 @@ _MUSE_DENY = "denied"
 
 
 def _uuid() -> str:
-    # MSP calls this a UUIDv7 idempotency handle; a v4 is accepted end to end
-    # (measured on 1.0.3), and uuid7 needs a Python newer than this app runs
-    # on. Uniqueness per connection is what the field is actually for.
-    return str(uuid.uuid4())
+    # MSP calls this a UUIDv7 idempotency handle, and it means it: measured on
+    # 1.0.3, session/start answers invalidParams for a v4 with "expected
+    # UUIDv7". uuid7() exists from Python 3.14; the fallback builds the same
+    # shape by hand -- 48-bit millisecond timestamp, version 7, variant 10,
+    # 74 random bits -- which the host accepts (measured).
+    uuid7 = getattr(uuid, "uuid7", None)
+    if uuid7 is not None:
+        return str(uuid7())
+    timestamp_ms = time.time_ns() // 1_000_000
+    rand = int.from_bytes(uuid.uuid4().bytes, "big") & ((1 << 74) - 1)
+    value = (timestamp_ms & ((1 << 48) - 1)) << 80
+    value |= 0x7 << 76
+    value |= (rand >> 62) << 64
+    value |= 0b10 << 62
+    value |= rand & ((1 << 62) - 1)
+    return str(uuid.UUID(int=value))
 
 
 class MuseTransport:
@@ -252,6 +278,11 @@ class MuseWorker(threading.Thread):
         self._cancelled = False
         self._clean_end = False
         self._failed = False
+        # bypassPermissions cannot be sent as MSP's allowAll -- the host
+        # seals its approval ceiling at startup and refuses anything above it
+        # (measured) -- so bypass is honoured by auto-approving each request
+        # here. The person is never asked, which is what the mode means.
+        self._auto_approve = permission_mode == "bypassPermissions"
         self._accepting_input = threading.Event()
         self._request_id = 100
         # Streaming frames that arrive while a request reply is awaited are
@@ -486,15 +517,17 @@ class MuseWorker(threading.Thread):
         return True
 
     def _workspace_root(self) -> str:
-        """The workspace root as the host sees it.
+        """The workspace root as the host sees it, always absolute.
 
-        On Windows the CLI runs inside WSL, where ``D:\\projekty\\x`` is
-        ``/mnt/d/projekty/x``; on every other platform the path is already
+        Measured on 1.0.3: session/start answers invalidParams for a relative
+        workspaceRoot ("expected an absolute path"), the same rule WSL's own
+        --cd has. On Windows the CLI runs inside WSL, where ``D:\\projekty\\x``
+        is ``/mnt/d/projekty/x``; on every other platform the path is already
         what the host expects.
         """
         if platform.system() != "Windows":
-            return self._cwd
-        return windows_path_to_wsl(self._cwd)
+            return str(Path(self._cwd).resolve())
+        return windows_path_to_wsl(str(Path(self._cwd).resolve()))
 
     def _start_turn(self) -> bool:
         text = (self._prompt or "").strip()
@@ -701,6 +734,14 @@ class MuseWorker(threading.Thread):
         approval_id = str(params.get("approvalId") or "")
         if not approval_id:
             return
+        if self._cancelled:
+            # A cancel arrived while the host was composing this request:
+            # answering it would restart work the person just stopped.
+            self._decide_approval(params, _MUSE_DENY)
+            return
+        if self._auto_approve:
+            self._decide_approval(params, _MUSE_APPROVE_ONCE)
+            return
         if self._on_question is None:
             # Nobody is here to answer: deny rather than leave the run wedged
             # on an approval nobody can see.
@@ -731,6 +772,12 @@ class MuseWorker(threading.Thread):
             allow_custom=False,
         )
         answers = self._on_question([question])
+        if self._cancelled:
+            # The person pressed Stop while the dialog was up. That stop wins
+            # over whatever the still-open dialog was answered with: approving
+            # here would let work continue past the cancel.
+            self._decide_approval(params, _MUSE_DENY)
+            return
         pick = ((answers or [[]])[0] or ["Deny"])[0]
         if pick.startswith("Allow for"):
             decision = _MUSE_APPROVE_SESSION
@@ -751,10 +798,31 @@ class MuseWorker(threading.Thread):
                 "approvalId": params.get("approvalId"),
                 "sessionId": params.get("sessionId") or self._live_session,
                 "commandId": _uuid(),
-                "choiceId": decision,
+                "choiceId": self._resolve_choice(params, decision),
                 "requirementId": requirement,
             },
         )
+
+    def _resolve_choice(self, params: dict, decision: str) -> str:
+        """The server's choiceId whose decision is the one we mean.
+
+        The schema is explicit: choiceId must be "one of the current
+        availableChoices", and those ids belong to the server -- a raw
+        "approved" sent back as an id is answered -32052. The request names
+        each choice with the decision it stands for, so the answer is looked
+        up, not assumed. When the intended decision is not on offer, a
+        refusal is -- the one answer that cannot push work forward.
+        """
+        choices = [
+            choice for choice in (params.get("availableChoices") or []) if isinstance(choice, dict)
+        ]
+        for choice in choices:
+            if str(choice.get("decision") or "") == decision:
+                return str(choice.get("choiceId") or decision)
+        for choice in choices:
+            if str(choice.get("decision") or "") == "denied":
+                return str(choice.get("choiceId") or decision)
+        return decision
 
     def _user_input_requested(self, params: dict) -> None:
         if self._on_question is None:
