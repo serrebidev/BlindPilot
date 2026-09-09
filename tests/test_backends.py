@@ -2375,6 +2375,11 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: data)
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     _hermes_pool(monkeypatch, tmp_path, {"anthropic": [{"id": "1", "label": "claude_code"}]})
+    # Muse, like Hermes above, gets an adapter-level answer rather than the
+    # machine's real one (this machine has a live WSL Muse and its account).
+    monkeypatch.setattr(agent_backends, "_muse_signed_in_checked", lambda: True)
+    monkeypatch.setattr(agent_backends, "_muse_version_probe", lambda: "9.9.9")
+    monkeypatch.setattr(agent_backends, "_muse_account_lines", lambda: ["Signed in: yes"])
 
     for backend in agent_backends.BACKEND_IDS:
         fields = _status_lines(backend_status(backend))
@@ -2434,6 +2439,12 @@ def test_status_reports_a_signed_out_backend_rather_than_guessing(monkeypatch, t
     monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: empty)
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     _hermes_pool(monkeypatch, tmp_path, {})
+    # Muse reads its credentials off disk and its version through WSL; both
+    # are pointed at nothing, the same way every other backend is fenced off
+    # from the real machine this suite runs on.
+    monkeypatch.setattr(agent_backends, "_muse_signed_in_checked", lambda: False)
+    monkeypatch.setattr(agent_backends, "_muse_version_probe", lambda: "")
+    monkeypatch.setattr(agent_backends, "_muse_account_lines", lambda: ["Signed in: no"])
 
     for backend in agent_backends.BACKEND_IDS:
         fields = _status_lines(backend_status(backend))
