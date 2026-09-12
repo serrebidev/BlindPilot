@@ -47,6 +47,27 @@ def test_model_cache_remembers_when_a_model_first_appeared(tmp_path):
     assert db.get_cached_models(int(account.id), "name_descending") == ["older", "newer"]
 
 
+def test_model_service_orders_model_generations_and_revisions_before_names(tmp_path):
+    db = Database(tmp_path / "chat.sqlite3")
+    account = Account(name="Test", provider="openrouter", base_url="https://example")
+    db.save_account(account)
+    db.replace_model_cache(int(account.id), ["alpha-1.0", "zeta-5.1", "beta-5.6", "theta-5.4"])
+    service = ModelService(db, CredentialStore())
+
+    assert service.cached_models(account, "newest") == [
+        "beta-5.6",
+        "theta-5.4",
+        "zeta-5.1",
+        "alpha-1.0",
+    ]
+    assert service.cached_models(account, "oldest") == [
+        "alpha-1.0",
+        "zeta-5.1",
+        "theta-5.4",
+        "beta-5.6",
+    ]
+
+
 def test_chat_model_list_uses_the_chosen_order_and_keeps_the_selected_model(tmp_path):
     app = _app()
     db = Database(tmp_path / "chat.sqlite3")
