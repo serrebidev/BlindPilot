@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.27.0 - 2026-09-11
+
+- Chat's editable Model field is now a native list. It only offers models in the selected account's catalog, so a mistyped or retired model cannot be sent by accident. Chat, Model order lets you choose newest first (the default), oldest first, A to Z, or Z to A; the order is remembered and changing it keeps the selected model. Newest and oldest use the first refresh on which each model appeared in that account's catalog, because providers do not consistently publish model release dates.
+
 ## v0.26.1 - 2026-09-08
 
 - The Muse backend starts sessions again. MSP validates `session/start`'s command id as UUIDv7 — a random v4, which every other command tolerated, is refused with `invalid session/start commandId: expected UUIDv7` before any conversation begins. Ids are v7 now.

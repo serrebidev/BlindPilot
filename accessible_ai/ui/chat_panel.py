@@ -81,6 +81,7 @@ class ChatPanel(wx.Panel):
         generation_service: GenerationService,
         set_status,
         speak,
+        model_order: str = "newest",
     ):
         super().__init__(parent)
         self.db = db
@@ -89,6 +90,7 @@ class ChatPanel(wx.Panel):
         self.generation_service = generation_service
         self._set_status = set_status
         self._speak = speak
+        self.model_order = model_order
 
         self.accounts: list[Account] = []
         self.profiles: list[Profile] = []
@@ -197,7 +199,10 @@ class ChatPanel(wx.Panel):
         model_row.Add(
             wx.StaticText(panel, label="Model:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad
         )
-        self.model_combo = wx.ComboBox(panel, style=wx.CB_DROPDOWN)
+        # A model identifier is chosen from the provider's catalog.  Keeping
+        # this as a Choice prevents a misspelling or a retired model being
+        # sent as a request, and gives screen readers the native list model.
+        self.model_combo = wx.Choice(panel)
         self.model_combo.SetName("Model")
         model_row.Add(self.model_combo, 1, wx.EXPAND)
         outer.Add(model_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
@@ -668,7 +673,6 @@ class ChatPanel(wx.Panel):
             self.load_cached_models()
         else:
             self.model_combo.Set([])
-            self.model_combo.SetValue("")
 
     def reload_profiles(self) -> None:
         previous = self.selected_profile().id if self.profiles and self.selected_profile() else None
@@ -702,15 +706,23 @@ class ChatPanel(wx.Panel):
         account = self.selected_account()
         if not account or account.id is None:
             self.model_combo.Set([])
-            self.model_combo.SetValue("")
             return
-        models = self.model_service.cached_models(account)
+        models = self.model_service.cached_models(account, self.model_order)
         self.model_combo.Set(models)
         preferred = preferred_model or account.default_model
-        if preferred:
-            self.model_combo.SetValue(preferred)
+        selected = self.model_combo.FindString(preferred) if preferred else wx.NOT_FOUND
+        if selected != wx.NOT_FOUND:
+            self.model_combo.SetSelection(selected)
         elif models:
             self.model_combo.SetSelection(0)
+
+    def set_model_order(self, order: str) -> None:
+        """Reorder the current account's model list without changing its pick."""
+        if order not in {"newest", "oldest", "name_ascending", "name_descending"}:
+            order = "newest"
+        self.model_order = order
+        current = self.model_combo.GetStringSelection()
+        self.load_cached_models(current)
 
     def on_account_changed(self, event: wx.CommandEvent) -> None:
         self.load_cached_models()
@@ -739,10 +751,14 @@ class ChatPanel(wx.Panel):
             # The account it named is gone. Its model is still worth applying;
             # the one on screen belongs to whichever account is selected now.
             if profile.default_model:
-                self.model_combo.SetValue(profile.default_model)
+                selected = self.model_combo.FindString(profile.default_model)
+                if selected != wx.NOT_FOUND:
+                    self.model_combo.SetSelection(selected)
             return
         if profile.default_model:
-            self.model_combo.SetValue(profile.default_model)
+            selected = self.model_combo.FindString(profile.default_model)
+            if selected != wx.NOT_FOUND:
+                self.model_combo.SetSelection(selected)
 
     def on_profile_changed(self, event: wx.CommandEvent) -> None:
         self.apply_selected_profile()
@@ -877,14 +893,8 @@ class ChatPanel(wx.Panel):
             wx.MessageBox(str(error), "Refresh Models", wx.OK | wx.ICON_ERROR, self)
             return
         if current and current.id == account_id:
-            previous = self.model_combo.GetValue()
-            self.model_combo.Set(models)
-            if previous:
-                self.model_combo.SetValue(previous)
-            elif current.default_model:
-                self.model_combo.SetValue(current.default_model)
-            elif models:
-                self.model_combo.SetSelection(0)
+            previous = self.model_combo.GetStringSelection()
+            self.load_cached_models(previous or current.default_model)
         self.SetStatusText(f"Model list refreshed. {len(models)} models available.")
 
     def on_new_conversation(self, event: wx.CommandEvent | None) -> None:
@@ -1045,7 +1055,7 @@ class ChatPanel(wx.Panel):
 
     def on_send(self, event: wx.CommandEvent | None) -> None:
         account = self.selected_account()
-        model = self.model_combo.GetValue().strip()
+        model = self.model_combo.GetStringSelection().strip()
         user_text = self.message_input.GetValue().strip()
         logger.info(
             "Send invoked account_selected=%s model_selected=%s message_characters=%d generating=%s",
@@ -1063,9 +1073,7 @@ class ChatPanel(wx.Panel):
             )
             return
         if not model:
-            wx.MessageBox(
-                "Select or enter a model first.", "Send", wx.OK | wx.ICON_INFORMATION, self
-            )
+            wx.MessageBox("Select a model first.", "Send", wx.OK | wx.ICON_INFORMATION, self)
             self.model_combo.SetFocus()
             return
         if not user_text and not self.pending_attachments:
@@ -1121,7 +1129,7 @@ class ChatPanel(wx.Panel):
             self.SetStatusText("A response is already being generated.")
             return
         account = self.selected_account()
-        model = self.model_combo.GetValue().strip()
+        model = self.model_combo.GetStringSelection().strip()
         if not account:
             wx.MessageBox(
                 "Add or select an account first.", "Regenerate", wx.OK | wx.ICON_INFORMATION, self
@@ -1129,9 +1137,7 @@ class ChatPanel(wx.Panel):
             self.account_choice.SetFocus()
             return
         if not model:
-            wx.MessageBox(
-                "Select or enter a model first.", "Regenerate", wx.OK | wx.ICON_INFORMATION, self
-            )
+            wx.MessageBox("Select a model first.", "Regenerate", wx.OK | wx.ICON_INFORMATION, self)
             self.model_combo.SetFocus()
             return
         previous = self._last_assistant_message()

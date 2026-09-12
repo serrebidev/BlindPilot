@@ -77,6 +77,7 @@ def create_chat_panel(
     parent: wx.Window,
     set_status: Callable[[str], None],
     speak: Callable[[str], None],
+    model_order: str = "newest",
 ) -> ChatPanel:
     _configure_chat_logging()
     path = database_path()
@@ -91,6 +92,7 @@ def create_chat_panel(
         GenerationService(credentials),
         set_status,
         speak,
+        model_order=model_order,
     )
     if imported is not None:
         set_status("AccessibleAI accounts, profiles, and conversations were imported.")
