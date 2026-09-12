@@ -71,6 +71,10 @@ def batch_status_text(status: str, batch_id: str) -> str:
 
 
 class OpenRouterProvider(ProtocolMixin):
+    def __init__(self, account, credentials):
+        super().__init__(account, credentials)
+        self._model_published: dict[str, int] = {}
+
     def headers(self) -> dict[str, str]:
         headers = super().headers()
         # Force response caching off even if an OpenRouter preset enables it.
@@ -81,7 +85,29 @@ class OpenRouterProvider(ProtocolMixin):
         return headers
 
     def list_models(self) -> list[str]:
-        return self.list_models_from_endpoint()
+        url = self.build_url(self.account.models_endpoint)
+        with self.client() as client:
+            response = client.get(url, headers=self.headers())
+            self.raise_for_status(response)
+            payload = response.json()
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        models: set[str] = set()
+        published: dict[str, int] = {}
+        for item in data:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            model_id = item["id"].strip()
+            if not model_id:
+                continue
+            models.add(model_id)
+            created = item.get("created")
+            if isinstance(created, (int, float)):
+                published[model_id] = int(created)
+        self._model_published = published
+        return sorted(models, key=str.casefold)
+
+    def model_published_at(self) -> dict[str, int]:
+        return dict(self._model_published)
 
     def generate(self, settings: GenerationSettings, cancel: Event) -> Iterator[StreamEvent]:
         mode = self.account.api_mode

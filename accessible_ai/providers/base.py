@@ -89,6 +89,14 @@ class BaseProvider(ABC):
     def list_models(self) -> list[str]:
         raise NotImplementedError
 
+    def model_published_at(self) -> dict[str, int]:
+        """Provider release times for the most recently fetched catalog.
+
+        Most compatible APIs return only identifiers.  Providers that expose
+        a publication timestamp override this after listing their catalog.
+        """
+        return {}
+
     @abstractmethod
     def generate(self, settings: GenerationSettings, cancel: Event) -> Iterator[StreamEvent]:
         raise NotImplementedError

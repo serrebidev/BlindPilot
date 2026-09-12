@@ -1,5 +1,5 @@
-# BlindPilot 0.27.2
+# BlindPilot 0.27.3
 
-Chat's Newest first and Oldest first model orders now use the generation, revision, and dated build numbers in model IDs. For example, 5.6 appears ahead of 5.4 and 5.1.
+Chat's Newest first and Oldest first model orders now use the provider's actual publication timestamp when it is available. OpenRouter supplies this for every catalog entry, so Meta Muse Voice Transcribe 1.0 correctly appears ahead of older models regardless of their version number.
 
-This release also fixes a Codex cancellation race found by the Intel macOS release test. If a turn's id arrived just after Stop had finished waiting for it, BlindPilot recorded the turn as abandoned but did not interrupt it. A late-named turn is now interrupted by its worker before it exits.
+Refresh the model list once after installing this update so BlindPilot can store the provider's publication dates.

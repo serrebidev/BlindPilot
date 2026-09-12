@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.27.3 - 2026-09-11
+
+- Chat's Newest first order now uses the release timestamp OpenRouter supplies for each model, rather than comparing version numbers across unrelated model families. Meta Muse Voice Transcribe 1.0, for example, correctly appears ahead of older 5.x models when OpenRouter lists it as newer.
+
 ## v0.27.2 - 2026-09-11
 
 - Codex now interrupts a turn whose id arrives just after the Stop wait expired. The id was recorded as abandoned but no interrupt was sent in that timing window, leaving the turn running; this was exposed by the Intel macOS release test.
