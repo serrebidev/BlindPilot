@@ -519,9 +519,9 @@ class Database:
 
         Providers do not consistently publish a model release date.  The
         useful date we can promise is when a model first appeared in this
-        account's catalog: a model discovered on a later refresh is newer than
-        one already present.  Keeping that value also makes a model-order
-        choice stable between refreshes.
+        account's catalog.  ModelService uses it as a stable tie-breaker after
+        the version embedded in the model id, which is the closest portable
+        indication of a model's release order.
         """
         unique_models = sorted({m.strip() for m in model_ids if m.strip()}, key=str.casefold)
         with self.connect() as conn:
