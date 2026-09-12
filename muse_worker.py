@@ -47,7 +47,7 @@ from agent_backends import (
 from hermes_backend import STDERR_KEEP_LINES, windows_path_to_wsl
 from markdown_rows import complete_sentences as _complete_sentences
 
-from muse_backend import muse_command
+from muse_backend import muse_command, muse_session_access_error
 
 
 # Permission-mode mapping. MSP approval modes are fixed enum values, and the
@@ -295,6 +295,8 @@ class MuseWorker(threading.Thread):
         # running work belongs to. The turn/start ack is authoritative for
         # the turn id, per the protocol.
         self._live_session = ""
+        self._session_log_path = ""
+        self._next_access_check = 0.0
         self._turn_id = ""
         self._assistant_parts: list[str] = []
         self._streamed = 0
@@ -488,6 +490,7 @@ class MuseWorker(threading.Thread):
             if reply is not None and "result" in reply:
                 session = (reply["result"] or {}).get("session") or {}
                 self._live_session = str(session.get("sessionId") or self._session_id)
+                self._session_log_path = str(session.get("path") or "")
                 self._on_session(self._live_session)
                 return True
             # The stored conversation no longer exists on this host. The
@@ -512,6 +515,7 @@ class MuseWorker(threading.Thread):
             return False
         session = (reply.get("result") or {}).get("session") or {}
         self._live_session = str(session.get("sessionId") or "")
+        self._session_log_path = str(session.get("path") or "")
         if self._live_session:
             self._on_session(self._live_session)
         return True
@@ -579,6 +583,10 @@ class MuseWorker(threading.Thread):
         # a dict) and then reassigned from receive(), which answers None.
         frame: Optional[dict]
         while not self._cancelled:
+            access_error = self._provider_access_error()
+            if access_error:
+                self._fail(access_error)
+                return
             for frame in self._parked_frames():
                 if self._handle_event(frame):
                     return
@@ -605,6 +613,22 @@ class MuseWorker(threading.Thread):
                 continue
             if self._handle_event(frame):
                 return
+
+    def _provider_access_error(self) -> str:
+        """Poll the durable log slowly while Muse waits for its provider.
+
+        MSP has no notification for a provider's HTTP refusal while its own
+        retry policy is active. The log is only queried once every two seconds,
+        and only after this turn has a named session, so ordinary streamed turns
+        retain their normal half-second responsiveness.
+        """
+        if not self._session_log_path:
+            return ""
+        now = time.monotonic()
+        if now < self._next_access_check:
+            return ""
+        self._next_access_check = now + 2.0
+        return muse_session_access_error(self._session_log_path)
 
     def _handle_event(self, frame: dict) -> bool:
         """One inbound frame. Returns True when the turn has ended."""

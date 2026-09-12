@@ -1,5 +1,5 @@
-# BlindPilot 0.27.4
+# BlindPilot 0.27.5
 
-FreeBuff's Windows terminal is now a disabled, no-activate tool window before BlindPilot hides it. It stays invisible and cannot receive focus or input while FreeBuff starts, runs, or stops.
+Muse Code now reports when Meta refuses a Muse Spark request with HTTP 402. The backend reaches the live Spark service, but that response means the signed-in Meta account does not have Spark inference access yet.
 
-This fixes the stray window titled with BlindPilot.exe's installation path.
+BlindPilot stops the turn promptly and explains that an account with Muse Spark access is required, instead of waiting silently through Muse's internal retries.

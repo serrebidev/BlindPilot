@@ -138,6 +138,19 @@ def test_a_credential_file_that_is_not_json_is_not_signed_in(monkeypatch, tmp_pa
     assert muse_signed_in() is False
 
 
+def test_the_session_log_makes_a_missing_spark_entitlement_actionable(monkeypatch):
+    monkeypatch.setattr(
+        muse_backend,
+        "_muse_session_log_tail",
+        lambda _path: '{"payload":{"event":{"details":{"http_status":402}}}}',
+    )
+
+    detail = muse_backend.muse_session_access_error("/sessions/example/session.jsonl")
+
+    assert "HTTP 402" in detail
+    assert "Muse Spark inference access" in detail
+
+
 # --------------------------------------------------------------------------
 # Version and discovery
 # --------------------------------------------------------------------------

@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.27.5 - 2026-09-11
+
+- Muse Code now detects Meta's HTTP 402 Spark-inference refusal in its live session log and reports that the signed-in account needs Muse Spark access. Previously Muse retried internally without publishing an MSP error, leaving a BlindPilot turn apparently stuck.
+
 ## v0.27.4 - 2026-09-11
 
 - FreeBuff's Windows pseudo-terminal console is now disabled and marked as a no-activate tool window before it is hidden and moved off-screen. It cannot become an interactive BlindPilot.exe window or take focus while FreeBuff starts or stops.
