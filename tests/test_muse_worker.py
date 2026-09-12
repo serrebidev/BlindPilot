@@ -148,6 +148,42 @@ def test_a_full_turn_streams_the_answer_and_completes(monkeypatch):
     assert started and started[0]["params"]["input"][0]["text"] == "say hello"
 
 
+def test_provider_402_fails_instead_of_waiting_for_muses_retry_backoff(monkeypatch):
+    transport = _with_script(
+        monkeypatch,
+        [
+            _init_reply(101),
+            {
+                "jsonrpc": "2.0",
+                "id": 102,
+                "result": {"session": {"sessionId": "sess-1", "path": "/sessions/sess-1.jsonl"}},
+            },
+            {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        ],
+    )
+    # The actual MSP host stays open while it retries its provider request.
+    # Its session log is the only place the HTTP 402 is published.
+    transport.stays_open = True
+    monkeypatch.setattr(
+        muse_worker,
+        "muse_session_access_error",
+        lambda path: (
+            "Muse Spark cannot answer because Meta refused this account (HTTP 402)."
+            if path == "/sessions/sess-1.jsonl"
+            else ""
+        ),
+    )
+    recorder = _Recorder()
+    worker = MuseWorker("say hello", None, ".", "default", **recorder.callbacks())
+
+    _run(worker)
+
+    assert recorder.failures == [
+        "Muse Spark cannot answer because Meta refused this account (HTTP 402)."
+    ]
+    assert recorder.completed == []
+
+
 def test_the_client_introduces_itself_with_a_protocol_valid_name(monkeypatch):
     # MSP validates clientInfo.name against ^[a-z0-9_]+$; a mixed-case display
     # name is answered invalidParams and the host never talks to this client.

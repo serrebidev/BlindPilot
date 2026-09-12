@@ -334,6 +334,62 @@ def muse_signed_in() -> bool:
     return any(key != "schema_version" for key in payload)
 
 
+def _muse_session_log_tail(path: str, lines: int = 80) -> str:
+    """Read the recent part of one Muse session log, wherever Muse runs."""
+    if not path:
+        return ""
+    try:
+        if platform.system() == "Windows":
+            launcher = wsl_exe()
+            if not launcher:
+                return ""
+            proc = subprocess.run(
+                [launcher, "-e", "tail", "-n", str(lines), "--", path],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=10,
+                **_text_output_kwargs(),
+                **_no_window_kwargs(),
+            )
+            return proc.stdout or ""
+        return "\n".join(
+            Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _contains_http_402(value: object) -> bool:
+    if isinstance(value, dict):
+        return value.get("http_status") == 402 or any(_contains_http_402(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_contains_http_402(v) for v in value)
+    return False
+
+
+def muse_session_access_error(path: str) -> str:
+    """Explain Meta refusing a Spark inference request, if its log records it.
+
+    Muse accepts a turn before it opens the provider stream. A signed-in account
+    without Spark inference access receives HTTP 402 there, then Muse retries
+    internally with increasing delays and emits nothing to MSP meanwhile.
+    Reading its own durable session log is the only prompt signal that turns
+    that otherwise looks like a stalled BlindPilot turn into an actionable
+    result.
+    """
+    for line in reversed(_muse_session_log_tail(path).splitlines()):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if _contains_http_402(entry):
+            return (
+                "Muse Spark cannot answer because Meta refused this account (HTTP 402). "
+                "Sign in with an account that has Muse Spark inference access, then try again."
+            )
+    return ""
+
+
 # --------------------------------------------------------------------------
 # Account lines for /status
 # --------------------------------------------------------------------------
