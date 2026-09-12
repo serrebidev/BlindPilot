@@ -181,19 +181,39 @@ def reserve_hidden_console() -> bool:
 
 
 def _banish_window(handle: int) -> None:
-    """Hide a window, and park it off-screen in case it is shown again.
+    """Make a console unable to take focus, then hide it off-screen.
 
-    Hiding alone leaves a window that something else can show, and the console
-    is shown again while the terminal is torn down. Off-screen and sized to
-    nothing, being shown costs nothing that can be seen.
+    A console created for a pseudo-terminal is owned by BlindPilot, so Windows
+    gives it the executable path for a title and treats it as an ordinary app
+    window. Hiding alone is insufficient: Windows can make it visible again
+    while ConPTY is starting or stopping, at which point it can take focus.
+    Turn it into a disabled, no-activate tool window first, then hide and park
+    it. The watcher reapplies these properties if a child creates another
+    console later.
     """
     import ctypes
 
     user32 = ctypes.windll.user32
     try:
+        # GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE.
+        # Tool windows do not appear on the taskbar; no-activate prevents an
+        # accidental ShowWindow from moving keyboard or screen-reader focus.
+        ex_style = user32.GetWindowLongW(handle, -20)
+        ex_style = (ex_style | 0x00000080 | 0x08000000) & ~0x00040000
+        user32.SetWindowLongW(handle, -20, ex_style)
+        user32.EnableWindow(handle, False)
         user32.ShowWindow(handle, 0)  # SW_HIDE
-        # SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER
-        user32.SetWindowPos(handle, 0, -32000, -32000, 0, 0, 0x0010 | 0x0004 | 0x0200)
+        # SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_NOZORDER |
+        # SWP_NOOWNERZORDER | SWP_HIDEWINDOW.
+        user32.SetWindowPos(
+            handle,
+            0,
+            -32000,
+            -32000,
+            0,
+            0,
+            0x0400 | 0x0010 | 0x0004 | 0x0200 | 0x0080,
+        )
     except OSError:
         pass
 

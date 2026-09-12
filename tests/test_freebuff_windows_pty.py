@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import platform
 import threading
+import ctypes
 
 import pytest
 
@@ -35,6 +36,43 @@ class _Pty:
         if self.frames:
             return self.frames.pop(0)
         raise EOFError("Pty is closed")
+
+
+def test_a_freebuff_console_cannot_be_activated_or_shown(monkeypatch):
+    """A ConPTY console is only transport, never an interactive app window."""
+
+    calls: list[tuple] = []
+
+    class User32:
+        def GetWindowLongW(self, handle, index):
+            calls.append(("get_style", handle, index))
+            return 0x00040000  # WS_EX_APPWINDOW
+
+        def SetWindowLongW(self, handle, index, style):
+            calls.append(("set_style", handle, index, style))
+
+        def EnableWindow(self, handle, enabled):
+            calls.append(("enable", handle, enabled))
+
+        def ShowWindow(self, handle, command):
+            calls.append(("show", handle, command))
+
+        def SetWindowPos(self, *args):
+            calls.append(("position", *args))
+
+    class Windll:
+        user32 = User32()
+
+    monkeypatch.setattr(ctypes, "windll", Windll())
+
+    ab._banish_window(42)
+
+    assert ("set_style", 42, -20, 0x08000080) in calls
+    assert ("enable", 42, False) in calls
+    assert ("show", 42, 0) in calls
+    position = next(call for call in calls if call[0] == "position")
+    assert position[3:7] == (-32000, -32000, 0, 0)
+    assert position[-1] & 0x0080  # SWP_HIDEWINDOW
 
 
 def test_the_terminal_is_started_with_the_environment_every_cli_gets(monkeypatch, quiet_console):
