@@ -47,24 +47,30 @@ def test_model_cache_remembers_when_a_model_first_appeared(tmp_path):
     assert db.get_cached_models(int(account.id), "name_descending") == ["older", "newer"]
 
 
-def test_model_service_orders_model_generations_and_revisions_before_names(tmp_path):
+def test_model_service_orders_by_provider_publication_date_before_model_name(tmp_path):
     db = Database(tmp_path / "chat.sqlite3")
     account = Account(name="Test", provider="openrouter", base_url="https://example")
     db.save_account(account)
-    db.replace_model_cache(int(account.id), ["alpha-1.0", "zeta-5.1", "beta-5.6", "theta-5.4"])
+    db.replace_model_cache(
+        int(account.id),
+        ["openai/gpt-5.6", "meta/muse-voice-transcribe-1.0", "openai/gpt-5.4"],
+        {
+            "openai/gpt-5.6": 100,
+            "meta/muse-voice-transcribe-1.0": 300,
+            "openai/gpt-5.4": 200,
+        },
+    )
     service = ModelService(db, CredentialStore())
 
     assert service.cached_models(account, "newest") == [
-        "beta-5.6",
-        "theta-5.4",
-        "zeta-5.1",
-        "alpha-1.0",
+        "meta/muse-voice-transcribe-1.0",
+        "openai/gpt-5.4",
+        "openai/gpt-5.6",
     ]
     assert service.cached_models(account, "oldest") == [
-        "alpha-1.0",
-        "zeta-5.1",
-        "theta-5.4",
-        "beta-5.6",
+        "openai/gpt-5.6",
+        "openai/gpt-5.4",
+        "meta/muse-voice-transcribe-1.0",
     ]
 
 

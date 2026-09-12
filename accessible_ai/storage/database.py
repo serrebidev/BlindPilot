@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS model_cache (
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     model_id TEXT NOT NULL,
     first_seen_at INTEGER NOT NULL DEFAULT 0,
+    published_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, model_id)
 );
 """
@@ -101,7 +102,10 @@ class Database:
         # A pre-existing cached model has an unknown introduction date.  Zero
         # deliberately leaves it behind models first discovered after this
         # upgrade, rather than pretending every old model is brand new.
-        "model_cache": {"first_seen_at": "INTEGER NOT NULL DEFAULT 0"},
+        "model_cache": {
+            "first_seen_at": "INTEGER NOT NULL DEFAULT 0",
+            "published_at": "INTEGER NOT NULL DEFAULT 0",
+        },
     }
 
     def __init__(self, path: Path):
@@ -514,16 +518,12 @@ class Database:
                 message.attachments = by_message[int(message.id)]
         return messages
 
-    def replace_model_cache(self, account_id: int, model_ids: list[str]) -> None:
-        """Refresh one account's catalog while retaining when each model appeared.
-
-        Providers do not consistently publish a model release date.  The
-        useful date we can promise is when a model first appeared in this
-        account's catalog.  ModelService uses it as a stable tie-breaker after
-        the version embedded in the model id, which is the closest portable
-        indication of a model's release order.
-        """
+    def replace_model_cache(
+        self, account_id: int, model_ids: list[str], published_at: dict[str, int] | None = None
+    ) -> None:
+        """Refresh one catalog and retain provider publication dates when known."""
         unique_models = sorted({m.strip() for m in model_ids if m.strip()}, key=str.casefold)
+        published_at = published_at or {}
         with self.connect() as conn:
             if unique_models:
                 placeholders = ", ".join("?" for _ in unique_models)
@@ -535,15 +535,20 @@ class Database:
             else:
                 conn.execute("DELETE FROM model_cache WHERE account_id = ?", (account_id,))
             conn.executemany(
-                "INSERT INTO model_cache (account_id, model_id, first_seen_at) "
-                "VALUES (?, ?, unixepoch()) ON CONFLICT(account_id, model_id) DO NOTHING",
-                [(account_id, model_id) for model_id in unique_models],
+                "INSERT INTO model_cache (account_id, model_id, first_seen_at, published_at) "
+                "VALUES (?, ?, unixepoch(), ?) ON CONFLICT(account_id, model_id) "
+                "DO UPDATE SET published_at = excluded.published_at "
+                "WHERE excluded.published_at > 0",
+                [
+                    (account_id, model_id, int(published_at.get(model_id, 0)))
+                    for model_id in unique_models
+                ],
             )
 
     def get_cached_models(self, account_id: int, order: str = "name_ascending") -> list[str]:
         ordering = {
-            "newest": "first_seen_at DESC, model_id COLLATE NOCASE",
-            "oldest": "first_seen_at ASC, model_id COLLATE NOCASE",
+            "newest": "published_at DESC, first_seen_at DESC, model_id COLLATE NOCASE",
+            "oldest": "published_at ASC, first_seen_at ASC, model_id COLLATE NOCASE",
             "name_ascending": "model_id COLLATE NOCASE ASC",
             "name_descending": "model_id COLLATE NOCASE DESC",
         }.get(order, "model_id COLLATE NOCASE ASC")
