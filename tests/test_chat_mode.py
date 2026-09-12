@@ -91,9 +91,15 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
         assert frame.chat_panel.message_input.GetName() == "Message"
         assert frame.chat_panel.account_choice.GetName() == "Account"
         assert frame.chat_panel.model_combo.GetName() == "Model"
+        assert isinstance(frame.chat_panel.model_combo, wx.Choice)
+        assert frame._chat_model_order_items["newest"].IsChecked()
         assert frame._chat_refresh_item.IsEnabled()
         assert frame._chat_accounts_item.IsEnabled()
         assert frame._chat_profiles_item.IsEnabled()
+        frame._set_chat_model_order("name_descending")
+        assert frame._chat_model_order == "name_descending"
+        assert frame._chat_model_order_items["name_descending"].IsChecked()
+        assert saved["chat_model_order"] == "name_descending"
 
         frame._set_chat_history_view("text")
         assert frame.chat_panel.transcript.IsShown()

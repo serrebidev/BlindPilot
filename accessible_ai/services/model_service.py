@@ -11,10 +11,10 @@ class ModelService:
         self.db = db
         self.credentials = credentials
 
-    def cached_models(self, account: Account) -> list[str]:
+    def cached_models(self, account: Account, order: str = "name_ascending") -> list[str]:
         if account.id is None:
             return []
-        return self.db.get_cached_models(int(account.id))
+        return self.db.get_cached_models(int(account.id), order)
 
     def refresh_models(self, account: Account) -> list[str]:
         if account.id is None:

@@ -169,7 +169,7 @@ def test_reopening_restores_the_profile_the_conversation_was_started_on(tmp_path
         assert second.current_profile_id == started.id
         assert second.selected_profile().name == "Started on"
         assert second.selected_account().name == "ZZZ Other"
-        assert second.model_combo.GetValue() == "z/two"
+        assert second.model_combo.GetStringSelection() == "z/two"
 
         settings = second._generation_settings(other, "z/two")
         assert settings.messages[0]["content"] == "FIRST"

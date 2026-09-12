@@ -290,10 +290,16 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.26.1"
+APP_VERSION = "0.27.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
+CHAT_MODEL_ORDERS = (
+    ("newest", "&Newest first", "Models discovered most recently appear first"),
+    ("oldest", "&Oldest first", "Models discovered first appear first"),
+    ("name_ascending", "Name, &A to Z", "Order models alphabetically"),
+    ("name_descending", "Name, &Z to A", "Order models in reverse alphabetical order"),
+)
 
 # Streamed coding-agent output can arrive much faster than a native list and a
 # screen reader can consume it. Process a bounded number of events per GUI turn
@@ -2614,6 +2620,12 @@ def _valid_cue_seconds(value: object) -> int:
     except (TypeError, ValueError):
         return CUE_SECONDS_DEFAULT
     return max(CUE_SECONDS_MIN, min(CUE_SECONDS_MAX, seconds))
+
+
+def _valid_chat_model_order(value: object) -> str:
+    """Return a supported model-catalog ordering, newest first by default."""
+    orders = {order for order, _label, _help in CHAT_MODEL_ORDERS}
+    return value if isinstance(value, str) and value in orders else "newest"
 
 
 class _Settings:
@@ -9072,6 +9084,7 @@ class MainFrame(wx.Frame):
         cfg = _load_config()
         self._backend = normalize_backend(cfg.get("backend"))
         self._app_mode = APP_MODE_CHAT if cfg.get("app_mode") == APP_MODE_CHAT else APP_MODE_AGENT
+        self._chat_model_order = _valid_chat_model_order(cfg.get("chat_model_order"))
         self.chat_panel = None
         pf = cfg.get("projects_folder")
         self._projects_folder: Optional[str] = pf if pf and os.path.isdir(pf) else None
@@ -9205,6 +9218,22 @@ class MainFrame(wx.Frame):
             "&Refresh models",
             "Refresh the model list for the selected Chat account",
         )
+        model_order_menu = wx.Menu()
+        self._chat_model_order_items: dict[str, wx.MenuItem] = {}
+        for order, label, description in CHAT_MODEL_ORDERS:
+            item = model_order_menu.AppendRadioItem(wx.ID_ANY, label, description)
+            item.Check(order == self._chat_model_order)
+            self._chat_model_order_items[order] = item
+            self.Bind(
+                wx.EVT_MENU,
+                lambda _e, selected=order: self._set_chat_model_order(selected),
+                item,
+            )
+        chat_menu.AppendSubMenu(
+            model_order_menu,
+            "Model &order",
+            "Choose how the Chat model list is sorted",
+        )
         chat_history_menu = wx.Menu()
         self._chat_history_list_item = chat_history_menu.AppendRadioItem(wx.ID_ANY, "&List")
         self._chat_history_text_item = chat_history_menu.AppendRadioItem(
@@ -9227,6 +9256,7 @@ class MainFrame(wx.Frame):
             self._chat_profiles_item,
             self._chat_conversations_item,
             self._chat_refresh_item,
+            *self._chat_model_order_items.values(),
             self._chat_history_list_item,
             self._chat_history_text_item,
             self._chat_diagnostics_item,
@@ -9613,6 +9643,7 @@ class MainFrame(wx.Frame):
             self._root,
             self._set_status_text,
             announce,
+            model_order=self._chat_model_order,
         )
         self.chat_panel.refresh_models_item = self._chat_refresh_item
         self.chat_panel.history_list_view_item = self._chat_history_list_item
@@ -9680,6 +9711,23 @@ class MainFrame(wx.Frame):
     def _refresh_chat_models(self) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
             self.chat_panel.on_refresh_models(wx.CommandEvent())
+
+    def _set_chat_model_order(self, order: str) -> None:
+        """Persist and apply the ordering chosen in Chat, without losing its pick."""
+        self._chat_model_order = _valid_chat_model_order(order)
+        for value, item in self._chat_model_order_items.items():
+            item.Check(value == self._chat_model_order)
+        if self.chat_panel is not None:
+            self.chat_panel.set_model_order(self._chat_model_order)
+        cfg = _load_config()
+        cfg["chat_model_order"] = self._chat_model_order
+        _save_config(cfg)
+        label = next(
+            label.replace("&", "")
+            for value, label, _description in CHAT_MODEL_ORDERS
+            if value == self._chat_model_order
+        )
+        self._announce_setting(f"Chat model order: {label}")
 
     def _show_chat_accounts(self) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:

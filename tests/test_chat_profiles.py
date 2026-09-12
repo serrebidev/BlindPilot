@@ -82,7 +82,7 @@ def test_a_default_profile_applies_its_account_and_model_at_startup(tmp_path):
         assert panel.selected_profile().name == "Named account"
         # Not "AAA First", which is what the account list alone would have said.
         assert panel.selected_account().name == "ZZZ Other"
-        assert panel.model_combo.GetValue() == "z/two"
+        assert panel.model_combo.GetStringSelection() == "z/two"
     finally:
         frame.Destroy()
         app.ProcessPendingEvents()
@@ -99,7 +99,7 @@ def test_picking_that_profile_by_hand_does_exactly_the_same(tmp_path):
         assert panel.selected_account().name == "AAA First"
         _pick(panel, int(profile.id))
         assert panel.selected_account().name == "ZZZ Other"
-        assert panel.model_combo.GetValue() == "z/two"
+        assert panel.model_combo.GetStringSelection() == "z/two"
     finally:
         frame.Destroy()
         app.ProcessPendingEvents()
@@ -121,7 +121,7 @@ def test_a_profile_still_applies_its_model_when_its_account_is_gone(tmp_path):
         panel = _panel(frame, db)
         _pick(panel, int(profile.id))
         assert panel.selected_account().name == "AAA First"
-        assert panel.model_combo.GetValue() == "a/two"
+        assert panel.model_combo.GetStringSelection() == "a/two"
     finally:
         frame.Destroy()
         app.ProcessPendingEvents()
