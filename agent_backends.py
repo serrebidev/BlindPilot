@@ -3827,8 +3827,18 @@ class CodexWorker(threading.Thread):
             self._turn_id_known.set()
             if self.abandoned_thread and self._turn_id:
                 # The cancel gave up waiting for this name before the reply
-                # carrying it arrived. Late is still in time for the next turn.
-                self._abandon(self.abandoned_thread, self._turn_id)
+                # carrying it arrived. Late is still in time to interrupt the
+                # turn, which is better than leaving it to leak output into a
+                # later conversation.  The normal cancel path has already
+                # returned, so this worker owns the final interrupt attempt.
+                abandoned_thread = self.abandoned_thread
+                server = self._server
+                if server is not None and server.interrupt(
+                    abandoned_thread, self._turn_id, _CODEX_INTERRUPT_VERIFY_SECONDS
+                ):
+                    self.abandoned_thread = ""
+                else:
+                    self._abandon(abandoned_thread, self._turn_id)
 
     @staticmethod
     def _turn_named(params: dict) -> str:
