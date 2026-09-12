@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.27.2 - 2026-09-11
+
+- Codex now interrupts a turn whose id arrives just after the Stop wait expired. The id was recorded as abandoned but no interrupt was sent in that timing window, leaving the turn running; this was exposed by the Intel macOS release test.
+
 ## v0.27.1 - 2026-09-11
 
 - Chat's Newest first and Oldest first orders now sort the generation, revision, and dated build numbers in model IDs before any catalog tie-breaker. The first release gave all models discovered in one refresh the same timestamp, so most of a catalog still fell back to alphabetic order.
