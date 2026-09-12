@@ -1,5 +1,5 @@
-# BlindPilot 0.27.3
+# BlindPilot 0.27.4
 
-Chat's Newest first and Oldest first model orders now use the provider's actual publication timestamp when it is available. OpenRouter supplies this for every catalog entry, so Meta Muse Voice Transcribe 1.0 correctly appears ahead of older models regardless of their version number.
+FreeBuff's Windows terminal is now a disabled, no-activate tool window before BlindPilot hides it. It stays invisible and cannot receive focus or input while FreeBuff starts, runs, or stops.
 
-Refresh the model list once after installing this update so BlindPilot can store the provider's publication dates.
+This fixes the stray window titled with BlindPilot.exe's installation path.

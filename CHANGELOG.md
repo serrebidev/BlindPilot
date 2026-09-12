@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.27.4 - 2026-09-11
+
+- FreeBuff's Windows pseudo-terminal console is now disabled and marked as a no-activate tool window before it is hidden and moved off-screen. It cannot become an interactive BlindPilot.exe window or take focus while FreeBuff starts or stops.
+
 ## v0.27.3 - 2026-09-11
 
 - Chat's Newest first order now uses the release timestamp OpenRouter supplies for each model, rather than comparing version numbers across unrelated model families. Meta Muse Voice Transcribe 1.0, for example, correctly appears ahead of older 5.x models when OpenRouter lists it as newer.
