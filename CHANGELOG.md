@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.28.3 - 2026-09-13
+
+- Command Code's sign-in no longer puts a console window on screen. v0.28.2 ran it in the same off-screen pseudo-terminal FreeBuff uses, but making that terminal calls `AllocConsole`, which hands back a console that has *already* appeared — hiding it is the next thing that happens, and that frame of a window, titled with BlindPilot's own executable, is what was still being seen. Windows now creates the sign-in's console hidden from the start (`CREATE_NEW_CONSOLE` with the startup show flag set), so there is no window to hide and nothing to flash; the same watcher still hides any console Windows raises anyway. Verified end to end on Windows: the CLI runs in that console, exits 0, and no console window in the process tree is ever visible.
+- The rest of v0.28.2 stands: the wizard waits for the sign-in to finish and reports whether it landed.
+
 ## v0.28.2 - 2026-09-13
 
 - Command Code's sign-in no longer opens a console window. The wizard now runs `command-code login` in an off-screen terminal — the same hidden pseudo-terminal FreeBuff runs in — because the CLI's Ink UI needs a real terminal but has nothing in it for anyone to read or answer: the sign-in is the browser page it opens. The wizard then waits for the command to end and asks the CLI whether the sign-in landed, so it reports the result itself rather than leaving a window to tab past and an "Already Signed In" to choose by hand.

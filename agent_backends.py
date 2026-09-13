@@ -4856,6 +4856,78 @@ def _spawn_freebuff_pty(
     return child, read_posix
 
 
+class _HiddenConsoleProcess:
+    """The handle for a command given a console Windows created hidden.
+
+    The wizard asks only whether the command is still running and tells it to
+    stop, which are the same two questions it asks of a pseudo-terminal, so the
+    two are interchangeable from there.
+    """
+
+    def __init__(self, proc: "subprocess.Popen[bytes]") -> None:
+        self._proc = proc
+
+    def isalive(self) -> bool:
+        return self._proc.poll() is None
+
+    @property
+    def exitstatus(self) -> Optional[int]:
+        return self._proc.returncode
+
+    def terminate(self, force: bool = False) -> None:
+        end_process_group(self._proc)
+
+    def close(self, force: bool = False) -> None:
+        try:
+            self._proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _spawn_hidden_console(args: list[str], cwd: str) -> object:
+    """Start a command with a console of its own that is never shown.
+
+    ``CREATE_NEW_CONSOLE`` gives it the real terminal that commands like these
+    need, and the startup show flag has Windows create that console hidden
+    rather than hiding it afterwards. The alternative, ``AllocConsole`` -- how
+    FreeBuff's pseudo-terminal reserves a console -- hands back one that has
+    already appeared and hiding it is the next thing that happens: a frame of a
+    console window, titled with our own executable, in front of the user.
+    FreeBuff pays that frame once, when its backend is chosen. A sign-in has no
+    such moment to pay it in, so it creates no window rather than hiding one.
+    """
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        args,
+        cwd=cwd,
+        env=subprocess_env(args[0]),
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=startupinfo,
+        close_fds=True,
+    )
+    # Belt and braces. Nothing was shown a moment ago, and nothing should be
+    # shown while this runs either: a console window is the one thing this must
+    # never put in front of the user. The same watcher FreeBuff runs hides
+    # anything Windows raises anyway.
+    roots = {os.getpid(), proc.pid}
+
+    def watch() -> None:
+        started = time.monotonic()
+        while proc.poll() is None:
+            try:
+                hide_console_windows(roots)
+            except Exception:
+                # Never let this thread die: it is the only thing keeping the
+                # console off screen for the whole run.
+                pass
+            time.sleep(0.005 if time.monotonic() - started < 8 else 0.25)
+
+    threading.Thread(target=watch, daemon=True).start()
+    return _HiddenConsoleProcess(proc)
+
+
 def spawn_hidden_terminal(args: list[str], cwd: str) -> object:
     """Run a command in a terminal nobody can see, and hand back its handle.
 
@@ -4865,12 +4937,14 @@ def spawn_hidden_terminal(args: list[str], cwd: str) -> object:
     terminal is a console window that appears, can take focus and screen-reader
     focus with it, and exists only to satisfy the UI.
 
-    This is the same off-screen pseudo-terminal FreeBuff runs in -- claimed and
-    hidden before the terminal asks for a console, with a watcher that re-hides
-    anything a child raises while it runs. The output is drained and thrown
-    away, because a terminal buffer nobody reads fills up and stops the command
-    writing into it. `end_hidden_terminal` stops it.
+    Windows gets a console created hidden (see :func:`_spawn_hidden_console`).
+    Everywhere else there is no window to avoid, so it is the off-screen
+    pseudo-terminal FreeBuff runs in, whose output is drained and thrown away:
+    a terminal buffer nobody reads fills up and stops the command writing into
+    it. `end_hidden_terminal` stops either.
     """
+    if platform.system() == "Windows":
+        return _spawn_hidden_console(args, cwd)
     ended = threading.Event()
     pty, read = _spawn_freebuff_pty(args, cwd, ended)
 
