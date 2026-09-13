@@ -604,7 +604,16 @@ BACKENDS = {
         # as a headless prompt is treated as text (measured at 1.53.1), so the
         # backend does not offer it rather than pretend.
         supports_compaction=False,
-        login_opens_browser=True,
+        # "cmd login" is not a plain sign-in: it mounts an Ink terminal UI for
+        # its authentication spinner, and Ink refuses to start when stdin is
+        # not a TTY ("Raw mode is not supported on the current process.stdin,
+        # which Ink uses as input stream by default"). Run hidden behind the
+        # wizard's pipes it died on that mount before it reached the browser,
+        # and its crash output -- Ink's own documentation URL included -- was
+        # read out as the sign-in address, pointing a listener at
+        # github.com/vadimdemedes/ink. A real console gives Ink the TTY it
+        # needs, so the wizard opens one, exactly as it does for Hermes.
+        login_needs_terminal=True,
     ),
 }
 

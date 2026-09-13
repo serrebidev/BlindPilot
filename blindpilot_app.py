@@ -291,7 +291,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.28.0"
+APP_VERSION = "0.28.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7976,12 +7976,21 @@ class SetupWizard(wx.Dialog):
                 "sign in through your browser. If you have already connected one, or "
                 f"already ran '{login}' in a terminal, choose Already Signed In."
             )
-        elif info.login_needs_terminal:
+        elif info.login_needs_terminal and self.backend == BACKEND_HERMES:
+            # Hermes' "login" is really its model picker, so its setup is about
+            # choosing a provider and model rather than about an account.
             self._signin_intro.SetLabel(
                 f"BlindPilot needs {label} to have a provider and model configured.\n\n"
                 f"If you have already run '{login}' in a terminal, choose Already "
                 "Signed In. Otherwise choose Sign In: its setup opens in a terminal "
                 "window where you can answer its questions."
+            )
+        elif info.login_needs_terminal:
+            self._signin_intro.SetLabel(
+                f"Sign in to {label}.\n\n"
+                f"If you have already run '{login}' in a terminal, choose Already "
+                "Signed In. Otherwise choose Sign In: the sign-in opens in a terminal "
+                "window, where it opens your browser and waits for it."
             )
         else:
             self._signin_intro.SetLabel(

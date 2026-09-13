@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
-from agent_backends import BACKEND_CODEX, BACKEND_HERMES
+from agent_backends import BACKEND_CODEX, BACKEND_COMMANDCODE, BACKEND_HERMES
 
 wx = pytest.importorskip("wx")
 
@@ -41,8 +41,8 @@ class _Widget:
     def GetLabel(self):
         return self.text
 
-    def Show(self):
-        self.shown = True
+    def Show(self, show=True):
+        self.shown = show
 
     def Hide(self):
         self.shown = False
@@ -80,13 +80,24 @@ class _Wizard:
         self._cli_check_btn = _Widget()
         self._next_btn = _Widget()
         self._back_btn = _Widget()
-        self._pages = [_Widget(), _Widget()]
+        self._pages = [_Widget(), _Widget(), _Widget()]
+        self._signin_btn = _Widget()
+        self._already_btn = _Widget()
+        self._open_page_btn = _Widget()
+        self._signin_status = _Widget()
+        self._signin_intro = _Widget()
+        self._welcome_text = _Widget()
+        self._done_text = _Widget()
+        self._login = None
 
     def _find_selected_cli(self):
         return None
 
     def _selected_install_argv(self):
         return app.SetupWizard._selected_install_argv(self)
+
+    def _run_login(self):
+        return app.SetupWizard._run_login(self)
 
     def Layout(self):
         pass
@@ -181,3 +192,57 @@ def test_installing_hermes_promises_nothing_until_it_is_running(monkeypatch, wx_
 
     assert not any("This usually takes under a minute" in text for text in spoken)
     assert any("PowerShell" in text or "curl" in text for text in spoken)
+
+
+class _InlineThread:
+    """Runs the wizard's worker on this thread, so the test sees what it did."""
+
+    def __init__(self, target=None, **_kwargs):
+        self._target = target
+
+    def start(self):
+        if self._target is not None:
+            self._target()
+
+
+def _refuse_to_pipe(*_args, **_kwargs):
+    raise AssertionError("this backend's sign-in must not run behind a pipe")
+
+
+def test_command_code_sign_in_opens_a_terminal_ink_can_use(monkeypatch, wx_app):
+    """`cmd login` mounts an Ink UI, which refuses to run without a TTY.
+
+    Hidden behind the wizard's pipes it died on that mount before it reached
+    the browser, and its crash output -- Ink's own documentation URL included
+    -- was read out as the sign-in address. It goes to a real console instead,
+    the same as Hermes' setup.
+    """
+    launched: list[list[str]] = []
+    monkeypatch.setattr(app, "announce", lambda *a, **k: None)
+    monkeypatch.setattr(app, "BackendLogin", _refuse_to_pipe)
+    monkeypatch.setattr(app.threading, "Thread", _InlineThread)
+
+    wizard = _Wizard(BACKEND_COMMANDCODE)
+    wizard._backend_path = "C:/npm/command-code.cmd"
+    wizard._launch_login_terminal = lambda args: launched.append(args)
+
+    app.SetupWizard._do_login(wizard)
+
+    assert launched == [["C:/npm/command-code.cmd", "login"]]
+    assert wizard._login is None
+
+
+def test_command_code_sign_in_copy_is_about_an_account(monkeypatch, wx_app):
+    """Command Code signs in to an account; its copy must not borrow Hermes'
+    provider-and-model wording, which describes a different thing entirely."""
+    wizard = _Wizard(BACKEND_COMMANDCODE)
+    app.SetupWizard._refresh_backend_copy(wizard)
+    assert "provider and model" not in wizard._signin_intro.text
+    assert "command-code login" in wizard._signin_intro.text
+
+
+def test_hermes_sign_in_copy_still_names_its_provider_picker(monkeypatch, wx_app):
+    """Hermes' "login" is its model picker, so its copy stays as it was."""
+    wizard = _Wizard(BACKEND_HERMES)
+    app.SetupWizard._refresh_backend_copy(wizard)
+    assert "provider and model" in wizard._signin_intro.text

@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.28.1 - 2026-09-13
+
+- Command Code's sign-in from the setup wizard now opens a real terminal window instead of running the CLI hidden. `cmd login` mounts an Ink terminal UI for its authentication spinner, and Ink refuses to start when its input is not a terminal ("Raw mode is not supported on the current process.stdin, which Ink uses as input stream by default"), so the hidden attempt died on that mount before it reached the browser — no sign-in page ever opened, and the crash's own Ink documentation URL was read out as the address to sign in at. A console gives Ink the terminal it needs, which is how Hermes' setup already runs.
+- The wizard's sign-in page for Command Code no longer says BlindPilot needs it "to have a provider and model configured" — that is Hermes' wording for a different thing. Command Code signs in to an account, and its page now says so.
+
 ## v0.28.0 - 2026-09-13
 
 - Command Code is now a backend BlindPilot can drive. It is installed from npm and driven through its non-interactive mode: `command-code -p --output-format json` writes one event per line, the answer is spoken a sentence at a time with tool calls and results shown as they happen, and the next message resumes the conversation by the session id the CLI reports.
