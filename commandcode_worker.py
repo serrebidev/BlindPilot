@@ -439,7 +439,7 @@ class CommandcodeWorker(threading.Thread):
             return
         if self._completed or self._failed:
             return
-        message = _EXIT_MESSAGES.get(code)
+        message = _EXIT_MESSAGES.get(code) if code is not None else None
         if message is None:
             message = "Command Code stopped before the turn completed"
             message += f" (exit code {code})." if code else "."
