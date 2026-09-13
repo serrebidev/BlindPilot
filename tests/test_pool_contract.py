@@ -121,8 +121,12 @@ def test_the_contract_rejects_a_pool_that_leaves_a_dead_process_registered(monke
 
 
 def test_the_claude_adapter_keeps_the_contract(monkeypatch):
+    # The bare sibling name, like every other import of a tests/ helper in this
+    # suite: a `tests.` prefix resolves to whichever `tests` package the
+    # environment offers first, and a stray one in site-packages shadows this
+    # directory on machines that have it installed.
     import claude_session as cs
-    from tests.test_claude_session import _Proc
+    from test_claude_session import _Proc
 
     monkeypatch.setattr(cs, "end_process_group", lambda proc, timeout=0.0: proc.kill())
 

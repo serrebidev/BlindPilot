@@ -100,6 +100,7 @@ from agent_backends import (
     codex_model_options,
     compaction_request,
     discard_freebuff_prewarm,
+    end_hidden_terminal,
     end_process_group,
     find_backend_cli,
     freebuff_model_options,
@@ -119,6 +120,7 @@ from agent_backends import (
     question_summary,
     reserve_hidden_console,
     set_freebuff_model,
+    spawn_hidden_terminal,
     stop_opencode_server,
     subprocess_env,
     worker_class,
@@ -291,7 +293,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.28.1"
+APP_VERSION = "0.28.2"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7518,6 +7520,11 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
 # work.
 _LOOPBACK_PROGRESS = "Waiting for the sign-in page to open…"
 
+# How long a hidden sign-in is given before the wizard stops waiting on it.
+# The person has to finish in a browser, so this is generous; running out is
+# not itself a failure, because the CLI is asked afterwards whether the
+# sign-in landed either way.
+_HIDDEN_LOGIN_TIMEOUT = 300.0
 
 _LOGIN_NOISE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[()][A-Z0-9])")
 
@@ -7541,6 +7548,22 @@ def _first_login_url(text: str) -> str:
             continue
         return url
     return ""
+
+
+def _terminal_running(terminal: object) -> bool:
+    """Whether the command in a hidden terminal is still running.
+
+    winpty and pexpect both answer `isalive`. A handle that cannot say is
+    treated as finished, so the wizard settles for asking the CLI whether the
+    sign-in landed rather than waiting forever on a terminal it cannot see.
+    """
+    alive = getattr(terminal, "isalive", None)
+    if alive is None:
+        return False
+    try:
+        return bool(alive())
+    except Exception:
+        return False
 
 
 class BackendLogin:
@@ -7760,6 +7783,9 @@ class SetupWizard(wx.Dialog):
         self._step = 0
         self._backend_path: Optional[str] = None
         self._login: Optional[BackendLogin] = None
+        # A sign-in running in a terminal the user never sees, kept so backing
+        # out of the wizard stops it rather than leaving it to finish unseen.
+        self._hidden_login: Optional[object] = None
         self._code_dialog: Optional[wx.TextEntryDialog] = None
 
         self._step_label = wx.StaticText(self, label="")
@@ -7976,6 +8002,15 @@ class SetupWizard(wx.Dialog):
                 "sign in through your browser. If you have already connected one, or "
                 f"already ran '{login}' in a terminal, choose Already Signed In."
             )
+        elif info.login_terminal_hidden:
+            # Nothing opens for the user to read or answer, so what this says
+            # is where the sign-in actually happens.
+            self._signin_intro.SetLabel(
+                f"Sign in to {label}.\n\n"
+                f"If you have already run '{login}' in a terminal, choose Already "
+                "Signed In. Otherwise choose Sign In: the sign-in page opens in "
+                "your browser, and the wizard reports the result here."
+            )
         elif info.login_needs_terminal and self.backend == BACKEND_HERMES:
             # Hermes' "login" is really its model picker, so its setup is about
             # choosing a provider and model rather than about an account.
@@ -7989,8 +8024,8 @@ class SetupWizard(wx.Dialog):
             self._signin_intro.SetLabel(
                 f"Sign in to {label}.\n\n"
                 f"If you have already run '{login}' in a terminal, choose Already "
-                "Signed In. Otherwise choose Sign In: the sign-in opens in a terminal "
-                "window, where it opens your browser and waits for it."
+                "Signed In. Otherwise choose Sign In: its setup opens in a terminal "
+                "window where you can answer its questions."
             )
         else:
             self._signin_intro.SetLabel(
@@ -8106,6 +8141,13 @@ class SetupWizard(wx.Dialog):
         login, self._login = self._login, None
         if login is not None:
             login.cancel()
+        self._stop_hidden_login()
+
+    def _stop_hidden_login(self) -> None:
+        """End a sign-in running in a terminal nobody can see."""
+        hidden, self._hidden_login = self._hidden_login, None
+        if hidden is not None:
+            end_hidden_terminal(hidden)
 
     # ---- CLI step ----
 
@@ -8467,6 +8509,9 @@ class SetupWizard(wx.Dialog):
         announce(text)
 
     def _do_login(self) -> None:
+        # A previous attempt whose terminal is still open on the browser is
+        # stopped first, so asking again cannot leave two sign-ins running.
+        self._stop_hidden_login()
         if self.backend == BACKEND_OPENCODE:
             # opencode signs in by picking a provider and giving it a key or a
             # browser round-trip, which is exactly what /connect does. Shelling
@@ -8493,7 +8538,9 @@ class SetupWizard(wx.Dialog):
         self._next_btn.Disable()
         self._open_page_btn.Disable()
         # A setup that asks its questions in a terminal is not watched for a
-        # browser address; `_run_login` opens a console for it instead.
+        # browser address; `_run_login` gives it a console instead -- shown for
+        # a backend the user has to answer, hidden for one that needs the
+        # terminal only to exist.
         # Muse's launcher is a bash script inside WSL on Windows, which Popen
         # cannot execute; its wrapper rebuilds the argv through the same
         # bridge every other Muse path takes.
@@ -8519,12 +8566,16 @@ class SetupWizard(wx.Dialog):
         if BACKENDS[self.backend].login_needs_terminal:
             # An interactive setup cannot run hidden with no stdin: it dies
             # immediately and the wizard would report a failed sign-in for a
-            # backend that is simply waiting to be asked. Give it a real
-            # console and let the user answer it.
+            # backend that is simply waiting to be asked.
             binary = self._backend_path
             if binary is None:
                 wx.CallAfter(self._on_login_terminal_opened, "", False)
                 return
+            if BACKENDS[self.backend].login_terminal_hidden:
+                self._run_hidden_login(binary)
+                return
+            # Its questions are the user's to answer, so give it a real
+            # console and let them read it.
             self._launch_login_terminal([binary, *BACKENDS[self.backend].login_args])
             return
         login = self._login
@@ -8541,6 +8592,43 @@ class SetupWizard(wx.Dialog):
         # signed in settles it either way.
         ok = rc == 0 or backend_auth_ok(self.backend)
         wx.CallAfter(self._on_login_done, ok, login.failure)
+
+    def _run_hidden_login(self, binary: str) -> None:
+        """Sign in through a terminal the user never sees.
+
+        Command Code's login mounts an Ink UI, which refuses to start without a
+        real terminal and needs nothing else from it: the sign-in is the
+        browser page the CLI opens. Running it in a hidden terminal keeps a
+        console that exists only for that UI from appearing, from taking focus,
+        and from taking screen-reader focus with it. When the command ends the
+        CLI is asked whether the sign-in landed, because it is the only thing
+        that knows.
+        """
+        args = [binary, *BACKENDS[self.backend].login_args]
+        try:
+            terminal = spawn_hidden_terminal(args, str(Path.home()))
+        except Exception as exc:  # noqa: BLE001 - the crash IS the report
+            wx.CallAfter(
+                self._on_login_done,
+                False,
+                f"Could not start {backend_label(self.backend)} to sign in: {exc}",
+            )
+            return
+        self._hidden_login = terminal
+        deadline = time.monotonic() + _HIDDEN_LOGIN_TIMEOUT
+        while _terminal_running(terminal) and time.monotonic() < deadline:
+            time.sleep(0.25)
+        if _terminal_running(terminal):
+            # Still open on the browser. It is left running rather than killed:
+            # a sign-in that finishes late still finishes, and the window has
+            # already said the wizard stopped waiting. Leaving the wizard, or
+            # asking to sign in again, stops it.
+            wx.CallAfter(self._on_login_done, False, "")
+            return
+        self._hidden_login = None
+        end_hidden_terminal(terminal)
+        ok = backend_auth_ok(self.backend)
+        wx.CallAfter(self._on_login_done, ok, "")
 
     def _launch_login_terminal(self, args: List[str]) -> None:
         """Open a real console for a backend whose setup asks questions.

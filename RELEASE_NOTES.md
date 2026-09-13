@@ -1,8 +1,7 @@
-# BlindPilot 0.28.1
+# BlindPilot 0.28.2
 
-Command Code's sign-in is fixed.
+Command Code's sign-in no longer opens a console window.
 
-- Choosing Sign In now runs `command-code login` in a real terminal window. That command mounts a terminal UI for its authentication spinner, and the toolkit it uses refuses to start when its input is not a terminal. Run hidden behind the wizard, it stopped there — speaking "Raw mode is not supported on the current process.stdin" and the rest of a stack trace — before it could open the browser, and the crash's own documentation link was read out as the address to sign in at. A console window gives it the terminal it needs, which is how Hermes' setup already runs.
-- The Command Code sign-in page now describes its own sign-in instead of borrowing Hermes' wording about needing a provider and model configured.
-
-Everything else about the Command Code backend is unchanged.
+- Choosing Sign In now runs `command-code login` in an off-screen terminal. That command renders a terminal UI for its authentication spinner, which refuses to start without an input terminal — but there is nothing in it to read or answer, because the sign-in itself is the browser page the CLI opens. The wizard used to open a visible console just to satisfy that UI.
+- When the command ends, the wizard asks the CLI whether the sign-in landed and reports the answer itself, instead of leaving you to come back and choose Already Signed In. Backing out of the wizard, or asking to sign in again, stops the hidden sign-in rather than leaving it running.
+- The test suite no longer fails on a machine whose Python has another `tests` package installed in site-packages; the import no longer goes through that name.

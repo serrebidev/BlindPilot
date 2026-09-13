@@ -85,15 +85,19 @@ def test_the_executable_is_command_code_never_cmd():
     assert info.login_args == ("login",)
 
 
-def test_sign_in_is_run_in_a_terminal_that_ink_can_use():
+def test_sign_in_is_run_in_a_terminal_ink_can_use():
     """`cmd login` mounts an Ink UI, which needs a TTY.
 
     Hidden behind the wizard's pipes, Ink refused to start ("Raw mode is not
     supported on the current process.stdin"), so no browser ever opened and
     the crash's own Ink documentation URL was read out as the address to sign
-    in at. The wizard opens a real console for it instead.
+    in at. It needs a real terminal, and it needs nothing else from it -- the
+    sign-in is the browser page the CLI opens -- so the wizard runs it in one
+    nobody can see rather than opening a console window.
     """
-    assert BACKENDS[BACKEND_COMMANDCODE].login_needs_terminal is True
+    info = BACKENDS[BACKEND_COMMANDCODE]
+    assert info.login_needs_terminal is True
+    assert info.login_terminal_hidden is True
 
 
 def test_capabilities_match_what_headless_mode_supports():

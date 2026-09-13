@@ -13,6 +13,8 @@ These tests pin what the user hears in every branch.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import blindpilot_app as app
@@ -89,6 +91,7 @@ class _Wizard:
         self._welcome_text = _Widget()
         self._done_text = _Widget()
         self._login = None
+        self._hidden_login = None
 
     def _find_selected_cli(self):
         return None
@@ -98,6 +101,12 @@ class _Wizard:
 
     def _run_login(self):
         return app.SetupWizard._run_login(self)
+
+    def _run_hidden_login(self, binary):
+        return app.SetupWizard._run_hidden_login(self, binary)
+
+    def _stop_hidden_login(self):
+        return app.SetupWizard._stop_hidden_login(self)
 
     def Layout(self):
         pass
@@ -205,40 +214,56 @@ class _InlineThread:
             self._target()
 
 
-def _refuse_to_pipe(*_args, **_kwargs):
-    raise AssertionError("this backend's sign-in must not run behind a pipe")
-
-
-def test_command_code_sign_in_opens_a_terminal_ink_can_use(monkeypatch, wx_app):
-    """`cmd login` mounts an Ink UI, which refuses to run without a TTY.
-
-    Hidden behind the wizard's pipes it died on that mount before it reached
-    the browser, and its crash output -- Ink's own documentation URL included
-    -- was read out as the sign-in address. It goes to a real console instead,
-    the same as Hermes' setup.
+def test_command_code_signs_in_through_a_hidden_terminal(monkeypatch, wx_app):
+    """Command Code's login needs a terminal only because its Ink UI refuses to
+    start without one. It gets a terminal nobody can see, rather than a console
+    window that exists for nothing the user reads or answers.
     """
-    launched: list[list[str]] = []
+    spawned: list[tuple[list[str], str]] = []
+    ended: list[object] = []
+    calls: list[tuple[bool, str]] = []
+
+    class _Finished:
+        def isalive(self):
+            return False
+
+    terminal = _Finished()
+    monkeypatch.setattr(
+        app,
+        "spawn_hidden_terminal",
+        lambda args, cwd: spawned.append((args, cwd)) or terminal,
+    )
+    monkeypatch.setattr(app, "end_hidden_terminal", ended.append)
+    monkeypatch.setattr(app, "backend_auth_ok", lambda _backend: True)
     monkeypatch.setattr(app, "announce", lambda *a, **k: None)
-    monkeypatch.setattr(app, "BackendLogin", _refuse_to_pipe)
     monkeypatch.setattr(app.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(app.wx, "CallAfter", lambda fn, *a: fn(*a))
 
     wizard = _Wizard(BACKEND_COMMANDCODE)
     wizard._backend_path = "C:/npm/command-code.cmd"
-    wizard._launch_login_terminal = lambda args: launched.append(args)
+    wizard._on_login_done = lambda ok, failure: calls.append((ok, failure))
 
     app.SetupWizard._do_login(wizard)
 
-    assert launched == [["C:/npm/command-code.cmd", "login"]]
+    assert spawned == [(["C:/npm/command-code.cmd", "login"], str(Path.home()))]
+    assert ended == [terminal]
+    # The CLI is the only thing that knows whether the browser round-trip
+    # landed, so the wizard reports what it says rather than what it guessed.
+    assert calls == [(True, "")]
     assert wizard._login is None
 
 
 def test_command_code_sign_in_copy_is_about_an_account(monkeypatch, wx_app):
-    """Command Code signs in to an account; its copy must not borrow Hermes'
-    provider-and-model wording, which describes a different thing entirely."""
+    """Command Code signs in to an account in a browser. Its copy must not
+    promise a terminal window to answer, and must not borrow Hermes' wording
+    about a provider and model, which describes a different thing entirely."""
     wizard = _Wizard(BACKEND_COMMANDCODE)
     app.SetupWizard._refresh_backend_copy(wizard)
-    assert "provider and model" not in wizard._signin_intro.text
-    assert "command-code login" in wizard._signin_intro.text
+    text = wizard._signin_intro.text
+    assert "provider and model" not in text
+    assert "terminal window" not in text
+    assert "browser" in text
+    assert "command-code login" in text
 
 
 def test_hermes_sign_in_copy_still_names_its_provider_picker(monkeypatch, wx_app):
@@ -246,3 +271,4 @@ def test_hermes_sign_in_copy_still_names_its_provider_picker(monkeypatch, wx_app
     wizard = _Wizard(BACKEND_HERMES)
     app.SetupWizard._refresh_backend_copy(wizard)
     assert "provider and model" in wizard._signin_intro.text
+    assert "terminal window" in wizard._signin_intro.text

@@ -477,6 +477,13 @@ class BackendInfo:
     # an interactive picker: run hidden with no stdin it simply fails, so the
     # wizard opens a real console instead of pretending to have signed in.
     login_needs_terminal: bool = False
+    # Whether that terminal is kept off screen rather than shown to the user.
+    # Hermes' setup asks questions the user has to answer, so its window is
+    # theirs to read. Command Code needs a terminal only because its Ink UI
+    # refuses to start without one -- the sign-in itself happens in the browser
+    # the CLI opens -- so its terminal runs hidden like FreeBuff's and the
+    # wizard waits for the command to finish instead of for the user.
+    login_terminal_hidden: bool = False
     # Whether the backend takes an attachment's BYTES rather than its path.
     # The CLI backends run on this machine, so naming the file is enough for
     # them. Hermes may be running somewhere else entirely -- in WSL, or on
@@ -611,9 +618,12 @@ BACKENDS = {
         # wizard's pipes it died on that mount before it reached the browser,
         # and its crash output -- Ink's own documentation URL included -- was
         # read out as the sign-in address, pointing a listener at
-        # github.com/vadimdemedes/ink. A real console gives Ink the TTY it
-        # needs, so the wizard opens one, exactly as it does for Hermes.
+        # github.com/vadimdemedes/ink. It needs a real terminal, but there is
+        # nothing in that terminal for anyone to read or answer -- the sign-in
+        # is the browser page the CLI opens -- so it gets a hidden one rather
+        # than a console window to tab past.
         login_needs_terminal=True,
+        login_terminal_hidden=True,
     ),
 }
 
@@ -4844,6 +4854,37 @@ def _spawn_freebuff_pty(
             return ""
 
     return child, read_posix
+
+
+def spawn_hidden_terminal(args: list[str], cwd: str) -> object:
+    """Run a command in a terminal nobody can see, and hand back its handle.
+
+    A backend whose sign-in mounts a terminal UI needs a real terminal even
+    when the user never looks at it: Command Code's login renders an Ink
+    spinner that refuses to start without one. The alternative to a hidden
+    terminal is a console window that appears, can take focus and screen-reader
+    focus with it, and exists only to satisfy the UI.
+
+    This is the same off-screen pseudo-terminal FreeBuff runs in -- claimed and
+    hidden before the terminal asks for a console, with a watcher that re-hides
+    anything a child raises while it runs. The output is drained and thrown
+    away, because a terminal buffer nobody reads fills up and stops the command
+    writing into it. `end_hidden_terminal` stops it.
+    """
+    ended = threading.Event()
+    pty, read = _spawn_freebuff_pty(args, cwd, ended)
+
+    def drain() -> None:
+        while not ended.is_set():
+            read(0.25)
+
+    threading.Thread(target=drain, daemon=True).start()
+    return pty
+
+
+def end_hidden_terminal(terminal: object) -> None:
+    """Stop a terminal started by :func:`spawn_hidden_terminal`."""
+    _kill_pty(terminal)
 
 
 # A FreeBuff terminal takes seconds to reach its composer, and that wait is the

@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.28.2 - 2026-09-13
+
+- Command Code's sign-in no longer opens a console window. The wizard now runs `command-code login` in an off-screen terminal — the same hidden pseudo-terminal FreeBuff runs in — because the CLI's Ink UI needs a real terminal but has nothing in it for anyone to read or answer: the sign-in is the browser page it opens. The wizard then waits for the command to end and asks the CLI whether the sign-in landed, so it reports the result itself rather than leaving a window to tab past and an "Already Signed In" to choose by hand.
+- Fixed `test_pool_contract.py` failing with `ModuleNotFoundError: No module named 'tests.test_claude_session'` on any machine whose Python has another `tests` package installed. argostranslate ships one into site-packages, and a directory without an `__init__.py` is only a namespace package, which loses to a regular package of the same name later on `sys.path`. The import uses the bare sibling name every other test in the suite already uses.
+
 ## v0.28.1 - 2026-09-13
 
 - Command Code's sign-in from the setup wizard now opens a real terminal window instead of running the CLI hidden. `cmd login` mounts an Ink terminal UI for its authentication spinner, and Ink refuses to start when its input is not a terminal ("Raw mode is not supported on the current process.stdin, which Ink uses as input stream by default"), so the hidden attempt died on that mount before it reached the browser — no sign-in page ever opened, and the crash's own Ink documentation URL was read out as the address to sign in at. A console gives Ink the terminal it needs, which is how Hermes' setup already runs.
