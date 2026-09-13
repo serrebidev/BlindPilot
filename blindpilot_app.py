@@ -78,6 +78,7 @@ from app_updater import (
 from agent_backends import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
+    BACKEND_COMMANDCODE,
     BACKEND_FREEBUFF,
     BACKEND_HERMES,
     BACKEND_IDS,
@@ -290,7 +291,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.27.5"
+APP_VERSION = "0.28.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1077,6 +1078,7 @@ _NPM_BACKEND_PACKAGES = {
     BACKEND_CODEX: "@openai/codex",
     BACKEND_FREEBUFF: "freebuff",
     BACKEND_OPENCODE: "opencode-ai",
+    BACKEND_COMMANDCODE: "command-code",
 }
 
 
@@ -1878,6 +1880,18 @@ def probe_model_options(
             _remember_model_options(backend, cwd, binary, options)
         return options
 
+    if backend == BACKEND_COMMANDCODE:
+        # The catalog comes from `command-code --list-models`, and the model
+        # and effort in use are read out of its stored config rather than
+        # asked for, so the picker opens on what is actually selected.
+        from commandcode_backend import commandcode_model_options
+
+        models, efforts, current_model, current_effort, error = commandcode_model_options(cwd)
+        options = ModelOptions(models, efforts, current_model, current_effort, error)
+        if models and binary is not None:
+            _remember_model_options(backend, cwd, binary, options)
+        return options
+
     # The two probes are independent, so the help text is fetched while the
     # slower `/model` status call is still running.
     help_text: List[str] = []
@@ -2022,6 +2036,34 @@ _FREEBUFF_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/logout", "Sign out of FreeBuff"),
 ]
 
+# Command Code's own commands. Its built-ins are interactive-only -- a slash
+# string sent to a headless run is treated as text rather than dispatched
+# (measured at 1.53.1) -- so this list is a discovery aid for the picker: one
+# the agent recognises runs, and one it does not is simply part of the prompt.
+# Curated rather than complete, leaving out the session-lifecycle and
+# terminal-drawing commands that have no meaning in a window read by ear.
+_COMMANDCODE_SLASH_COMMANDS: list[tuple[str, str]] = [
+    ("/add-dir [directory]", "Add a directory to the workspace context"),
+    ("/agents", "Manage agent configurations"),
+    ("/config [query]", "Search and change settings"),
+    ("/connect", "Connect to AI providers, BYOK providers, and API keys"),
+    ("/context", "Show context window usage and breakdown"),
+    ("/effort [level]", "Set the reasoning effort for the current model"),
+    ("/feedback [title]", "Report a bug or share feedback"),
+    ("/init", "Initialize AGENTS.md for this project"),
+    ("/login", "Log in to Command Code or a provider"),
+    ("/logout", "Log out of Command Code or a provider"),
+    ("/mcp", "Manage MCP server connections"),
+    ("/memory", "Manage Command Code memory"),
+    ("/mode [name]", "Show or switch the permission mode"),
+    ("/plan [task]", "Enter plan mode, optionally planning a task"),
+    ("/pr-comments", "Fetch all PR comments for the current branch"),
+    ("/review [pr]", "Review a pull request"),
+    ("/skills", "Browse and open agent skills"),
+    ("/usage", "Display credits, plan, and usage metrics"),
+    ("/worktree [name]", "Create, list, or switch git worktrees"),
+]
+
 
 # Hermes' own commands. Curated rather than complete: it ships about 120, and
 # the ones left out are terminal drawing and input controls (/redraw, /mouse,
@@ -2128,6 +2170,8 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
             (f"/{name}", description or f"Run opencode's {name} command")
             for name, description in opencode_commands(cwd)
         )
+    elif backend == BACKEND_COMMANDCODE:
+        commands.extend(_COMMANDCODE_SLASH_COMMANDS)
     return commands
 
 
@@ -7468,6 +7512,12 @@ _LOGIN_FAILED_RE = re.compile(
 # lands the user on a blank local port.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
 
+# Said instead of a callback address. The CLI is only announcing the local
+# server the browser comes back to, and that port is not a place anyone can
+# sign in -- reading it out sends a listener to the one address that cannot
+# work.
+_LOOPBACK_PROGRESS = "Waiting for the sign-in page to open…"
+
 
 _LOGIN_NOISE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[()][A-Z0-9])")
 
@@ -7633,12 +7683,21 @@ class BackendLogin:
         found = _first_login_url(text)
         if found and not self.url:
             self.url = found
-            # A CLI that opens its own page is left to it, so the user does not
-            # end up with two tabs on the same authorization. The wizard's Open
-            # Sign-in Page button opens it either way, for when that did not
-            # arrive.
+            # Codex's page is opened here, because its own browser launch does
+            # not reliably arrive from the hidden process BlindPilot starts. A
+            # CLI that opens its own page (Claude Code) is left to it, so the
+            # user does not end up with two tabs on the same authorization. The
+            # wizard's Open Sign-in Page button opens it either way, for when
+            # the browser did not arrive.
             opened = False if self._info.login_opens_browser else self.open_page()
             on_url(found, opened)
+            return
+        if not found and _LOGIN_URL_RE.search(text):
+            # Every URL on this line was a loopback one: the CLI is announcing
+            # its own callback server, which is not the sign-in page. Reading
+            # it out would send the listener to a local port that cannot sign
+            # them in, so say what is actually happening instead.
+            on_progress(_LOOPBACK_PROGRESS)
             return
         if spoken:
             on_progress(spoken)

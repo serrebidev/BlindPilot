@@ -223,7 +223,27 @@ def test_codex_login_ignores_the_callback_server_it_announces_first():
     assert [url for url, _ in run.urls] == [
         "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EM"
     ]
-    assert run.opened == []
+    # BlindPilot opens Codex's page itself: the CLI's own browser launch does
+    # not reliably arrive from the hidden process BlindPilot starts, and a
+    # sign-in page that never opens is worse than a duplicate tab.
+    assert run.opened == [
+        "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EM"
+    ]
+    assert run.urls[0][1] is True
+
+
+def test_the_callback_server_is_never_read_out_as_the_address():
+    """A listener must not be sent to the port the browser comes back to.
+
+    Codex announces "Starting local login server on http://localhost:1455."
+    before the page to visit. Speaking that line points a screen-reader user
+    at the one address that cannot sign them in.
+    """
+    run = _Run("codex")
+    run.proc.stdout.feed(CODEX_OUTPUT)
+    run.finish(0)
+    assert "localhost" not in " ".join(run.progress)
+    assert blindpilot_app._LOOPBACK_PROGRESS in run.progress
 
 
 def test_freebuff_login_page_is_opened_by_blindpilot():

@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.28.0 - 2026-09-13
+
+- Command Code is now a backend BlindPilot can drive. It is installed from npm and driven through its non-interactive mode: `command-code -p --output-format json` writes one event per line, the answer is spoken a sentence at a time with tool calls and results shown as they happen, and the next message resumes the conversation by the session id the CLI reports.
+- The model picker reads `command-code --list-models` and opens on the model and effort Command Code's own config records. Permission modes map onto its `default`, `auto-accept`, `plan`, `dont-ask`, and launch-only `--yolo`; the setup wizard installs, updates, and signs it in; `/status` names the account; and past conversations are listed from `~/.commandcode/projects` by the id they resume with.
+- Compaction is not offered, and a headless prompt of `/compact` is treated as text by the CLI (measured at 1.53.1) — the backend reports that instead of pretending. A running turn cannot be steered either, because `-p` answers one query and exits.
+- Codex sign-in now opens the sign-in page from BlindPilot itself, because the CLI's own browser launch does not reliably arrive when `codex login` runs hidden. Codex's `http://localhost:1455` callback line is no longer read out as the address to visit, which had sent at least one person to a local port that cannot sign them in.
+
 ## v0.27.5 - 2026-09-11
 
 - Muse Code now detects Meta's HTTP 402 Spark-inference refusal in its live session log and reports that the signed-in account needs Muse Spark access. Previously Muse retried internally without publishing an MSP error, leaving a BlindPilot turn apparently stuck.

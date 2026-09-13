@@ -335,6 +335,7 @@ BACKEND_FREEBUFF = "freebuff"
 BACKEND_OPENCODE = "opencode"
 BACKEND_HERMES = "hermes"
 BACKEND_MUSE = "muse"
+BACKEND_COMMANDCODE = "commandcode"
 BACKEND_IDS = (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
@@ -342,6 +343,7 @@ BACKEND_IDS = (
     BACKEND_OPENCODE,
     BACKEND_HERMES,
     BACKEND_MUSE,
+    BACKEND_COMMANDCODE,
 )
 BACKEND_LABELS = {
     BACKEND_CLAUDE: "Claude Code",
@@ -350,6 +352,7 @@ BACKEND_LABELS = {
     BACKEND_OPENCODE: "opencode",
     BACKEND_HERMES: "Hermes",
     BACKEND_MUSE: "Muse Code",
+    BACKEND_COMMANDCODE: "Command Code",
 }
 
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
@@ -456,11 +459,13 @@ class BackendInfo:
     # up its context window. FreeBuff's CLI has no such command — its only
     # context control is starting a new conversation.
     supports_compaction: bool = False
-    # Whether the CLI opens the sign-in page itself. Claude Code and Codex do,
-    # even when BlindPilot starts them with no console; FreeBuff deliberately
-    # prints the address and tells you to open it yourself. Opening a page the
-    # CLI has already opened leaves two tabs on the same authorization, so
-    # BlindPilot only opens the ones nobody else will.
+    # Whether the CLI opens the sign-in page itself. Claude Code does, even
+    # when BlindPilot starts it with no console, so that one is left to the CLI
+    # and BlindPilot only opens the pages nobody else will. Codex is the
+    # counter-example: its own browser launch does not reliably arrive from a
+    # hidden process with its output on a pipe, and it has no flag to suppress
+    # it, so BlindPilot opens Codex's page itself -- a duplicate tab is the
+    # lesser cost of a sign-in page that never opens.
     login_opens_browser: bool = False
     # What the CLI's "paste the code from the browser" prompt looks like. It is
     # written without a newline after it, so it is matched against the output
@@ -511,7 +516,10 @@ BACKENDS = {
         True,
         True,
         supports_compaction=True,
-        login_opens_browser=True,
+        # Codex opens the auth URL itself when it can, but not reliably from
+        # the hidden process BlindPilot starts; its page is opened here instead
+        # (see the login_opens_browser comment above).
+        login_opens_browser=False,
     ),
     BACKEND_FREEBUFF: BackendInfo(
         BACKEND_FREEBUFF,
@@ -576,6 +584,28 @@ BACKENDS = {
         True,
         supports_compaction=True,
     ),
+    BACKEND_COMMANDCODE: BackendInfo(
+        BACKEND_COMMANDCODE,
+        "Command Code",
+        # The npm package installs four launchers (cmd, cmdc, command-code,
+        # commandcode). This one, never `cmd`: on Windows `shutil.which("cmd")`
+        # finds the command interpreter in System32, not the agent.
+        "command-code",
+        "npm install -g command-code",
+        # `cmd login` is the OAuth flow, which opens the browser itself.
+        ("login",),
+        True,
+        True,
+        True,
+        # -p answers a single query and exits, so there is no running turn to
+        # steer; a second message waits for this one to finish.
+        False,
+        # Compaction is a command the interactive CLI runs. Sending "/compact"
+        # as a headless prompt is treated as text (measured at 1.53.1), so the
+        # backend does not offer it rather than pretend.
+        supports_compaction=False,
+        login_opens_browser=True,
+    ),
 }
 
 # What a "compact this conversation" turn looks like per provider: the text to
@@ -623,6 +653,10 @@ def normalize_backend(value: object) -> str:
         "muse": BACKEND_MUSE,
         "musecode": BACKEND_MUSE,
         "meta": BACKEND_MUSE,
+        # "cmd" is one of Command Code's launcher names, and a stored settings
+        # value using it should resolve here rather than fall back to Claude.
+        "commandcode": BACKEND_COMMANDCODE,
+        "cmd": BACKEND_COMMANDCODE,
     }
     return aliases.get(compact, BACKEND_CLAUDE)
 
@@ -752,6 +786,12 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
         return hermes_auth_ok(timeout=max(timeout, 25))
     if backend == BACKEND_MUSE:
         return _muse_signed_in_checked()
+    if backend == BACKEND_COMMANDCODE:
+        # `command-code status` is a Node start-up plus a request; the default
+        # twelve seconds has been enough, but give it room like Hermes.
+        from commandcode_backend import commandcode_auth_ok
+
+        return commandcode_auth_ok(timeout=max(timeout, 25))
     binary = find_backend_cli(backend)
     if not binary:
         return False
@@ -945,6 +985,9 @@ def _opencode_account_lines() -> list[str]:
 #                the rate-limit headers it does read are used to decide a
 #                retry rather than kept anywhere that could be asked. So it
 #                reports nothing, rather than a number that would be a guess.
+#   Command Code nothing of its own either: usage is behind the interactive
+#                /usage command and the billing website, and the headless
+#                surface has no command that reports it.
 #
 # What is metered is the account's business, not BlindPilot's. A plan may have
 # a five-hour window and no weekly one, a weekly window for one model and not
@@ -1695,6 +1738,10 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         lines.extend(_hermes_account_lines())
     elif backend == BACKEND_MUSE:
         lines.extend(_muse_account_lines())
+    elif backend == BACKEND_COMMANDCODE:
+        from commandcode_backend import commandcode_account_lines
+
+        lines.extend(commandcode_account_lines())
     else:
         lines.extend(_opencode_account_lines())
     lines.extend(backend_usage_lines(backend, binary, timeout))
@@ -1832,6 +1879,12 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             "Muse's stored sign-in and provider credentials. On Windows this file "
             "lives inside the WSL distribution the CLI runs in, not on this side.",
         ),
+        SettingsFile(
+            BACKEND_COMMANDCODE,
+            "global",
+            home / ".commandcode" / "config.json",
+            "Applies to every project. Holds the chosen model, provider, and reasoning effort.",
+        ),
     ]
     if project is not None:
         entries += [
@@ -1852,6 +1905,19 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
                 "this folder",
                 project / "opencode.json",
                 "Applies in this folder, and can pin a model or turn providers off.",
+            ),
+            SettingsFile(
+                BACKEND_COMMANDCODE,
+                "this folder",
+                project / ".commandcode" / "settings.json",
+                "Shared: committed to this repository, so anyone who has it gets "
+                "these permission rules and default mode.",
+            ),
+            SettingsFile(
+                BACKEND_COMMANDCODE,
+                "this folder, personal",
+                project / ".commandcode" / "settings.local.json",
+                "Yours alone: normally ignored by git, so it stays on this machine.",
             ),
         ]
     return entries
@@ -7161,4 +7227,10 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         from muse_worker import MuseWorker
 
         return MuseWorker
+    if backend == BACKEND_COMMANDCODE:
+        # Imported on demand: a machine without Command Code pays nothing, and
+        # an import error here cannot stop the other backends working.
+        from commandcode_worker import CommandcodeWorker
+
+        return CommandcodeWorker
     return claude_worker

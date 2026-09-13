@@ -55,6 +55,7 @@ from typing import Iterator, List, Optional, Sequence
 from agent_backends import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
+    BACKEND_COMMANDCODE,
     BACKEND_FREEBUFF,
     BACKEND_HERMES,
     BACKEND_IDS,
@@ -474,6 +475,105 @@ def _codex_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     turns: List[HistoryTurn] = []
     for record in _iter_jsonl(path):
         role, text = _codex_message(record)
+        if role == "user":
+            turns.append(HistoryTurn(prompt=text))
+        elif role == "assistant":
+            if not turns:
+                turns.append(HistoryTurn())
+            turns[-1].response = _append(turns[-1].response, text)
+    return turns
+
+
+# ----- Command Code -----
+#
+# Command Code keeps one JSONL transcript per conversation under a per-project
+# folder: ``~/.commandcode/projects/<project-slug>/<session-id>.jsonl``. The
+# slug is derived from the working directory, but it is never decoded here --
+# the transcript's own first record is a header carrying the session id and
+# the working directory, so the file is read rather than the folder name
+# guessed. Its headless sessions are hidden from Command Code's own /resume
+# picker, but they resume by id, which is exactly what this list needs.
+#
+# The first record is the session header; every one after it is a message
+# (``{"type": "message", "message": {"role": ..., "content": [...]}}``), with
+# content blocks in the same shape Claude Code uses.
+
+# Sidecars that sit beside a transcript and are not a conversation of their own.
+_COMMANDCODE_SIDECARS = (".checkpoints", ".prompts")
+
+
+def _commandcode_transcript(path: Path) -> bool:
+    """Whether a ``.jsonl`` file under the projects folder is a transcript."""
+    name = path.name
+    if not name.endswith(".jsonl"):
+        return False
+    return not any(name.endswith(f"{side}.jsonl") for side in _COMMANDCODE_SIDECARS)
+
+
+def _commandcode_message(record: dict) -> tuple[str, str]:
+    """(role, text) for a Command Code message record, or ("", "")."""
+    if record.get("type") != "message":
+        return "", ""
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return "", ""
+    role = str(message.get("role") or "")
+    if role not in ("user", "assistant"):
+        return "", ""
+    text = _content_text(message.get("content"), ("text",))
+    if role == "user":
+        text = clean_user_text(text)
+    if not text:
+        return "", ""
+    return role, text
+
+
+def _commandcode_entry(path: Path, cwd: Optional[str]) -> Optional[HistoryEntry]:
+    session_id = ""
+    session_cwd = ""
+    title = ""
+    for record in _iter_jsonl(path, _MAX_HEAD_LINES):
+        if record.get("type") == "session":
+            session_id = str(record.get("id") or "")
+            session_cwd = str(record.get("cwd") or "")
+            continue
+        role, text = _commandcode_message(record)
+        if role == "user":
+            title = make_title(text)
+            break
+    if not session_id or not title:
+        return None
+    if cwd and not _same_dir(session_cwd, cwd):
+        return None
+    return HistoryEntry(
+        backend=BACKEND_COMMANDCODE,
+        session_id=session_id,
+        title=title,
+        path=str(path),
+        modified=_mtime(path),
+        cwd=session_cwd,
+        folder=_folder_name(session_cwd),
+    )
+
+
+def _commandcode_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    root = _home() / ".commandcode" / "projects"
+    try:
+        paths = [path for path in root.glob("*/*.jsonl") if _commandcode_transcript(path)]
+    except OSError:
+        return []
+    entries: List[HistoryEntry] = []
+    for path in paths:
+        entry = _commandcode_entry(path, cwd)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _commandcode_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    turns: List[HistoryTurn] = []
+    for record in _iter_jsonl(Path(entry.path)):
+        role, text = _commandcode_message(record)
         if role == "user":
             turns.append(HistoryTurn(prompt=text))
         elif role == "assistant":
@@ -993,6 +1093,7 @@ _LISTERS = {
     BACKEND_FREEBUFF: _freebuff_entries,
     BACKEND_OPENCODE: _opencode_entries,
     BACKEND_HERMES: _hermes_entries,
+    BACKEND_COMMANDCODE: _commandcode_entries,
 }
 
 # Readers are given the whole entry rather than its path, because opencode and
@@ -1004,6 +1105,7 @@ _READERS = {
     BACKEND_FREEBUFF: _freebuff_turns,
     BACKEND_OPENCODE: _opencode_turns,
     BACKEND_HERMES: _hermes_turns,
+    BACKEND_COMMANDCODE: _commandcode_turns,
 }
 
 
