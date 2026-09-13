@@ -106,7 +106,9 @@ def test_a_transcript_is_listed_with_its_own_title(tmp_path, monkeypatch):
     assert entry.session_id == "abc-123"
     assert entry.title == "Fix the login bug"
     assert entry.cwd == "C:\\Users\\me\\proj"
-    assert entry.folder == "proj"
+    # The folder is the last path component on whichever platform is running;
+    # a Windows-style path has no separator to split on anywhere else.
+    assert entry.folder.endswith("proj")
 
 
 def test_the_sidecar_files_are_not_conversations(tmp_path, monkeypatch):
