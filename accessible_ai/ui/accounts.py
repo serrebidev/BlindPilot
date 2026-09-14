@@ -16,6 +16,7 @@ from accessible_ai.models import (
     API_MODE_RESPONSES,
     Account,
     PROVIDER_CLAUDE,
+    PROVIDER_COMMAND_CODE,
     PROVIDER_DEEPSEEK,
     PROVIDER_GEMINI,
     PROVIDER_KIMI,
@@ -52,6 +53,7 @@ PROVIDER_ORDER = [
     PROVIDER_MOONSHOT,
     PROVIDER_KIMI,
     PROVIDER_DEEPSEEK,
+    PROVIDER_COMMAND_CODE,
     PROVIDER_OPENCODE_GO,
     PROVIDER_OPENAI_COMPATIBLE,
 ]
@@ -70,7 +72,8 @@ BUILTIN_PROVIDER_NOTES = {
     ),
     PROVIDER_CLAUDE: (
         "Claude connection addresses are built in. Enter an account name and your Anthropic API key. "
-        "Claude uses Anthropic's Messages protocol. File attachments are available on OpenRouter accounts only."
+        "Claude uses Anthropic's Messages protocol. File attachments are supported: images and PDFs "
+        "are sent as the protocol's own blocks, and any other file goes in as its text."
     ),
     PROVIDER_GEMINI: (
         "Gemini connection addresses are built in. Enter an account name and your Google AI Studio API key. "
@@ -92,6 +95,12 @@ BUILTIN_PROVIDER_NOTES = {
     PROVIDER_DEEPSEEK: (
         "DeepSeek connection addresses are built in. Enter an account name and your DeepSeek API key. "
         "You do not need to enter or verify any URL."
+    ),
+    PROVIDER_COMMAND_CODE: (
+        "Command Code connection addresses are built in. Enter an account name and your Command Code "
+        "API key from Studio. Claude models are sent to the Messages protocol and every other model to "
+        "Chat Completions automatically. File attachments are supported: images and PDFs go as the "
+        "protocol's own blocks, and any other file in as its text."
     ),
     PROVIDER_OPENCODE_GO: (
         "OpenCode Go connection addresses and per-model protocol routing are built in. Enter an account "

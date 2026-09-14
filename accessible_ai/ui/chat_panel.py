@@ -1082,17 +1082,6 @@ class ChatPanel(wx.Panel):
             )
             self.message_input.SetFocus()
             return
-        if self.pending_attachments and account.provider != PROVIDER_OPENROUTER:
-            wx.MessageBox(
-                "File attachments are currently supported for OpenRouter accounts. Select an OpenRouter account "
-                "or clear the pending attachments.",
-                "Attachments",
-                wx.OK | wx.ICON_ERROR,
-                self,
-            )
-            self.account_choice.SetFocus()
-            return
-
         self._ensure_conversation(user_text, account, model)
         assert self.current_conversation_id is not None
         attachments = list(self.pending_attachments)

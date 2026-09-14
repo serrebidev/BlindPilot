@@ -109,6 +109,41 @@ def chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def messages_content(content: str, attachments: list[Any]) -> list[dict[str, Any]]:
+    """A message carrying files, in the Anthropic Messages shape of blocks.
+
+    Anthropic serves images and PDFs as content blocks of their own. Files
+    that are neither have no block type on this protocol, so their text is
+    sent inline as one more text block, exactly as the Chat Completions path
+    sends them. Only called when there is something attached; a plain string
+    body stays a plain string, as it always was.
+    """
+    parts: list[dict[str, Any]] = [
+        {"type": "text", "text": content or "Review the attached files."}
+    ]
+    parts.extend(attachment_source_block(attachment) for attachment in attachments)
+    return parts
+
+
+def attachment_source_block(attachment: MessageAttachment) -> dict[str, Any]:
+    """One attachment as a Messages content block."""
+    encoded = base64.b64encode(attachment.data).decode("ascii")
+    mime_type = attachment.mime_type or "application/octet-stream"
+    suffix = PurePath(attachment.filename).suffix.lower()
+    if mime_type.startswith("image/"):
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime_type, "data": encoded},
+        }
+    if mime_type == "application/pdf" or suffix == ".pdf":
+        return {
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": encoded},
+        }
+    text = attachment.data.decode("utf-8", errors="replace")
+    return {"type": "text", "text": f"[Attached file: {attachment.filename}]\n{text}"}
+
+
 def reasoning_text(payload: dict[str, Any]) -> str:
     """The thinking in one delta or one finished message, as plain text.
 
@@ -380,7 +415,10 @@ class ProtocolMixin(BaseProvider):
         extra_headers: dict[str, str] | None = None,
     ) -> Iterator[StreamEvent]:
         if any(message.get("attachments") for message in settings.messages):
-            raise ProviderError("File attachments currently require the Chat Completions API mode.")
+            raise ProviderError(
+                "File attachments need an account using the Chat Completions or Messages protocol. "
+                "Pick a different model, or set the account's API mode to Chat Completions."
+            )
         url = self.build_url(endpoint or self.account.responses_endpoint)
         headers = self.headers()
         if extra_headers:
@@ -456,8 +494,6 @@ class ProtocolMixin(BaseProvider):
         endpoint: str | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> Iterator[StreamEvent]:
-        if any(message.get("attachments") for message in settings.messages):
-            raise ProviderError("File attachments currently require the Chat Completions API mode.")
         url = self.build_url(endpoint or self.account.messages_endpoint)
         headers = self.headers()
         headers.setdefault("anthropic-version", "2023-06-01")
@@ -465,14 +501,18 @@ class ProtocolMixin(BaseProvider):
             headers.update(extra_headers)
 
         system_parts: list[str] = []
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         for message in settings.messages:
             role = message.get("role", "user")
             content = str(message.get("content", ""))
+            attachments = message.get("attachments") or []
             if role in {"system", "developer"}:
                 system_parts.append(content)
             elif role in {"user", "assistant"}:
-                messages.append({"role": role, "content": content})
+                body_content: Any = content
+                if attachments:
+                    body_content = messages_content(content, attachments)
+                messages.append({"role": role, "content": body_content})
 
         body: dict[str, Any] = dict(self.account.custom_body)
         body.update(

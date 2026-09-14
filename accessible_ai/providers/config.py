@@ -6,6 +6,7 @@ from accessible_ai.models import (
     API_MODE_MESSAGES,
     Account,
     PROVIDER_CLAUDE,
+    PROVIDER_COMMAND_CODE,
     PROVIDER_DEEPSEEK,
     PROVIDER_GEMINI,
     PROVIDER_KIMI,
@@ -30,6 +31,10 @@ _BUILTIN_PROVIDERS: dict[str, tuple[str, str]] = {
     PROVIDER_OPENROUTER: ("https://openrouter.ai/api/v1", API_MODE_AUTO),
     PROVIDER_OPENAI: ("https://api.openai.com/v1", API_MODE_AUTO),
     PROVIDER_OPENCODE_GO: ("https://opencode.ai/zen/go/v1", API_MODE_AUTO),
+    # Command Code serves both protocols from one host: the OpenAI shape for
+    # every model except Claude, which it only serves on the Messages shape.
+    # Which endpoint a model belongs on is per-model routing, in the provider.
+    PROVIDER_COMMAND_CODE: ("https://api.commandcode.ai/provider/v1", API_MODE_AUTO),
     # Anthropic speaks only its own Messages API and authenticates with an
     # x-api-key header rather than a bearer token.  The chat and responses paths
     # are placeholders that this provider never calls.

@@ -12,6 +12,7 @@ PROVIDER_Z_AI = "z_ai"
 PROVIDER_MOONSHOT = "moonshot"
 PROVIDER_KIMI = "kimi"
 PROVIDER_DEEPSEEK = "deepseek"
+PROVIDER_COMMAND_CODE = "command_code"
 PROVIDER_OPENCODE_GO = "opencode_go"
 PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 
@@ -24,6 +25,7 @@ PROVIDER_LABELS = {
     PROVIDER_MOONSHOT: "Moonshot AI",
     PROVIDER_KIMI: "Kimi",
     PROVIDER_DEEPSEEK: "DeepSeek",
+    PROVIDER_COMMAND_CODE: "Command Code",
     PROVIDER_OPENCODE_GO: "OpenCode Go",
     PROVIDER_OPENAI_COMPATIBLE: "OpenAI-compatible",
 }

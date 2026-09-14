@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.0 - 2026-09-14
+
+- Chat mode has a new built-in provider: Command Code's Provider API. One account reaches every model Command Code sells - Claude, GPT, Gemini and the open models - at their underlying rates. Claude models are sent to the Anthropic Messages protocol and every other model to Chat Completions, chosen per model as the request is built, because the service rejects a model sent to the wrong protocol. Enter a name and the API key from Command Code Studio; the addresses are built in.
+- File attachments now work on every chat account, not only OpenRouter's. The panel no longer refuses to send them for other providers: images and PDFs travel as the protocol's own content blocks on the Messages protocol (which also gains them on OpenAI accounts set to Messages), and text files go in as their text everywhere, as they already did on Chat Completions. Accounts left on OpenAI's Responses API still decline attachments with a clear sentence, because that protocol has no file block BlindPilot can serve.
+
 ## v0.28.4 - 2026-09-14
 
 - Command Code can now be steered and queued. `-p` answers one query and exits, so a message typed while a turn was running used to be refused with "still finishing"; it is now queued and sent the moment that turn drains, in order and with its own attachments. Steer stops the running turn and resumes the conversation with the new instruction, Stop pauses the queue, and `/queue list`, `/queue clear` and `/queue resume` manage it. `/help` explains the flow.

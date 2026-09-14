@@ -168,11 +168,11 @@ Then choose Username and password in Remote Hermes. Hermes issues a short-lived 
 
 Chat talks to a provider's API directly. No CLI, no agent, no file access.
 
-Set the Mode combo box to Chat, add a provider and key under Chat, Accounts, then Chat, Refresh models and pick one. Supported providers are OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, OpenCode Go, and any OpenAI-compatible endpoint. Keys go in the OS credential store.
+Set the Mode combo box to Chat, add a provider and key under Chat, Accounts, then Chat, Refresh models and pick one. Supported providers are OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, Command Code, OpenCode Go, and any OpenAI-compatible endpoint. Keys go in the OS credential store.
 
 Conversation profiles hold a system prompt, default account and model, temperature, token limit, and streaming preference. History view switches between a native list and a read-only edit field. Provider logs are under Chat, Diagnostics.
 
-OpenRouter accounts also get multiple attachments, cache-aware regeneration, `:batch` model ids, OpenRouter's server-side tools (web search, web fetch, date and time, image generation, apply patch, shell, bash, fusion, advisor, subagent, tool search, model search), and thinking controls. Tools run on OpenRouter's servers, not your computer. Thinking effort sets how long a reasoning model thinks. Send the thinking back decides whether the thinking text is returned. Thinking arrives as its own History entry with a length line first. Read attached PDFs with converts a PDF to text for models that cannot read PDFs.
+Every chat account takes attachments: images and PDFs go as the protocol's own content blocks, and any other file goes in as its text. OpenRouter accounts also get cache-aware regeneration, `:batch` model ids, OpenRouter's server-side tools (web search, web fetch, date and time, image generation, apply patch, shell, bash, fusion, advisor, subagent, tool search, model search), and thinking controls. Tools run on OpenRouter's servers, not your computer. Thinking effort sets how long a reasoning model thinks. Send the thinking back decides whether the thinking text is returned. Thinking arrives as its own History entry with a length line first. Read attached PDFs with converts a PDF to text for models that cannot read PDFs.
 
 Chat data lives in `chat.sqlite3` beside the config. An existing AccessibleAI database is imported once and left unmodified.
 
