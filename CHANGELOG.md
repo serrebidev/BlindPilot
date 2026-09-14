@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.28.4 - 2026-09-14
+
+- Command Code can now be steered and queued. `-p` answers one query and exits, so a message typed while a turn was running used to be refused with "still finishing"; it is now queued and sent the moment that turn drains, in order and with its own attachments. Steer stops the running turn and resumes the conversation with the new instruction, Stop pauses the queue, and `/queue list`, `/queue clear` and `/queue resume` manage it. `/help` explains the flow.
+- Command Code's own commands now have frontend equivalents: `/effort`, `/mode` and the `/mode:name` forms, `/plan [task]`, `/add-dir`, `/copy`, `/sessions`, `/quit`, `/config`, `/login`, `/connect`, `/update`, `/init`, `/review` and `/pr-comments`. A command that only exists in its terminal UI is explained when typed instead of being sent to the model as ordinary text.
+- `/compact` works for Command Code: it summarizes the conversation into a new saved session, and the original stays selected unless the replacement session is saved first.
+- Command Code no longer starts its own background updater. Even `--version`, `status` and `--list-models` could spawn its detached updater, which put a console window on screen mid-use. Every Command Code process BlindPilot starts now runs with `COMMANDCODE_SKIP_UPDATES` set, and npm installs and updates run hidden and non-interactively with their output logged.
+
 ## v0.28.3 - 2026-09-13
 
 - Command Code's sign-in no longer puts a console window on screen. v0.28.2 ran it in the same off-screen pseudo-terminal FreeBuff uses, but making that terminal calls `AllocConsole`, which hands back a console that has *already* appeared — hiding it is the next thing that happens, and that frame of a window, titled with BlindPilot's own executable, is what was still being seen. Windows now creates the sign-in's console hidden from the start (`CREATE_NEW_CONSOLE` with the startup show flag set), so there is no window to hide and nothing to flash; the same watcher still hides any console Windows raises anyway. Verified end to end on Windows: the CLI runs in that console, exits 0, and no console window in the process tree is ever visible.

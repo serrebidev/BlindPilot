@@ -1,9 +1,9 @@
-# BlindPilot 0.28.3
+# BlindPilot 0.28.4
 
-Command Code's sign-in no longer shows a console window.
+Command Code can be steered and queued, and it no longer flashes a console window when it updates.
 
-- 0.28.2 ran the sign-in in an off-screen terminal, but making that terminal calls `AllocConsole`, and `AllocConsole` hands back a console that has already appeared on screen. Hiding it is the next thing that happens, so one frame of a window — titled with BlindPilot's own executable — was still being put in front of you. That was the window.
-- The sign-in now gets a console that Windows creates hidden from the start, so there is no window to hide and nothing to flash. A watcher still hides any console Windows raises anyway.
-- Checked end to end on Windows: the CLI runs in that console, exits 0, and no console window belonging to the process tree is ever visible.
-
-The rest of 0.28.2 stands: the wizard waits for the sign-in to finish and then reports whether it landed, instead of leaving you to choose Already Signed In.
+- Sending a message while Command Code is working no longer says "still finishing". The message is queued and goes out, in order and with its files, as soon as the running turn ends.
+- Steer stops the running turn and resumes the conversation with your new instruction. Stop pauses the queue, and `/queue list`, `/queue clear` and `/queue resume` let you inspect, discard or release what is waiting.
+- Command Code's own commands now have working equivalents, including `/effort`, `/mode`, `/plan`, `/add-dir`, `/copy` and `/sessions`. Commands that only exist in its terminal interface are explained when you type them, instead of being sent to the model as text.
+- `/compact` now works for Command Code. It summarizes the conversation into a new session; the original stays in Recent Conversations, and stays selected unless the new session is saved.
+- Command Code no longer starts its own background updater during a turn, a status check or a model list. That updater was what put a console window on screen. BlindPilot's own install and update steps run hidden and non-interactively, with their output in the log.

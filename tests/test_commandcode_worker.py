@@ -147,6 +147,11 @@ def test_model_effort_and_resume_are_passed_through():
     assert argv[argv.index("--resume") + 1] == "abc-123"
 
 
+def test_additional_directories_are_separate_arguments():
+    argv = build_command("command-code", "plan", additional_dirs=("/work/with spaces", "/other"))
+    assert argv[-4:] == ["--add-dir", "/work/with spaces", "--add-dir", "/other"]
+
+
 # --------------------------------------------------------------------------
 # A turn
 # --------------------------------------------------------------------------
@@ -353,3 +358,96 @@ def test_cancel_reports_stopped_without_a_failure(monkeypatch):
     assert rec.texts("failed") == []
     assert rec.texts("complete") == ["Stopped"]
     assert rec.kinds()[-1] == "done"
+
+
+def _worker(rec, **extra):
+    return CommandcodeWorker(
+        "hi",
+        "original",
+        ".",
+        "default",
+        on_session=rec.callback("session"),
+        on_started=rec.callback("started"),
+        on_activity=rec.callback("activity"),
+        on_complete=rec.callback("complete"),
+        on_failed=rec.callback("failed"),
+        on_done=rec.callback("done"),
+        **extra,
+    )
+
+
+def test_cancel_during_process_creation_kills_late_child(worker_env, monkeypatch):
+    rec = _Recorder()
+    worker = _worker(rec)
+    killed = []
+    proc = worker_env["proc"]
+
+    def popen(*_args, **_kwargs):
+        worker.cancel()
+        return proc
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        commandcode_worker, "end_process_group", lambda process: killed.append(process)
+    )
+    worker.run()
+    assert proc in killed
+    assert proc.stdin.written == ""
+    assert rec.kinds()[-1] == "done"
+
+
+def test_compaction_saves_summary_in_new_session_before_switching(worker_env, monkeypatch):
+    rec = _Recorder()
+    first = _FakeProcess(
+        lines=[
+            _result(
+                subtype="success", sessionId="original", finalText="Objective and unfinished work"
+            )
+        ]
+    )
+    second = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "compacted"}),
+            _result(subtype="success", sessionId="compacted", finalText="Ready"),
+        ]
+    )
+    processes = iter([first, second])
+    commands = []
+
+    def popen(argv, **_kwargs):
+        commands.append(argv)
+        return next(processes)
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", popen)
+    _worker(rec, compact=True).run()
+    assert "--resume" in commands[0] and "original" in commands[0]
+    assert "--resume" not in commands[1]
+    assert "Objective and unfinished work" in second.stdin.written
+    assert all(argv[argv.index("--permission-mode") + 1] == "plan" for argv in commands)
+    assert rec.texts("session") == ["compacted"]
+    assert len(rec.texts("complete")) == 1
+    assert rec.kinds().count("done") == 1
+    assert "failed" not in rec.kinds()
+
+
+def test_failed_compaction_does_not_switch_from_original(worker_env, monkeypatch):
+    rec = _Recorder()
+    processes = iter(
+        [
+            _FakeProcess(
+                lines=[_result(subtype="success", sessionId="original", finalText="Summary")]
+            ),
+            _FakeProcess(
+                lines=[
+                    _event({"type": "run_start", "sessionId": "incomplete"}),
+                    _result(subtype="error", error={"message": "network failed"}),
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda *_a, **_k: next(processes))
+    _worker(rec, compact=True).run()
+    assert rec.texts("session") == []
+    assert rec.texts("complete") == []
+    assert rec.texts("failed") == ["network failed"]
+    assert rec.kinds().count("done") == 1

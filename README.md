@@ -128,7 +128,7 @@ On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, 
 | FreeBuff | Hidden pseudo-terminal | Model yes, effort no. GLM 5.3 Flash by default | Managed by FreeBuff | No | Yes |
 | opencode | Its headless HTTP server, one shared process | Yes, with per-model reasoning variants | Yes | Yes | Yes |
 | Hermes | Gateway JSON-RPC over a local pipe or the network | Yes | Yes | Yes | Yes |
-| Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | No | No |
+| Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | Yes | No |
 
 FreeBuff has no JSON or headless API, so BlindPilot runs its terminal interface in a hidden pseudo-terminal and reads the answer off the screen a sentence at a time. Redraws and advertisements are filtered out. If you send a message before FreeBuff has finished starting, BlindPilot holds it and says so, then sends it when the session is live.
 
@@ -138,7 +138,7 @@ opencode runs as one server shared by every tab, on loopback, behind a password 
 
 Hermes answers stream a sentence at a time. One connection is kept for the whole conversation. Hermes' reasoning channel carries a terminal spinner rather than reasoning, so that is filtered out.
 
-Command Code runs one process per message. `-p` answers a single query and exits, so a running turn cannot be steered and the next message resumes the conversation by the session id the CLI reports. Its built-in commands are interactive-only — a slash string sent headlessly is treated as text — so the slash picker lists them as a discovery aid, while BlindPilot's own commands are the ones that always run. Compaction and mid-run questions are not offered.
+Command Code runs one process per message. `-p` answers a single query and exits, so a running turn cannot be steered by the CLI itself and the next message resumes the conversation by the session id the CLI reports. BlindPilot supplies the missing pieces: a message sent while a turn is running is queued and goes out the moment that turn finishes, in order and with its attachments; Steer stops the running turn and resumes the conversation with your new instruction; Stop pauses the queue, and `/queue list`, `/queue clear` and `/queue resume` manage it. `/compact` summarizes the conversation into a new saved session and leaves the original in Recent Conversations. Its built-in commands cannot run headlessly — a slash string sent that way is treated as text — so the picker lists the ones BlindPilot provides equivalents for, explains the rest when typed, and never sends one to the model by accident. Mid-run questions are not offered.
 
 ### Hermes on another computer
 

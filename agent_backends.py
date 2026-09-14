@@ -604,13 +604,10 @@ BACKENDS = {
         True,
         True,
         True,
-        # -p answers a single query and exits, so there is no running turn to
-        # steer; a second message waits for this one to finish.
-        False,
-        # Compaction is a command the interactive CLI runs. Sending "/compact"
-        # as a headless prompt is treated as text (measured at 1.53.1), so the
-        # backend does not offer it rather than pretend.
-        supports_compaction=False,
+        # The frontend implements steering by stopping and resuming, and
+        # queues ordinary follow-ups until the preceding turn has drained.
+        True,
+        supports_compaction=True,
         # "cmd login" is not a plain sign-in: it mounts an Ink terminal UI for
         # its authentication spinner, and Ink refuses to start when stdin is
         # not a TTY ("Raw mode is not supported on the current process.stdin,
@@ -646,6 +643,7 @@ _COMPACTION_REQUESTS: dict[str, tuple[str, dict]] = {
     # Muse compacts the same way, over session/compact; the worker turns the
     # flag into that request.
     BACKEND_MUSE: ("/compact", {"compact": True}),
+    BACKEND_COMMANDCODE: ("Summarize this conversation for continuation.", {"compact": True}),
 }
 
 
@@ -1952,6 +1950,10 @@ def subprocess_env(binary: str) -> dict[str, str]:
     runtime BlindPilot manages itself.
     """
     env = os.environ.copy()
+    # Even --version/--list-models can start Command Code's detached updater.
+    # Keep updates in BlindPilot's logged, hidden npm installer, including
+    # when a backend launches Command Code as a child of its own.
+    env["COMMANDCODE_SKIP_UPDATES"] = "1"
     entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry.strip()]
     known = set(entries)
     directory = os.path.dirname(binary)

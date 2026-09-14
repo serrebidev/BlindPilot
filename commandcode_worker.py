@@ -77,6 +77,7 @@ def build_command(
     model: str = "",
     effort: str = "",
     session_id: Optional[str] = None,
+    additional_dirs: tuple[str, ...] = (),
 ) -> list[str]:
     """The argv for one headless turn. The prompt itself travels on stdin."""
     command = [
@@ -102,6 +103,8 @@ def build_command(
         command += ["--effort", effort]
     if session_id:
         command += ["--resume", session_id]
+    for directory in additional_dirs:
+        command += ["--add-dir", directory]
     return command
 
 
@@ -118,6 +121,7 @@ class CommandcodeWorker(threading.Thread):
         model: str = "",
         effort: str = "",
         compact: bool = False,
+        additional_dirs: tuple[str, ...] = (),
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -133,11 +137,10 @@ class CommandcodeWorker(threading.Thread):
         self._permission_mode = permission_mode
         self._model = model
         self._effort = effort
-        # Accepted for the shared worker signature. Compaction is a command
-        # the interactive CLI runs; a headless prompt of "/compact" is treated
-        # as text (measured), so this backend does not offer it and this flag
-        # is never set by the window.
+        self._additional_dirs = additional_dirs
+        # Headless compaction summarizes into a fresh persisted session.
         self._compact = compact
+        self._compact_child: Optional[CommandcodeWorker] = None
         self._on_session = on_session
         self._on_started = on_started
         self._on_activity = on_activity
@@ -183,6 +186,8 @@ class CommandcodeWorker(threading.Thread):
         would leave the child running.
         """
         self._cancelled = True
+        if self._compact_child is not None:
+            self._compact_child.cancel()
         proc = self._proc
         if proc is not None:
             end_process_group(proc)
@@ -191,7 +196,10 @@ class CommandcodeWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            self._do_run()
+            if self._compact:
+                self._run_compaction()
+            else:
+                self._do_run()
         except Exception as exc:  # noqa: BLE001 - the crash IS the report
             if not self._failed and not self._clean_end:
                 self._fail(f"Command Code turn failed: {exc}")
@@ -199,13 +207,81 @@ class CommandcodeWorker(threading.Thread):
             self._close_process()
             self._on_done()
 
+    def _run_compaction(self) -> None:
+        """Keep the original session until a summarized replacement is saved."""
+        if not self._session_id:
+            self._fail("There is no Command Code conversation to compact.")
+            return
+        prompts = [
+            "Summarize this conversation for another coding agent to continue. "
+            "Preserve the user's objective, constraints, decisions, files changed, "
+            "validation results, and unfinished work. Return only the summary. "
+            "Do not run tools or change files.",
+        ]
+        session: Optional[str] = self._session_id
+        for stage in range(2):
+            if self._cancelled:
+                return
+            answers: list[str] = []
+            sessions: list[str] = []
+            self._on_activity(
+                "tool",
+                "Summarizing conversation" if stage == 0 else "Saving compacted conversation",
+            )
+            child = CommandcodeWorker(
+                prompts[stage],
+                session,
+                self._cwd,
+                "plan",
+                model=self._model,
+                effort=self._effort,
+                additional_dirs=self._additional_dirs,
+                on_session=sessions.append,
+                on_started=self._notify_started,
+                on_activity=lambda _kind, _text: None,
+                on_complete=answers.append,
+                on_failed=self._fail,
+                on_done=lambda: None,
+            )
+            self._compact_child = child
+            if self._cancelled:
+                child.cancel()
+            child.run()
+            self._compact_child = None
+            if self._failed or self._cancelled:
+                return
+            if not answers or not sessions:
+                self._fail(
+                    "Command Code did not save the compacted conversation. The original session is still selected."
+                )
+                return
+            if stage == 0:
+                session = None
+                prompts.append(
+                    "The following summary is prior conversation context. Retain it for the user's next message. "
+                    "Do not perform the pending work or run tools. Acknowledge briefly.\n\n"
+                    + answers[-1]
+                )
+            else:
+                self._remember_session(sessions[-1])
+                self._on_complete(
+                    "Conversation compacted into a new session. The original remains in Recent Conversations."
+                )
+
     def _do_run(self) -> None:
+        if self._cancelled:
+            return
         binary = find_backend_cli(BACKEND_COMMANDCODE)
         if not binary:
             self._fail("Command Code is not installed. Run: npm install -g command-code")
             return
         command = build_command(
-            binary, self._permission_mode, self._model, self._effort, self._session_id
+            binary,
+            self._permission_mode,
+            self._model,
+            self._effort,
+            self._session_id,
+            self._additional_dirs,
         )
         try:
             proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -226,6 +302,11 @@ class CommandcodeWorker(threading.Thread):
             self._fail(f"Could not start Command Code: {exc}")
             return
         self._proc = proc
+        # Stop can arrive while Popen is creating the process. cancel() had
+        # no process to kill then; do not let that late child run the prompt.
+        if self._cancelled:
+            end_process_group(proc)
+            return
         threading.Thread(target=self._read_stderr, args=(proc,), daemon=True).start()
         self._send_prompt(proc)
         self._read_stdout(proc)

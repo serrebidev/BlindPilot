@@ -293,7 +293,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.28.3"
+APP_VERSION = "0.28.4"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1304,7 +1304,17 @@ def _npm_environment(npm: str) -> dict[str, str]:
     npm is itself a shim that has to find `node`, so it fails from the macOS
     Dock for exactly the reason the provider CLIs do.
     """
-    return subprocess_env(npm)
+    env = subprocess_env(npm)
+    env.update(
+        {
+            "CI": "1",
+            "npm_config_yes": "true",
+            "npm_config_progress": "false",
+            "npm_config_fund": "false",
+            "npm_config_audit": "false",
+        }
+    )
+    return env
 
 
 def _npm_install_argv(backend: str, latest: bool = False) -> Optional[List[str]]:
@@ -1355,7 +1365,7 @@ def _run_logged_process(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=env,
+            env=env if env is not None else subprocess_env(argv[0]),
             **_no_window_kwargs(),
         )
     except OSError as exc:
@@ -2038,32 +2048,34 @@ _FREEBUFF_SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/logout", "Sign out of FreeBuff"),
 ]
 
-# Command Code's own commands. Its built-ins are interactive-only -- a slash
-# string sent to a headless run is treated as text rather than dispatched
-# (measured at 1.53.1) -- so this list is a discovery aid for the picker: one
-# the agent recognises runs, and one it does not is simply part of the prompt.
-# Curated rather than complete, leaving out the session-lifecycle and
-# terminal-drawing commands that have no meaning in a window read by ear.
+# These have actual frontend or prompt equivalents; terminal-only commands
+# are explained locally instead of accidentally sent to the model as text.
 _COMMANDCODE_SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/add-dir [directory]", "Add a directory to the workspace context"),
-    ("/agents", "Manage agent configurations"),
-    ("/config [query]", "Search and change settings"),
-    ("/connect", "Connect to AI providers, BYOK providers, and API keys"),
-    ("/context", "Show context window usage and breakdown"),
-    ("/effort [level]", "Set the reasoning effort for the current model"),
-    ("/feedback [title]", "Report a bug or share feedback"),
-    ("/init", "Initialize AGENTS.md for this project"),
-    ("/login", "Log in to Command Code or a provider"),
-    ("/logout", "Log out of Command Code or a provider"),
-    ("/mcp", "Manage MCP server connections"),
-    ("/memory", "Manage Command Code memory"),
-    ("/mode [name]", "Show or switch the permission mode"),
-    ("/plan [task]", "Enter plan mode, optionally planning a task"),
-    ("/pr-comments", "Fetch all PR comments for the current branch"),
-    ("/review [pr]", "Review a pull request"),
-    ("/skills", "Browse and open agent skills"),
-    ("/usage", "Display credits, plan, and usage metrics"),
-    ("/worktree [name]", "Create, list, or switch git worktrees"),
+    (
+        "/queue [message|list|clear|resume]",
+        "Queue a follow-up, inspect, clear, or resume the queue [BlindPilot]",
+    ),
+    ("/steer [message]", "Stop this turn and resume with a new instruction [BlindPilot]"),
+    ("/stop", "Stop this turn and pause queued messages [BlindPilot]"),
+    ("/help", "Show commands and how queuing and steering work [BlindPilot]"),
+    ("/new", "Start a fresh conversation [BlindPilot]"),
+    ("/sessions", "Reopen a past conversation [BlindPilot]"),
+    ("/quit", "Close this session tab [BlindPilot]"),
+    (
+        "/add-dir [directory]",
+        "Add context for subsequent messages; bare command lists directories [BlindPilot]",
+    ),
+    ("/config", "Open backend settings files [BlindPilot]"),
+    ("/connect", "Open backend sign-in and setup [BlindPilot]"),
+    ("/effort [level]", "Show or set reasoning effort [BlindPilot]"),
+    ("/init", "Ask the agent to create project instructions [BlindPilot]"),
+    ("/login", "Open backend sign-in and setup [BlindPilot]"),
+    ("/mode [name]", "Show or switch permission mode [BlindPilot]"),
+    ("/plan [task]", "Enter plan mode, optionally sending a planning task [BlindPilot]"),
+    ("/pr-comments", "Ask the agent to fetch comments for this branch's PR [BlindPilot]"),
+    ("/review [pr]", "Ask the agent to review changes or a pull request [BlindPilot]"),
+    ("/copy", "Copy the last response [BlindPilot]"),
+    ("/update", "Open backend management to update Command Code [BlindPilot]"),
 ]
 
 
@@ -5372,6 +5384,10 @@ class SessionPanel(wx.Panel):
         self._session_id: Optional[str] = None
         self._session_backend = normalize_backend(self._get_backend())
         self._worker: Optional[AgentWorker] = None
+        self._pending_messages: list[tuple[str, list[str], str]] = []
+        self._queue_paused = False
+        self._steering_context = ""
+        self._commandcode_dirs: tuple[str, ...] = ()
         # One Hermes connection per tab, reused by each turn of this
         # conversation. Created on first use rather than here, so a machine
         # without Hermes never imports its adapter -- the same reason
@@ -6267,6 +6283,217 @@ class SessionPanel(wx.Panel):
         """Public entry point so the frame can fire a seeded side-chat prompt."""
         self._on_send()
 
+    def _queue_message(self, steering: bool = False) -> None:
+        text = self.prompt.GetValue().strip()
+        if not text and not self._attachments:
+            self._announce("Error: Type a message or attach a file first")
+            return
+        if self.selected_backend() != self._session_backend:
+            self._announce("Error: Switch back to the running backend before queuing a message")
+            return
+        pending = getattr(self, "_pending_messages", [])
+        item = (text, list(self._attachments), self._session_backend)
+        if steering:
+            pending.insert(0, item)
+            if not self._session_id and self._turns:
+                self._steering_context = getattr(self, "_active_send_text", self._turns[-1].prompt)
+        else:
+            pending.append(item)
+        self._pending_messages = pending
+        self.prompt.SetValue("")
+        self._attachments = []
+        self._earcons.play_send()
+        if steering:
+            if self._worker is not None and self._worker.is_alive() and not self._stopping:
+                self._on_stop()
+            self._queue_paused = False
+            self._announce(f"Steering: stopping and resuming with your instruction. {text}")
+        else:
+            self._announce(f"Message queued. {len(pending)} waiting. {text}")
+
+    def _send_queued_message(self) -> None:
+        pending = getattr(self, "_pending_messages", [])
+        if self._run_in_progress() or not pending or getattr(self, "_queue_paused", False):
+            return
+        text, attachments, backend = pending[0]
+        if backend != self.selected_backend() or backend != self._session_backend:
+            self._queue_paused = True
+            self._announce(
+                "Queue paused because the backend changed. Switch back and use /queue resume"
+            )
+            return
+        pending.pop(0)
+        context = getattr(self, "_steering_context", "")
+        self._steering_context = ""
+        if context and not self._session_id:
+            text = f"Original task:\n{context}\n\nUpdated instruction:\n{text}"
+        # Do not replace a draft the person has been typing while waiting.
+        draft, draft_files = self.prompt.GetValue(), self._attachments
+        self.prompt.SetValue(text)
+        self._attachments = attachments
+        try:
+            self._on_send()
+            if self._worker is None:
+                pending.insert(0, (text, attachments, backend))
+                self._queue_paused = True
+        finally:
+            self.prompt.SetValue(draft)
+            self._attachments = draft_files
+
+    def _commandcode_command(self, raw: str) -> bool:
+        """Dispatch Command Code equivalents without sending terminal commands as prompts."""
+        if not raw.startswith("/"):
+            return False
+        parts = raw.split(maxsplit=1)
+        name, argument = parts[0].lower(), parts[1].strip() if len(parts) > 1 else ""
+        aliases = {"/sessions": "/resume", "/quit": "/exit"}
+        if name in aliases and not argument:
+            self.prompt.SetValue(aliases[name])
+            return False
+        if name in {
+            "/btw",
+            "/clear",
+            "/new",
+            "/compact",
+            "/exit",
+            "/model",
+            "/models",
+            "/resume",
+            "/status",
+        }:
+            return False
+        if name == "/queue":
+            action = argument.lower()
+            if action in ("", "list"):
+                pending = getattr(self, "_pending_messages", [])
+                text = "\n".join(
+                    f"{i}. {p or 'Attached files'}"
+                    for i, (p, _files, _backend) in enumerate(pending, 1)
+                )
+                self._announce(text or "No queued messages")
+            elif action == "clear":
+                self._pending_messages = []
+                self._steering_context = ""
+                self._queue_paused = False
+                self._announce("Queued messages cleared")
+            elif action == "resume":
+                self.prompt.SetValue("")
+                self._queue_paused = False
+                if not getattr(self, "_pending_messages", []):
+                    self._announce("No queued messages")
+                else:
+                    self._send_queued_message()
+                return True
+            elif self._run_in_progress():
+                self.prompt.SetValue(argument)
+                self._queue_message()
+                return True
+            else:
+                self.prompt.SetValue(argument)
+                return False
+        elif name == "/steer":
+            if not argument:
+                self._announce("Usage: /steer followed by your instruction")
+                return True
+            self.prompt.SetValue(argument)
+            self._on_steer()
+            return True
+        elif name == "/stop":
+            self._on_stop()
+        elif name == "/effort":
+            from commandcode_backend import COMMANDCODE_EFFORTS
+
+            if not argument:
+                self._announce(
+                    f"Reasoning effort: {self.effort or self._cli_effort or 'CLI default'}"
+                )
+            elif argument.lower() in COMMANDCODE_EFFORTS:
+                self.set_model(self.model, argument.lower())
+            else:
+                self._announce(f"Error: Choose an effort: {', '.join(COMMANDCODE_EFFORTS)}")
+                return True
+        elif name == "/mode" or name.startswith("/mode:") or name == "/plan":
+            mode = "plan" if name == "/plan" else (name.partition(":")[2] or argument)
+            modes = {
+                "standard": "default",
+                "default": "default",
+                "auto-accept": "acceptEdits",
+                "plan": "plan",
+                "dont-ask": "dontAsk",
+                "auto": "auto",
+                "yolo": "bypassPermissions",
+            }
+            if not mode:
+                self._announce(f"Permission mode: {_MODE_LABEL_BY_VALUE.get(self.mode, self.mode)}")
+            elif mode.lower() in modes:
+                self._set_mode(modes[mode.lower()])
+                if name == "/plan" and argument:
+                    self.prompt.SetValue(f"Plan this task without changing files:\n{argument}")
+                    return False
+            else:
+                self._announce(f"Error: Choose a mode: {', '.join(modes)}")
+                return True
+        elif name == "/add-dir":
+            if not argument:
+                self._announce(
+                    "Additional directories: "
+                    + (", ".join(getattr(self, "_commandcode_dirs", ())) or "none")
+                )
+            else:
+                directory = Path(argument.strip('"')).expanduser()
+                if not directory.is_absolute():
+                    directory = Path(self.cwd) / directory
+                if not directory.is_dir():
+                    self._announce(f"Error: Directory does not exist: {directory}")
+                    return True
+                self._commandcode_dirs = tuple(
+                    dict.fromkeys(
+                        (*getattr(self, "_commandcode_dirs", ()), str(directory.resolve()))
+                    )
+                )
+                self._announce(f"Added directory for subsequent messages: {directory}")
+        elif name in ("/login", "/connect", "/update", "/config") and not argument:
+            method = "_settings_files_active" if name == "/config" else "_manage_backends"
+            callback = getattr(wx.GetTopLevelParent(self), method, None)
+            if callable(callback):
+                wx.CallAfter(callback)
+        elif name in ("/init", "/review", "/pr-comments"):
+            prompts = {
+                "/init": "Inspect this project and create or update AGENTS.md with accurate build, test, and coding instructions.",
+                "/review": "Review the current changes for bugs and regressions. Report findings with file references; do not change files.",
+                "/pr-comments": "Fetch and summarize the review comments for the pull request associated with this branch. Do not post replies or change files.",
+            }
+            text = (
+                f"Review pull request {argument} for bugs and regressions. Do not post a review or change files."
+                if name == "/review" and argument
+                else prompts[name]
+            )
+            self.prompt.SetValue(text)
+            return False
+        elif name == "/copy" and not argument:
+            response = next((turn.response for turn in reversed(self._turns) if turn.response), "")
+            self._announce(
+                "Last response copied"
+                if response and _copy_to_clipboard(response)
+                else "Error: No response to copy or clipboard unavailable"
+            )
+        elif name == "/help":
+            text = "Enter queues a follow-up while Command Code is running. Steer stops and resumes with your instruction. Stop pauses queued messages.\n\n"
+            text += "\n".join(
+                f"{command}: {description}"
+                for command, description in _slash_commands_for_backend(BACKEND_COMMANDCODE)
+            )
+            text += "\n\nCommands requiring Command Code's terminal UI are explained when typed and are never sent as ordinary prompts."
+            with ReadView(self, text, "Command Code commands") as dialog:
+                dialog.ShowModal()
+        else:
+            self._announce(
+                f"{name} has no headless command in BlindPilot. Use /help for supported equivalents, or run it in Command Code's interactive terminal."
+            )
+            return True
+        self.prompt.SetValue("")
+        return True
+
     def _on_send(self, worker_extra: Optional[dict] = None) -> None:
         # ``worker_extra`` carries per-turn arguments only some backends take —
         # compaction, at present. Ordinary sends pass nothing.
@@ -6274,6 +6501,10 @@ class SessionPanel(wx.Panel):
         # "/btw [message]" opens a new side-chat tab in the same directory
         # instead of sending to this conversation.
         raw = self.prompt.GetValue().strip()
+        if self.selected_backend() == BACKEND_COMMANDCODE:
+            if self._commandcode_command(raw):
+                return
+            raw = self.prompt.GetValue().strip()
         low = raw.lower()
         if low == "/btw" or low.startswith("/btw "):
             self.prompt.SetValue("")
@@ -6320,6 +6551,10 @@ class SessionPanel(wx.Panel):
         if low == "/status":
             self.prompt.SetValue("")
             self.open_status_dialog()
+            return
+
+        if self._run_in_progress() and self._session_backend == BACKEND_COMMANDCODE:
+            self._queue_message()
             return
 
         if (
@@ -6404,11 +6639,14 @@ class SessionPanel(wx.Panel):
             extra.update(self._hermes_worker_extra(outgoing_files))
         elif selected_backend == BACKEND_CLAUDE:
             extra.update(self._claude_worker_extra())
+        elif selected_backend == BACKEND_COMMANDCODE:
+            extra["additional_dirs"] = getattr(self, "_commandcode_dirs", ())
         self._launch_turn(send_text, selected_backend, extra)
 
     def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
         """Start the worker for one turn. `send_text` is None for a late turn,
         which has nothing to send and only reads what has already arrived."""
+        self._active_send_text = send_text or ""
         worker_type = worker_class(selected_backend, ClaudeWorker)
         self._worker = worker_type(
             send_text,
@@ -6440,6 +6678,8 @@ class SessionPanel(wx.Panel):
             return
         self.steer_btn.Enable()
         self.stop_btn.Enable()
+        if selected_backend == BACKEND_COMMANDCODE:
+            self.send_btn.Enable()
 
     def _claude_worker_extra(self) -> dict:
         """What a Claude turn needs beyond the message, namely whose process
@@ -6515,6 +6755,12 @@ class SessionPanel(wx.Panel):
 
     def _on_steer(self) -> None:
         """Send what is typed into the run that is already going."""
+        if (
+            getattr(self, "_session_backend", None) == BACKEND_COMMANDCODE
+            and self._run_in_progress()
+        ):
+            self._queue_message(steering=True)
+            return
         worker = self._worker
         text = self.prompt.GetValue().strip()
         if worker is None or not worker.is_alive():
@@ -6544,6 +6790,11 @@ class SessionPanel(wx.Panel):
         transcript is not left with a question and no answer.
         """
         worker = self._worker
+        if getattr(self, "_pending_messages", []):
+            self._queue_paused = True
+            self._announce(
+                "Queued messages paused. Use /queue resume to send them or /queue clear to remove them"
+            )
         if worker is None or not worker.is_alive():
             self._announce("Error: Nothing is running to stop")
             return
@@ -6696,6 +6947,9 @@ class SessionPanel(wx.Panel):
         # thing, only one of which the person named -- and would keep this tab
         # from taking the name of the first message, which is all a nameless
         # conversation has.
+        self._pending_messages = []
+        self._steering_context = ""
+        self._queue_paused = False
         self._session_title = ""
         self._turns = []
         self._rows = []
@@ -7091,6 +7345,7 @@ class SessionPanel(wx.Panel):
             # A cancelled backend reports its own interruption. The user asked
             # for it, so it is not news, and it is not an error.
             return
+        self._queue_paused = True
         self._earcons.stop_progress()
         self._hide_working()
         self._earcons.play_error()
@@ -7142,6 +7397,13 @@ class SessionPanel(wx.Panel):
             self._turns.pop()
         self._worker = None
         self._replaying = False
+        if getattr(self, "_pending_messages", []):
+            if getattr(self, "_queue_paused", False):
+                self._announce(
+                    "Queued messages paused. Use /queue resume to retry or /queue clear to remove them"
+                )
+            else:
+                self._send_queued_message()
         waiting = getattr(self, "_late_turn_waiting", None)
         self._late_turn_waiting = None
         if waiting is not None:
@@ -7471,6 +7733,8 @@ class SessionPanel(wx.Panel):
         every tab). The shared progress loop is stopped here because the
         mailbox drops the worker's `done` once the panel is gone.
         """
+        self._queue_paused = True
+        self._pending_messages = []
         self._close_question_dialog()
         self._earcons.stop_progress()
         self._hide_working()

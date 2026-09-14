@@ -105,12 +105,11 @@ def test_capabilities_match_what_headless_mode_supports():
     assert info.supports_model is True
     assert info.supports_effort is True
     assert info.supports_permissions is True
-    # -p answers one query and exits, so a running turn cannot be steered.
-    assert info.supports_steering is False
-    # A headless prompt of "/compact" is treated as text (measured at 1.53.1).
-    assert info.supports_compaction is False
+    # BlindPilot supplies stop-and-resume steering and summary compaction.
+    assert info.supports_steering is True
+    assert info.supports_compaction is True
     assert info.uploads_attachments is False
-    assert agent_backends.compaction_request(BACKEND_COMMANDCODE) is None
+    assert agent_backends.compaction_request(BACKEND_COMMANDCODE)[1] == {"compact": True}
 
 
 def test_history_is_registered():
