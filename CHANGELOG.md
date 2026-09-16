@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.1 - 2026-09-15
+
+- Command Code's bypass mode now actually bypasses what it can, and names what it cannot. `-p` withholds nine tools from the model outright, so a call to one came back "No tool named ... exists" — a refusal no permission mode lifts, bypass included. `todo_write` and `taste` are now asked back with `--tools-enable`; the tools that would answer a question or approve a plan with nobody watching stay withheld on purpose.
+- A refused tool is said out loud. `tool_denied`, `tool_errored` and `tool_hook_blocked` arrived through the unknown-event path as the bare words "tool_denied" and "tool_hook_blocked", naming neither the tool nor the reason. Each now names the tool, its subject, and the reason the hook or gate gave, and a bypass turn adds one sentence saying what bypass does not cover: a `permissions.deny` match, a `permissions.ask` match and a destructive shell command are all checked before the mode is.
+- A turn Command Code stopped over a permission is reported as that. A refusal that did not come from a permission rule ends the whole turn, and a headless run has nobody to approve it; the turn used to finish with "Finished with nothing to say."
+- A bypass turn says up front what the settings will still refuse. `permissions.disableBypass` switches `--yolo` off with one line on stderr that a windowed run never shows anybody, and `permissions.deny` and `permissions.ask` rules apply in bypass exactly as they do in default. All three are now read out of Command Code's own settings layers and announced before the turn starts.
+
 ## v0.29.0 - 2026-09-14
 
 - Chat mode has a new built-in provider: Command Code's Provider API. One account reaches every model Command Code sells - Claude, GPT, Gemini and the open models - at their underlying rates. Claude models are sent to the Anthropic Messages protocol and every other model to Chat Completions, chosen per model as the request is built, because the service rejects a model sent to the wrong protocol. Enter a name and the API key from Command Code Studio; the addresses are built in.

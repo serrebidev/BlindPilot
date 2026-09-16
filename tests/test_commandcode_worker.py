@@ -140,6 +140,24 @@ def test_bypass_uses_the_launch_only_yolo_flag():
     assert "--permission-mode" not in argv
 
 
+@pytest.mark.parametrize("mode", ["bypassPermissions", "default", "plan"])
+def test_the_withheld_bookkeeping_tools_are_asked_back(mode):
+    """A headless run hides todo_write and taste from the model.
+
+    Their absence is not a permission question -- the model is told no such
+    tool exists -- so no mode, bypass included, lifts it. --tools-enable is.
+    """
+    argv = build_command("command-code", mode)
+    assert argv[argv.index("--tools-enable") + 1] == "todo_write,taste"
+
+
+def test_the_tools_that_would_answer_for_the_person_stay_withheld():
+    argv = build_command("command-code", "bypassPermissions")
+    enabled = argv[argv.index("--tools-enable") + 1].split(",")
+    assert "ask_user_question" not in enabled
+    assert "exit_plan_mode" not in enabled
+
+
 def test_model_effort_and_resume_are_passed_through():
     argv = build_command("command-code", "plan", "gpt-5.5", "high", "abc-123")
     assert argv[argv.index("--model") + 1] == "gpt-5.5"
@@ -451,3 +469,141 @@ def test_failed_compaction_does_not_switch_from_original(worker_env, monkeypatch
     assert rec.texts("complete") == []
     assert rec.texts("failed") == ["network failed"]
     assert rec.kinds().count("done") == 1
+
+
+# --------------------------------------------------------------------------
+# Refusals
+# --------------------------------------------------------------------------
+
+
+def test_a_denied_tool_is_named_rather_than_said_as_an_event_name(worker_env):
+    """Before this, a refusal arrived as the bare word "tool_denied"."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event(
+                {
+                    "type": "tool_queued",
+                    "toolCallId": "c1",
+                    "toolName": "shell_command",
+                    "input": {"command": "rm -rf /"},
+                }
+            ),
+            _event({"type": "tool_denied", "toolCallId": "c1", "toolName": "shell_command"}),
+            _result(subtype="success", sessionId="s1", finalText="Could not."),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    tools = rec.activity("tool")
+    assert any("Refused: shell_command: rm -rf /" in line for line in tools)
+
+
+def test_a_withheld_tool_says_why_no_mode_can_grant_it(worker_env):
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event({"type": "tool_denied", "toolCallId": "c9", "toolName": "ask_user_question"}),
+            _result(subtype="success", sessionId="s1", finalText="Done."),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert any("withholds this tool from a headless run" in t for t in rec.activity("tool"))
+
+
+def test_a_hook_block_repeats_the_reason_the_hook_gave(worker_env):
+    """Command Code's own print-mode gate is such a hook outside bypass."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event(
+                {
+                    "type": "tool_hook_blocked",
+                    "toolCallId": "c1",
+                    "toolName": "write_file",
+                    "hookOutput": 'Error: Tool "write_file" requires permissions. Use --yolo',
+                }
+            ),
+            _result(subtype="success", sessionId="s1", finalText="Nope."),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert any("Blocked: write_file: Error:" in t for t in rec.activity("tool"))
+
+
+def test_a_turn_that_permission_denied_stopped_says_so(worker_env):
+    """It used to arrive as "Finished with nothing to say."."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _result(
+                subtype="success", sessionId="s1", stopReason="permission_denied", finalText=""
+            ),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert rec.texts("complete") == []
+    assert any("nobody to give it" in message for message in rec.texts("failed"))
+
+
+def _bypass_worker(recorder, cwd):
+    return CommandcodeWorker(
+        "go",
+        None,
+        cwd,
+        "bypassPermissions",
+        on_session=recorder.callback("session"),
+        on_started=recorder.callback("started"),
+        on_activity=recorder.callback("activity"),
+        on_complete=recorder.callback("complete"),
+        on_failed=recorder.callback("failed"),
+        on_done=recorder.callback("done"),
+    )
+
+
+def test_bypass_says_what_the_settings_still_refuse(worker_env, tmp_path, monkeypatch):
+    """permissions.disableBypass turns --yolo off with one line on stderr."""
+    import commandcode_backend
+
+    project = tmp_path / "project"
+    (project / ".commandcode").mkdir(parents=True)
+    (project / ".commandcode" / "settings.json").write_text(
+        json.dumps({"permissions": {"disableBypass": True, "deny": ["Shell(rm:*)"]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(commandcode_backend, "commandcode_home", lambda: tmp_path / "home")
+    worker_env["proc"] = _FakeProcess(
+        lines=[_result(subtype="success", sessionId="s1", finalText="ok")]
+    )
+
+    rec = _Recorder()
+    worker = _bypass_worker(rec, str(project))
+    worker.start()
+    worker.join(20)
+
+    notes = rec.activity("tool")
+    assert any("permissions.disableBypass" in note for note in notes)
+    assert any("1 permissions.deny rule" in note for note in notes)
+
+
+def test_a_quiet_settings_file_says_nothing(worker_env, tmp_path, monkeypatch):
+    import commandcode_backend
+
+    monkeypatch.setattr(commandcode_backend, "commandcode_home", lambda: tmp_path / "home")
+    worker_env["proc"] = _FakeProcess(
+        lines=[_result(subtype="success", sessionId="s1", finalText="ok")]
+    )
+
+    rec = _Recorder()
+    worker = _bypass_worker(rec, str(tmp_path))
+    worker.start()
+    worker.join(20)
+
+    assert rec.activity("tool") == []

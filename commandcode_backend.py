@@ -136,6 +136,88 @@ def commandcode_account_lines() -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# What bypass does not cover
+# --------------------------------------------------------------------------
+
+
+def _settings_layer_paths(cwd: Optional[str]) -> list[Path]:
+    """The layers Command Code merges permission rules from, in its own order.
+
+    Measured at 1.54.0: the person's own settings, then the project's, then the
+    project's local overrides. This is settings.json, not the config.json
+    above -- one holds the model and the theme, the other the permission rules.
+    """
+    project = Path(cwd) if cwd else Path.cwd()
+    return [
+        commandcode_home() / "settings.json",
+        project / ".commandcode" / "settings.json",
+        project / ".commandcode" / "settings.local.json",
+    ]
+
+
+def _permissions_block(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    block = payload.get("permissions")
+    return block if isinstance(block, dict) else {}
+
+
+def _rule_count(block: dict, key: str) -> int:
+    rules = block.get(key)
+    return len(rules) if isinstance(rules, list) else 0
+
+
+def commandcode_bypass_limits(cwd: Optional[str] = None) -> list[str]:
+    """What a bypass turn will still be refused, read from the CLI's settings.
+
+    "Bypass permissions" does not mean the same thing to Command Code as it
+    does to the window. Its permission check consults the settings before it
+    consults the mode, so a ``permissions.deny`` or ``permissions.ask`` rule
+    refuses in bypass exactly as it does in default, and
+    ``permissions.disableBypass`` turns the whole flag off with one line on
+    stderr that a windowed run never shows anybody. Each of those is something
+    a person who chose bypass would want said out loud before the turn rather
+    than discovered as a refusal in the middle of one.
+    """
+    denies = 0
+    asks = 0
+    disabled = False
+    for path in _settings_layer_paths(cwd):
+        block = _permissions_block(path)
+        if not block:
+            continue
+        # Rule lists merge across layers rather than replacing each other, so
+        # the counts add up the way Command Code's own merge does.
+        denies += _rule_count(block, "deny")
+        asks += _rule_count(block, "ask")
+        # A later layer can switch it back on, so the last word wins.
+        if "disableBypass" in block:
+            flag = block.get("disableBypass")
+            disabled = flag is True or flag == "disable"
+    notes: list[str] = []
+    if disabled:
+        notes.append(
+            "Command Code's settings switch bypass off (permissions.disableBypass), so this "
+            "turn runs under its normal rules and anything that would ask is refused instead."
+        )
+    if denies:
+        notes.append(
+            f"Command Code still applies {denies} permissions.deny "
+            f"rule{'' if denies == 1 else 's'} in bypass."
+        )
+    if asks:
+        notes.append(
+            f"Command Code still applies {asks} permissions.ask "
+            f"rule{'' if asks == 1 else 's'} in bypass, and a headless turn cannot answer one."
+        )
+    return notes
+
+
+# --------------------------------------------------------------------------
 # Model catalog
 # --------------------------------------------------------------------------
 

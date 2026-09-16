@@ -56,6 +56,50 @@ _PERMISSION_MODES = {
 }
 _BYPASS_MODE = "bypassPermissions"
 
+# The tools ``-p`` withholds, and the two BlindPilot asks back.
+#
+# A headless Command Code run hides nine tools from the model --
+# ask_user_question, enter_plan_mode, exit_plan_mode, plan_review, todo_write,
+# cron_create, cron_list, cron_delete and taste (measured at 1.54.0). A call to
+# one of them is not a permission question: the name is absent from the
+# schema, so it comes back refused with `No tool named "..." exists`, and no
+# permission mode lifts it -- bypass included. ``--tools-enable`` is the only
+# way back, and it only accepts names from that list.
+#
+# These two are bookkeeping. todo_write is the checklist the model keeps for
+# itself and reaches for constantly; taste is the note Command Code learns the
+# person's preferences from. Neither settles anything on the person's behalf,
+# and withholding them is a steady drip of refusals in every mode.
+_RESTORED_HEADLESS_TOOLS = ("todo_write", "taste")
+
+# The rest stay withheld deliberately. A headless run answers its own prompts
+# by taking the first option, so ask_user_question would silently settle a
+# question nobody heard, and enter_plan_mode, exit_plan_mode and plan_review
+# would let a turn approve its own plan and leave plan mode -- the one mode
+# whose whole point is that it does not. The cron trio schedules work that
+# outlives the window. Their refusals are named rather than granted, which is
+# what _tool_denied below does.
+_WITHHELD_HEADLESS_TOOLS = (
+    "ask_user_question",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "plan_review",
+    "cron_create",
+    "cron_list",
+    "cron_delete",
+)
+
+# What bypass still does not cover, said once when a turn in bypass mode has a
+# tool refused. Command Code checks these before it checks the mode, so they
+# refuse in bypass exactly as they do in default (measured at 1.54.0), and a
+# listener who chose "bypass permissions" has every reason to expect otherwise.
+_BYPASS_GAP_NOTE = (
+    "Bypass does not cover this. Command Code still refuses a permissions.deny "
+    "match, a permissions.ask match and a destructive shell command in a "
+    "headless run, and the tools it withholds from a headless run are not a "
+    "permission question at all."
+)
+
 # Command Code's documented print-mode exit codes, said as something a listener
 # can act on rather than a number.
 _EXIT_MESSAGES = {
@@ -97,6 +141,10 @@ def build_command(
         command.append("--yolo")
     else:
         command += ["--permission-mode", _PERMISSION_MODES.get(permission_mode, "default")]
+    # Hand back the withheld tools that are safe to hand back. Names Command
+    # Code does not consider withheld are ignored with a warning on stderr, so
+    # this stays harmless if a release stops withholding them.
+    command += ["--tools-enable", ",".join(_RESTORED_HEADLESS_TOOLS)]
     if model:
         command += ["--model", model]
     if effort:
@@ -166,6 +214,8 @@ class CommandcodeWorker(threading.Thread):
         self._session_seen = ""
         self._tool_names: dict[str, str] = {}
         self._tool_subjects: dict[str, str] = {}
+        # The bypass caveat is worth hearing once a turn, not once a refusal.
+        self._gap_note_said = False
 
     # -- public surface the window drives ---------------------------------
 
@@ -283,6 +333,7 @@ class CommandcodeWorker(threading.Thread):
             self._session_id,
             self._additional_dirs,
         )
+        self._warn_about_bypass_limits()
         try:
             proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
                 command,
@@ -312,6 +363,21 @@ class CommandcodeWorker(threading.Thread):
         self._read_stdout(proc)
         self._finish(proc)
         self._clean_end = True
+
+    def _warn_about_bypass_limits(self) -> None:
+        """Say up front what this bypass turn will still be refused.
+
+        Read from Command Code's own settings rather than waited for: the one
+        that matters most, ``permissions.disableBypass``, is announced on
+        stderr and nowhere else, and a windowed run keeps stderr for the
+        failure report, so it would never be heard at all.
+        """
+        if self._permission_mode != _BYPASS_MODE:
+            return
+        from commandcode_backend import commandcode_bypass_limits
+
+        for note in commandcode_bypass_limits(self._cwd):
+            self._on_activity("tool", note)
 
     def _send_prompt(self, proc: subprocess.Popen) -> None:
         """Write the prompt and close the pipe, so the CLI stops reading stdin."""
@@ -402,6 +468,10 @@ class CommandcodeWorker(threading.Thread):
             self._tool_running(event)
         elif etype == "tool_completed":
             self._tool_completed(event)
+        elif etype == "tool_denied":
+            self._tool_denied(event)
+        elif etype in ("tool_errored", "tool_hook_blocked"):
+            self._tool_refused(event)
         elif etype in ("message_end", "message_update"):
             self._fallback_message_text(event)
         elif etype in (
@@ -448,6 +518,49 @@ class CommandcodeWorker(threading.Thread):
         if result.strip():
             self._on_activity("result", f"{name}: {result.strip()}")
 
+    def _tool_denied(self, event: dict) -> None:
+        """Say which tool was refused, and why bypass did not stop it.
+
+        The event carries the call id and the tool name and nothing else --
+        the reason goes to the model, in the tool result, not onto the stream
+        -- so the name and the subject already remembered from ``tool_queued``
+        are what a listener gets. Without this the refusal arrived as the bare
+        word "tool_denied" through the unknown-event path, which says a tool
+        was refused without saying which one.
+        """
+        call_id = str(event.get("toolCallId") or "")
+        name = str(event.get("toolName") or self._tool_names.get(call_id, "tool"))
+        subject = self._tool_subjects.get(call_id, "")
+        line = f"Refused: {name}: {subject}" if subject else f"Refused: {name}"
+        if name in _WITHHELD_HEADLESS_TOOLS:
+            line += " — Command Code withholds this tool from a headless run."
+        self._on_activity("tool", line)
+        self._say_bypass_gap()
+
+    def _tool_refused(self, event: dict) -> None:
+        """A tool that failed, or one a pre-tool hook blocked.
+
+        Command Code's own print-mode permission gate is such a hook: outside
+        bypass it blocks the file and shell tools and puts its reason in
+        ``hookOutput``, which is the sentence worth repeating.
+        """
+        call_id = str(event.get("toolCallId") or "")
+        name = str(event.get("toolName") or self._tool_names.get(call_id, "tool"))
+        blocked = "hookOutput" in event
+        detail = str(event.get("hookOutput") or event.get("error") or "").strip()
+        first = detail.splitlines()[0][:200] if detail else ""
+        verb = "Blocked" if blocked else "Failed"
+        self._on_activity("tool", f"{verb}: {name}: {first}" if first else f"{verb}: {name}")
+        if blocked:
+            self._say_bypass_gap()
+
+    def _say_bypass_gap(self) -> None:
+        """Explain, once a turn, why a bypass run still refused something."""
+        if self._gap_note_said or self._permission_mode != _BYPASS_MODE:
+            return
+        self._gap_note_said = True
+        self._on_activity("tool", _BYPASS_GAP_NOTE)
+
     def _fallback_message_text(self, event: dict) -> None:
         """Use a whole-message text if no streaming deltas arrived.
 
@@ -488,6 +601,18 @@ class CommandcodeWorker(threading.Thread):
             return
         if subtype == "max_turns":
             self._fail("Command Code reached its maximum number of turns before finishing.")
+            return
+        if str(frame.get("stopReason") or "") == "permission_denied":
+            # Not every refusal is handed back to the model. One that did not
+            # come from a permission rule -- an ask rule, a destructive shell
+            # command, a hook -- ends the whole turn instead, and a headless
+            # run has nobody to approve it. The turn then stops with no final
+            # text, which used to arrive as "Finished with nothing to say."
+            self._say_bypass_gap()
+            self._fail(
+                "Command Code stopped the turn: a tool needed approval and a headless run "
+                "has nobody to give it."
+            )
             return
         final = str(frame.get("finalText") or "").strip()
         text = final or "".join(self._assistant_parts).strip()
