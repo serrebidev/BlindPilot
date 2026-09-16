@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.3 - 2026-09-16
+
+- The README now names Muse Code wherever it names the other backends: the opening sentence, the agent count (seven, not six), the wizard paragraph, the by-hand setup block with its one-line install and `muse login`, the Backends table with its columns read off Muse's BackendInfo and the compaction map, and a paragraph on how BlindPilot reaches it over MSP through WSL on Windows. Muse Code became the sixth backend in 0.26 and the README was never updated for it; Command Code in 0.28 was, which is why the prose said six while the Backend menu offered seven.
+- A new test reads the README the way a person does and fails the moment a backend or Chat provider exists in the code without a mention: it checks every backend label against the opening sentence, the by-hand setup block and the Backends table, checks the stated count in words against the number of backends the code ships, and checks every Chat provider label against the supported-providers sentence. Written against main first, it named all five places Muse Code was missing.
+- The sound-cue tests no longer read the developer's own config.json. Their Earcons fixture pins the master switch, every cue, and the working-loop mode, so a machine with the working cue switched off can no longer make the loop-starts test fail and the loop-stays-off test pass for the wrong reason.
+
 ## v0.29.2 - 2026-09-15
 
 - A tool Claude Code refused is no longer read out as though it were the tool's output. A `permissions.deny` rule, a disabled tool and a PreToolUse hook all refuse in `bypassPermissions` exactly as they do in any other mode, and each one comes back as an ordinary tool result carrying `is_error` — which was announced as "Result: Permission to use Bash ... has been denied", indistinguishable by ear from the command output it never produced. A refusal now names the tool and the reason, a call that merely failed is told apart from one that was refused, and the full text still gets its own row. In bypass, one sentence follows the first refusal saying what bypass does not cover.
