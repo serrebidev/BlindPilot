@@ -175,7 +175,7 @@ def test_reassemble_all_covers_the_whole_list_with_response_markers():
 _FakeProc = _ClaudeFakeProc
 
 
-def _run_worker(events, on_activity=None):
+def _run_worker(events, on_activity=None, mode="default"):
     """Drive ClaudeWorker over `events` and collect its activity callbacks."""
     import json
 
@@ -205,7 +205,7 @@ def _run_worker(events, on_activity=None):
             "hi",
             None,
             os.getcwd(),
-            "default",
+            mode,
             on_session=lambda _sid: None,
             on_started=lambda: None,
             on_activity=record,
@@ -1020,3 +1020,116 @@ def test_the_list_is_given_rows_not_labels(monkeypatch):
     blindpilot_app.SessionPanel._refresh_list(panel)
 
     assert given["set"] == rows, "the list should receive Row objects so it can draw by kind"
+
+
+# --------------------------------------------------------------------------
+# Refused tool calls
+#
+# The frames below are the ones Claude Code actually sent when a
+# permissions.deny rule, a disabled tool and a PreToolUse hook each refused a
+# call made in bypassPermissions mode (captured 2026-09-15). All three refuse
+# in bypass exactly as they do in any other mode, and all three arrive as an
+# ordinary tool result carrying is_error.
+# --------------------------------------------------------------------------
+
+
+def _refusal_stream(name, text, mode="bypassPermissions"):
+    return _run_worker(
+        [
+            {"type": "system", "subtype": "init", "session_id": "abc"},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_01",
+                            "name": name,
+                            "input": {"command": "echo deny-probe"},
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_01",
+                            "is_error": True,
+                            "content": text,
+                        }
+                    ]
+                },
+            },
+            {"type": "result", "subtype": "success"},
+        ],
+        mode=mode,
+    )
+
+
+def test_a_denied_tool_is_not_read_out_as_ordinary_output():
+    """It used to arrive as an ordinary Result row with the denial as its text."""
+    activity, _completed, _proc = _refusal_stream(
+        "Bash", "Permission to use Bash with command echo deny-probe has been denied."
+    )
+    spoken = [text for kind, text in activity if kind == "tool"]
+    assert any(t.startswith("Refused: Bash: Permission to use Bash") for t in spoken)
+    # The whole text still gets a row of its own to read.
+    assert any(kind == "result" for kind, _t in activity)
+
+
+def test_a_disabled_tool_reads_as_a_refusal():
+    activity, _completed, _proc = _refusal_stream(
+        "Write",
+        "<tool_use_error>Error: No such tool available: Write. "
+        "Write is disabled for this session, in subagents as well as here.</tool_use_error>",
+    )
+    assert any(kind == "tool" and text.startswith("Refused: Write:") for kind, text in activity)
+
+
+def test_a_pretooluse_hook_block_reads_as_a_refusal():
+    activity, _completed, _proc = _refusal_stream(
+        "Bash", "PreToolUse:Bash hook error: [exit 2]: blocked-by-a-pretooluse-hook"
+    )
+    assert any(kind == "tool" and text.startswith("Refused: Bash:") for kind, text in activity)
+
+
+def test_bypass_says_once_that_it_does_not_cover_a_refusal():
+    activity, _completed, _proc = _refusal_stream(
+        "Bash", "Permission to use Bash with command echo deny-probe has been denied."
+    )
+    notes = [t for k, t in activity if k == "tool" and t.startswith("Bypass does not cover")]
+    assert len(notes) == 1
+
+
+def test_a_mode_that_asks_does_not_get_the_bypass_note():
+    activity, _completed, _proc = _refusal_stream(
+        "Bash",
+        "Permission to use Bash with command echo deny-probe has been denied.",
+        mode="acceptEdits",
+    )
+    assert not any(t.startswith("Bypass does not cover") for _k, t in activity)
+
+
+def test_a_tool_that_merely_failed_is_not_called_a_refusal():
+    activity, _completed, _proc = _refusal_stream("Read", "File does not exist.")
+    spoken = [text for kind, text in activity if kind == "tool"]
+    assert any(t.startswith("Failed: Read: File does not exist.") for t in spoken)
+    assert not any(t.startswith("Refused") for t in spoken)
+
+
+def test_a_successful_result_is_still_just_a_result():
+    activity, _completed, _proc = _run_worker(
+        [
+            {
+                "type": "user",
+                "message": {"content": [{"type": "tool_result", "content": "x = 1"}]},
+            },
+            {"type": "result", "subtype": "success"},
+        ],
+        mode="bypassPermissions",
+    )
+    assert ("result", "x = 1") in activity
+    assert not any(kind == "tool" for kind, _text in activity)

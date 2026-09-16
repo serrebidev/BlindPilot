@@ -293,7 +293,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.1"
+APP_VERSION = "0.29.2"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2503,6 +2503,38 @@ def _starts_of(lines: List[str]) -> List[int]:
     return starts
 
 
+# How a refused tool call reads, as against one that simply failed. Claude Code
+# flags both with ``is_error`` on the tool result and says nothing else about
+# which it was, so the wording is what tells them apart: a permission rule, a
+# disabled tool and a PreToolUse hook all refuse, and all three refuse in
+# bypassPermissions exactly as they do in any other mode (measured against
+# Claude Code on 2026-09-15). A tool that looked for a file and did not find one
+# is a different thing and is not called a refusal.
+_CLAUDE_REFUSAL_MARKERS = (
+    "permission to use",
+    "has been denied",
+    "permission denied",
+    "is disabled for this session",
+    "no such tool available",
+    "hook error",
+    "blocked by",
+    "requested permissions",
+    "haven't granted it yet",
+)
+
+# Said once a turn, when a bypass turn has a tool refused anyway. Somebody who
+# chose "bypass permissions" has every reason to read a refusal as a bug.
+_CLAUDE_BYPASS_GAP_NOTE = (
+    "Bypass does not cover this. Claude Code still applies a permissions.deny rule, a "
+    "disabled tool and a PreToolUse hook in bypass, the same way it does in every other mode."
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    lowered = text.casefold()
+    return any(marker in lowered for marker in _CLAUDE_REFUSAL_MARKERS)
+
+
 def _result_label(text: str) -> str:
     """Short, screen-reader-friendly preview line for a result row."""
     first = next((ln for ln in text.splitlines() if ln.strip()), "")
@@ -3644,6 +3676,11 @@ class ClaudeWorker(threading.Thread):
         first_assistant_seen = False
         complete = False
         died = False
+        # tool_use id -> name. A tool_result carries the id and not the name,
+        # and a refusal that cannot say which tool was refused is not much of a
+        # report.
+        tool_names: dict[str, str] = {}
+        gap_note_said = False
 
         while True:
             timeout: Optional[float] = None
@@ -3739,10 +3776,14 @@ class ClaudeWorker(threading.Thread):
                         # The live "what is it doing" signal: announced when the
                         # tool is called, with its result following separately.
                         params = block.get("input")
+                        name = str(block.get("name") or "tool")
+                        call_id = block.get("id")
+                        if isinstance(call_id, str):
+                            tool_names[call_id] = name
                         self._on_activity(
                             "tool",
                             _tool_use_label(
-                                str(block.get("name") or "tool"),
+                                name,
                                 params if isinstance(params, dict) else {},
                             ),
                         )
@@ -3756,8 +3797,33 @@ class ClaudeWorker(threading.Thread):
                         continue
                     if block.get("type") == "tool_result":
                         result = _tool_result_text(block.get("content"))
-                        if result:
+                        if not result:
+                            continue
+                        if not block.get("is_error"):
                             self._on_activity("result", result)
+                            continue
+                        # A refused or failed call. Announced as an action
+                        # rather than as output: read out as an ordinary
+                        # "Result:" row, a refusal sounded exactly like the
+                        # command output it never produced.
+                        call_id = block.get("tool_use_id")
+                        name = (
+                            tool_names.get(call_id, "tool") if isinstance(call_id, str) else "tool"
+                        )
+                        refused = _looks_like_refusal(result)
+                        first = " ".join(result.split())[:200]
+                        verb = "Refused" if refused else "Failed"
+                        self._on_activity("tool", f"{verb}: {name}: {first}")
+                        # The full text still deserves a row of its own; the
+                        # line above is the part that gets spoken.
+                        self._on_activity("result", result)
+                        if (
+                            refused
+                            and not gap_note_said
+                            and self._permission_mode == "bypassPermissions"
+                        ):
+                            gap_note_said = True
+                            self._on_activity("tool", _CLAUDE_BYPASS_GAP_NOTE)
 
             elif etype == "result":
                 complete = True

@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.2 - 2026-09-15
+
+- A tool Claude Code refused is no longer read out as though it were the tool's output. A `permissions.deny` rule, a disabled tool and a PreToolUse hook all refuse in `bypassPermissions` exactly as they do in any other mode, and each one comes back as an ordinary tool result carrying `is_error` — which was announced as "Result: Permission to use Bash ... has been denied", indistinguishable by ear from the command output it never produced. A refusal now names the tool and the reason, a call that merely failed is told apart from one that was refused, and the full text still gets its own row. In bypass, one sentence follows the first refusal saying what bypass does not cover.
+- Verified against the installed Claude Code rather than assumed: in `bypassPermissions` the CLI sends no permission prompt at all and Read, Write, Edit, Bash, Glob and Grep all run, so BlindPilot's own refusal of anything left to a prompt never fires in that mode. The refusals that do get through come from deny rules, disabled tools and hooks.
+
 ## v0.29.1 - 2026-09-15
 
 - Command Code's bypass mode now actually bypasses what it can, and names what it cannot. `-p` withholds nine tools from the model outright, so a call to one came back "No tool named ... exists" — a refusal no permission mode lifts, bypass included. `todo_write` and `taste` are now asked back with `--tools-enable`; the tools that would answer a question or approve a plan with nobody watching stay withheld on purpose.

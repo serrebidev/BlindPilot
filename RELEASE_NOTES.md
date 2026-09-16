@@ -1,9 +1,8 @@
-# BlindPilot 0.29.1
+# BlindPilot 0.29.2
 
-Command Code's bypass permission mode now bypasses what it can, and says plainly what it cannot.
+Claude Code's refused tool calls are now said out loud as refusals.
 
-- Command Code hides nine tools from any headless run, `todo_write` among them. A call to one of those was refused with "No tool named ... exists", which is not a permission question and which no mode — bypass included — could grant. `todo_write` and Command Code's `taste` note are now asked back explicitly. The tools that would answer a question or approve a plan with nobody watching are still withheld, because a headless run answers its own prompts by taking the first option.
-- Every refusal now says which tool was refused, what it was about to do, and the reason given. Before this, a refusal was read out as the single word "tool_denied".
-- In bypass, a refusal is followed by one sentence explaining what bypass does not cover: Command Code checks a `permissions.deny` rule, a `permissions.ask` rule and a destructive shell command before it checks the mode, so all three refuse in bypass exactly as they do in default.
-- A bypass turn now says what your settings will still refuse before it starts, including `permissions.disableBypass`, which switches the whole flag off with one line on standard error that a windowed run never showed anybody.
-- A turn Command Code stopped because a tool needed approval says so, instead of finishing with "Finished with nothing to say."
+- A `permissions.deny` rule, a tool disabled for the session, and a `PreToolUse` hook all refuse a call in `bypassPermissions` mode exactly as they do in every other mode. Each came back as an ordinary result row — "Result: Permission to use Bash with command ... has been denied" — which sounds like the output of a command that in fact never ran. A refusal now names the tool and the reason it was given, and a call that simply failed is distinguished from one that was refused.
+- In bypass, the first refusal of a turn is followed by one sentence explaining what bypass does not cover, so a refusal in the mode you chose so that nothing would be refused is not left looking like a fault.
+- The full text of the refusal still gets a row of its own to read in the list.
+- Checked against the installed Claude Code: in bypass the CLI asks no permission at all, and Read, Write, Edit, Bash, Glob and Grep all run. The refusals that reach you come from your own deny rules, disabled tools and hooks.
