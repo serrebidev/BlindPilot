@@ -23,7 +23,14 @@ CUES = ["send", "working", "received", "error"]
 @pytest.fixture
 def earcons(monkeypatch, tmp_path):
     """An Earcons that records what it would have played."""
+    # Pin the settings the box reads, so the tests describe Earcons and not
+    # whatever the developer's own config.json happens to say: a machine
+    # with the working cue switched off used to fail the loop-starts test
+    # and pass the loop-stays-off test for the wrong reason.
+    monkeypatch.setattr(app.SETTINGS, "progress_cue", app.CUE_LOOP)
     box = app.Earcons(str(tmp_path))
+    box.enabled = True
+    box.cues = dict.fromkeys(CUES, True)
     played: list[str] = []
     monkeypatch.setattr(box, "_play_once", lambda path: played.append(str(path)))
     box.send = "send.wav"
