@@ -97,6 +97,7 @@ from agent_backends import (
     blindpilot_config_dir,
     blindpilot_data_dir,
     migrate_macos_legacy_dirs,
+    trailing_question,
     codex_model_options,
     compaction_request,
     discard_freebuff_prewarm,
@@ -2769,6 +2770,13 @@ class _Settings:
         self.sound_cues = {cue: bool(stored.get(cue, True)) for cue, _label, _help in SOUND_CUES}
         self.text_view = bool(cfg.get("text_view", False))
         self.show_thinking = bool(cfg.get("show_thinking", False))
+        # Whether a question a turn only wrote into its answer opens the same
+        # dialog a question asked through the backend's own tool opens. On by
+        # default: a turn that ends waiting on an answer nobody was told about
+        # is the thing this exists to stop. It can be turned off because the
+        # judgement is a reading of prose and can be wrong, and a dialog that
+        # opens when nothing was asked interrupts.
+        self.ask_written_questions = bool(cfg.get("ask_written_questions", True))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Read again in main() before the first window, which is the only
@@ -2785,6 +2793,7 @@ class _Settings:
         cfg["sound_cues"] = self.sound_cues
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
+        cfg["ask_written_questions"] = self.ask_written_questions
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["appearance"] = self.appearance
@@ -3240,6 +3249,22 @@ def _copy_to_clipboard(text: str) -> bool:
         finally:
             wx.TheClipboard.Close()
     return False
+
+
+def question_left_in_the_answer(text: str, *, asked_properly: bool, replaying: bool) -> str:
+    """The question a finished turn ended on without ever asking it properly.
+
+    A question the backend put through its own question tool has already been
+    announced and answered in a dialog, and the answer that follows usually
+    repeats it back — so a turn that asked properly is left alone, whatever
+    its text then reads like.
+
+    A replay is the transcript of a conversation being reopened. The question
+    in it was asked, and answered, whenever it was first asked.
+    """
+    if asked_properly or replaying:
+        return ""
+    return trailing_question(text)
 
 
 @dataclass
@@ -4165,7 +4190,14 @@ class QuestionDialog(wx.Dialog):
 
     OTHER = "Other: type your own answer"
 
-    def __init__(self, parent: wx.Window, backend: str, questions: Sequence[Question]):
+    def __init__(
+        self,
+        parent: wx.Window,
+        backend: str,
+        questions: Sequence[Question],
+        *,
+        ended_turn: bool = False,
+    ):
         plural = "s" if len(questions) > 1 else ""
         super().__init__(
             parent,
@@ -4183,12 +4215,19 @@ class QuestionDialog(wx.Dialog):
         wrap = self.FromDIP(560)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
+        # A question asked through the backend's own tool holds the turn open
+        # while this dialog is up; one only written into the answer does not,
+        # because the turn is already over. Saying "paused" for the second
+        # would be telling somebody their turn is still running when it has
+        # finished, and the answer they type starts a new one.
+        opening = (
+            f"{backend_label(backend)} ended this turn by asking"
+            if ended_turn
+            else f"{backend_label(backend)} has paused this turn to ask"
+        )
         intro = wx.StaticText(
             self,
-            label=(
-                f"{backend_label(backend)} has paused this turn to ask "
-                f"{'you these questions' if plural else 'you a question'}."
-            ),
+            label=(f"{opening} {'you these questions' if plural else 'you a question'}."),
         )
         sizer.Add(intro, 0, wx.ALL, pad)
 
@@ -5416,6 +5455,13 @@ class SessionPanel(wx.Panel):
         self._focus_after = focus_after
         self.last_status = "Ready"
 
+        # A question this turn asked through its backend's own question tool,
+        # so a question left in the answer as well is not asked over again.
+        self._structured_question_asked = False
+        # A question the finished turn only wrote into its answer, waiting to
+        # be put to the person once the turn is fully done.
+        self._question_in_the_answer = ""
+
         self._turns: List[Turn] = []
         self._rows: List[Row] = []  # every row across every response, in order
         self._displayed: List[Row] = []  # rows currently shown (after search)
@@ -6207,6 +6253,9 @@ class SessionPanel(wx.Panel):
         """
         if not questions:
             return None
+        # The backend asked properly. Whatever its answer then says, it is not
+        # a turn that ended with nobody told a question was waiting.
+        self._structured_question_asked = True
         answered = threading.Event()
         held: dict[str, Optional[list[list[str]]]] = {"answers": None}
 
@@ -6224,7 +6273,9 @@ class SessionPanel(wx.Panel):
                 return None
         return held["answers"]
 
-    def _show_question_dialog(self, questions: Sequence[Question]) -> Optional[list[list[str]]]:
+    def _show_question_dialog(
+        self, questions: Sequence[Question], *, ended_turn: bool = False
+    ) -> Optional[list[list[str]]]:
         """Open the question dialog. GUI thread only."""
         if not self:
             return None
@@ -6234,7 +6285,7 @@ class SessionPanel(wx.Panel):
         # waiting on this dialog, and a loop under a question is only noise.
         self._earcons.stop_progress()
         self._hide_working()
-        dlg = QuestionDialog(self, backend, questions)
+        dlg = QuestionDialog(self, backend, questions, ended_turn=ended_turn)
         self._question_dialog = dlg
         try:
             if dlg.ShowModal() != wx.ID_OK:
@@ -6249,6 +6300,33 @@ class SessionPanel(wx.Panel):
                 self._show_working()
         self._announce("Answer sent")
         return answers
+
+    def _ask_question_left_in_the_answer(self, question: str) -> None:
+        """Put a question the turn only wrote down in front of the person.
+
+        The same dialog a backend's own question tool opens, because it is the
+        same thing happening: a turn wants an answer. The difference is that
+        this turn has already ended, so there is nothing holding a reply — what
+        is typed is sent as the next turn, which is what typing it into the
+        message box would have done.
+        """
+        if not self or self._run_in_progress():
+            # Something was sent between the turn ending and this being posted.
+            # That message is the answer now, whatever it says.
+            return
+        answers = self._show_question_dialog([Question(question=question)], ended_turn=True)
+        answer = answers[0][0].strip() if answers and answers[0] else ""
+        if not answer or not self.prompt:
+            return
+        # The answer goes out through the message box, which may already hold
+        # something typed while the turn was running. That draft is put back
+        # once the answer has gone, rather than being sent in its place or lost.
+        draft = self.prompt.GetValue()
+        self.prompt.SetValue(answer)
+        self._on_send()
+        if draft.strip() and not self.prompt.GetValue():
+            self.prompt.SetValue(draft)
+            self.prompt.SetInsertionPointEnd()
 
     def _close_question_dialog(self) -> None:
         """Take down an open question, because the run it belongs to is going.
@@ -7358,6 +7436,14 @@ class SessionPanel(wx.Panel):
         self._stopping = False
         # Stop the in-progress loop and play the "received" cue.
         self._earcons.play_received()
+        # Kept rather than asked here: the turn is still finishing, and a modal
+        # over a run that has not reported itself done would be answered into a
+        # turn that cannot take it.
+        self._question_in_the_answer = question_left_in_the_answer(
+            text,
+            asked_properly=getattr(self, "_structured_question_asked", False),
+            replaying=getattr(self, "_replaying", False),
+        )
         # A reopened conversation completes with no text: nothing new was said,
         # the rows are the transcript that was just replayed. Announcing a
         # "response received, 0 segments" there, or parsing "" into a fresh
@@ -7463,7 +7549,13 @@ class SessionPanel(wx.Panel):
             self._turns.pop()
         self._worker = None
         self._replaying = False
-        if getattr(self, "_pending_messages", []):
+        # Read and cleared here, because the next turn starts from whatever
+        # this one left behind and a question already put is not asked twice.
+        written = getattr(self, "_question_in_the_answer", "")
+        self._question_in_the_answer = ""
+        self._structured_question_asked = False
+        queued = bool(getattr(self, "_pending_messages", []))
+        if queued:
             if getattr(self, "_queue_paused", False):
                 self._announce(
                     "Queued messages paused. Use /queue resume to retry or /queue clear to remove them"
@@ -7472,6 +7564,11 @@ class SessionPanel(wx.Panel):
                 self._send_queued_message()
         waiting = getattr(self, "_late_turn_waiting", None)
         self._late_turn_waiting = None
+        if written and not queued and waiting is None and SETTINGS.ask_written_questions:
+            # Posted rather than opened, so the event batch this is being
+            # drained from finishes first: a modal opened inside it would hold
+            # every row, cue and announcement still queued behind it.
+            wx.CallAfter(self._ask_question_left_in_the_answer, written)
         if waiting is not None:
             self._start_late_turn(waiting)
 
@@ -9379,11 +9476,16 @@ class PreferencesDialog(wx.Dialog):
         self._thinking.SetValue(SETTINGS.show_thinking)
         self._text_view = wx.CheckBox(panel, label="Responses as a read-only text field")
         self._text_view.SetValue(SETTINGS.text_view)
+        self._written_questions = wx.CheckBox(
+            panel, label="Ask me questions a turn wrote into its answer"
+        )
+        self._written_questions.SetValue(SETTINGS.ask_written_questions)
         for check in (
             self._live_rows,
             self._speak_live,
             self._thinking,
             self._text_view,
+            self._written_questions,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -9519,6 +9621,10 @@ class PreferencesDialog(wx.Dialog):
     @property
     def text_view(self) -> bool:
         return self._text_view.GetValue()
+
+    @property
+    def ask_written_questions(self) -> bool:
+        return self._written_questions.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -10311,6 +10417,7 @@ class MainFrame(wx.Frame):
         SETTINGS.sounds_enabled = dialog.sounds_enabled
         SETTINGS.sound_cues = dict(dialog.sound_cues)
         SETTINGS.text_view = dialog.text_view
+        SETTINGS.ask_written_questions = dialog.ask_written_questions
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         changed_appearance = dialog.appearance != SETTINGS.appearance

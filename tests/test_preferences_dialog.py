@@ -205,6 +205,7 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
         sounds_enabled = False
         sound_cues = {cue: False for cue, _label, _help in app.SOUND_CUES}
         text_view = True
+        ask_written_questions = False
         appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30
@@ -219,6 +220,7 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
     assert app.SETTINGS.sounds_enabled is False
     assert not any(app.SETTINGS.sound_cues.values())
     assert app.SETTINGS.text_view is True
+    assert app.SETTINGS.ask_written_questions is False
     assert app.SETTINGS.progress_cue == app.CUE_OFF
     assert app.SETTINGS.progress_cue_seconds == 30
 
@@ -309,6 +311,7 @@ def test_changing_the_appearance_says_it_takes_effect_next_launch(wx_app, monkey
         live_rows = app.SETTINGS.live_rows
         speak_live = app.SETTINGS.speak_live
         show_thinking = app.SETTINGS.show_thinking
+        ask_written_questions = app.SETTINGS.ask_written_questions
         sounds_enabled = app.SETTINGS.sounds_enabled
         sound_cues = dict(app.SETTINGS.sound_cues)
         text_view = app.SETTINGS.text_view

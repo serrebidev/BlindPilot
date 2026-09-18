@@ -111,6 +111,8 @@ def test_the_command_line_is_the_one_a_turn_used_to_build():
         "--output-format",
         "stream-json",
         "--verbose",
+        "--append-system-prompt",
+        cs.ASK_THROUGH_THE_TOOL,
         "--permission-prompt-tool",
         "stdio",
         "--permission-mode",
@@ -124,6 +126,27 @@ def test_the_command_line_is_the_one_a_turn_used_to_build():
     ]
     bare = cs.build_command("claude", cs.Wants(cwd="C:/work", permission_mode=""), "")
     assert "--permission-mode" not in bare and "--resume" not in bare
+
+
+def test_the_ask_through_the_tool_instruction_goes_with_the_tool_it_names():
+    """Without the prompt tool there is no AskUserQuestion to send anybody to.
+
+    ``--permission-prompt-tool`` is what makes the tool exist in a headless
+    run at all, and it is dropped for the rest of the session against a CLI
+    that does not know the flag. Telling that CLI's model to ask through a
+    tool it has not got would be an instruction it could only fail.
+    """
+    wants = cs.Wants(cwd="C:/work", permission_mode="")
+    assert "--append-system-prompt" not in cs.build_command("claude", wants, "")
+    assert "--append-system-prompt" in cs.build_command("claude", wants, "stdio")
+
+
+def test_the_instruction_names_the_tool_and_why_writing_it_out_is_not_enough():
+    assert "AskUserQuestion" in cs.ASK_THROUGH_THE_TOOL
+    # The reason is the part that has to survive an edit: an instruction that
+    # only says "use this tool" reads as a style note and loses to a skill
+    # that says to interview in prose.
+    assert "BlindPilot" in cs.ASK_THROUGH_THE_TOOL
 
 
 def test_an_attached_turn_receives_events_in_order_and_the_result_closes_nothing():
