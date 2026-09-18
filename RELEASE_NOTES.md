@@ -7,3 +7,4 @@ A turn that ends by asking you something now opens the question dialog, whicheve
 - This matters most on Command Code, which withholds its `ask_user_question` tool from headless runs entirely, so a written question was the only kind it could ever ask.
 - The reading is narrow on purpose. The question mark has to be near the end of the answer, question marks inside code blocks are ignored, and a question the answer then answers itself is left alone, so a dialog does not open when nothing was asked of you.
 - Claude Code and Codex are also told, in their own instructions, to ask through their question tool rather than writing the question out. On Codex that is added behind your own `developer_instructions` rather than replacing them.
+- If you had started typing a message while the turn was running, answering the question does not send it or throw it away. Your draft is back in the message box once the answer has gone.
