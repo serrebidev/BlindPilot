@@ -31,6 +31,7 @@ import json
 import os
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -497,6 +498,60 @@ REMOTE_CREDENTIALS = ("token", "password")
 WS_QUERY_CREDENTIALS = ("token", "ticket")
 
 
+def _http_base(url: str) -> str:
+    """The plain-HTTP origin behind a gateway URL, for the routes beside it.
+
+    Hermes' login and ticket routes are ordinary HTTP on the same host the
+    WebSocket lives on, so the address a user configures has to be turned back
+    into one. In one place, because the login, the ticket request and the
+    gate probe all have to agree on it or they sign in to different servers.
+    """
+    base = url.split("?", 1)[0]
+    for prefix, replacement in (("wss://", "https://"), ("ws://", "http://")):
+        if base.startswith(prefix):
+            base = replacement + base[len(prefix) :]
+            break
+    return base[: -len("/api/ws")] if base.endswith("/api/ws") else base
+
+
+def hermes_asks_for_a_login(url: str, timeout: float = REMOTE_CONNECT_TIMEOUT) -> Optional[bool]:
+    """Whether this Hermes requires a sign-in of its own, or a session token.
+
+    The two arrangements take different credentials, and Hermes does not
+    announce which one it is running: a Hermes bound to a public address
+    demands a login and refuses the legacy session token outright, while one
+    bound to the loopback address has no login to offer and refuses a ticket.
+    Getting it wrong produces a refusal that looks exactly like a wrong
+    password, which is how a correct password gets reported as broken.
+
+    ``GET /api/auth/providers`` separates them: it is a public route on a
+    dashboard that requires a login and answers with the provider list, and a
+    Hermes that does not require one refuses it. Measured against both
+    arrangements. ``None`` when the question cannot be answered -- the caller
+    then says less rather than guessing.
+    """
+    import urllib.error
+    import urllib.request
+
+    base = _http_base(url)
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=certificate_context())
+    )
+    request = urllib.request.Request(base + "/api/auth/providers", method="GET")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            json.loads(response.read() or b"{}")
+            return True
+    except urllib.error.HTTPError as exc:
+        # A response body left unread warns "Implicitly cleaning up" when it is
+        # collected, which CI's ``pytest -W error`` turns into a failure.
+        code = exc.code
+        exc.close()
+        return False if code in (401, 403) else None
+    except Exception:  # noqa: BLE001 - DNS, TLS, and proxy errors all land here
+        return None
+
+
 def mint_ws_ticket(url: str, username: str, password: str) -> str:
     """Log in with a password and return a one-shot WebSocket ticket.
 
@@ -512,12 +567,7 @@ def mint_ws_ticket(url: str, username: str, password: str) -> str:
     import urllib.request
     from http.cookiejar import CookieJar
 
-    base = url.split("?", 1)[0]
-    for prefix, replacement in (("wss://", "https://"), ("ws://", "http://")):
-        if base.startswith(prefix):
-            base = replacement + base[len(prefix) :]
-            break
-    base = base[: -len("/api/ws")] if base.endswith("/api/ws") else base
+    base = _http_base(url)
 
     # The packaged build's trust store, not OpenSSL's default, which the frozen
     # macOS build ships empty.
@@ -547,21 +597,59 @@ def mint_ws_ticket(url: str, username: str, password: str) -> str:
         # "Implicitly cleaning up" when it is collected -- under ``-W error``
         # that is a failure, and in real use it holds the response stream
         # until then. Close it before the exception turns into a message.
+        code = exc.code
         exc.close()
-        if exc.code in (401, 403):
+        if code in (401, 403):
             raise OSError(f"Hermes at {base} rejected that username and password.") from exc
-        raise OSError(f"Could not sign in to Hermes at {base}: HTTP {exc.code}") from exc
+        if code == 400:
+            # Hermes answers 400 to a Host it was not told to expect, which is
+            # what a reverse proxy sending its own Host produces. Nothing about
+            # the password is involved, and "HTTP 400" alone reads like one.
+            raise OSError(
+                f"Hermes at {base} refused the address, not the password: it only "
+                "answers to the name it was given. Set dashboard.public_url on that "
+                "Hermes to the address you are connecting to, or start it with "
+                "'hermes serve --host 0.0.0.0'."
+            ) from exc
+        raise OSError(f"Could not sign in to Hermes at {base}: HTTP {code}") from exc
     except Exception as exc:  # noqa: BLE001 - network, DNS, TLS all land here
         raise OSError(_remote_failure_message(base, exc)) from exc
 
     try:
         payload = _post("/api/auth/ws-ticket", None)
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+        exc.close()
+        raise OSError(_no_ticket_message(base, code)) from exc
     except Exception as exc:  # noqa: BLE001
         raise OSError(f"Signed in to Hermes at {base}, but it issued no ticket.") from exc
     ticket = str(payload.get("ticket") or "")
     if not ticket:
         raise OSError(f"Signed in to Hermes at {base}, but it issued no ticket.")
     return ticket
+
+
+def _no_ticket_message(base: str, code: int) -> str:
+    """Say why a signed-in session got no ticket, and which setting to change.
+
+    The sign-in itself succeeded -- Hermes checked the password and set a
+    session -- so the failure is about the ticket, and there are two very
+    different reasons for it. Asking Hermes which arrangement it is running
+    tells them apart instead of guessing at the one the user cannot see.
+    """
+    asks = hermes_asks_for_a_login(base)
+    if asks is False:
+        return (
+            f"Hermes at {base} did not ask for a sign-in, so it issued no ticket. It "
+            "accepts only its own session token: choose Session token in Remote Hermes."
+        )
+    if asks is True:
+        return (
+            f"Hermes at {base} asked for a sign-in, and then did not recognise the "
+            f"session it had just issued (HTTP {code}). A proxy in front of it may be "
+            "dropping its cookies."
+        )
+    return f"Signed in to Hermes at {base}, but it issued no ticket (HTTP {code})."
 
 
 def remote_ws_url(host: str, port: int = 9119, secure: bool = False) -> str:
@@ -622,12 +710,20 @@ def _remote_failure_message(url: str, exc: Exception) -> str:
     A blind user cannot glance at a log, so the message has to carry the
     diagnosis: refused means nothing is listening, a rejected handshake means
     the key is wrong, a timeout means the machine is not answering.
+
+    This is the fallback for a failure with no context to reason from. A
+    WebSocket upgrade that came back with a status has one, and
+    :func:`_upgrade_refused_message` uses it instead -- the same status means
+    different things depending on which credential was presented and whether
+    the sign-in had already succeeded.
     """
     detail = str(exc).strip() or exc.__class__.__name__
     lowered = detail.lower()
-    if "403" in detail or "401" in detail or "handshake" in lowered:
+    status = _handshake_status(exc)
+    if status or "handshake" in lowered:
+        code = f" (HTTP {status})" if status else ""
         return (
-            f"Hermes at {url} refused the connection key. Check the key in "
+            f"Hermes at {url} refused the connection key{code}. Check the key in "
             "Remote Hermes settings, then try again."
         )
     if "refused" in lowered:
@@ -645,6 +741,78 @@ def _remote_failure_message(url: str, exc: Exception) -> str:
             "'hermes serve', and that the machine is awake and reachable."
         )
     return f"Could not reach Hermes at {url}: {detail}"
+
+
+# A WebSocket upgrade that is refused never becomes a connection: the server
+# answers the HTTP request with a status instead of the 101 that would open it.
+# That status is the one piece of evidence saying which layer refused, and the
+# client library carries it either as an attribute or only inside the message,
+# depending on the version.
+_HANDSHAKE_STATUS_RE = re.compile(r"handshake status\s+(\d{3})", re.IGNORECASE)
+
+
+def _handshake_status(exc: Exception) -> int:
+    """The HTTP status the server refused the upgrade with, or 0 if it did not.
+
+    The message alone cannot distinguish "the credential is wrong" from
+    "something between here and Hermes refused", and reporting one as the other
+    is what sent a correct password back to the settings screen.
+    """
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and 100 <= code <= 599:
+        return code
+    match = _HANDSHAKE_STATUS_RE.search(str(exc))
+    return int(match.group(1)) if match else 0
+
+
+def _upgrade_refused_message(
+    url: str,
+    status: int,
+    *,
+    credential: str,
+    verified: bool,
+    asks_for_login: Optional[bool],
+) -> str:
+    """Explain a refused WebSocket upgrade from the evidence, not from habit.
+
+    Every refusal used to be reported as a wrong key. The key is correct in
+    most of them -- the sign-in had just succeeded on one of these paths -- so
+    the one thing the user was told to check was the one thing that was fine.
+    The status, plus which credential was presented, says which layer refused.
+    """
+    if status in (401, 403):
+        if verified:
+            # The sign-in for this very connection already succeeded, so the
+            # password is proven. Saying "check the key" here is simply untrue.
+            return (
+                f"Hermes at {url} accepted the username and password, then refused the "
+                f"connection (HTTP {status}). The sign-in is not the problem: check that "
+                "Hermes, and any proxy in front of it, allow WebSocket connections."
+            )
+        if credential == "token" and asks_for_login:
+            return (
+                f"Hermes at {url} refused the session token. That Hermes is reachable from "
+                "other computers, so it requires a sign-in instead of a token: choose "
+                "Username and password in Remote Hermes, then try again."
+            )
+        return (
+            f"Hermes at {url} refused the connection key (HTTP {status}). Check the key "
+            "in Remote Hermes settings, then try again."
+        )
+    if status in (404, 405):
+        return (
+            f"There is nothing at {url} to connect to (HTTP {status}). A proxy in front of "
+            "that address may not be passing WebSocket connections through to Hermes."
+        )
+    if status >= 500:
+        return (
+            f"The server at {url} failed the connection (HTTP {status}). Hermes may not be "
+            "running there, or the proxy in front of it may not be reaching it."
+        )
+    return (
+        f"Hermes at {url} refused the connection (HTTP {status}). Check the address and the "
+        "key in Remote Hermes settings, then try again."
+    )
 
 
 class Transport(Protocol):
@@ -922,12 +1090,17 @@ class WebSocketTransport:
             raise OSError(
                 "Remote Hermes needs the websocket-client package: pip install websocket-client"
             ) from exc
+        signed_in = False
         if self._credential == "password":
             # A Hermes reachable from another machine requires its own login,
             # and the ticket it then issues lives thirty seconds -- so it is
             # minted here, immediately before use, rather than stored.
             ticket = mint_ws_ticket(self._base_url, self._username, self._token)
             url = _authenticated_ws_url(self._base_url, ticket, "ticket")
+            # Past this point the password is proven: Hermes checked it and
+            # issued a ticket. A refusal from here on is not a wrong key, and
+            # saying it was is how a correct password got reported as broken.
+            signed_in = True
         else:
             url = _authenticated_ws_url(self._base_url, self._token, "token")
         try:
@@ -943,7 +1116,25 @@ class WebSocketTransport:
             )
         except Exception as exc:  # noqa: BLE001 - any failure is "cannot reach it"
             self._error = str(exc)
-            raise OSError(_remote_failure_message(self._display_url, exc)) from exc
+            status = _handshake_status(exc)
+            if not status:
+                raise OSError(_remote_failure_message(self._display_url, exc)) from exc
+            # Only a token can be swapped for a password, and only a server that
+            # answers the question is worth asking.
+            asks = (
+                hermes_asks_for_a_login(self._base_url)
+                if self._credential == "token" and status in (401, 403)
+                else None
+            )
+            raise OSError(
+                _upgrade_refused_message(
+                    self._display_url,
+                    status,
+                    credential=self._credential,
+                    verified=signed_in,
+                    asks_for_login=asks,
+                )
+            ) from exc
         self._closing.clear()
         self._reader = threading.Thread(target=self._read_forever, daemon=True)
         self._reader.start()

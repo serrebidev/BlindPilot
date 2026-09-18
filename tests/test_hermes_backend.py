@@ -1081,6 +1081,263 @@ def test_connection_failures_say_what_to_do_about_them():
         assert url in message
 
 
+# -- a refusal is not the same thing as a wrong key ------------------------
+#
+# The defect these lock down was reported as issue #44: a Hermes on another
+# machine answered "refused the connection key. Check the key", and the user
+# knew the password was right -- because it was. Every refusal of the WebSocket
+# upgrade was reported as a wrong key, so the one setting the message named was
+# the one that was never at fault.
+
+
+class _Refused(Exception):
+    """websocket-client's WebSocketBadStatusException, near enough to reason about."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"Handshake status {status_code} Forbidden")
+        self.status_code = status_code
+
+
+class _Ok:
+    """A response whose body is all the caller reads."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> "_Ok":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _refusal(transport) -> str:
+    """Start a transport that must be refused, and return what it said."""
+    try:
+        transport.start()
+    except OSError as exc:
+        return str(exc)
+    raise AssertionError("a refused connection has to raise")
+
+
+def _login_opener(monkeypatch, responder) -> None:
+    """Point urllib at ``responder(request)`` for every request."""
+    import urllib.request
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            return responder(request)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: _Opener())
+
+
+def test_a_refused_upgrade_carries_the_status_it_was_refused_with():
+    """The status is the only evidence of which layer refused."""
+    assert hermes_backend._handshake_status(_Refused(403)) == 403
+    # Older libraries put it in the message and nowhere else.
+    assert hermes_backend._handshake_status(OSError("Handshake status 502 Bad Gateway")) == 502
+    # Not a handshake at all: the caller must fall back, not invent a code.
+    assert hermes_backend._handshake_status(OSError("[Errno 111] Connection refused")) == 0
+
+
+def test_a_proven_sign_in_is_never_reported_as_a_wrong_key():
+    """On the password path the sign-in has already succeeded when this fires.
+
+    Hermes checked the password and issued a ticket before the upgrade was
+    attempted, so "check the key" sends the user back to re-type the one value
+    that is known to be correct.
+    """
+    message = hermes_backend._upgrade_refused_message(
+        "wss://box/api/ws", 403, credential="password", verified=True, asks_for_login=None
+    )
+
+    assert "not the problem" in message
+    assert "Check the key" not in message
+    assert "WebSocket" in message
+
+
+def test_a_token_refused_by_a_hermes_that_wants_a_login_names_the_setting():
+    """The reproduced cause of issue #44, and the fix is one combo box away."""
+    message = hermes_backend._upgrade_refused_message(
+        "wss://box/api/ws", 403, credential="token", verified=False, asks_for_login=True
+    )
+
+    assert "Username and password" in message
+    assert "Remote Hermes" in message
+
+
+def test_a_token_refused_by_a_hermes_that_takes_one_still_says_check_the_key():
+    """Negative control: this advice must not overwrite the real one.
+
+    A Hermes that never asked for a login refuses the legacy token only when the
+    token is actually wrong, which is the one case the old message was right for.
+    """
+    message = hermes_backend._upgrade_refused_message(
+        "wss://box/api/ws", 403, credential="token", verified=False, asks_for_login=False
+    )
+
+    assert "Check the key" in message
+    assert "Username and password" not in message
+
+
+def test_a_missing_gateway_and_a_failing_proxy_are_named_as_such():
+    """Neither is a credential problem, and both used to be reported as one."""
+    missing = hermes_backend._upgrade_refused_message(
+        "wss://box/api/ws", 404, credential="password", verified=True, asks_for_login=None
+    )
+    assert "proxy" in missing
+
+    broken = hermes_backend._upgrade_refused_message(
+        "wss://box/api/ws", 502, credential="password", verified=True, asks_for_login=None
+    )
+    assert "HTTP 502" in broken
+
+
+def test_the_transport_reports_a_refused_upgrade_from_its_own_evidence(monkeypatch):
+    """End to end through the transport, which is where the user's message comes from."""
+    monkeypatch.setattr(hermes_backend, "mint_ws_ticket", lambda url, user, secret: "ticket")
+
+    def _refuse(url, timeout=None, **kwargs):
+        raise _Refused(403)
+
+    monkeypatch.setitem(sys.modules, "websocket", types.SimpleNamespace(create_connection=_refuse))
+    transport = hermes_backend.WebSocketTransport(
+        "ws://box:9119/api/ws", "pw", "password", "pilot"
+    )
+
+    message = _refusal(transport)
+
+    assert "not the problem" in message
+    assert "Check the key" not in message
+
+
+def test_the_transport_asks_whether_a_token_was_the_wrong_kind_of_credential(monkeypatch):
+    """Only a token can be swapped for a password, so only that case probes."""
+    asked: list[str] = []
+    monkeypatch.setattr(
+        hermes_backend,
+        "hermes_asks_for_a_login",
+        lambda url, timeout=20.0: asked.append(url) or True,
+    )
+
+    def _refuse(url, timeout=None, **kwargs):
+        raise _Refused(403)
+
+    monkeypatch.setitem(sys.modules, "websocket", types.SimpleNamespace(create_connection=_refuse))
+    transport = hermes_backend.WebSocketTransport("ws://box:9119/api/ws", "pw", "token", "")
+
+    message = _refusal(transport)
+
+    assert asked == ["ws://box:9119/api/ws"]
+    assert "Username and password" in message
+
+
+def test_a_connection_that_never_opened_still_says_which_address(monkeypatch):
+    """A socket refusal has no status, and must keep its own message."""
+
+    def _refuse(url, timeout=None, **kwargs):
+        raise OSError("[Errno 111] Connection refused")
+
+    monkeypatch.setitem(sys.modules, "websocket", types.SimpleNamespace(create_connection=_refuse))
+    transport = hermes_backend.WebSocketTransport("ws://box:9119/api/ws", "pw", "token", "")
+
+    assert "hermes serve" in _refusal(transport)
+
+
+def test_the_login_requirement_is_read_from_the_provider_route(monkeypatch):
+    """Hermes never announces which credential arrangement it is running.
+
+    The provider route is public on a dashboard that requires a login and
+    refused by one that does not, which is the only signal available without a
+    credential to try.
+    """
+    import email.message
+    import io
+    import urllib.error
+
+    def _answer(outcome) -> object:
+        def _respond(request):
+            if isinstance(outcome, int):
+                raise urllib.error.HTTPError(
+                    request.full_url, outcome, "x", email.message.Message(), io.BytesIO(b"")
+                )
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        _login_opener(monkeypatch, _respond)
+        return hermes_backend.hermes_asks_for_a_login("ws://box:9119/api/ws")
+
+    assert _answer(_Ok(b'{"providers":[{"name":"basic"}]}')) is True
+    assert _answer(401) is False
+    # Nothing to conclude from an unreachable server, so nothing is claimed.
+    assert _answer(urllib.error.URLError("no network in this test")) is None
+
+
+def test_an_address_hermes_was_not_told_about_is_not_reported_as_a_bad_password(monkeypatch):
+    """Hermes answers 400 to a Host it does not answer to -- a proxy setup fault.
+
+    Reported as a bare "HTTP 400" it reads like a credential problem, and the
+    user goes back to re-typing a password that was never the issue.
+    """
+    import email.message
+    import io
+    import urllib.error
+
+    def _respond(request):
+        raise urllib.error.HTTPError(
+            request.full_url, 400, "Bad Request", email.message.Message(), io.BytesIO(b"")
+        )
+
+    _login_opener(monkeypatch, _respond)
+
+    try:
+        hermes_backend.mint_ws_ticket("ws://box:9119/api/ws", "someone", "hunter2")
+    except OSError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - a refused address has to raise
+        raise AssertionError("a refused address has to raise")
+
+    assert "dashboard.public_url" in message
+    assert "hunter2" not in message
+
+
+def test_a_hermes_that_needs_no_login_says_so_instead_of_asking_for_a_ticket(monkeypatch):
+    """A signed-in session that gets no ticket is two different faults.
+
+    Either the server wanted no login at all -- so it has no ticket to give and
+    the session token is the answer -- or it did, and something between here and
+    there dropped the session cookie. Guessing between them is what the probe
+    exists to avoid.
+    """
+    import email.message
+    import io
+    import urllib.error
+
+    def _respond(request):
+        if request.full_url.endswith("/auth/password-login"):
+            return _Ok(b'{"ok":true,"next":"/"}')
+        raise urllib.error.HTTPError(
+            request.full_url, 401, "Unauthorized", email.message.Message(), io.BytesIO(b"")
+        )
+
+    _login_opener(monkeypatch, _respond)
+    monkeypatch.setattr(hermes_backend, "hermes_asks_for_a_login", lambda url, timeout=20.0: False)
+
+    try:
+        hermes_backend.mint_ws_ticket("ws://box:9119/api/ws", "someone", "hunter2")
+    except OSError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - a session with no ticket has to raise
+        raise AssertionError("a session with no ticket has to raise")
+
+    assert "Session token" in message
+    assert "hunter2" not in message
+
+
 def test_a_missing_websocket_library_is_reported_as_a_fixable_thing(monkeypatch):
     """The local backend needs no such library, so this must not be fatal.
 

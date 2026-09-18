@@ -174,6 +174,19 @@ hermes serve --port 9119 --host 0.0.0.0
 
 Then choose Username and password in Remote Hermes. Hermes issues a short-lived single-use ticket for each WebSocket connection; BlindPilot logs in and fetches one itself each time it connects. Test connection checks the address and credentials before anything is sent.
 
+The two arrangements take different credentials, and Hermes does not say which one it is running:
+
+- **A Hermes bound to a public address** (`--host 0.0.0.0`) requires a login and refuses a session token outright. Choose Username and password.
+- **A Hermes bound to localhost**, reached through a tunnel or a reverse proxy, has no login to offer and refuses a ticket. Choose Session token. The token is the one `HERMES_DASHBOARD_SESSION_TOKEN` names, or the one Hermes prints for its own dashboard.
+
+Behind a reverse proxy, Hermes must be told what address it answers to, or it refuses the request before it looks at any credential. Set `dashboard.public_url` to the address you connect to:
+
+```bash
+hermes config set dashboard.public_url https://hermes.example.com
+```
+
+BlindPilot reads the status Hermes refused with and says which of these it is, rather than reporting every refusal as a wrong key.
+
 `websocket-client` is only needed for the remote path. If it is missing, BlindPilot names it as an installable package and keeps running.
 
 ## Chat mode
