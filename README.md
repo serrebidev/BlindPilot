@@ -97,7 +97,7 @@ Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ct
 
 Model. Backend (one radio item per CLI), Model and Effort (Ctrl+Shift+E), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Session Status, Backend Settings, Manage Backends, Connect a Provider.
 
-Options. Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Silent until the response mode, Working sound (continuous, every few seconds, off), Working sound interval, Remote Hermes, Preferences (Ctrl+,). On macOS, Preferences is in the application menu on Cmd+, as in every Mac app.
+Options. Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Ask me questions a turn wrote into its answer, Silent until the response mode, Working sound (continuous, every few seconds, off), Working sound interval, Remote Hermes, Preferences (Ctrl+,). On macOS, Preferences is in the application menu on Cmd+, as in every Mac app.
 
 Chat. Accounts, Conversation profiles, Refresh models, History view (List, Read-only text), Diagnostics. Enabled only when the Mode combo box is set to Chat.
 
@@ -134,7 +134,11 @@ On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, 
 | opencode | Its headless HTTP server, one shared process | Yes, with per-model reasoning variants | Yes | Yes | Yes |
 | Hermes | Gateway JSON-RPC over a local pipe or the network | Yes | Yes | Yes | Yes |
 | Muse Code | MSP JSON-RPC over the stdio of `muse serve`, inside WSL on Windows | Yes, with reasoning effort | Yes | Yes | Yes |
-| Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | Yes | No |
+| Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | Yes | In writing only |
+
+Every backend marked Yes in that column stops its turn and opens a question dialog through a question tool of its own. A model does not always use it: asked to interview you, or told to ask one question at a time, it will often write the question into its answer instead, and Command Code has its question tool withheld from headless runs altogether. A question written into an answer sends no event, so nothing used to announce it and no dialog opened - the turn simply ended, with no sign that anything was waiting on you. BlindPilot now reads the end of each answer, and a turn that ends by asking you something opens the same dialog, on every backend. What you type is sent as your next message. Turn it off under Options if you would rather a turn just end.
+
+Claude Code and Codex are also told, in their own system instructions, to ask through their question tool rather than writing the question out. On Codex this is added to your own `developer_instructions` rather than replacing them.
 
 FreeBuff has no JSON or headless API, so BlindPilot runs its terminal interface in a hidden pseudo-terminal and reads the answer off the screen a sentence at a time. Redraws and advertisements are filtered out. If you send a message before FreeBuff has finished starting, BlindPilot holds it and says so, then sends it when the session is live.
 

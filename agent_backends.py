@@ -417,6 +417,77 @@ class Question:
 AskQuestions = Callable[[Sequence[Question]], Optional[list[list[str]]]]
 
 
+# How much a turn may say after its last question mark before it counts as
+# having moved on. A question the answer then answers itself -- "Is the extra
+# lock worth it? No, because..." -- is not asked of anybody, and opening a
+# dialog on it would interrupt for nothing. A question followed by the
+# recommendation the asker would give is still a question, and that is what
+# fits inside this.
+_QUESTION_TAIL_CHARS = 200
+
+# Markdown that would otherwise be read out as part of the question.
+_QUESTION_TRIM = "*_`~ 	"
+_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+
+
+def _without_code(text: str) -> str:
+    """The text with fenced code taken out.
+
+    A question mark in a code sample is punctuation, not a question, and a
+    fence is the one place it turns up often enough to matter.
+    """
+    kept: list[str] = []
+    fence = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if fence:
+            if stripped.startswith(fence):
+                fence = ""
+            continue
+        if stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def trailing_question(text: str) -> str:
+    """The question a turn ended by asking, or "" if it did not end on one.
+
+    Every backend opens the question dialog from a structured event of its own
+    -- AskUserQuestion, request_user_input, clarify, userInput. A model that
+    writes its question into its answer sends none of them, so the turn ends
+    with nothing said and nothing shown, and the person is left waiting on a
+    turn that is itself waiting on them. An interview skill asks that way by
+    design, and Command Code has no question tool in a headless run at all, so
+    on that backend it is the only way a question ever arrives.
+
+    The judgement is deliberately narrow, because a dialog nobody asked for is
+    worse than none: the last question mark has to be near the end, and the
+    question is read no further back than the line it sits on. Both are what
+    keep a turn that asked itself something in passing from being mistaken for
+    one that is waiting.
+    """
+    body = _without_code(text)
+    end = body.rfind("?")
+    if end < 0:
+        return ""
+    if len(body[end + 1 :].strip()) > _QUESTION_TAIL_CHARS:
+        return ""
+    start = body.rfind("\n", 0, end) + 1
+    for mark in ".!?":
+        found = body.rfind(mark, start, end)
+        if found >= 0:
+            start = max(start, found + 1)
+    question = " ".join(body[start : end + 1].split())
+    question = _BULLET.sub("", question.lstrip("#").strip())
+    question = question.strip(_QUESTION_TRIM)
+    if not any(character.isalpha() for character in question):
+        # A stray question mark on its own is not a question worth stopping for.
+        return ""
+    return question if question.endswith("?") else f"{question}?"
+
+
 def question_summary(questions: Sequence[Question], answers: Optional[list[list[str]]]) -> str:
     """One row for the transcript saying what was asked and what was said.
 
@@ -2508,6 +2579,60 @@ _CODEX_QUESTION_ARGS = (
     _CODEX_QUESTION_FEATURE,
 )
 
+# Switching the tool on is not the same as being asked through it. A model
+# that writes its question into its answer sends no request_user_input, so
+# nothing announces it and no dialog opens: the turn ends, and the person is
+# left waiting on an answer nobody told them was wanted. An interview skill
+# asks that way by design, which is why the reason is given rather than the
+# preference alone.
+_CODEX_ASK_THROUGH_THE_TOOL = (
+    "You are running inside BlindPilot, which a blind person is driving with a "
+    "screen reader. When you want an answer from them, ask with the "
+    "request_user_input tool rather than writing the question into your reply. "
+    "BlindPilot speaks a tool question and opens it in a dialog; a question "
+    "written into a reply is neither spoken as a question nor shown as one, so "
+    "the turn ends and nothing tells them an answer is wanted. This holds for "
+    "every question, including an interview that asks them one at a time."
+)
+
+
+def _codex_developer_instructions() -> str:
+    """BlindPilot's instruction, behind whatever the person wrote themselves.
+
+    ``-c`` replaces a key rather than adding to it, so setting this key blind
+    would cost somebody their own ``developer_instructions`` for as long as
+    BlindPilot was running. Theirs is read first and kept in front, which is
+    both the order they wrote it in and the order that leaves BlindPilot's
+    addition reading as the footnote it is.
+    """
+    theirs = ""
+    try:
+        import tomllib
+
+        with open(_codex_home() / "config.toml", "rb") as handle:
+            theirs = str(tomllib.load(handle).get("developer_instructions") or "")
+    except (OSError, ValueError):
+        # No config file, or one Codex itself would refuse to load and report
+        # on. Either way there is nothing here of theirs to lose.
+        theirs = ""
+    return f"{theirs.strip()}\n\n{_CODEX_ASK_THROUGH_THE_TOOL}".strip()
+
+
+def codex_question_args() -> tuple[str, ...]:
+    """The app-server arguments that make a question reach the dialog.
+
+    Built per launch rather than held as a constant, because the instruction
+    half has to read the user's config first. Quoted as a TOML string with
+    ``json.dumps``: ``-c`` parses its value as TOML and only falls back to a
+    literal when that fails, and a sentence with a quote or a newline in it
+    should not be relying on the fallback.
+    """
+    return (
+        *_CODEX_QUESTION_ARGS,
+        "-c",
+        f"developer_instructions={json.dumps(_codex_developer_instructions())}",
+    )
+
 
 def _question_options(raw: object) -> tuple[QuestionOption, ...]:
     """The labelled options of a question, as Codex and opencode both send them."""
@@ -3135,7 +3260,7 @@ def _start_codex_server(binary: str = "") -> CodexServer:
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
     proc = subprocess.Popen(
-        [server_binary, *_CODEX_QUESTION_ARGS, "app-server", "--stdio"],
+        [server_binary, *codex_question_args(), "app-server", "--stdio"],
         cwd=str(Path.home()),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

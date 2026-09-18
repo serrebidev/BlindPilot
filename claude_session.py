@@ -59,12 +59,35 @@ class Wants:
     session_id: Optional[str] = None
 
 
+# Why a question has to be asked with the tool rather than written out.
+#
+# BlindPilot announces an AskUserQuestion call and opens it in a dialog. A
+# question written into the answer instead arrives as ordinary prose: nothing
+# announces it, no dialog opens, and the turn ends with somebody waiting on an
+# answer nobody was told was wanted. A skill that runs an interview -- "grill
+# me" is the one this was found through -- asks in prose as a matter of
+# course, which is why the reason is spelled out here rather than left as a
+# preference: an instruction that only says "prefer this tool" loses to a
+# skill that says to interview in prose.
+ASK_THROUGH_THE_TOOL = (
+    "You are running inside BlindPilot, which a blind person is driving with a "
+    "screen reader. When you want an answer from them, ask with the "
+    "AskUserQuestion tool rather than writing the question into your reply. "
+    "BlindPilot speaks a tool question and opens it in a dialog; a question "
+    "written into a reply is neither spoken as a question nor shown as one, so "
+    "the turn ends and nothing tells them an answer is wanted. This holds for "
+    "every question, including an interview that asks them one at a time."
+)
+
+
 def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:
     """The command line one process is started with.
 
     Streaming input mode keeps stdin open, so further messages can be pushed
     into the process while it works and after a turn ends. The prompt tool
-    makes AskUserQuestion arrive as a control request on this same stream.
+    makes AskUserQuestion arrive as a control request on this same stream, and
+    the instruction to use it goes on only when it does: a CLI old enough to
+    have had the prompt tool dropped has no AskUserQuestion to be sent to.
     """
     cmd = [
         binary,
@@ -76,6 +99,7 @@ def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:
         "--verbose",
     ]
     if prompt_tool:
+        cmd.extend(["--append-system-prompt", ASK_THROUGH_THE_TOOL])
         cmd.extend(["--permission-prompt-tool", prompt_tool])
     if wants.permission_mode:
         cmd.extend(["--permission-mode", wants.permission_mode])

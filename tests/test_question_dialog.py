@@ -227,3 +227,41 @@ def test_a_free_text_answer_is_sent_with_enter(frame):
         assert dlg.answers() == [["main"]]
     finally:
         dlg.Destroy()
+
+
+def _intro(dlg) -> str:
+    """The sentence at the top, which is what the dialog opens by reading."""
+    for child in dlg.GetChildren():
+        if isinstance(child, wx.StaticText):
+            return child.GetLabel()
+    raise AssertionError("the dialog opened with nothing said at the top")
+
+
+def test_a_question_asked_through_a_tool_says_the_turn_is_paused(frame):
+    dlg = _dialog(frame, QUESTIONS[:1])
+    try:
+        assert _intro(dlg) == "Claude Code has paused this turn to ask you a question."
+    finally:
+        dlg.Destroy()
+
+
+def test_a_question_only_written_into_the_answer_says_the_turn_ended(frame):
+    """The turn is over, and the answer typed here starts a new one.
+
+    Nothing is holding this open: a question written into a reply sent no
+    event, so there is no call waiting on it. Calling that "paused" would be
+    telling somebody their turn is still running when it has finished.
+    """
+    import blindpilot_app
+
+    dlg = blindpilot_app.QuestionDialog(
+        frame, "commandcode", (Question(question="Which name do you want?"),), ended_turn=True
+    )
+    try:
+        assert _intro(dlg) == "Command Code ended this turn by asking you a question."
+        # No options to pick from, so the box to type in is there from the
+        # start rather than behind an "Other" nobody can select.
+        assert dlg._pickers == [None]
+        assert dlg._texts[0].IsShown()
+    finally:
+        dlg.Destroy()
