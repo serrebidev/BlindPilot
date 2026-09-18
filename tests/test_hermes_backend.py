@@ -1204,9 +1204,7 @@ def test_the_transport_reports_a_refused_upgrade_from_its_own_evidence(monkeypat
         raise _Refused(403)
 
     monkeypatch.setitem(sys.modules, "websocket", types.SimpleNamespace(create_connection=_refuse))
-    transport = hermes_backend.WebSocketTransport(
-        "ws://box:9119/api/ws", "pw", "password", "pilot"
-    )
+    transport = hermes_backend.WebSocketTransport("ws://box:9119/api/ws", "pw", "password", "pilot")
 
     message = _refusal(transport)
 

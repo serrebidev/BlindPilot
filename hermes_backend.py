@@ -534,9 +534,7 @@ def hermes_asks_for_a_login(url: str, timeout: float = REMOTE_CONNECT_TIMEOUT) -
     import urllib.request
 
     base = _http_base(url)
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=certificate_context())
-    )
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=certificate_context()))
     request = urllib.request.Request(base + "/api/auth/providers", method="GET")
     try:
         with opener.open(request, timeout=timeout) as response:
