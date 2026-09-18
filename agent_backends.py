@@ -2625,13 +2625,13 @@ def codex_question_args() -> tuple[str, ...]:
     half has to read the user's config first. Quoted as a TOML string with
     ``json.dumps``: ``-c`` parses its value as TOML and only falls back to a
     literal when that fails, and a sentence with a quote or a newline in it
-    should not be relying on the fallback.
+    should not be relying on the fallback. ``ensure_ascii`` is off because
+    JSON writes a character outside the BMP -- an emoji in somebody's own
+    instructions -- as an escaped surrogate pair, which TOML refuses,
+    and the refusal would send the whole quoted value through as a literal.
     """
-    return (
-        *_CODEX_QUESTION_ARGS,
-        "-c",
-        f"developer_instructions={json.dumps(_codex_developer_instructions())}",
-    )
+    value = json.dumps(_codex_developer_instructions(), ensure_ascii=False)
+    return (*_CODEX_QUESTION_ARGS, "-c", f"developer_instructions={value}")
 
 
 def _question_options(raw: object) -> tuple[QuestionOption, ...]:

@@ -6318,8 +6318,15 @@ class SessionPanel(wx.Panel):
         answer = answers[0][0].strip() if answers and answers[0] else ""
         if not answer or not self.prompt:
             return
+        # The answer goes out through the message box, which may already hold
+        # something typed while the turn was running. That draft is put back
+        # once the answer has gone, rather than being sent in its place or lost.
+        draft = self.prompt.GetValue()
         self.prompt.SetValue(answer)
         self._on_send()
+        if draft.strip() and not self.prompt.GetValue():
+            self.prompt.SetValue(draft)
+            self.prompt.SetInsertionPointEnd()
 
     def _close_question_dialog(self) -> None:
         """Take down an open question, because the run it belongs to is going.

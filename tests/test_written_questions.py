@@ -146,8 +146,14 @@ class _Prompt:
     def __init__(self):
         self.value = ""
 
+    def GetValue(self):
+        return self.value
+
     def SetValue(self, text):
         self.value = text
+
+    def SetInsertionPointEnd(self):
+        pass
 
 
 class _Answering(_Panel):
@@ -170,6 +176,8 @@ class _Answering(_Panel):
 
     def _on_send(self):
         self.sent += 1
+        self.sent_text = self.prompt.value
+        self.prompt.value = ""
 
 
 def test_the_answer_is_sent_as_the_next_turn():
@@ -177,8 +185,20 @@ def test_the_answer_is_sent_as_the_next_turn():
 
     app.SessionPanel._ask_question_left_in_the_answer(panel, "Which name do you want?")
 
-    assert panel.prompt.value == "Call it blindpilot.toml"
+    assert panel.sent_text == "Call it blindpilot.toml"
     assert panel.sent == 1
+
+
+def test_a_draft_in_the_message_box_survives_the_answer():
+    # Something typed while the turn was running is neither sent as the
+    # answer nor thrown away by it.
+    panel = _Answering([["yes"]])
+    panel.prompt.value = "and then rename the tests"
+
+    app.SessionPanel._ask_question_left_in_the_answer(panel, "Ready?")
+
+    assert panel.sent_text == "yes"
+    assert panel.prompt.value == "and then rename the tests"
 
 
 def test_the_question_is_shown_as_one_that_ended_its_turn():

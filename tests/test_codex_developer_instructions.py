@@ -65,3 +65,17 @@ def test_a_config_codex_itself_could_not_load_costs_nothing(tmp_path, monkeypatc
     # Codex will report the config error itself. BlindPilot's job here is only
     # to not add a second failure of its own on the way past.
     assert "request_user_input" in _instruction_value(ab.codex_question_args())
+
+
+def test_instructions_outside_the_bmp_are_not_escaped_as_surrogates(tmp_path, monkeypatch):
+    # JSON escapes an emoji as a surrogate pair. TOML only allows escapes of
+    # Unicode scalar values, so Codex's parser refuses the pair and takes the
+    # whole quoted value as a literal, quotes and all. (Python's tomllib lets
+    # the pair through, so it cannot stand in for Codex here.)
+    (tmp_path / "config.toml").write_text(
+        'developer_instructions = "Sign off with \U0001f680."\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(ab, "_codex_home", lambda: tmp_path)
+    value = _instruction_value(ab.codex_question_args())
+    assert "Sign off with \U0001f680." in value
+    assert "\\ud83d" not in value.lower()
