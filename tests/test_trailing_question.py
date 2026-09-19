@@ -18,7 +18,7 @@ no dialog at all.
 
 from __future__ import annotations
 
-from agent_backends import trailing_question
+from agent_backends import is_an_offer_to_carry_on, trailing_question
 
 
 def test_a_turn_that_ends_on_a_question_is_found():
@@ -91,3 +91,55 @@ def test_a_heading_style_question_keeps_its_words_and_loses_its_hashes():
 def test_the_last_question_is_the_one_asked():
     text = "Do you want tests as well?\n\nAnd should they run in CI?"
     assert trailing_question(text) == "And should they run in CI?"
+
+
+# ----- Which of those questions is the turn actually waiting on -----
+def test_an_offer_to_do_more_work_is_a_sign_off():
+    # The work is done and this asks about the next piece of it. Nothing is
+    # held open: the answer is the next turn whenever it is given.
+    for offer in (
+        "Want me to run the tests as well?",
+        "Do you want me to commit this?",
+        "Would you like me to open a PR?",
+        "Should I also update the README?",
+        "Shall I push it?",
+        "And should I bump the version too?",
+        "Ready for me to delete the old one?",
+    ):
+        assert is_an_offer_to_carry_on(offer), offer
+
+
+def test_a_closing_courtesy_is_a_sign_off():
+    for closer in (
+        "Anything else?",
+        "Any other questions?",
+        "Does that make sense?",
+        "Sound good?",
+        "Is that okay?",
+        "All good?",
+        "Good to go?",
+    ):
+        assert is_an_offer_to_carry_on(closer), closer
+
+
+def test_a_question_only_the_person_can_settle_is_not_a_sign_off():
+    for question in (
+        "Which name do you prefer?",
+        "What should the config file be called?",
+        "Which would you rather?",
+        "Do you want tests as well?",
+        "Should they run in CI?",
+        "How many retries do you want?",
+    ):
+        assert not is_an_offer_to_carry_on(question), question
+
+
+def test_an_offer_that_names_a_fork_is_still_a_question():
+    # An offer by its grammar, a decision by its content. Which way the work
+    # goes from here is not something the turn can pick for itself.
+    assert not is_an_offer_to_carry_on("Should I use tabs or spaces?")
+    assert not is_an_offer_to_carry_on("Want me to keep the lock or drop it?")
+
+
+def test_markdown_around_a_sign_off_does_not_hide_it():
+    assert is_an_offer_to_carry_on("**Want me to commit it?**")

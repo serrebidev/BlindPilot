@@ -488,6 +488,60 @@ def trailing_question(text: str) -> str:
     return question if question.endswith("?") else f"{question}?"
 
 
+# The shapes a turn signs off with once its work is already done. "Want me to
+# run the tests as well?", "Should I commit this?", "Anything else?" -- none of
+# them is in the way of anything. The turn ended, the work it asks about is the
+# next thing to ask for, and the reply is the next message whenever it comes,
+# so a modal interrupts the answer being read for a question that was never
+# blocking. What the dialog is for is the other kind: the turn that stopped
+# because only the person can say which name, which of the two, what it should
+# be called. That one still opens it.
+_OFFER_TO_CARRY_ON = re.compile(
+    r"""^(?:(?:and|then|so|also|now|ok|okay|alright),?\s+)*
+    (?:
+        (?:do\s+you\s+want|would\s+you\s+like|want|like)\s+(?:me|us)\s+to\b
+      | (?:should|shall|can|may)\s+(?:i|we)\b
+      | (?:ready|happy|ok(?:ay)?)\s+for\s+(?:me|us)\s+to\b
+      | (?:is\s+)?(?:that|this|it)\s+(?:ok(?:ay)?|good|fine|right|all\s+right)\b
+      | (?:does|do)\s+(?:that|this|they|these)\s+(?:work|help|sound|look|make)\b
+      | (?:sound|sounds|look|looks)\s+(?:good|right|ok(?:ay)?)\b
+      | (?:make|makes)\s+sense\b
+      | any(?:thing)?\s+else\b
+      | any\s+(?:other\s+)?questions?\b
+      | all\s+good\b
+      | good\s+to\s+go\b
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# A fork named inside the offer. "Should I use tabs or spaces?" is an offer by
+# its grammar and a decision by its content, and nobody but the person can
+# settle which way the work goes from there.
+_A_FORK = re.compile(r"\bor\b", re.IGNORECASE)
+
+
+def is_an_offer_to_carry_on(question: str) -> bool:
+    """Whether a question written into an answer signs off rather than waits.
+
+    A turn that delivered its work and closed by offering the next step, or by
+    checking that what it did reads right, is not waiting on anybody: nothing
+    is held open, and the reply is simply the next turn. A turn that stopped
+    short of the work because it needs to be told something is waiting, and
+    that is the one worth a dialog.
+
+    The reading is of the question alone, and deliberately literal: an offer is
+    recognised by the way it is put -- "want me to", "should I", "anything
+    else" -- because the alternative is guessing at intent, and a dialog that
+    opens over a finished turn is exactly the interruption this is meant to
+    spare. A yes-or-no offer to do more is a sign-off; an offer that names a
+    fork is a decision, and stays a question.
+    """
+    text = question.strip().strip(_QUESTION_TRIM)
+    if not _OFFER_TO_CARRY_ON.match(text):
+        return False
+    return not _A_FORK.search(text)
+
+
 def question_summary(questions: Sequence[Question], answers: Optional[list[list[str]]]) -> str:
     """One row for the transcript saying what was asked and what was said.
 

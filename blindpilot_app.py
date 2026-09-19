@@ -97,6 +97,7 @@ from agent_backends import (
     blindpilot_config_dir,
     blindpilot_data_dir,
     migrate_macos_legacy_dirs,
+    is_an_offer_to_carry_on,
     no_window_kwargs,
     trailing_question,
     codex_model_options,
@@ -3249,10 +3250,20 @@ def question_left_in_the_answer(text: str, *, asked_properly: bool, replaying: b
 
     A replay is the transcript of a conversation being reopened. The question
     in it was asked, and answered, whenever it was first asked.
+
+    A turn that finished the work and signed off by offering the next step --
+    "Want me to run the tests too?", "Anything else?" -- is not waiting on an
+    answer either, and it is how most turns end on most backends. Opening a
+    modal over every one of those is what this asks about last, because the
+    dialog is for the turn that stopped and cannot go on until it is told
+    something.
     """
     if asked_properly or replaying:
         return ""
-    return trailing_question(text)
+    question = trailing_question(text)
+    if not question or is_an_offer_to_carry_on(question):
+        return ""
+    return question
 
 
 @dataclass
