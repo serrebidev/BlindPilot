@@ -1910,7 +1910,13 @@ def _hermes_home() -> Path:
     so reading it is the difference between naming the file somebody is actually
     using and naming a default they abandoned.
     """
-    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    # One rule for the whole app. hermes_backend strips and expands the
+    # override; resolving it a second way here meant auth.json and config.yaml
+    # were read from a different directory than the CLI and the history reader
+    # used whenever HERMES_HOME held a tilde.
+    from hermes_backend import hermes_home
+
+    return hermes_home()
 
 
 def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
