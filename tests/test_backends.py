@@ -2334,6 +2334,23 @@ def _hermes_pool(monkeypatch, tmp_path, pool: dict, active: str = "") -> None:
     monkeypatch.setenv("HERMES_HOME", str(home))
 
 
+def test_a_tilde_in_hermes_home_names_the_same_directory_everywhere(monkeypatch, tmp_path):
+    """HERMES_HOME=~/alt is one directory, not a literal "~" folder.
+
+    The status report and the settings menu used to take the value as written
+    while the Hermes launcher and the history reader expanded it, so the two
+    halves of BlindPilot looked for auth.json and config.yaml in different
+    places. Every existing test set an absolute path, which is why it held.
+    """
+    from hermes_backend import hermes_home
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", "~/alt-hermes")
+    assert agent_backends._hermes_home() == tmp_path / "alt-hermes"
+    assert agent_backends._hermes_home() == hermes_home()
+
+
 def _status_lines(report: str) -> dict[str, str]:
     return {
         caption.strip(): value.strip()
