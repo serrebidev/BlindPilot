@@ -54,7 +54,7 @@ from markdown_rows import complete_sentences as _complete_sentences
 # console program is given a brand new one - a terminal that pops up on screen,
 # takes focus away from the screen reader, and in the case of a long-running
 # agent CLI stays there for the whole turn. CREATE_NO_WINDOW suppresses it.
-CREATE_NO_WINDOW = 0x08000000 if platform.system() == "Windows" else 0
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def no_window_kwargs() -> dict:

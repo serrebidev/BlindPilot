@@ -53,5 +53,5 @@ def test_npm_update_is_noninteractive_hidden_and_logged(monkeypatch):
     assert kwargs["env"]["CI"] == "1"
     assert kwargs["env"]["npm_config_yes"] == "true"
     assert kwargs["env"]["COMMANDCODE_SKIP_UPDATES"] == "1"
-    for key, value in app._no_window_kwargs().items():
+    for key, value in app.no_window_kwargs().items():
         assert kwargs[key] == value

@@ -97,6 +97,7 @@ from agent_backends import (
     blindpilot_config_dir,
     blindpilot_data_dir,
     migrate_macos_legacy_dirs,
+    no_window_kwargs,
     trailing_question,
     codex_model_options,
     compaction_request,
@@ -428,14 +429,6 @@ POSIX_INSTALL_SH_URL = "https://claude.ai/install.sh"
 # self-updates from then on; no administrator rights, no Node.js.
 HERMES_INSTALL_PS1_URL = "https://hermes-agent.nousresearch.com/install.ps1"
 HERMES_INSTALL_SH_URL = "https://hermes-agent.nousresearch.com/install.sh"
-
-# CREATE_NO_WINDOW: without it every helper process flashes a console window,
-# which also steals focus away from the screen reader mid-install.
-_NO_WINDOW = 0x08000000 if platform.system() == "Windows" else 0
-
-
-def _no_window_kwargs() -> dict:
-    return {"creationflags": _NO_WINDOW} if _NO_WINDOW else {}
 
 
 def _open_web_page(url: str) -> bool:
@@ -1367,7 +1360,7 @@ def _run_logged_process(
             encoding="utf-8",
             errors="replace",
             env=env if env is not None else subprocess_env(argv[0]),
-            **_no_window_kwargs(),
+            **no_window_kwargs(),
         )
     except OSError as exc:
         log(f"The installer could not be started: {exc}")
@@ -1458,16 +1451,11 @@ def _executable_version(binary: str) -> str:
             timeout=30,
             stdin=subprocess.DEVNULL,
             env=subprocess_env(binary),
-            **_no_window_kwargs(),
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return ((result.stdout or "") + (result.stderr or "")).strip()
-
-
-def _version_tuple(text: str) -> tuple[int, ...]:
-    match = re.search(r"\b(\d+(?:\.\d+)+)\b", text)
-    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
 
 
 def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> bool:
@@ -1479,15 +1467,15 @@ def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> boo
     versions = Path.home() / ".local" / "share" / "claude" / "versions"
     try:
         candidates = [
-            path for path in versions.iterdir() if path.is_file() and _version_tuple(path.name)
+            path for path in versions.iterdir() if path.is_file() and version_tuple(path.name)
         ]
     except OSError:
         return True
     if not candidates:
         return True
-    newest = max(candidates, key=lambda path: _version_tuple(path.name))
-    current_version = _version_tuple(_executable_version(binary))
-    newest_version = _version_tuple(newest.name)
+    newest = max(candidates, key=lambda path: version_tuple(path.name))
+    current_version = version_tuple(_executable_version(binary))
+    newest_version = version_tuple(newest.name)
     if not newest_version or newest_version <= current_version:
         return True
     try:
@@ -1495,7 +1483,7 @@ def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> boo
     except OSError as exc:
         log(f"Claude downloaded {newest.name}, but its launcher could not be updated: {exc}")
         return False
-    verified = _version_tuple(_executable_version(binary))
+    verified = version_tuple(_executable_version(binary))
     if verified < newest_version:
         log("Claude's launcher still reports an older version after updating.")
         return False
@@ -1742,7 +1730,7 @@ def _run_claude(binary: str, args: List[str], cwd: Optional[str], timeout: int) 
             encoding="utf-8",
             errors="replace",
             env=subprocess_env(binary),
-            **_no_window_kwargs(),
+            **no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -2460,7 +2448,7 @@ def create_desktop_shortcut() -> str:
         text=True,
         timeout=30,
         stdin=subprocess.DEVNULL,
-        **_no_window_kwargs(),
+        **no_window_kwargs(),
     )
     if result.returncode != 0 or not link.exists():
         raise OSError((result.stderr or "The shortcut could not be created.").strip())
@@ -3666,7 +3654,7 @@ class ClaudeWorker(threading.Thread):
                 binary,
                 _CLAUDE_PERMISSION_PROMPT_TOOL,
                 idle_sink=self._on_unsolicited,
-                popen_kwargs=_no_window_kwargs(),
+                popen_kwargs=no_window_kwargs(),
                 # A turn with no prompt is a late one: it reads the process it
                 # was woken for or it reads nothing. A replacement has no turn
                 # running and would never send the result it waits for.
@@ -8056,7 +8044,7 @@ class BackendLogin:
                 # A cancelled sign-in must not leave the CLI's own child still
                 # running and still waiting for a browser nobody is in.
                 **own_group_kwargs(),
-                **_no_window_kwargs(),
+                **no_window_kwargs(),
             )
         except OSError:
             return -2
