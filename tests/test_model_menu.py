@@ -21,23 +21,6 @@ import blindpilot_app as app
 wx = pytest.importorskip("wx")
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        return wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-
-
-@pytest.fixture
-def frame(wx_app):
-    window = wx.Frame(None)
-    try:
-        yield window
-    finally:
-        window.Destroy()
-
-
 class _Panel(app.SessionPanel):
     """A stand-in the menu can act on without building a session."""
 

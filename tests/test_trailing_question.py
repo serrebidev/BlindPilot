@@ -18,6 +18,8 @@ no dialog at all.
 
 from __future__ import annotations
 
+import pytest
+
 from agent_backends import trailing_question
 
 
@@ -34,12 +36,24 @@ def test_empty_and_blank_answers_ask_nothing():
     assert trailing_question("   \n\n  ") == ""
 
 
-def test_only_the_question_is_taken_not_the_paragraph_before_it():
-    text = (
-        "I looked at the three files that read this setting. All of them take a "
-        "string today.\n\nShould the new setting be a string as well?"
-    )
-    assert trailing_question(text) == "Should the new setting be a string as well?"
+@pytest.mark.parametrize(
+    ("text", "question"),
+    [
+        (
+            "I looked at the three files that read this setting. All of them take a "
+            "string today.\n\nShould the new setting be a string as well?",
+            "Should the new setting be a string as well?",
+        ),
+        (
+            "Two ways to do it:\n\n- Keep the lock and narrow what it covers\n"
+            "- Drop the lock and make the state immutable\n\nWhich would you rather?",
+            "Which would you rather?",
+        ),
+    ],
+    ids=["a paragraph above it", "a bullet list above it"],
+)
+def test_only_the_question_is_taken_not_what_leads_up_to_it(text, question):
+    assert trailing_question(text) == question
 
 
 def test_a_recommendation_after_the_question_still_counts():
@@ -70,14 +84,6 @@ def test_a_question_mark_inside_a_code_block_is_not_a_question():
 def test_a_code_block_does_not_hide_a_real_question_after_it():
     text = "Here it is:\n\n```python\nx = 1\n```\n\nDoes that cover the empty case?"
     assert trailing_question(text) == "Does that cover the empty case?"
-
-
-def test_bullets_above_the_question_are_left_out_of_it():
-    text = (
-        "Two ways to do it:\n\n- Keep the lock and narrow what it covers\n"
-        "- Drop the lock and make the state immutable\n\nWhich would you rather?"
-    )
-    assert trailing_question(text) == "Which would you rather?"
 
 
 def test_markdown_emphasis_is_not_read_out_as_part_of_the_question():

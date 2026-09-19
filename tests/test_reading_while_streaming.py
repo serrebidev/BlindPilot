@@ -20,6 +20,7 @@ from __future__ import annotations
 
 
 import blindpilot_app as app
+from doubles import panel_stub
 from markdown_rows import Row
 
 
@@ -106,10 +107,7 @@ def _rows(*labels):
 
 def _panel(monkeypatch, *, text_view, displayed, rows, control):
     monkeypatch.setattr(app.SETTINGS, "text_view", text_view)
-    panel = type("PanelStub", (), {})()
-    panel._rows = rows
-    panel._displayed = list(displayed)
-    panel._search_term = ""
+    panel = panel_stub(_rows=rows, _displayed=list(displayed))
     if text_view:
         panel.responses_text = control
         # Mirrors what a prior text-mode refresh would have recorded for the
@@ -118,10 +116,6 @@ def _panel(monkeypatch, *, text_view, displayed, rows, control):
         panel._row_starts = app._starts_of(control.text.split("\n")) if control.text else []
     else:
         panel.responses = control
-    panel._selected_row = lambda: app.SessionPanel._selected_row(panel)
-    panel._select_row = lambda index: app.SessionPanel._select_row(panel, index)
-    panel._append_rows = lambda labels: app.SessionPanel._append_rows(panel, labels)
-    panel._row_count = lambda: len(panel._displayed)
     return panel
 
 

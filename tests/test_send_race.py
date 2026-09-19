@@ -15,6 +15,7 @@ last one's unfinished bookkeeping.
 from __future__ import annotations
 
 import blindpilot_app as app
+from doubles import Prompt, panel_stub
 
 
 class _DeadWorker:
@@ -33,91 +34,31 @@ class _DeadWorker:
         self.cancelled = True
 
 
-class _Prompt:
-    def __init__(self, text: str):
-        self._text = text
-
-    def GetValue(self) -> str:
-        return self._text
-
-    def SetValue(self, text: str) -> None:
-        self._text = text
-
-
-class _Button:
-    def __init__(self):
-        self.enabled = True
-
-    def Enable(self, value: bool = True) -> None:
-        self.enabled = bool(value)
-
-    def Disable(self) -> None:
-        self.enabled = False
-
-    def __bool__(self) -> bool:
-        return True
-
-
-class _Earcons:
-    def __init__(self):
-        self.events: list[str] = []
-
-    def play_send(self) -> None:
-        self.events.append("send")
-
-    def start_progress(self) -> None:
-        self.events.append("start")
-
-    def stop_progress(self) -> None:
-        self.events.append("stop")
-
-    def play_received(self) -> None:
-        self.events.append("received")
-
-
 def _panel(prompt_text: str = "the second question"):
     """A session panel mid-gap: turn 1 done, its events not yet drained."""
-    panel = type("PanelStub", (), {})()
-    panel._worker = _DeadWorker()
-    panel.prompt = _Prompt(prompt_text)
-    panel._attachments = []
-    panel._turns = [app.Turn(prompt="the first question")]
-    panel._rows = []
-    panel._response_count = 1
-    panel._stream_response = 1
-    panel._streamed_assistant = "part of the first answer"
-    panel._stopping = False
-    panel._session_id = "session-1"
-    panel._session_backend = app.BACKEND_CLAUDE
-    panel._claude_generation = 0
-    panel._assistant_narrated_this_turn = True
-    panel.model = ""
-    panel.effort = ""
-    panel._cli_model = ""
-    panel._cli_effort = ""
-    panel.cwd = "."
-    panel.mode = "default"
-    panel._earcons = _Earcons()
-    panel._show_working = lambda: None
-    panel._hide_working = lambda: None
-    panel.send_btn = _Button()
-    panel.steer_btn = _Button()
-    panel.stop_btn = _Button()
-    panel.announced = []
-    panel.status = []
-    panel._announce = lambda text: (panel.announced.append(text), panel.status.append(text))
-    panel._set_status = lambda text: panel.status.append(text)
-    panel._refresh_list = lambda: None
-    panel._say = lambda _text: False
-    # The real one, not a stand-in: it is the thing under test.
-    panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
-    panel.selected_backend = lambda: app.BACKEND_CLAUDE
+    panel = panel_stub(
+        _worker=_DeadWorker(),
+        prompt=Prompt(prompt_text),
+        _attachments=[],
+        _turns=[app.Turn(prompt="the first question")],
+        _response_count=1,
+        _stream_response=1,
+        _streamed_assistant="part of the first answer",
+        _session_id="session-1",
+        model="",
+        effort="",
+        _cli_model="",
+        _cli_effort="",
+        cwd=".",
+        mode="default",
+        selected_backend=lambda: app.BACKEND_CLAUDE,
+        _build_send_text=lambda text: text,
+        _add_your_message=lambda *_a, **_k: None,
+        _queue_worker_event=lambda *_a, **_k: None,
+        _ask_questions=None,
+        _on_title=lambda *_a: None,
+    )
     panel._on_steer = lambda: panel.announced.append("STEERED")
-    panel._build_send_text = lambda text: text
-    panel._add_your_message = lambda *_a, **_k: None
-    panel._queue_worker_event = lambda *_a, **_k: None
-    panel._ask_questions = None
-    panel._on_title = lambda *_a: None
     # The real methods, not stand-ins: Task 5 moved the worker-building tail
     # of _on_send into _launch_turn, and a Claude turn is now given
     # _claude_worker_extra() as well.
@@ -164,7 +105,7 @@ def test_the_first_turn_is_left_exactly_as_it_was():
     assert panel._stream_response == 1, "turn 1's response number was cleared under it"
     assert panel._streamed_assistant == "part of the first answer"
     assert panel._stopping is False
-    assert panel._earcons.events == [], f"earcons fired for a refused send: {panel._earcons.events}"
+    assert panel._earcons.calls == [], f"earcons fired for a refused send: {panel._earcons.calls}"
 
 
 def test_a_new_conversation_is_refused_in_the_same_gap():

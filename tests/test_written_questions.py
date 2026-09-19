@@ -15,6 +15,7 @@ prose counts as a question is tests/test_trailing_question.py.
 from __future__ import annotations
 
 import blindpilot_app as app
+from doubles import Prompt
 
 
 class _Panel:
@@ -142,25 +143,11 @@ def test_a_turn_waiting_to_start_is_not_interrupted_by_a_dialog(monkeypatch):
 
 
 # ----- Answering it -----
-class _Prompt:
-    def __init__(self):
-        self.value = ""
-
-    def GetValue(self):
-        return self.value
-
-    def SetValue(self, text):
-        self.value = text
-
-    def SetInsertionPointEnd(self):
-        pass
-
-
 class _Answering(_Panel):
     def __init__(self, answers, **kwargs):
         super().__init__(**kwargs)
         self._answers = answers
-        self.prompt = _Prompt()
+        self.prompt = Prompt()
         self.shown = []
         self.sent = 0
 
@@ -176,8 +163,8 @@ class _Answering(_Panel):
 
     def _on_send(self):
         self.sent += 1
-        self.sent_text = self.prompt.value
-        self.prompt.value = ""
+        self.sent_text = self.prompt.GetValue()
+        self.prompt.SetValue("")
 
 
 def test_the_answer_is_sent_as_the_next_turn():
@@ -193,12 +180,12 @@ def test_a_draft_in_the_message_box_survives_the_answer():
     # Something typed while the turn was running is neither sent as the
     # answer nor thrown away by it.
     panel = _Answering([["yes"]])
-    panel.prompt.value = "and then rename the tests"
+    panel.prompt.SetValue("and then rename the tests")
 
     app.SessionPanel._ask_question_left_in_the_answer(panel, "Ready?")
 
     assert panel.sent_text == "yes"
-    assert panel.prompt.value == "and then rename the tests"
+    assert panel.prompt.GetValue() == "and then rename the tests"
 
 
 def test_the_question_is_shown_as_one_that_ended_its_turn():
@@ -219,7 +206,7 @@ def test_closing_the_dialog_sends_nothing():
 
     app.SessionPanel._ask_question_left_in_the_answer(panel, "Ready?")
 
-    assert panel.prompt.value == ""
+    assert panel.prompt.GetValue() == ""
     assert panel.sent == 0
 
 

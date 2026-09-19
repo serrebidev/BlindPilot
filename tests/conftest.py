@@ -140,3 +140,34 @@ def tmp_path() -> Path:
         except OSError:
             # Parallel tests may still own another child directory.
             pass
+
+
+@pytest.fixture(scope="module")
+def wx_app():
+    """One `wx.App` for a module's worth of dialogs, or a skip.
+
+    Module scope rather than session: several of these tests build and destroy
+    top-level windows, and one application object per module is what every
+    copy of this fixture was written with. The import is inside the try
+    because a machine without wxPython has to skip for the same reason as a
+    machine without a display, not fail at collection.
+    """
+    try:
+        import wx
+
+        application = wx.App(False)
+    except Exception as exc:  # pragma: no cover - depends on the machine
+        pytest.skip(f"no display for wxPython: {exc}")
+    yield application
+
+
+@pytest.fixture
+def frame(wx_app):
+    """A bare top-level window, destroyed however the test ends."""
+    import wx
+
+    window = wx.Frame(None)
+    try:
+        yield window
+    finally:
+        window.Destroy()

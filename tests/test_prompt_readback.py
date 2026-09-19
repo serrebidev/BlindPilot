@@ -19,14 +19,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
-
-
-class _Prompt:
-    def __init__(self, text=""):
-        self.text = text
-
-    def GetValue(self):
-        return self.text
+from doubles import Prompt
 
 
 class _Timer:
@@ -54,7 +47,7 @@ def panel(monkeypatch):
     )
 
     stub = type("PanelStub", (), {})()
-    stub.prompt = _Prompt()
+    stub.prompt = Prompt()
     stub._dictation_timer = None
     stub._prompt_text = ""
     stub._dictation_pending = ""
@@ -66,7 +59,7 @@ def panel(monkeypatch):
 
 def _change(panel, text):
     """The prompt now holds `text`, however it got there."""
-    panel.prompt.text = text
+    panel.prompt.SetValue(text)
     app.SessionPanel._on_prompt_text_changed(panel, _Event())
 
 

@@ -32,6 +32,18 @@ from agent_backends import (
 )
 
 
+@pytest.fixture
+def fake_home(monkeypatch, tmp_path):
+    """Look for a CLI in a home directory this test owns.
+
+    Requested rather than autouse: the tests that go looking for one are
+    spread through this file, and the rest have no business having their home
+    moved out from under them.
+    """
+    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
+    return tmp_path
+
+
 def _callbacks() -> dict:
     return {
         "on_session": lambda _value: None,
@@ -51,10 +63,9 @@ def test_backend_names_are_normalized_and_claude_is_the_fallback():
     assert backend_label(BACKEND_FREEBUFF) == "FreeBuff"
 
 
-def test_freebuff_auth_requires_a_complete_parseable_credential(monkeypatch, tmp_path):
+def test_freebuff_auth_requires_a_complete_parseable_credential(monkeypatch, tmp_path, fake_home):
     credential = tmp_path / ".config" / "manicode" / "credentials.json"
     credential.parent.mkdir(parents=True)
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
 
     credential.write_text("not json", encoding="utf-8")
@@ -165,7 +176,9 @@ def test_codex_stream_deltas_become_one_accessible_activity_row():
     assert "".join(worker._assistant_parts) == "BlindPilot ready."
 
 
-def test_freebuff_catalog_is_discovered_at_runtime_and_preferred_is_default(monkeypatch, tmp_path):
+def test_freebuff_catalog_is_discovered_at_runtime_and_preferred_is_default(
+    monkeypatch, tmp_path, fake_home
+):
     wrapper = tmp_path / "npm" / "freebuff.cmd"
     readme = wrapper.parent / "node_modules" / "freebuff" / "README.md"
     executable = tmp_path / ".config" / "manicode" / "freebuff.exe"
@@ -179,7 +192,6 @@ def test_freebuff_catalog_is_discovered_at_runtime_and_preferred_is_default(monk
         'b={id:next,displayName:"GPT Next",availability:"always"};',
         encoding="latin-1",
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     # BlindPilot's own config lives under APPDATA on Windows, and selecting a
     # model writes there, so it has to be redirected as well as the home path.
@@ -204,7 +216,9 @@ def test_freebuff_catalog_is_discovered_at_runtime_and_preferred_is_default(monk
     assert settings["freebuffModel"] == "openai/gpt-next"
 
 
-def test_freebuff_catalog_keeps_the_current_off_peak_preferred_model(monkeypatch, tmp_path):
+def test_freebuff_catalog_keeps_the_current_off_peak_preferred_model(
+    monkeypatch, tmp_path, fake_home
+):
     """Freebuff 0.0.152 changed its top model from always to off_peak_only."""
     wrapper = tmp_path / "npm" / "freebuff.cmd"
     readme = wrapper.parent / "node_modules" / "freebuff" / "README.md"
@@ -219,7 +233,6 @@ def test_freebuff_catalog_keeps_the_current_off_peak_preferred_model(monkeypatch
         'b={id:flash,displayName:"DeepSeek V4 Flash",availability:"always"};',
         encoding="latin-1",
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
@@ -232,7 +245,9 @@ def test_freebuff_catalog_keeps_the_current_off_peak_preferred_model(monkeypatch
     assert error == ""
 
 
-def test_freebuff_catalog_keeps_a_model_the_readme_names_without_its_date(monkeypatch, tmp_path):
+def test_freebuff_catalog_keeps_a_model_the_readme_names_without_its_date(
+    monkeypatch, tmp_path, fake_home
+):
     """A release date on the display name must not hide the model.
 
     FreeBuff renamed "DeepSeek V4 Pro" to "DeepSeek V4 Pro 08/13" in the binary
@@ -255,7 +270,6 @@ def test_freebuff_catalog_keeps_a_model_the_readme_names_without_its_date(monkey
         'c={id:next,displayName:"GPT Next",availability:"always"};',
         encoding="latin-1",
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
@@ -269,7 +283,9 @@ def test_freebuff_catalog_keeps_a_model_the_readme_names_without_its_date(monkey
     assert error == ""
 
 
-def test_freebuff_falls_back_to_preferred_rather_than_freebuffs_own_setting(monkeypatch, tmp_path):
+def test_freebuff_falls_back_to_preferred_rather_than_freebuffs_own_setting(
+    monkeypatch, tmp_path, fake_home
+):
     """With no BlindPilot record, the preferred model wins over FreeBuff's."""
     wrapper = tmp_path / "npm" / "freebuff.cmd"
     readme = wrapper.parent / "node_modules" / "freebuff" / "README.md"
@@ -286,7 +302,6 @@ def test_freebuff_falls_back_to_preferred_rather_than_freebuffs_own_setting(monk
     )
     settings = executable.parent / "settings.json"
     settings.write_text(json.dumps({"freebuffModel": "deepseek/deepseek-v4-flash"}), "utf-8")
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
@@ -537,11 +552,10 @@ def test_a_powershell_script_is_not_offered_as_a_cli(monkeypatch, tmp_path):
     assert agent_backends.find_backend_cli(BACKEND_CODEX) == str(appdata / "codex.cmd")
 
 
-def test_freebuff_chat_discovery_searches_all_project_buckets(monkeypatch, tmp_path):
+def test_freebuff_chat_discovery_searches_all_project_buckets(monkeypatch, tmp_path, fake_home):
     project_root = tmp_path / ".config" / "manicode" / "projects"
     chat = project_root / "different-git-root" / "chats" / "session-id"
     chat.mkdir(parents=True)
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda cls: tmp_path))
 
     found = agent_backends._freebuff_chat_dirs(str(tmp_path / "workspace"))
 
@@ -551,11 +565,10 @@ def test_freebuff_chat_discovery_searches_all_project_buckets(monkeypatch, tmp_p
 
 
 def test_freebuff_structured_chat_reports_progress_and_authoritative_completion(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, fake_home
 ):
     chat = tmp_path / ".config" / "manicode" / "projects" / "project" / "chats" / "session-id"
     chat.mkdir(parents=True)
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda cls: tmp_path))
     messages = [
         {"variant": "user", "content": "Do the work"},
         {
@@ -590,7 +603,9 @@ def test_freebuff_structured_chat_reports_progress_and_authoritative_completion(
     assert agent_backends._freebuff_run_status(chat, log.stat().st_size) == ""
 
 
-def test_freebuff_finished_turn_can_still_hold_an_agent_marked_running(monkeypatch, tmp_path):
+def test_freebuff_finished_turn_can_still_hold_an_agent_marked_running(
+    monkeypatch, tmp_path, fake_home
+):
     """A completed FreeBuff turn can carry an agent block that says "running".
 
     FreeBuff writes an agent block the moment the spawn tool is called, keyed
@@ -609,7 +624,6 @@ def test_freebuff_finished_turn_can_still_hold_an_agent_marked_running(monkeypat
     """
     chat = tmp_path / ".config" / "manicode" / "projects" / "project" / "chats" / "session-id"
     chat.mkdir(parents=True)
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda cls: tmp_path))
     messages = [
         {
             "id": "ai-1",
@@ -767,7 +781,9 @@ def test_a_worker_that_fails_to_launch_codex_reports_why(monkeypatch):
     assert captured.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW
 
 
-def test_freebuff_keeps_its_choice_when_freebuff_resets_its_own_setting(monkeypatch, tmp_path):
+def test_freebuff_keeps_its_choice_when_freebuff_resets_its_own_setting(
+    monkeypatch, tmp_path, fake_home
+):
     """FreeBuff rewrites its settings to the model it recommends after a turn.
 
     Reading that back as the user's choice downgraded every following turn to
@@ -787,7 +803,6 @@ def test_freebuff_keeps_its_choice_when_freebuff_resets_its_own_setting(monkeypa
         'b={id:flash,displayName:"DeepSeek V4 Flash",availability:"always"};',
         encoding="latin-1",
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
@@ -2064,7 +2079,7 @@ def test_every_row_of_the_model_picker_is_recognised():
     assert focused == 0
 
 
-def test_a_model_the_installed_release_dropped_is_not_offered(monkeypatch, tmp_path):
+def test_a_model_the_installed_release_dropped_is_not_offered(monkeypatch, tmp_path, fake_home):
     # FreeBuff removes models between releases. Continuing to offer one it has
     # dropped means picking it, waiting out a picker that will never show it,
     # and losing the message.
@@ -2077,7 +2092,6 @@ def test_a_model_the_installed_release_dropped_is_not_offered(monkeypatch, tmp_p
     monkeypatch.setattr(
         agent_backends, "_read_freebuff_choice", lambda: agent_backends.FREEBUFF_PREFERRED_MODEL
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
 
     models, _efforts, current, _effort, error = freebuff_model_options()
 
@@ -2086,11 +2100,12 @@ def test_a_model_the_installed_release_dropped_is_not_offered(monkeypatch, tmp_p
     assert current == "openai/gpt-5.6-luna"
 
 
-def test_a_catalog_that_could_not_be_read_still_offers_the_remembered_model(monkeypatch, tmp_path):
+def test_a_catalog_that_could_not_be_read_still_offers_the_remembered_model(
+    monkeypatch, tmp_path, fake_home
+):
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
     monkeypatch.setattr(agent_backends, "_freebuff_models_from_install", lambda _binary: [])
     monkeypatch.setattr(agent_backends, "_read_freebuff_choice", lambda: "vendor/remembered")
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
 
     models, _efforts, current, _effort, error = freebuff_model_options()
 
@@ -2350,7 +2365,7 @@ def test_status_says_so_when_the_backend_is_not_installed(monkeypatch):
         assert fields["Command line"] == "not installed"
 
 
-def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path):
+def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path, fake_home):
     """Whichever backend is selected, the report answers the same question."""
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "cli")
     monkeypatch.setattr(
@@ -2362,7 +2377,6 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path):
             else (0, '{"loggedIn": true}' if args[0] == "auth" else "Logged in using ChatGPT")
         ),
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     credential = tmp_path / ".config" / "manicode" / "credentials.json"
     credential.parent.mkdir(parents=True)
     credential.write_text(
@@ -2424,7 +2438,7 @@ def test_status_reads_the_account_out_of_claude_auth_status(monkeypatch):
     assert fields["Organisation"] == "Example"
 
 
-def test_status_reports_a_signed_out_backend_rather_than_guessing(monkeypatch, tmp_path):
+def test_status_reports_a_signed_out_backend_rather_than_guessing(monkeypatch, tmp_path, fake_home):
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "cli")
     monkeypatch.setattr(
         agent_backends,
@@ -2433,7 +2447,6 @@ def test_status_reports_a_signed_out_backend_rather_than_guessing(monkeypatch, t
             (0, "9.9.9") if args == ["--version"] else (1, '{"loggedIn": false}')
         ),
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     empty = tmp_path / "opencode-empty"
     empty.mkdir()
     monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: empty)
@@ -2496,12 +2509,13 @@ def test_status_names_the_opencode_providers_that_are_connected(monkeypatch, tmp
     assert fields["Connected providers"] == "anthropic, opencode-go"
 
 
-def test_status_reports_the_freebuff_account_from_its_stored_credentials(monkeypatch, tmp_path):
+def test_status_reports_the_freebuff_account_from_its_stored_credentials(
+    monkeypatch, tmp_path, fake_home
+):
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
     monkeypatch.setattr(
         agent_backends, "_probe_backend", lambda _binary, _args, _timeout: (0, "0.0.163")
     )
-    monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     credential = tmp_path / ".config" / "manicode" / "credentials.json"
     credential.parent.mkdir(parents=True)
     credential.write_text(

@@ -10,16 +10,9 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
+from doubles import Earcons
 
 wx = pytest.importorskip("wx")
-
-
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        return wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
 
 
 @pytest.fixture(autouse=True)
@@ -83,20 +76,7 @@ class _FrameStub:
         self._automatic_updates_item = _checked("Auto updates", True)
         self.announced: list[str] = []
 
-        class _Earcons:
-            def set_enabled(self, _enabled):
-                pass
-
-            def set_cues(self, _cues):
-                pass
-
-            def start_progress(self):
-                pass
-
-            def stop_progress(self):
-                pass
-
-        self.earcons = _Earcons()
+        self.earcons = Earcons()
 
         class _Notebook:
             def GetPageCount(self):

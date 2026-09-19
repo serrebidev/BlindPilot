@@ -19,16 +19,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
-
-
-class _Earcons:
-    """The frame's one shared earcon player."""
-
-    def __init__(self):
-        self.stops = 0
-
-    def stop_progress(self):
-        self.stops += 1
+from doubles import panel_stub
 
 
 class _Worker:
@@ -49,14 +40,7 @@ class _Worker:
 
 @pytest.fixture
 def panel():
-    stub = type("PanelStub", (), {})()
-    stub._earcons = _Earcons()
-    stub._show_working = lambda: None
-    stub._hide_working = lambda: None
-    stub._worker = None
-    stub._dictation_timer = None
-    stub._close_question_dialog = lambda: None
-    return stub
+    return panel_stub()
 
 
 def test_closing_a_tab_mid_turn_stops_the_progress_loop(panel):
@@ -65,7 +49,7 @@ def test_closing_a_tab_mid_turn_stops_the_progress_loop(panel):
 
     app.SessionPanel.cancel_worker(panel)
 
-    assert panel._earcons.stops == 1, "the progress loop was left running"
+    assert panel._earcons.calls == ["stop"], "the progress loop was left running"
 
 
 def test_the_turn_is_still_cancelled(panel):
@@ -82,7 +66,7 @@ def test_closing_a_tab_with_no_turn_running_is_still_quiet(panel):
     shared, so another tab may have started one."""
     app.SessionPanel.cancel_worker(panel)
 
-    assert panel._earcons.stops == 1
+    assert panel._earcons.calls == ["stop"]
 
 
 def test_a_worker_that_already_finished_is_not_joined_again(panel):

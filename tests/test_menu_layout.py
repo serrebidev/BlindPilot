@@ -23,14 +23,6 @@ import blindpilot_app as app
 wx = pytest.importorskip("wx")
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        return wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-
-
 @pytest.fixture
 def frame(wx_app):
     """A bare frame carrying the real append-and-bind helper the builders use."""

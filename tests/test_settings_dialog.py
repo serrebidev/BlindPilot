@@ -106,14 +106,6 @@ def test_a_file_that_is_not_there_says_so_in_its_label(tmp_path):
 wx = pytest.importorskip("wx")
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        return wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-
-
 def test_the_dialog_offers_one_row_per_settings_file(wx_app, tmp_path):
     dialog = app.SettingsFilesDialog(None, str(tmp_path))
     try:

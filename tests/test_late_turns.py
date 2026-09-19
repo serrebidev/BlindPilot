@@ -4,68 +4,31 @@ from __future__ import annotations
 
 import blindpilot_app as app
 from agent_backends import BACKEND_CLAUDE
-
-
-class _Btn:
-    def __init__(self):
-        self.enabled = True
-
-    def Enable(self):
-        self.enabled = True
-
-    def Disable(self):
-        self.enabled = False
-
-    def __bool__(self):
-        return True
-
-
-class _Earcons:
-    def __init__(self):
-        self.calls: list[str] = []
-
-    def start_progress(self):
-        self.calls.append("start")
-
-    def stop_progress(self):
-        self.calls.append("stop")
-
-    def play_send(self):
-        self.calls.append("send")
+from doubles import panel_stub
 
 
 def _panel(worker=None):
     launched: list[tuple] = []
-
-    class _Panel:
-        pass
-
-    panel = _Panel()
-    panel._worker = worker
-    panel._late_turn_waiting = None
-    panel._claude_generation = 0
-    panel._session_backend = BACKEND_CLAUDE
-    panel._held_hermes = None
-    panel._earcons = _Earcons()
-    panel.send_btn, panel.steer_btn, panel.stop_btn = _Btn(), _Btn(), _Btn()
-    panel._stopping = False
-    panel._replaying = False
-    panel._assistant_narrated_this_turn = True
-    panel._streamed_assistant = "left over"
-    panel._turns = []
-    panel.announced: list[str] = []
-    panel._announce = lambda text, urgent=False: panel.announced.append(text)
+    panel = panel_stub(
+        _worker=worker,
+        _late_turn_waiting=None,
+        _replaying=False,
+        _streamed_assistant="left over",
+        queued=[],
+        # A late turn ends through _on_worker_finished, and what that does
+        # with a stopped turn is another file's subject.
+        _finish_stopped_turn=lambda: None,
+    )
+    # The working indicator goes into the same list as the cues, so a test can
+    # assert on the order the sound and the indicator came in.
     panel._show_working = lambda: panel._earcons.calls.append("indicator")
     panel._hide_working = lambda: panel._earcons.calls.append("indicator off")
-    panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
     panel._claude_worker_extra = lambda: app.SessionPanel._claude_worker_extra(panel)
     panel._launch_turn = lambda send_text, backend, extra: launched.append(
         (send_text, backend, extra)
     )
     panel._start_late_turn = lambda generation: app.SessionPanel._start_late_turn(panel, generation)
     panel._queue_worker_event = lambda name, *args: panel.queued.append((name, args))
-    panel.queued: list[tuple] = []
-    panel._finish_stopped_turn = lambda: None
     return panel, launched
 
 
