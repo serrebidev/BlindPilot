@@ -871,11 +871,15 @@ def test_the_setup_helper_hands_the_installer_paths_with_spaces_as_one_argument(
     # go of the first. Seeing the first alone was not enough -- CI tore the
     # temp tree down while Windows Script Host still held the trace open, and
     # the teardown's PermissionError failed a job whose every test had passed.
+    # The "ready" file is itself written under a temporary name and renamed
+    # into place once closed: a file exists from the moment it is created,
+    # not from its close, so only the rename can mean it has been let go of.
     restarted_ready = install_dir / "restarted-ready.txt"
     (install_dir / "BlindPilot.vbs").write_text(
         'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
         'fso.CreateTextFile("' + str(restarted) + '", True).Close\r\n'
-        'fso.CreateTextFile("' + str(restarted_ready) + '", True).Close\r\n'
+        'fso.CreateTextFile("' + str(restarted_ready) + '.tmp", True).Close\r\n'
+        'fso.MoveFile "' + str(restarted_ready) + '.tmp", "' + str(restarted_ready) + '"\r\n'
         "WScript.Quit 0\r\n",
         encoding="ascii",
     )
