@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.7 - 2026-09-19
+
+- A turn that finished its work and signed off by offering the next step no longer opens the question dialog. Since 0.29.4 a question written into an answer opens the same dialog a question tool does, which on Command Code is the only way a question can arrive at all - but the judgement was "the turn ends on a question mark", and that is how most turns end. "Want me to run the tests too?", "Should I commit this?", "Anything else?": every one of them put a modal over an answer that was still being read, for a question that was holding nothing up, and whose reply would have been the next message whenever it was typed. `is_an_offer_to_carry_on` now reads the question alone and literally - the phrasing an offer or a closing courtesy is put in - rather than guessing at intent, because a dialog opened over a finished turn is exactly the interruption this is meant to spare.
+- A question only you can settle still opens the dialog, on every backend: "Which name do you prefer?", "What should the config file be called?", "How many retries do you want?" So does an offer that names a fork - "Should I use tabs or spaces?" is an offer by its grammar and a decision by its content, and which way the work goes from there is not something a turn can pick for itself. Questions a backend asks through its own question tool are untouched, and the Options switch that turns written questions off altogether is unchanged.
+
 ## v0.29.6 - 2026-09-19
 
 - `HERMES_HOME` is now resolved one way, so a tilde in it names one directory. Three parts of BlindPilot read that setting and two of them disagreed: the Hermes launcher and the session history stripped the value and expanded a leading `~`, while the status report and the Settings menu took it exactly as written. With `HERMES_HOME=~/alt`, the launcher and the history used the real directory while the other two looked for `auth.json` and `config.yaml` under a folder literally named `~`, so a Hermes that was signed in could be reported as signed out of it. All three now resolve it through `hermes_backend.hermes_home`. Every test until now set an absolute path, which is why the two halves never disagreed in the suite; the new one sets a tilde.
