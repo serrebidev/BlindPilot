@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.8 - 2026-09-19
+
+- The working design and task plan for the held Claude Code process are gone from `docs/claude-session/`, now that the work they describe shipped in 0.22.1 (PR #39). `01-design.md` was the design approved 2026-09-05, and `02-plan.md` was the eight-task plan an agent followed, with every test body written out ahead of the code; both describe an intention the code now realises, and `applied.md` already keeps the record of what shipped and what was left out. Git history keeps both files. No code, spoken wording, or key changed.
+
 ## v0.29.7 - 2026-09-19
 
 - A turn that finished its work and signed off by offering the next step no longer opens the question dialog. Since 0.29.4 a question written into an answer opens the same dialog a question tool does, which on Command Code is the only way a question can arrive at all - but the judgement was "the turn ends on a question mark", and that is how most turns end. "Want me to run the tests too?", "Should I commit this?", "Anything else?": every one of them put a modal over an answer that was still being read, for a question that was holding nothing up, and whose reply would have been the next message whenever it was typed. `is_an_offer_to_carry_on` now reads the question alone and literally - the phrasing an offer or a closing courtesy is put in - rather than guessing at intent, because a dialog opened over a finished turn is exactly the interruption this is meant to spare.
