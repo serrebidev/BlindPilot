@@ -35,7 +35,6 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-import certificates  # noqa: F401 - kept for symmetry with hermes_backend; Muse is local-only.
 from hermes_backend import (
     _no_window_kwargs,
     _text_output_kwargs,
@@ -67,20 +66,9 @@ CLI_PROBE_TIMEOUT = 45
 # (MSP schema at Muse 1.0.3). The CLI's own list is filtered to this.
 _MSP_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "ultra"})
 
-
-def _no_window() -> dict:
-    """Kept name for callers that read this module's own helpers."""
-    return _no_window_kwargs()
-
-
 # --------------------------------------------------------------------------
 # Locating Muse
 # --------------------------------------------------------------------------
-
-
-def _wsl_available() -> bool:
-    """Whether this is Windows with a WSL launcher present."""
-    return platform.system() == "Windows" and wsl_exe() is not None
 
 
 def wsl_muse_path(timeout: int = CLI_PROBE_TIMEOUT) -> Optional[str]:
@@ -602,8 +590,3 @@ def muse_model_options(
         models, efforts, current, current_effort = [], [], "", ""
     error = "" if models else "Muse did not answer the model catalog request."
     return models, efforts, current, current_effort, error
-
-
-# Keep the module importable without certificates on a tree where it moves;
-# see the noqa above.
-_ = certificates

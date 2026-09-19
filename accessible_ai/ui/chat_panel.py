@@ -266,12 +266,6 @@ class ChatPanel(wx.Panel):
         self.history_list.Bind(wx.EVT_CONTEXT_MENU, self.on_history_context_menu)
         self.history_list.Bind(wx.EVT_KEY_DOWN, self.on_history_list_key_down)
 
-    def on_history_list_view(self, event: wx.CommandEvent | None) -> None:
-        self._set_history_view("list")
-
-    def on_history_text_view(self, event: wx.CommandEvent | None) -> None:
-        self._set_history_view("text")
-
     def _set_history_view(self, view: str) -> None:
         if view not in {"list", "text"}:
             raise ValueError(f"Unknown history view: {view}")
