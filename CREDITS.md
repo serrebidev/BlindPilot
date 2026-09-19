@@ -2,7 +2,7 @@
 
 BlindPilot is a fork of [Claude Code Reader](https://github.com/doubletaponair/claude-code-reader) by [doubletaponair](https://github.com/doubletaponair). The original project built the accessible wxPython window, the navigable response rows, live activity narration, multi-session tabs, and the Claude Code integration. Its contributor history is in the upstream repository. The original specification is kept in this repository as `original-claude-code-reader-spec.html`.
 
-BlindPilot contributors added the Codex, FreeBuff, opencode, and Hermes backends, the setup wizard and installer, the verified updater, Chat mode, remote Hermes, narration modes, sound cues, and the test suite. The five backends BlindPilot drives are Claude Code, Codex, FreeBuff, opencode, and Hermes.
+BlindPilot contributors added the Codex, FreeBuff, opencode, Hermes, Muse Code, and Command Code backends, the setup wizard and installer, the verified updater, Chat mode, remote Hermes, narration modes, sound cues, and the test suite. The seven backends BlindPilot drives are Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, and Command Code.
 
 Chat mode is adapted from AccessibleAI, a sibling project by the same publisher. Its accounts, profiles, provider protocols, credential storage, attachments, and streaming were moved into BlindPilot's main window.
 

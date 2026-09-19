@@ -143,7 +143,6 @@ def test_worker_class_selects_the_hermes_adapter():
 
 def test_declared_capabilities_match_what_the_worker_implements():
     info = BACKENDS[BACKEND_HERMES]
-    assert info.supports_steering is True
     assert info.supports_compaction is True
     assert info.supports_permissions is True
     # Hermes takes a reasoning level as a per-session override on

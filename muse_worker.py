@@ -412,9 +412,6 @@ class MuseWorker(threading.Thread):
             self._parked.clear()
         return frames
 
-    def _notify(self, method: str) -> bool:
-        return self._fire(method)
-
     def _fail(self, message: str) -> None:
         self._failed = True
         self._on_failed(message)
@@ -476,7 +473,7 @@ class MuseWorker(threading.Thread):
         if "error" in reply:
             self._fail(self._error_text(reply["error"]))
             return False
-        self._notify("initialized")
+        self._fire("initialized")
         return True
 
     def _ensure_session(self) -> bool:

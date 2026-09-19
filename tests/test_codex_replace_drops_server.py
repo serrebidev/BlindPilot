@@ -45,7 +45,7 @@ def test_installing_codex_drops_the_held_app_server(dropped, monkeypatch):
 
 def test_other_backends_leave_the_codex_server_alone(dropped, monkeypatch):
     monkeypatch.setattr(app, "_npm_update_argv", lambda backend: ["npm", "install", "freebuff"])
-    monkeypatch.setattr(app, "freebuff_model_options", lambda: ([], [], "", "", ""))
+    monkeypatch.setattr(app, "freebuff_model_options", lambda: ([], "", ""))
 
     app.update_backend(app.BACKEND_FREEBUFF, lambda _line: None)
 

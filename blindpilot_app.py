@@ -54,7 +54,7 @@ import zipfile
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, cast
+from typing import Any, Callable, List, Optional, Sequence, cast
 
 from linux_accessibility import announce as _linux_native_announce
 
@@ -135,6 +135,7 @@ from hermes_backend import (
 )
 from muse_backend import (
     muse_cli_path,
+    muse_command,
     muse_installed,
     wsl_exe as muse_wsl_exe,
     reset_discovery as reset_muse_discovery,
@@ -1180,9 +1181,9 @@ def _automatic_npm_install_available() -> bool:
     return _find_npm() is not None or _node_archive_spec("v0.0.0") is not None
 
 
-def _fetch_url_bytes(url: str, timeout: int = 30) -> bytes:
+def _fetch_url_bytes(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": f"BlindPilot/{APP_VERSION}"})
-    with open_url(request, timeout=timeout) as response:
+    with open_url(request, timeout=30) as response:
         return response.read()
 
 
@@ -1522,7 +1523,7 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
         return False
     previous_freebuff_model = ""
     if backend == BACKEND_FREEBUFF:
-        _models, _efforts, previous_freebuff_model, _effort, _error = freebuff_model_options()
+        _models, previous_freebuff_model, _error = freebuff_model_options()
     if backend == BACKEND_CLAUDE:
         argv = [binary, "update"]
     elif backend == BACKEND_HERMES:
@@ -1609,7 +1610,7 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
             return False
     if backend == BACKEND_FREEBUFF:
         invalidate_backend_cache(BACKEND_FREEBUFF)
-        models, _efforts, _current, _effort, _error = freebuff_model_options()
+        models, _current, _error = freebuff_model_options()
         selected = (
             previous_freebuff_model
             if previous_freebuff_model in models
@@ -1755,16 +1756,13 @@ _probe_lock = threading.Lock()
 _probe_cache: dict[str, tuple[float, ModelOptions, str]] = {}
 
 
-def invalidate_model_options(backend: str | None = None) -> None:
+def invalidate_model_options(backend: str) -> None:
     """Clear model catalogs after an update or an explicit `/models` refresh."""
-    selected = normalize_backend(backend) if backend is not None else None
+    selected = normalize_backend(backend)
     with _probe_lock:
-        if selected is None:
-            _probe_cache.clear()
-        else:
-            prefix = f"{selected}:"
-            for key in [key for key in _probe_cache if key.startswith(prefix)]:
-                _probe_cache.pop(key, None)
+        prefix = f"{selected}:"
+        for key in [key for key in _probe_cache if key.startswith(prefix)]:
+            _probe_cache.pop(key, None)
     invalidate_backend_cache(selected)
 
 
@@ -1870,8 +1868,8 @@ def probe_model_options(
         return options
 
     if backend == BACKEND_FREEBUFF:
-        models, efforts, current_model, current_effort, error = freebuff_model_options()
-        return ModelOptions(models, efforts, current_model, current_effort, error)
+        models, current_model, error = freebuff_model_options()
+        return ModelOptions(models, [], current_model, "", error)
 
     if backend == BACKEND_OPENCODE:
         models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
@@ -2258,12 +2256,12 @@ def _short_label(path: str) -> str:
     return name or path
 
 
-def _tab_title(text: str, limit: int = 32) -> str:
+def _tab_title(text: str) -> str:
     """A conversation's name, cut to something a tab strip can show."""
     flat = " ".join((text or "").split())
-    if len(flat) <= limit:
+    if len(flat) <= 32:
         return flat
-    return flat[: limit - 1].rstrip() + "…"
+    return flat[:31].rstrip() + "…"
 
 
 def _tab_label(title: str, cwd: str) -> str:
@@ -5790,15 +5788,14 @@ class SessionPanel(wx.Panel):
             wx.CallAfter(announce, "Responses, read only edit")
 
     # ----- Permission mode -----
-    def _set_mode(self, value: str, speak: bool = True) -> None:
+    def _set_mode(self, value: str) -> None:
         if value not in _MODE_VALUES:
             return
         self.mode = value
         self.mode_picker.SetSelection(_MODE_VALUES.index(value))
         # Remembered globally, so new tabs and the next launch start here.
         _remember_permission_mode(value)
-        if speak:
-            self._announce(_MODE_DESCRIPTIONS[value])
+        self._announce(_MODE_DESCRIPTIONS[value])
 
     def _on_mode_choice(self, event: wx.CommandEvent) -> None:
         self._set_mode(_MODE_VALUES[self.mode_picker.GetSelection()])
@@ -8968,14 +8965,22 @@ class SetupWizard(wx.Dialog):
         # browser address; `_run_login` gives it a console instead -- shown for
         # a backend the user has to answer, hidden for one that needs the
         # terminal only to exist.
-        # Muse's launcher is a bash script inside WSL on Windows, which Popen
-        # cannot execute; its wrapper rebuilds the argv through the same
-        # bridge every other Muse path takes.
-        muse_popen = None
-        if self.backend == BACKEND_MUSE:
-            from muse_backend import muse_popen_wrapper
+        # The login runner builds [binary, *login_args] and hands it to Popen.
+        # On Windows Muse's binary is a bash script inside WSL, which Popen
+        # cannot execute, so the argv is rebuilt through the same bridge every
+        # other Muse path takes. Elsewhere plain Popen runs it.
+        muse_popen: Optional[Callable[..., subprocess.Popen]] = None
+        muse_argv = (
+            muse_command() or []
+            if self.backend == BACKEND_MUSE and platform.system() == "Windows"
+            else []
+        )
+        if muse_argv:
 
-            muse_popen = muse_popen_wrapper()
+            def through_wsl(args: list[str], **kwargs: Any) -> subprocess.Popen:
+                return subprocess.Popen([*muse_argv, *args[1:]], **kwargs)
+
+            muse_popen = through_wsl
         self._login = (
             None
             if BACKENDS[self.backend].login_needs_terminal
@@ -11008,17 +11013,28 @@ class MainFrame(wx.Frame):
         if isinstance(page, SessionPanel):
             page._set_mode(value)
 
-    def _toggle_live_rows(self) -> None:
-        SETTINGS.live_rows = self._rows_item.IsChecked()
+    def _toggle_setting(self, item: wx.MenuItem, attr: str, on_text: str, off_text: str) -> None:
+        """One checkable setting: store what the menu now says, and say it."""
+        value = item.IsChecked()
+        setattr(SETTINGS, attr, value)
         SETTINGS.save()
-        state = "on" if SETTINGS.live_rows else "off"
-        self._announce_setting(f"Live activity in the list {state}")
+        self._announce_setting(on_text if value else off_text)
+
+    def _toggle_live_rows(self) -> None:
+        self._toggle_setting(
+            self._rows_item,
+            "live_rows",
+            "Live activity in the list on",
+            "Live activity in the list off",
+        )
 
     def _toggle_speak_live(self) -> None:
-        SETTINGS.speak_live = self._speak_item.IsChecked()
-        SETTINGS.save()
-        state = "on" if SETTINGS.speak_live else "off"
-        self._announce_setting(f"Speaking activity aloud {state}")
+        self._toggle_setting(
+            self._speak_item,
+            "speak_live",
+            "Speaking activity aloud on",
+            "Speaking activity aloud off",
+        )
 
     def _turn_in_flight(self) -> bool:
         """Whether the tab in front is in the middle of a turn.
@@ -11085,10 +11101,12 @@ class MainFrame(wx.Frame):
         self._announce_setting(f"Working sound every {seconds} seconds")
 
     def _toggle_show_thinking(self) -> None:
-        SETTINGS.show_thinking = self._thinking_item.IsChecked()
-        SETTINGS.save()
-        state = "shown" if SETTINGS.show_thinking else "hidden"
-        self._announce_setting(f"The backend's reasoning is {state}")
+        self._toggle_setting(
+            self._thinking_item,
+            "show_thinking",
+            "The backend's reasoning is shown",
+            "The backend's reasoning is hidden",
+        )
 
     def _open_log_folder(self) -> None:
         """Show where the diagnostics go, rather than reading out a path."""

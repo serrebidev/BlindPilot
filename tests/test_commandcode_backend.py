@@ -105,8 +105,7 @@ def test_capabilities_match_what_headless_mode_supports():
     assert info.supports_model is True
     assert info.supports_effort is True
     assert info.supports_permissions is True
-    # BlindPilot supplies stop-and-resume steering and summary compaction.
-    assert info.supports_steering is True
+    # BlindPilot supplies summary compaction.
     assert info.supports_compaction is True
     assert info.uploads_attachments is False
     assert agent_backends.compaction_request(BACKEND_COMMANDCODE)[1] == {"compact": True}

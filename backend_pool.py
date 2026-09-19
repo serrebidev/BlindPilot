@@ -60,16 +60,6 @@ REAP_IDLE = "idle"
 REAP_DIED = "died"
 
 
-def _never_busy(_handle: object) -> bool:
-    """The default for a backend that does not yet count who is using it.
-
-    False, not True: it is what every backend did before there was anything to
-    ask, so an adapter that has not been taught the question keeps its present
-    behaviour rather than quietly becoming un-reapable for ever.
-    """
-    return False
-
-
 class Adapter(NamedTuple):
     """What a backend must say about its process, and nothing more.
 
@@ -89,7 +79,7 @@ class Adapter(NamedTuple):
     alive: Callable[[object], bool]
     interrupt: Callable[[object, float], bool]
     stop: Callable[[object], None]
-    busy: Callable[[object], bool] = _never_busy
+    busy: Callable[[object], bool]
 
 
 class HeldProcess:
@@ -403,13 +393,6 @@ def start_reaper(interval: float = 60.0) -> threading.Thread:
     _reaper = threading.Thread(target=sweep, name="backend-pool-reaper", daemon=True)
     _reaper.start()
     return _reaper
-
-
-def stop_reaper() -> None:
-    """No production caller -- `start_reaper` runs once for the app's whole
-    life, from `MainFrame.__init__`. This exists so tests can tear the
-    sweeping thread down between runs instead of leaking one per test."""
-    _reaper_stop.set()
 
 
 atexit.register(stop_all_held_processes)

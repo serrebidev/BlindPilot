@@ -100,11 +100,10 @@ def test_the_sign_in_console_is_created_hidden_rather_than_hidden_after(monkeypa
     assert startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW
     assert startupinfo.wShowWindow == subprocess.SW_HIDE
 
-    # What the wizard asks of it: is it still running, and how did it end.
+    # What the wizard asks of it: is it still running.
     assert terminal.isalive() is True
     proc.returncode = 0
     assert terminal.isalive() is False
-    assert terminal.exitstatus == 0
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="CREATE_NEW_CONSOLE is Windows-only")

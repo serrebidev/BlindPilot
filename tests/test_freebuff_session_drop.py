@@ -306,7 +306,7 @@ def test_a_welcome_turn_still_reaches_its_answer(monkeypatch):
     monkeypatch.setattr(
         agent_backends,
         "freebuff_model_options",
-        lambda: (list(CATALOG), [], CATALOG[0], "", ""),
+        lambda: (list(CATALOG), CATALOG[0], ""),
     )
     monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", lambda _cwd: {})
     state = {"sent": False, "enters": 0, "downs": 0, "phase": 0}
@@ -353,7 +353,7 @@ def test_the_chosen_model_is_reached_on_the_marker_less_screen(monkeypatch):
     monkeypatch.setattr(
         agent_backends,
         "freebuff_model_options",
-        lambda: (list(CATALOG), [], CATALOG[0], "", ""),
+        lambda: (list(CATALOG), CATALOG[0], ""),
     )
     monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", lambda _cwd: {})
     state = {"sent": False, "enters": 0, "downs": 0, "phase": 0}
@@ -401,7 +401,7 @@ def test_a_dropped_session_logged_mid_turn_gets_patience_then_ends_the_turn(monk
     monkeypatch.setattr(
         agent_backends,
         "freebuff_model_options",
-        lambda: (list(CATALOG), [], CATALOG[0], "", ""),
+        lambda: (list(CATALOG), CATALOG[0], ""),
     )
     chat = tmp_path / "chat"
     chat.mkdir()
@@ -570,7 +570,7 @@ def test_a_normal_boot_does_not_hold_the_message(monkeypatch):
     monkeypatch.setattr(
         agent_backends,
         "freebuff_model_options",
-        lambda: (list(CATALOG), [], CATALOG[0], "", ""),
+        lambda: (list(CATALOG), CATALOG[0], ""),
     )
     monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(_hold_spawn(worker, state)))
     monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", 60)

@@ -24,6 +24,7 @@ def _real() -> backend_pool.HeldProcess:
             alive=lambda h: h.running,
             interrupt=lambda _h, _t: True,
             stop=lambda h: h.stop(),
+            busy=lambda _h: False,
         ),
     )
 
@@ -47,6 +48,7 @@ def test_a_process_that_never_admits_it_stopped_is_rejected():
                 alive=lambda h: h.running,
                 interrupt=lambda _h, _t: True,
                 stop=lambda h: h.stop(),
+                busy=lambda _h: False,
             ),
         )
 
@@ -89,6 +91,7 @@ def test_a_process_that_keeps_confirming_interrupts_is_rejected():
                 alive=lambda h: h.running,
                 interrupt=lambda _h, _t: True,
                 stop=lambda h: h.stop(),
+                busy=lambda _h: False,
             ),
         )
 

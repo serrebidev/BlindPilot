@@ -319,7 +319,7 @@ def test_the_reaper_runs_on_a_daemon_thread():
         assert thread.daemon is True
         assert thread.is_alive()
     finally:
-        backend_pool.stop_reaper()
+        backend_pool._reaper_stop.set()
         thread.join(timeout=5)
         assert not thread.is_alive(), "the reaper did not stop when asked"
 
@@ -368,21 +368,6 @@ def test_a_backend_that_cannot_say_whether_it_is_busy_is_left_alone():
     assert pool.reap(now=901.0, idle_limit=900.0) == []
     assert handle.stops == 0
     pool.drop_all()
-
-
-def test_a_backend_that_never_learned_the_question_is_reaped_as_before():
-    """`busy` has a default, because four backends supply their own later."""
-    pool = backend_pool.BackendPool()
-    handle = _FakeHandle()
-    plain = backend_pool.Adapter(
-        alive=lambda h: h.running,
-        interrupt=lambda _h, _t: True,
-        stop=lambda h: h.stop(),
-    )
-    key = backend_pool.pool_key("codex")
-    pool.keep(key, backend_pool.HeldProcess(handle, plain, now=lambda: 0.0))
-    assert pool.reap(now=901.0, idle_limit=900.0) == [key]
-    assert handle.stops == 1
 
 
 def test_the_idle_clock_starts_when_a_turn_ends_not_when_it_begins():

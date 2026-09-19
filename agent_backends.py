@@ -336,25 +336,6 @@ BACKEND_OPENCODE = "opencode"
 BACKEND_HERMES = "hermes"
 BACKEND_MUSE = "muse"
 BACKEND_COMMANDCODE = "commandcode"
-BACKEND_IDS = (
-    BACKEND_CLAUDE,
-    BACKEND_CODEX,
-    BACKEND_FREEBUFF,
-    BACKEND_OPENCODE,
-    BACKEND_HERMES,
-    BACKEND_MUSE,
-    BACKEND_COMMANDCODE,
-)
-BACKEND_LABELS = {
-    BACKEND_CLAUDE: "Claude Code",
-    BACKEND_CODEX: "Codex",
-    BACKEND_FREEBUFF: "FreeBuff",
-    BACKEND_OPENCODE: "opencode",
-    BACKEND_HERMES: "Hermes",
-    BACKEND_MUSE: "Muse Code",
-    BACKEND_COMMANDCODE: "Command Code",
-}
-
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
 # package and downloaded executable do contain the live picker catalog, so the
 # adapter discovers that catalog at runtime and writes the same setting the
@@ -525,7 +506,6 @@ class BackendInfo:
     supports_model: bool
     supports_effort: bool
     supports_permissions: bool
-    supports_steering: bool
     # Whether the provider can summarise a long conversation in place to free
     # up its context window. FreeBuff's CLI has no such command — its only
     # context control is starting a new conversation.
@@ -578,7 +558,6 @@ BACKENDS = {
         True,
         True,
         True,
-        True,
         supports_compaction=True,
         login_opens_browser=True,
         login_code_prompt=r"[Pp]aste code here[^>]*>",
@@ -589,7 +568,6 @@ BACKENDS = {
         "codex",
         "npm install -g @openai/codex",
         ("login",),
-        True,
         True,
         True,
         True,
@@ -608,7 +586,6 @@ BACKENDS = {
         True,
         False,
         False,
-        True,
         supports_compaction=False,
     ),
     BACKEND_OPENCODE: BackendInfo(
@@ -617,7 +594,6 @@ BACKENDS = {
         "opencode",
         "npm install -g opencode-ai",
         ("providers", "login"),
-        True,
         True,
         True,
         True,
@@ -639,7 +615,6 @@ BACKENDS = {
         # that Hermes "does not expose a reasoning effort level".
         True,
         True,
-        True,
         supports_compaction=True,
         login_needs_terminal=True,
         # Hermes' gateway takes an upload of the file, so an attachment works
@@ -659,7 +634,6 @@ BACKENDS = {
         True,
         True,
         True,
-        True,
         supports_compaction=True,
     ),
     BACKEND_COMMANDCODE: BackendInfo(
@@ -674,9 +648,6 @@ BACKENDS = {
         ("login",),
         True,
         True,
-        True,
-        # The frontend implements steering by stopping and resuming, and
-        # queues ordinary follow-ups until the preceding turn has drained.
         True,
         supports_compaction=True,
         # "cmd login" is not a plain sign-in: it mounts an Ink terminal UI for
@@ -694,6 +665,9 @@ BACKENDS = {
         login_terminal_hidden=True,
     ),
 }
+
+BACKEND_IDS = tuple(BACKENDS)
+BACKEND_LABELS = {id_: info.label for id_, info in BACKENDS.items()}
 
 # What a "compact this conversation" turn looks like per provider: the text to
 # send, and any extra keyword arguments its worker needs.
@@ -1503,7 +1477,7 @@ def _codex_usage_handshake(server: "CodexServer") -> bool:
 
 def _codex_rate_limits(server: "CodexServer", timeout: int) -> object:
     """Ask one app-server for the account's windows and wait for the reply."""
-    inbox = server.inbox()
+    inbox: queue.Queue[object] = queue.Queue()
     request_id = server.next_id()
     server.expect(request_id, inbox)
     try:
@@ -2413,7 +2387,7 @@ def _freebuff_models_from_install(binary: Optional[str]) -> list[str]:
     return models
 
 
-def freebuff_model_options() -> tuple[list[str], list[str], str, str, str]:
+def freebuff_model_options() -> tuple[list[str], str, str]:
     """Return the model choices exposed by the installed FreeBuff release."""
     binary = find_backend_cli(BACKEND_FREEBUFF)
     models = _freebuff_models_from_install(binary)
@@ -2452,7 +2426,7 @@ def freebuff_model_options() -> tuple[list[str], list[str], str, str, str]:
         if saved in models
         else models[0]
     )
-    return models, [], current, "", error
+    return models, current, error
 
 
 def _freebuff_display_key(text: str) -> str:
@@ -2522,16 +2496,16 @@ def _freebuff_picker_options(visible: str, models: list[str]) -> tuple[list[str]
     return options, focused
 
 
-def invalidate_backend_cache(backend: str | None = None) -> None:
+def invalidate_backend_cache(backend: str) -> None:
     """Drop version-derived provider data before an explicit runtime refresh."""
     global _freebuff_catalog_cache, _login_shell_path
     # The wizard may have just put a backend on PATH. The answer cached before
     # that happened is precisely the one that made putting it there necessary.
     _login_shell_path = None
-    if backend is None or normalize_backend(backend) == BACKEND_OPENCODE:
+    if normalize_backend(backend) == BACKEND_OPENCODE:
         with _OPENCODE_CATALOG_LOCK:
             _opencode_catalog_cache.clear()
-    if backend is None or normalize_backend(backend) == BACKEND_FREEBUFF:
+    if normalize_backend(backend) == BACKEND_FREEBUFF:
         _freebuff_catalog_cache = None
         try:
             _freebuff_catalog_cache_path().unlink()
@@ -2543,7 +2517,7 @@ def set_freebuff_model(model: str) -> None:
     """Select the model in FreeBuff, and record the choice as BlindPilot's own."""
     selected = model.strip()
     if not selected:
-        models, _efforts, current, _effort, _error = freebuff_model_options()
+        models, current, _error = freebuff_model_options()
         selected = current or (models[0] if models else FREEBUFF_PREFERRED_MODEL)
     settings = Path.home() / ".config" / "manicode" / "settings.json"
     with _FREEBUFF_SETTINGS_LOCK:
@@ -2579,21 +2553,28 @@ _CODEX_QUESTION_ARGS = (
     _CODEX_QUESTION_FEATURE,
 )
 
-# Switching the tool on is not the same as being asked through it. A model
-# that writes its question into its answer sends no request_user_input, so
-# nothing announces it and no dialog opens: the turn ends, and the person is
-# left waiting on an answer nobody told them was wanted. An interview skill
-# asks that way by design, which is why the reason is given rather than the
-# preference alone.
-_CODEX_ASK_THROUGH_THE_TOOL = (
-    "You are running inside BlindPilot, which a blind person is driving with a "
-    "screen reader. When you want an answer from them, ask with the "
-    "request_user_input tool rather than writing the question into your reply. "
-    "BlindPilot speaks a tool question and opens it in a dialog; a question "
-    "written into a reply is neither spoken as a question nor shown as one, so "
-    "the turn ends and nothing tells them an answer is wanted. This holds for "
-    "every question, including an interview that asks them one at a time."
-)
+
+# Why a question has to be asked with the tool rather than written out, for
+# whichever backend's tool is named. Switching the tool on is not the same as
+# being asked through it: a model that writes its question into its answer
+# makes no tool call, so nothing announces it and no dialog opens, the turn
+# ends, and the person is left waiting on an answer nobody told them was
+# wanted. A skill that runs an interview -- "grill me" is the one this was
+# found through -- asks in prose as a matter of course, which is why the
+# reason is spelled out rather than left as a preference: an instruction that
+# only says "prefer this tool" loses to a skill that says to interview in
+# prose.
+def ask_through_the_tool(tool: str) -> str:
+    """BlindPilot's instruction to ask with `tool` instead of asking in prose."""
+    return (
+        "You are running inside BlindPilot, which a blind person is driving with a "
+        "screen reader. When you want an answer from them, ask with the "
+        f"{tool} tool rather than writing the question into your reply. "
+        "BlindPilot speaks a tool question and opens it in a dialog; a question "
+        "written into a reply is neither spoken as a question nor shown as one, so "
+        "the turn ends and nothing tells them an answer is wanted. This holds for "
+        "every question, including an interview that asks them one at a time."
+    )
 
 
 def _codex_developer_instructions() -> str:
@@ -2615,7 +2596,7 @@ def _codex_developer_instructions() -> str:
         # No config file, or one Codex itself would refuse to load and report
         # on. Either way there is nothing here of theirs to lose.
         theirs = ""
-    return f"{theirs.strip()}\n\n{_CODEX_ASK_THROUGH_THE_TOOL}".strip()
+    return f"{theirs.strip()}\n\n{ask_through_the_tool('request_user_input')}".strip()
 
 
 def codex_question_args() -> tuple[str, ...]:
@@ -2667,7 +2648,6 @@ def _codex_questions(raw: object) -> tuple[Question, ...]:
                 question=text,
                 header=str(entry.get("header") or ""),
                 options=options,
-                multi_select=False,
                 allow_custom=bool(entry.get("isOther")) or not options,
                 secret=bool(entry.get("isSecret")),
                 id=str(entry.get("id") or ""),
@@ -2873,16 +2853,6 @@ class CodexServer:
 
     # ----- routing -----
 
-    def inbox(self) -> "queue.Queue[object]":
-        """A queue for one turn to read.
-
-        Unbounded, because a turn's own answer text must never be dropped to
-        make room for more of it. Empty until `expect` or `attach` says what
-        should arrive in it; one of those has to be called before it is read,
-        because they are also what wakes a reader of a server already closed.
-        """
-        return queue.Queue()
-
     def expect(self, request_id: int, listener: "queue.Queue[object]") -> None:
         """Send this request's reply to that queue. Register before sending."""
         self._expect(request_id, listener, binds_thread=False)
@@ -3001,11 +2971,6 @@ class CodexServer:
         """Why the reader stopped, if it stopped on an error rather than EOF."""
         with self._state_lock:
             return self._read_error
-
-    def stderr_lines(self) -> list[str]:
-        """Everything still kept, oldest first. The whole process's, not a turn's."""
-        with self._state_lock:
-            return list(self._stderr)
 
     def stderr_mark(self) -> int:
         """Where a turn's own stderr begins, to be read back with `stderr_since`."""
@@ -3351,6 +3316,11 @@ class CodexWorker(threading.Thread):
         self._held: Optional[backend_pool.HeldProcess] = None
         # Where this turn's stderr begins in a process older than the turn.
         self._stderr_mark = 0
+        # This turn's queue, read by it alone. Unbounded, because a turn's own
+        # answer text must never be dropped to make room for more of it. Empty
+        # until `expect` or `attach` says what should arrive in it; one of
+        # those has to be called before it is read, because they are also what
+        # wakes a reader of a server already closed.
         self._inbox: Optional["queue.Queue[object]"] = None
         self._expected: list[int] = []
         self._borrowed = False
@@ -3655,7 +3625,7 @@ class CodexWorker(threading.Thread):
                 # Everything after this point on stderr is this turn's to be
                 # explained by; anything before it belonged to another turn.
                 self._stderr_mark = server.stderr_mark()
-            self._inbox = server.inbox()
+            self._inbox = queue.Queue()
             server.borrow()
             self._borrowed = True
         return held
@@ -4281,9 +4251,6 @@ def _freebuff_chat_path(cwd: str, session_id: str) -> Optional[Path]:
 
 _FREEBUFF_INTERRUPTED = "[response interrupted]"
 
-# The title FreeBuff draws on the box its `ask_user` tool opens. It is the one
-# thing on that screen that is always there and never part of an answer, so it
-# is what says a turn has stopped to ask something.
 # What FreeBuff's start screen says while it is waiting for a model to be
 # chosen. The wording has moved between releases - the card was once labelled
 # RECOMMENDED and is now introduced by a heading - so all of it is recognised:
@@ -4298,6 +4265,9 @@ _FREEBUFF_PICKER_RE = re.compile(r"(?i)RECOMMENDED|Start coding for free|See all
 # first Down moves to that entry instead.
 _FREEBUFF_PICKER_EXPANDED_RE = re.compile(r"(?i)show fewer|see all \d+ models?")
 
+# The title FreeBuff draws on the box its `ask_user` tool opens. It is the one
+# thing on that screen that is always there and never part of an answer, so it
+# is what says a turn has stopped to ask something.
 _FREEBUFF_QUESTION_MARKER = "Some questions for you"
 
 # A question in that box: collapsed (right-pointing) or open (down-pointing),
@@ -4867,7 +4837,6 @@ def _spawn_freebuff_pty(
         # consoles FreeBuff's own tools can still raise.
         reserve_hidden_console()
         roots = {os.getpid()}
-        holder: dict[str, object] = {}
 
         def hide_terminal() -> None:
             # Poll hard while the terminal is starting, then slowly: the
@@ -4903,7 +4872,6 @@ def _spawn_freebuff_pty(
             # EnumWindows until it is set.
             stream_ended.set()
             raise
-        holder["pty"] = pty
         pty_pid = getattr(pty, "pid", 0)
         if pty_pid:
             roots.add(int(pty_pid))
@@ -4997,10 +4965,6 @@ class _HiddenConsoleProcess:
     def isalive(self) -> bool:
         return self._proc.poll() is None
 
-    @property
-    def exitstatus(self) -> Optional[int]:
-        return self._proc.returncode
-
     def terminate(self, force: bool = False) -> None:
         end_process_group(self._proc)
 
@@ -5083,11 +5047,6 @@ def spawn_hidden_terminal(args: list[str], cwd: str) -> object:
     return pty
 
 
-def end_hidden_terminal(terminal: object) -> None:
-    """Stop a terminal started by :func:`spawn_hidden_terminal`."""
-    _kill_pty(terminal)
-
-
 # A FreeBuff terminal takes seconds to reach its composer, and that wait is the
 # largest part of how long a message takes to start answering. One is therefore
 # started ahead of time, for the conversation the next message will most likely
@@ -5101,7 +5060,7 @@ _freebuff_prewarm_generation = 0
 _FREEBUFF_PREWARM_TTL = 15 * 60
 
 
-def _kill_pty(pty: object) -> None:
+def end_hidden_terminal(pty: object) -> None:
     """End the terminal and give the pseudo-terminal itself back.
 
     Both calls are wanted, not the first one that works: `terminate` stops
@@ -5124,7 +5083,7 @@ def _end_prewarm(holding: dict) -> None:
     timer = holding.get("timer")
     if timer is not None:
         timer.cancel()
-    _kill_pty(holding["pty"])
+    end_hidden_terminal(holding["pty"])
 
 
 def discard_freebuff_prewarm() -> None:
@@ -5348,7 +5307,7 @@ class FreebuffWorker(threading.Thread):
         if pty is not None:
             # Every turn ends here, through `run`'s `finally`, so this is where
             # a terminal that was stopped but never closed piles up.
-            _kill_pty(pty)
+            end_hidden_terminal(pty)
 
     def _fail(self, message: str) -> None:
         """Report why the turn ended, once."""
@@ -5512,7 +5471,7 @@ class FreebuffWorker(threading.Thread):
             costs the usual wait; refusing to would cost the message.
             """
             nonlocal before
-            _kill_pty(self._pty)
+            end_hidden_terminal(self._pty)
             # The terminal being replaced had a whole FreeBuff in it, and one
             # rewrites the model setting to its own recommendation as it goes.
             # The replacement reads that setting at launch, so the choice has to
@@ -6156,10 +6115,6 @@ _OPENCODE_PERMISSIONS: dict[str, list[dict[str, str]]] = {
         {"permission": "*", "pattern": "*", "action": "allow"},
     ],
 }
-
-# opencode ships a "plan" agent whose whole job is the mode BlindPilot calls
-# plan, so plan mode selects it rather than trying to describe it in rules.
-_OPENCODE_AGENTS = {"plan": "plan"}
 
 
 def _opencode_data_dir() -> Path:
@@ -7046,9 +7001,10 @@ class OpencodeWorker(threading.Thread):
         provider_id, model_id = opencode_split_model(self._model)
         if provider_id:
             body["model"] = {"providerID": provider_id, "modelID": model_id}
-        agent = _OPENCODE_AGENTS.get(self._permission_mode)
-        if agent:
-            body["agent"] = agent
+        if self._permission_mode == "plan":
+            # opencode's own "plan" agent is the mode BlindPilot calls plan,
+            # so plan mode selects it rather than describing it in rules.
+            body["agent"] = "plan"
         if self._variant:
             body["variant"] = self._variant
         return body
@@ -7127,9 +7083,10 @@ class OpencodeWorker(threading.Thread):
         body: dict = {}
         if rules is not None:
             body["permission"] = rules
-        agent = _OPENCODE_AGENTS.get(self._permission_mode)
-        if agent:
-            body["agent"] = agent
+        if self._permission_mode == "plan":
+            # opencode's own "plan" agent is the mode BlindPilot calls plan,
+            # so plan mode selects it rather than describing it in rules.
+            body["agent"] = "plan"
         provider_id, model_id = opencode_split_model(self._model)
         if provider_id:
             body["model"] = {"providerID": provider_id, "id": model_id}
@@ -7173,9 +7130,10 @@ class OpencodeWorker(threading.Thread):
         provider_id, model_id = opencode_split_model(self._model)
         if provider_id:
             body["model"] = f"{provider_id}/{model_id}"
-        agent = _OPENCODE_AGENTS.get(self._permission_mode)
-        if agent:
-            body["agent"] = agent
+        if self._permission_mode == "plan":
+            # opencode's own "plan" agent is the mode BlindPilot calls plan,
+            # so plan mode selects it rather than describing it in rules.
+            body["agent"] = "plan"
 
         def work() -> None:
             try:

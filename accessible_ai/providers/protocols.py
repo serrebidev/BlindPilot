@@ -291,13 +291,9 @@ class ProtocolMixin(BaseProvider):
         self,
         settings: GenerationSettings,
         cancel: Event,
-        endpoint: str | None = None,
-        extra_headers: dict[str, str] | None = None,
     ) -> Iterator[StreamEvent]:
-        url = self.build_url(endpoint or self.account.chat_endpoint)
+        url = self.build_url(self.account.chat_endpoint)
         headers = self.headers()
-        if extra_headers:
-            headers.update(extra_headers)
         body: dict[str, Any] = dict(self.account.custom_body)
         body.update(
             {
@@ -411,18 +407,14 @@ class ProtocolMixin(BaseProvider):
         self,
         settings: GenerationSettings,
         cancel: Event,
-        endpoint: str | None = None,
-        extra_headers: dict[str, str] | None = None,
     ) -> Iterator[StreamEvent]:
         if any(message.get("attachments") for message in settings.messages):
             raise ProviderError(
                 "File attachments need an account using the Chat Completions or Messages protocol. "
                 "Pick a different model, or set the account's API mode to Chat Completions."
             )
-        url = self.build_url(endpoint or self.account.responses_endpoint)
+        url = self.build_url(self.account.responses_endpoint)
         headers = self.headers()
-        if extra_headers:
-            headers.update(extra_headers)
         body: dict[str, Any] = dict(self.account.custom_body)
         body.update(
             {
@@ -491,14 +483,10 @@ class ProtocolMixin(BaseProvider):
         self,
         settings: GenerationSettings,
         cancel: Event,
-        endpoint: str | None = None,
-        extra_headers: dict[str, str] | None = None,
     ) -> Iterator[StreamEvent]:
-        url = self.build_url(endpoint or self.account.messages_endpoint)
+        url = self.build_url(self.account.messages_endpoint)
         headers = self.headers()
         headers.setdefault("anthropic-version", "2023-06-01")
-        if extra_headers:
-            headers.update(extra_headers)
 
         system_parts: list[str] = []
         messages: list[dict[str, Any]] = []

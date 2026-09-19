@@ -61,8 +61,7 @@ if sys.platform == "win32":
     binaries += _winpty_binaries
     hiddenimports += _winpty_hidden
     hiddenimports += ["accessible_output2", "accessible_output2.outputs"]
-    icon = str(spec_dir / "packaging" / "BlindPilot.ico")
-    app_icon = icon
+    app_icon = str(spec_dir / "packaging" / "BlindPilot.ico")
 
     # Explorer's Properties tab and the SmartScreen prompt read the version
     # resource. Without one both show a nameless program with no version.
@@ -140,8 +139,6 @@ a = Analysis(
     # --additional-hooks-dir CLI flag once a .spec file is given, and the
     # workflow builds from the spec.
     hookspath=[str(spec_dir / "hooks")],
-    runtime_hooks=[],
-    excludes=[],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

@@ -185,18 +185,16 @@ def test_freebuff_catalog_is_discovered_at_runtime_and_preferred_is_default(monk
     # model writes there, so it has to be redirected as well as the home path.
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
-    agent_backends.invalidate_backend_cache()
+    agent_backends.invalidate_backend_cache(agent_backends.BACKEND_FREEBUFF)
 
-    models, efforts, current, current_effort, error = freebuff_model_options()
+    models, current, error = freebuff_model_options()
 
     assert models == ["z-ai/glm-5.3-flash", "openai/gpt-next"]
-    assert efforts == []
     assert current == "z-ai/glm-5.3-flash"
-    assert current_effort == ""
     assert error == ""
 
     set_freebuff_model("openai/gpt-next")
-    models, _efforts, current, _current_effort, _error = freebuff_model_options()
+    models, current, _error = freebuff_model_options()
     assert current == "openai/gpt-next"
     settings = json.loads(
         (tmp_path / ".config" / "manicode" / "settings.json").read_text(encoding="utf-8")
@@ -223,9 +221,9 @@ def test_freebuff_catalog_keeps_the_current_off_peak_preferred_model(monkeypatch
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
-    agent_backends.invalidate_backend_cache()
+    agent_backends.invalidate_backend_cache(agent_backends.BACKEND_FREEBUFF)
 
-    models, _efforts, current, _current_effort, error = freebuff_model_options()
+    models, current, error = freebuff_model_options()
 
     assert models == ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4-flash"]
     assert current == "z-ai/glm-5.3-flash"
@@ -259,9 +257,9 @@ def test_freebuff_catalog_keeps_a_model_the_readme_names_without_its_date(monkey
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
-    agent_backends.invalidate_backend_cache()
+    agent_backends.invalidate_backend_cache(agent_backends.BACKEND_FREEBUFF)
 
-    models, _efforts, current, _current_effort, error = freebuff_model_options()
+    models, current, error = freebuff_model_options()
 
     assert models[0] == "z-ai/glm-5.3-flash"
     assert "deepseek/deepseek-v4-flash" in models
@@ -290,9 +288,9 @@ def test_freebuff_falls_back_to_preferred_rather_than_freebuffs_own_setting(monk
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
-    agent_backends.invalidate_backend_cache()
+    agent_backends.invalidate_backend_cache(agent_backends.BACKEND_FREEBUFF)
 
-    _models, _efforts, current, _current_effort, _error = freebuff_model_options()
+    _models, current, _error = freebuff_model_options()
 
     assert current == "z-ai/glm-5.3-flash"
 
@@ -791,18 +789,18 @@ def test_freebuff_keeps_its_choice_when_freebuff_resets_its_own_setting(monkeypa
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData"))
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(wrapper))
-    agent_backends.invalidate_backend_cache()
+    agent_backends.invalidate_backend_cache(agent_backends.BACKEND_FREEBUFF)
 
     # FreeBuff has left its own recommendation behind and BlindPilot has no
     # record yet, which is the state after a first run.
     settings.write_text(json.dumps({"freebuffModel": "deepseek/deepseek-v4-flash"}), "utf-8")
-    _models, _efforts, current, _effort, _error = freebuff_model_options()
+    _models, current, _error = freebuff_model_options()
     assert current == "z-ai/glm-5.3-flash"
 
     # An explicit choice is recorded by BlindPilot and survives the same reset.
     set_freebuff_model("deepseek/deepseek-v4-flash")
     settings.write_text(json.dumps({"freebuffModel": "z-ai/glm-5.3-flash"}), "utf-8")
-    _models, _efforts, current, _effort, _error = freebuff_model_options()
+    _models, current, _error = freebuff_model_options()
     assert current == "deepseek/deepseek-v4-flash"
 
 
@@ -825,7 +823,7 @@ def test_freebuff_reports_a_terminal_that_closes_before_it_is_ready(monkeypatch)
     monkeypatch.setattr(
         agent_backends,
         "freebuff_model_options",
-        lambda: (["deepseek/deepseek-v4-pro"], [], "deepseek/deepseek-v4-pro", "", ""),
+        lambda: (["deepseek/deepseek-v4-pro"], "deepseek/deepseek-v4-pro", ""),
     )
     monkeypatch.setattr(agent_backends, "set_freebuff_model", lambda _model: None)
     monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(fake_spawn))
@@ -2079,7 +2077,7 @@ def test_a_model_the_installed_release_dropped_is_not_offered(monkeypatch, tmp_p
     )
     monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
 
-    models, _efforts, current, _effort, error = freebuff_model_options()
+    models, current, error = freebuff_model_options()
 
     assert error == ""
     assert agent_backends.FREEBUFF_PREFERRED_MODEL not in models
@@ -2092,7 +2090,7 @@ def test_a_catalog_that_could_not_be_read_still_offers_the_remembered_model(monk
     monkeypatch.setattr(agent_backends, "_read_freebuff_choice", lambda: "vendor/remembered")
     monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
 
-    models, _efforts, current, _effort, error = freebuff_model_options()
+    models, current, error = freebuff_model_options()
 
     assert error
     assert "vendor/remembered" in models
