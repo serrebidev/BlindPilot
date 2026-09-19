@@ -85,6 +85,26 @@ def test_a_reopened_conversation_does_not_re_ask_its_own_history():
     assert found == ""
 
 
+def test_a_turn_that_finished_and_offered_the_next_step_is_left_to_end():
+    # How most turns end on most backends, and every one of them used to open
+    # a modal over an answer somebody was still reading.
+    found = app.question_left_in_the_answer(
+        "Committed on a branch and pushed.\n\nWant me to open the PR as well?",
+        asked_properly=False,
+        replaying=False,
+    )
+    assert found == ""
+
+
+def test_a_turn_that_stopped_to_be_told_something_still_asks():
+    found = app.question_left_in_the_answer(
+        "Both files read the setting as a string today.\n\nWhat should the new one be called?",
+        asked_properly=False,
+        replaying=False,
+    )
+    assert found == "What should the new one be called?"
+
+
 # ----- What happens when the turn is done -----
 def test_the_question_is_put_once_the_turn_is_fully_finished(monkeypatch):
     posted = _posted(monkeypatch)
