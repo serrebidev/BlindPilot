@@ -30,7 +30,7 @@ repos:
         files: \.py$
       - id: pytest
         name: pytest
-        entry: python -m pytest -q -W error --ignore=docs
+        entry: python -m pytest -q -W error
         language: system
         pass_filenames: false
         always_run: true
