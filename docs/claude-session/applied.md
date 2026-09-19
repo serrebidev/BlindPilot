@@ -2,8 +2,8 @@
 
 What the held-Claude-session branch changed, file by file, the tests that
 cover it, what the other backends already did, and what could not be checked
-live on this machine. Spec: `01-design.md`. Branch
-`feat/held-claude-session`.
+live on this machine. Spec: `01-design.md`, removed from the tree once the
+work shipped and kept in git history. Branch `feat/held-claude-session`.
 
 ## What changed, by file
 
@@ -129,7 +129,7 @@ silence already said.
 
 ## What the other backends do
 
-Checked 2026-09-05, copied from `01-design.md`:
+Checked 2026-09-05, copied from the spec:
 
 - Codex holds one shared app-server process between turns
   (`backend_pool`, `CodexWorker._borrow_server`). Background work survives.
