@@ -88,6 +88,10 @@ def _frame(event: str, payload: dict) -> dict:
     }
 
 
+def _server_request(method: str, payload: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": "srq-test", "method": method, "params": payload}
+
+
 def _responses(sent, method="clarify.respond"):
     return [m["params"] for m in sent if m.get("method") == method]
 
@@ -155,6 +159,45 @@ def test_batch_clarify_answers_every_question_by_its_own_id():
         {"request_id": "batch1", "question_id": "q1", "answer": "AirPlay"},
         {"request_id": "batch1", "question_id": "q2", "answer": "Yes"},
     ]
+
+
+def test_current_gateway_batch_clarify_opens_the_dialog_and_gets_one_response():
+    sent = []
+    asked = []
+    worker = _worker([], sent, asked, [["Microphone sweep"], ["Include existing files"]])
+
+    worker._handle_event(
+        _server_request(
+            "clarify",
+            {
+                "session_id": "s",
+                "questions": [
+                    {
+                        "qid": "measurement",
+                        "question": "How should loudness be measured?",
+                        "choices": ["Microphone sweep", "Manual selection"],
+                    },
+                    {
+                        "qid": "release",
+                        "question": "Include the existing files?",
+                        "choices": ["Include existing files", "Leave them untouched"],
+                    },
+                ],
+            },
+        )
+    )
+
+    assert len(asked) == 1 and len(asked[0]) == 2
+    assert sent[-1] == {
+        "jsonrpc": "2.0",
+        "id": "srq-test",
+        "result": {
+            "answers": {
+                "measurement": "Microphone sweep",
+                "release": "Include existing files",
+            }
+        },
+    }
 
 
 def test_batch_clarify_answers_every_question_even_when_the_user_declines():
@@ -313,3 +356,68 @@ def test_a_clarify_with_no_readable_question_is_still_answered():
 
     assert _responses(sent) == [{"request_id": "r9", "answer": ""}]
     assert activities
+
+
+# -- the request half of the protocol ------------------------------------
+#
+# A current gateway does not announce these as events at all. It writes a
+# JSON-RPC *request* -- an ``id`` with a method on it -- and holds it open until
+# a response frame carrying that same id comes back, which is what
+# ``client.capabilities {server_requests: true}`` buys. Nothing here is
+# announced as an event, so an unanswered one is a turn that hangs.
+
+
+def test_a_single_clarify_arriving_as_a_request_answers_with_the_answer_key():
+    sent = []
+    worker = _worker([], sent, [], [["Chromecast"]])
+    worker._handle_event(
+        _server_request(
+            "clarify",
+            {"session_id": "s", "question": "Which device?", "choices": ["Chromecast", "AirPlay"]},
+        )
+    )
+
+    assert sent == [{"jsonrpc": "2.0", "id": "srq-test", "result": {"answer": "Chromecast"}}]
+
+
+def test_a_sudo_request_answers_with_the_value_key_of_the_request_half():
+    """The request half reads ``value``; ``password`` belongs to ``sudo.respond``.
+
+    Answering on the wrong key is silence as far as the gateway is concerned,
+    and a password prompt it never hears back from parks the turn.
+    """
+    sent = []
+    worker = _worker([], sent, [], [["hunter2"]])
+    worker._handle_event(
+        _server_request("sudo", {"session_id": "s", "command": "sudo systemctl restart x"})
+    )
+
+    assert sent == [{"jsonrpc": "2.0", "id": "srq-test", "result": {"value": "hunter2"}}]
+    assert _responses(sent, "sudo.respond") == []
+
+
+def test_a_secret_request_answers_with_the_value_key_of_the_request_half():
+    sent = []
+    worker = _worker([], sent, [], [["sk-live-xyz"]])
+    worker._handle_event(
+        _server_request("secret", {"session_id": "s", "env_var": "API_KEY", "prompt": "API key?"})
+    )
+
+    assert sent == [{"jsonrpc": "2.0", "id": "srq-test", "result": {"value": "sk-live-xyz"}}]
+    assert _responses(sent, "secret.respond") == []
+
+
+def test_a_request_this_window_cannot_drive_is_declined_rather_than_ignored():
+    """Reading Hermes' in-app terminal is one BlindPilot has no window to serve.
+
+    Silence would be indistinguishable from a client that never got the frame,
+    and the gateway waits the request out; an error response settles it, and the
+    gateway treats the two the same way.
+    """
+    sent = []
+    worker = _worker([], sent, [], None)
+    worker._handle_event(_server_request("terminal.read", {"session_id": "s", "start": 0}))
+
+    assert len(sent) == 1
+    assert sent[0]["id"] == "srq-test"
+    assert sent[0]["error"]["code"] == -32601

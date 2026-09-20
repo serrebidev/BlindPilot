@@ -412,6 +412,39 @@ def test_an_approval_is_answered_so_the_turn_cannot_hang():
         assert rows and rows[0][0] == "tool"
 
 
+def test_an_approval_arriving_as_a_request_is_answered_on_its_own_id():
+    """A current gateway asks this as a request rather than announcing an event.
+
+    The answer travels as a JSON-RPC result frame carrying the request's own
+    ``srq-`` id, and the response has to settle that id: the older
+    ``approval.respond`` method it used to answer with is not a thing the
+    gateway is waiting for here, so a mode that approves still parks the turn.
+    """
+    worker = _worker()
+    worker._permission_mode = "auto"
+    transport = _FakeTransport([])
+    worker._transport = transport
+
+    worker._handle_event(
+        {
+            "jsonrpc": "2.0",
+            "id": "srq-ap1",
+            "method": "approval",
+            "params": {
+                "session_id": "s",
+                "request_id": "srq-ap1",
+                "command": "rm -rf /tmp/x",
+                "choices": ["once", "session", "deny"],
+            },
+        }
+    )
+
+    replies = [m for m in transport.sent if m.get("id") == "srq-ap1"]
+    assert len(replies) == 1
+    assert replies[0]["result"]["choice"] == "once"
+    assert [m for m in transport.sent if m.get("method") == "approval.respond"] == []
+
+
 def test_a_non_bypass_mode_asks_the_person_instead_of_denying_silently():
     """The whole point of an approval request is the person's answer.
 

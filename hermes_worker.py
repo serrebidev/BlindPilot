@@ -815,6 +815,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             # the remote path is the difference between "wrong address" and "slow".
             if self._wait_for_ready() is False:
                 return
+            self._advertise_server_requests()
             if self._resume_only:
                 self._run_replay()
                 return
@@ -890,6 +891,13 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             self._on_failed(detail or "Hermes did not become ready in time")
         return False
 
+    def _advertise_server_requests(self) -> None:
+        """Tell current Hermes builds that this client answers blocking prompts."""
+        request_id = self._send("client.capabilities", {"server_requests": True})
+        if request_id is not None:
+            # Older gateways reject this optional method; either reply is fine.
+            self._await_response(request_id, 5.0)
+
     def _run_replay(self) -> None:
         """Reopen a stored conversation and hand its transcript to the window.
 
@@ -937,6 +945,9 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         self._on_started()
         for kind, text in _replay_rows(result.get("messages") or []):
             self._on_activity(kind, text)
+        # The transcript first, then whatever it is still waiting on: the rows
+        # are the context the question is being asked about.
+        self._answer_open_requests(result)
         if bool(result.get("running")):
             # The conversation's turn is still going on the gateway. Eating its
             # events here is what "attaching" means; the same idle and
@@ -992,6 +1003,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
                 "note",
                 f"Hermes could not use {self._cwd}, so this conversation is running in {landed}.",
             )
+        self._answer_open_requests(result)
         return True
 
     def _apply_yolo(self) -> None:
@@ -1318,6 +1330,18 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         time, and a front end that fails on an unknown one would break at the
         next Hermes release.
         """
+        # A reply to one of this worker's own requests carries an id and no
+        # method, and is picked up by whoever is waiting for it; a notification
+        # from the gateway carries a method and no id, and is ignored with the
+        # rest of the unknown events below. A request is the one that has both.
+        # (``request.cancel`` is a notification of that second kind on purpose:
+        # the frame it withdraws was answered on the thread reading this one,
+        # which is still inside the dialog that answer came from.)
+        method = str(frame.get("method") or "")
+        if method and method != "event" and "id" in frame:
+            self._handle_server_request(frame)
+            return None
+
         params = frame.get("params")
         if not isinstance(params, dict):
             return None
@@ -1415,6 +1439,65 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
 
         return None
 
+    def _handle_server_request(self, frame: dict) -> None:
+        """Answer a server-to-client request on its own JSON-RPC id.
+
+        The gateway holds the request open until a response frame carrying the
+        same ``srq-`` id comes back, and the wait has no deadline of its own for
+        a clarify, so every branch here answers something: a request whose text
+        cannot be read is answered empty, and one this window has no way to
+        drive (an in-app terminal or preview read, a password-manager prompt)
+        is answered with an error rather than silence, which is treated as an
+        answer too. See :meth:`_answer_open_requests` for the ones asked while
+        nobody was attached.
+        """
+        method = str(frame.get("method") or "")
+        params = frame.get("params")
+        payload = params if isinstance(params, dict) else {}
+        request_id = frame.get("id")
+        if method == "clarify":
+            self._answer_clarify(payload, request_id)
+        elif method == "approval":
+            self._answer_approval(payload, request_id)
+        elif method in ("sudo", "secret"):
+            self._answer_secret(method, payload, request_id)
+        else:
+            self._reply(
+                request_id,
+                error={"code": -32601, "message": f"Unsupported server request: {method}"},
+            )
+
+    def _answer_open_requests(self, result: dict) -> None:
+        """Answer the questions a resume handed back with the session.
+
+        A request written while no client was attached is not lost: a resume or
+        an activate returns it in ``open_requests``, each entry shaped exactly
+        like the frame it was sent as, for the client to deliver to itself.
+        Without this, opening the conversation that is parked on a question right
+        now -- which is what the Hermes Conversations list offers -- attached to a
+        session this window could not unblock, and the agent sat out the rest of
+        its deadline waiting on an answer nobody had been shown.
+        """
+        for entry in result.get("open_requests") or []:
+            if isinstance(entry, dict):
+                self._handle_server_request(entry)
+
+    def _reply(
+        self,
+        request_id: object,
+        result: Optional[dict] = None,
+        *,
+        error: Optional[dict] = None,
+    ) -> None:
+        transport = self._transport
+        if transport is None or request_id is None:
+            return
+        frame = {"jsonrpc": "2.0", "id": request_id}
+        frame["error" if error is not None else "result"] = (
+            error if error is not None else result or {}
+        )
+        transport.send(frame)
+
     def _release_finished_sentences(self, final: bool = False) -> None:
         """Hand the window every sentence the answer has finished so far.
 
@@ -1476,7 +1559,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             detail = detail[:_RESULT_MAX_CHARS] + " […truncated]"
         self._on_activity("result", f"{name}: {detail}")
 
-    def _answer_clarify(self, payload: dict) -> None:
+    def _answer_clarify(self, payload: dict, response_id: object = None) -> None:
         """Put Hermes' question in front of the user, and answer it.
 
         Hermes waits on the answer with no deadline at all when its
@@ -1484,6 +1567,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         even one whose question could not be read.
         """
         request_id = str(payload.get("request_id") or "")
+        if response_id is not None:
+            request_id = str(response_id)
         if not request_id:
             return
         questions = _clarify_questions(payload)
@@ -1491,10 +1576,28 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             self._on_activity(
                 "tool", "Hermes asked a question that could not be read; it was answered empty."
             )
-            self._request("clarify.respond", {"request_id": request_id, "answer": ""})
+            if response_id is not None:
+                self._reply(response_id, {"answer": ""})
+            else:
+                self._request("clarify.respond", {"request_id": request_id, "answer": ""})
             return
         answers = self._on_question(questions) if self._on_question else None
         self._on_activity("tool", question_summary(questions, answers))
+        if response_id is not None:
+            values = {
+                question.id: _clarify_answer(
+                    question,
+                    answers[index] if answers is not None and index < len(answers) else [],
+                )
+                for index, question in enumerate(questions)
+                if question.id
+            }
+            if values:
+                self._reply(response_id, {"answers": values})
+            else:
+                chosen = answers[0] if answers else []
+                self._reply(response_id, {"answer": _clarify_answer(questions[0], chosen)})
+            return
         self._send_clarify_answers(request_id, questions, answers)
 
     def _send_clarify_answers(
@@ -1520,7 +1623,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
                 params["question_id"] = question.id
             self._request("clarify.respond", params)
 
-    def _answer_secret(self, event: str, payload: dict) -> None:
+    def _answer_secret(self, event: str, payload: dict, response_id: object = None) -> None:
         """Answer a password or secret request rather than stall on it.
 
         Asked with ``secret`` set, so the transcript records THAT it was
@@ -1529,9 +1632,11 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         empty string, because Hermes blocks the turn until something arrives.
         """
         request_id = str(payload.get("request_id") or "")
+        if response_id is not None:
+            request_id = str(response_id)
         if not request_id:
             return
-        sudo = event == "sudo.request"
+        sudo = event in ("sudo", "sudo.request")
         asked = _first_text(
             payload.get("question"), payload.get("prompt"), payload.get("message")
         ) or ("Hermes needs the administrator password" if sudo else "Hermes needs a secret value")
@@ -1539,12 +1644,15 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         answers = self._on_question([question]) if self._on_question else None
         self._on_activity("tool", question_summary([question], answers))
         given = answers[0][0] if answers and answers[0] else ""
-        self._request(
-            "sudo.respond" if sudo else "secret.respond",
-            {"request_id": request_id, "password" if sudo else "value": given},
-        )
+        if response_id is not None:
+            self._reply(response_id, {"value": given})
+        else:
+            self._request(
+                "sudo.respond" if sudo else "secret.respond",
+                {"request_id": request_id, "password" if sudo else "value": given},
+            )
 
-    def _answer_approval(self, payload: dict) -> None:
+    def _answer_approval(self, payload: dict, response_id: object = None) -> None:
         """Answer a dangerous-command approval the way the mode says to.
 
         Two things were wrong with the first version, both measured against
@@ -1562,7 +1670,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         choice. No ``on_question`` (a resume replay, say) still cannot hang:
         the request is answered with the mode's own decision.
         """
-        request_id = payload.get("request_id")
+        request_id = response_id if response_id is not None else payload.get("request_id")
         if request_id is None:
             return
         command = _first_text(payload.get("command"), payload.get("summary"))
@@ -1605,7 +1713,10 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
                     "Switch the permission mode to allow it.",
                 )
             choice = "deny"
-        self._request("approval.respond", {"request_id": request_id, "choice": choice})
+        if response_id is not None:
+            self._reply(response_id, {"choice": choice})
+        else:
+            self._request("approval.respond", {"request_id": request_id, "choice": choice})
 
     def _turn_complete(self, payload: dict) -> Optional[bool]:
         self._accepting_input.clear()
