@@ -22,11 +22,17 @@ REMOTE = "ws://garfield:9119/api/ws"
 
 @pytest.fixture
 def frame():
-    app = wx.App()
+    # Only an app this fixture made may be destroyed. A shared one belongs to
+    # the whole session, and making a second app on top of it replaces the
+    # current one; dropping that again leaves every later dialog with no app
+    # at all, which wxGTK reports as PyNoAppError from an unrelated test.
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
     top = wx.Frame(None)
     yield top
     top.Destroy()
-    app.Destroy()
+    if owns_app:
+        app.Destroy()
 
 
 @pytest.fixture(autouse=True)

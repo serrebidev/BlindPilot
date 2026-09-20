@@ -142,23 +142,30 @@ def tmp_path() -> Path:
             pass
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def wx_app():
-    """One `wx.App` for a module's worth of dialogs, or a skip.
+    """One `wx.App` for the whole run, or a skip.
 
-    Module scope rather than session: several of these tests build and destroy
-    top-level windows, and one application object per module is what every
-    copy of this fixture was written with. The import is inside the try
+    A wx.App is a process-wide singleton and only one may exist: making a
+    second replaces the first, and collecting that second one leaves the
+    process with no current app at all. A per-module fixture re-made the app
+    each time one was collected, so a test elsewhere that made and dropped its
+    own app took the current one with it -- which is how four unrelated tests
+    in test_preferences_dialog went red on the Linux runner, where wxGTK
+    answers a dialog built without a current app with ``PyNoAppError``, while
+    wxMSW often carries on. One app for the session cannot be replaced under
+    itself, and every fixture and helper that wants an app asks ``GetApp``
+    first, so nothing else makes a second one. The import is inside the try
     because a machine without wxPython has to skip for the same reason as a
     machine without a display, not fail at collection.
     """
     try:
         import wx
 
-        application = wx.App(False)
+        application = wx.GetApp() or wx.App(False)
     except Exception as exc:  # pragma: no cover - depends on the machine
         pytest.skip(f"no display for wxPython: {exc}")
-    yield application
+    return application
 
 
 @pytest.fixture
