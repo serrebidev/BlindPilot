@@ -42,7 +42,7 @@ from agent_backends import (
     subprocess_env,
 )
 from hermes_backend import STDERR_KEEP_LINES
-from markdown_rows import complete_sentences as _complete_sentences
+from markdown_rows import release_finished, release_remainder
 
 # The window's permission vocabulary translated to Command Code's. "bypass" has
 # no --permission-mode value at all -- it is the launch-only --yolo flag -- so
@@ -682,21 +682,16 @@ class CommandcodeWorker(threading.Thread):
 
     # -- streaming helpers -------------------------------------------------
 
+    def _emit_answer(self, text: str) -> None:
+        self._on_activity("assistant", text)
+
     def _release_streamed(self) -> None:
         text = "".join(self._assistant_parts)
-        if len(text) <= self._streamed:
-            return
-        spoken = _complete_sentences(text[self._streamed :])
-        if not spoken:
-            return
-        self._streamed += len(spoken)
-        self._on_activity("assistant", spoken)
+        self._streamed = release_finished(text, self._streamed, self._emit_answer)
 
     def _release_all(self) -> None:
         text = "".join(self._assistant_parts)
-        if len(text) > self._streamed:
-            self._on_activity("assistant", text[self._streamed :])
-        self._streamed = len(text)
+        self._streamed = release_remainder(text, self._streamed, self._emit_answer)
 
 
 def _content_text(content: object) -> str:

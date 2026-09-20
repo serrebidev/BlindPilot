@@ -91,6 +91,7 @@ from agent_backends import (
     AskQuestions,
     Question,
     QuestionOption,
+    _questions,
     backend_auth_ok,
     backend_label,
     backend_status,
@@ -3287,31 +3288,7 @@ def _claude_questions(raw: list) -> tuple[Question, ...]:
     Claude Code always offers an "Other" answer of its own, whatever the
     question says, so `allow_custom` is not read from the payload.
     """
-    questions: list[Question] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        text = str(entry.get("question") or "").strip()
-        if not text:
-            continue
-        options: list[QuestionOption] = []
-        for option in entry.get("options") or []:
-            if isinstance(option, dict) and option.get("label"):
-                options.append(
-                    QuestionOption(
-                        str(option["label"]),
-                        str(option.get("description") or ""),
-                    )
-                )
-        questions.append(
-            Question(
-                question=text,
-                header=str(entry.get("header") or ""),
-                options=tuple(options),
-                multi_select=bool(entry.get("multiSelect")),
-            )
-        )
-    return tuple(questions)
+    return _questions(raw, multi_key="multiSelect")
 
 
 # How long a stopped turn waits for the CLI's result before the tab's process
