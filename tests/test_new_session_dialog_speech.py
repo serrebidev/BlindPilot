@@ -24,12 +24,8 @@ is built around cannot be silent, and nothing may be spoken twice.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 wx = pytest.importorskip("wx")
 

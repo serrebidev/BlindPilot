@@ -16,36 +16,7 @@ which only the send path shows.
 from __future__ import annotations
 
 import blindpilot_app as app
-
-
-class _Prompt:
-    def __init__(self, text: str):
-        self._text = text
-
-    def GetValue(self) -> str:
-        return self._text
-
-    def SetValue(self, text: str) -> None:
-        self._text = text
-
-
-class _Button:
-    def Enable(self, value: bool = True) -> None:
-        pass
-
-    def Disable(self) -> None:
-        pass
-
-    def __bool__(self) -> bool:
-        return True
-
-
-class _Earcons:
-    def play_send(self) -> None:
-        pass
-
-    def start_progress(self) -> None:
-        pass
+from doubles import Button, Prompt, panel_stub
 
 
 class _Label:
@@ -79,50 +50,34 @@ class _Worker:
 
 def _panel(session_title: str, prompt: str = "start", session_id=None):
     """A fresh tab, about to send its first message."""
-    panel = type("PanelStub", (), {})()
-    panel._worker = None
-    panel.prompt = _Prompt(prompt)
-    panel._attachments = []
-    panel._turns = []
-    panel._rows = []
-    panel._response_count = 0
-    panel._stream_response = None
-    panel._streamed_assistant = ""
-    panel._stopping = False
-    panel._session_id = session_id
-    panel._session_backend = app.BACKEND_HERMES
-    panel._claude_generation = 0
-    panel._session_title = session_title
-    panel._assistant_narrated_this_turn = False
-    panel.model = ""
-    panel.effort = ""
-    panel._cli_model = ""
-    panel._cli_effort = ""
-    panel.cwd = ""
-    panel.mode = "default"
-    panel._earcons = _Earcons()
-    panel._show_working = lambda: None
-    panel._hide_working = lambda: None
-    panel.send_btn = _Button()
-    panel.steer_btn = _Button()
-    panel.stop_btn = _Button()
-    panel.backend_status = _Label()
-    panel.titles: list[str] = []
-    panel.announced: list[str] = []
-    panel._announce = lambda text: panel.announced.append(text)
-    panel._set_status = lambda _text: None
-    panel._refresh_list = lambda: None
-    panel._say = lambda _text: False
-    panel._run_in_progress = lambda: False
-    panel.selected_backend = lambda: app.BACKEND_HERMES
-    panel._on_steer = lambda: None
-    panel._build_send_text = lambda text: text
-    panel._backend_uploads_attachments = lambda: False
-    panel._attachment_summary = lambda: ""
-    panel._add_your_message = lambda *_a, **_k: None
-    panel._queue_worker_event = lambda *_a, **_k: None
-    panel._ask_questions = None
-    panel._held_hermes = object()  # already held: no real connection is opened
+    panel = panel_stub(
+        prompt=Prompt(prompt),
+        _attachments=[],
+        _session_id=session_id,
+        _session_backend=app.BACKEND_HERMES,
+        _session_title=session_title,
+        _assistant_narrated_this_turn=False,
+        model="",
+        effort="",
+        _cli_model="",
+        _cli_effort="",
+        cwd="",
+        mode="default",
+        backend_status=_Label(),
+        titles=[],
+        # Never a running turn: these tests send twice in a row on purpose,
+        # and the second send is about the title, not about being refused.
+        _run_in_progress=lambda: False,
+        selected_backend=lambda: app.BACKEND_HERMES,
+        _on_steer=lambda: None,
+        _build_send_text=lambda text: text,
+        _backend_uploads_attachments=lambda: False,
+        _attachment_summary=lambda: "",
+        _add_your_message=lambda *_a, **_k: None,
+        _queue_worker_event=lambda *_a, **_k: None,
+        _ask_questions=None,
+        _held_hermes=object(),  # already held: no real connection is opened
+    )
     # The real method, not a stand-in: what a turn is GIVEN is half of what this
     # file is about, so the name reaching session.create is measured too.
     panel._hermes_worker_extra = lambda files: app.SessionPanel._hermes_worker_extra(panel, files)
@@ -277,7 +232,7 @@ def test_reopening_a_hermes_conversation_drops_the_name() -> None:
     panel = _panel("Radio pipeline")
     panel._drop_held_backends = lambda: None
     panel.backend_changed = lambda: None
-    panel.stop_btn = _Button()
+    panel.stop_btn = Button()
     panel._worker = None
 
     real = app.worker_class

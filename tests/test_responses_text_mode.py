@@ -7,6 +7,7 @@ longer match rows. Each row's start offset does.
 from __future__ import annotations
 
 import blindpilot_app as app
+from doubles import panel_stub
 
 
 def test_a_caret_anywhere_in_a_row_names_that_row():
@@ -51,18 +52,11 @@ class _Text:
 def _panel(rows):
     from markdown_rows import Row
 
-    panel = type("PanelStub", (), {})()
-    panel.responses_text = _Text()
-    panel.responses = None
-    panel._rows = [Row(kind="prose", label=r, payload=r, response_number=1) for r in rows]
-    panel._displayed = []
-    panel._search_term = ""
-    panel._row_starts = []
-    panel._row_count = lambda: len(panel._displayed)
-    panel._selected_row = lambda: app.SessionPanel._selected_row(panel)
-    panel._select_row = lambda i: app.SessionPanel._select_row(panel, i)
-    panel._append_rows = lambda rows: app.SessionPanel._append_rows(panel, rows)
-    return panel
+    return panel_stub(
+        responses_text=_Text(),
+        responses=None,
+        _rows=[Row(kind="prose", label=r, payload=r, response_number=1) for r in rows],
+    )
 
 
 def test_offsets_follow_the_rows_through_a_rebuild_and_an_append(monkeypatch):

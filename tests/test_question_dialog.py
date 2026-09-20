@@ -16,24 +16,6 @@ from agent_backends import Question, QuestionOption
 wx = pytest.importorskip("wx")
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        application = wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-    yield application
-
-
-@pytest.fixture
-def frame(wx_app):
-    window = wx.Frame(None)
-    try:
-        yield window
-    finally:
-        window.Destroy()
-
-
 QUESTIONS = (
     Question(
         question="Tabs or spaces?",

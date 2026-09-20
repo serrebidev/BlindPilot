@@ -18,6 +18,18 @@ import pytest
 import diagnostics
 
 
+@pytest.fixture
+def logs_in_tmp_path(monkeypatch, tmp_path):
+    """Point the log at a directory this test can read back.
+
+    Requested rather than autouse: three tests here are about where the real
+    `log_dir()` points, and redirecting it under them would leave them passing
+    without measuring anything.
+    """
+    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+    return tmp_path
+
+
 @pytest.fixture(autouse=True)
 def _quiet_root(tmp_path):
     """Never let a test leave a handler pointing at a real log file.
@@ -64,9 +76,10 @@ def test_the_log_directory_is_named_after_the_application():
 
 
 # ----- what it is allowed to say -----
-def test_a_turn_that_ended_badly_is_recorded_without_a_word_of_its_content(tmp_path, monkeypatch):
+def test_a_turn_that_ended_badly_is_recorded_without_a_word_of_its_content(
+    tmp_path, monkeypatch, logs_in_tmp_path
+):
     """The whole point. Metadata yes; the conversation never."""
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
     diagnostics.start_logging()
 
     diagnostics.log_unfinished_turn(
@@ -105,8 +118,7 @@ def test_the_recorded_fields_are_a_closed_list():
         assert banned not in diagnostics.TURN_FIELDS
 
 
-def test_a_field_nobody_declared_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+def test_a_field_nobody_declared_is_refused(tmp_path, monkeypatch, logs_in_tmp_path):
     diagnostics.start_logging()
 
     with pytest.raises(TypeError):
@@ -114,13 +126,12 @@ def test_a_field_nobody_declared_is_refused(tmp_path, monkeypatch):
 
 
 # ----- it must not grow forever -----
-def test_the_log_is_capped_and_rolls_over(tmp_path, monkeypatch):
+def test_the_log_is_capped_and_rolls_over(tmp_path, monkeypatch, logs_in_tmp_path):
     """An append-forever log is a liability rather than an asset.
 
     The cap is shrunk rather than a megabyte being written, so this proves the
     rollover without the test itself becoming the slowest one in the suite.
     """
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
     monkeypatch.setattr(diagnostics, "MAX_BYTES", 4096)
     diagnostics.start_logging()
     logger = logging.getLogger("blindpilot.test")
@@ -137,10 +148,9 @@ def test_the_log_is_capped_and_rolls_over(tmp_path, monkeypatch):
 
 
 # ----- failures that used to vanish -----
-def test_an_uncaught_exception_reaches_the_log(tmp_path, monkeypatch):
+def test_an_uncaught_exception_reaches_the_log(tmp_path, monkeypatch, logs_in_tmp_path):
     """In the packaged windowed build there is no stderr, so an uncaught
     exception is currently lost completely."""
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
     diagnostics.start_logging()
 
     try:
@@ -154,8 +164,7 @@ def test_an_uncaught_exception_reaches_the_log(tmp_path, monkeypatch):
     assert "RuntimeError" in written
 
 
-def test_starting_twice_does_not_write_everything_twice(tmp_path, monkeypatch):
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+def test_starting_twice_does_not_write_everything_twice(tmp_path, monkeypatch, logs_in_tmp_path):
 
     diagnostics.start_logging()
     diagnostics.start_logging()
@@ -175,9 +184,8 @@ def test_a_log_directory_that_cannot_be_made_is_not_fatal(monkeypatch, tmp_path)
     assert diagnostics.start_logging() is None  # must not raise
 
 
-def test_the_level_can_be_raised_from_the_environment(tmp_path, monkeypatch):
+def test_the_level_can_be_raised_from_the_environment(tmp_path, monkeypatch, logs_in_tmp_path):
     """The conventional way to get more detail out of a tool for a bug report."""
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
     monkeypatch.setenv("BLINDPILOT_LOG_LEVEL", "DEBUG")
 
     diagnostics.start_logging()
@@ -188,8 +196,7 @@ def test_the_level_can_be_raised_from_the_environment(tmp_path, monkeypatch):
     assert logging.getLogger().level == logging.DEBUG
 
 
-def test_the_default_level_is_info(tmp_path, monkeypatch):
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+def test_the_default_level_is_info(tmp_path, monkeypatch, logs_in_tmp_path):
     monkeypatch.delenv("BLINDPILOT_LOG_LEVEL", raising=False)
 
     diagnostics.start_logging()
@@ -197,8 +204,7 @@ def test_the_default_level_is_info(tmp_path, monkeypatch):
     assert logging.getLogger("blindpilot").level == logging.INFO
 
 
-def test_a_nonsense_level_falls_back_rather_than_failing(tmp_path, monkeypatch):
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+def test_a_nonsense_level_falls_back_rather_than_failing(tmp_path, monkeypatch, logs_in_tmp_path):
     monkeypatch.setenv("BLINDPILOT_LOG_LEVEL", "LOUDER")
 
     diagnostics.start_logging()
@@ -206,7 +212,9 @@ def test_a_nonsense_level_falls_back_rather_than_failing(tmp_path, monkeypatch):
     assert logging.getLogger("blindpilot").level == logging.INFO
 
 
-def test_a_chatty_library_cannot_push_out_what_the_log_is_for(tmp_path, monkeypatch):
+def test_a_chatty_library_cannot_push_out_what_the_log_is_for(
+    tmp_path, monkeypatch, logs_in_tmp_path
+):
     """The file is capped on purpose, so what fills it matters.
 
     A library that logs a line per HTTP request or per COM call would roll the
@@ -214,7 +222,6 @@ def test_a_chatty_library_cannot_push_out_what_the_log_is_for(tmp_path, monkeypa
     came looking for them. BlindPilot's own logger is set to the asked-for
     level; nothing else drops below WARNING unless somebody asks for it.
     """
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
     monkeypatch.delenv("BLINDPILOT_LOG_LEVEL", raising=False)
     diagnostics.start_logging()
 
@@ -234,8 +241,9 @@ def test_a_chatty_library_cannot_push_out_what_the_log_is_for(tmp_path, monkeypa
     assert "connection pool is full" in written
 
 
-def test_the_path_is_reported_so_it_can_be_named_to_somebody(tmp_path, monkeypatch):
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+def test_the_path_is_reported_so_it_can_be_named_to_somebody(
+    tmp_path, monkeypatch, logs_in_tmp_path
+):
 
     started = diagnostics.start_logging()
 
@@ -253,9 +261,10 @@ def test_a_test_run_never_writes_to_the_real_log():
     )
 
 
-def test_the_folder_can_be_opened_without_reading_a_path_out_loud(monkeypatch, tmp_path):
+def test_the_folder_can_be_opened_without_reading_a_path_out_loud(
+    monkeypatch, tmp_path, logs_in_tmp_path
+):
     """Telling somebody a path they must then navigate to is not a way in."""
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
     opened: list[str] = []
     monkeypatch.setattr(diagnostics, "_reveal", lambda path: opened.append(str(path)) or True)
 
@@ -273,8 +282,9 @@ def test_opening_a_folder_that_is_not_there_yet_makes_it_first(monkeypatch, tmp_
     assert target.is_dir()
 
 
-def test_a_folder_that_will_not_open_is_reported_rather_than_raised(monkeypatch, tmp_path):
-    monkeypatch.setattr(diagnostics, "log_dir", lambda: tmp_path)
+def test_a_folder_that_will_not_open_is_reported_rather_than_raised(
+    monkeypatch, tmp_path, logs_in_tmp_path
+):
 
     def refuse(_path):
         raise OSError("no file manager here")

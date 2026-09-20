@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
+from doubles import panel_stub
 
 
 def _panel(monkeypatch, mode):
@@ -26,22 +27,16 @@ def _panel(monkeypatch, mode):
     monkeypatch.setattr(app.SETTINGS, "speak_live", True)
     monkeypatch.setattr(app.SETTINGS, "show_thinking", True)
 
-    panel = type("PanelStub", (), {})()
-    panel.spoken: list[str] = []
-    panel.status: list[str] = []
-    panel._rows = []
-    panel._response_count = 1
-    panel._stream_response = 1
-    panel._streamed_assistant = ""
-    panel._stopping = False
-    panel._assistant_narrated_this_turn = False
-    panel._session_backend = app.BACKEND_CLAUDE
-    panel._set_status = panel.status.append
-    panel._refresh_list = lambda: None
-    panel._begin_stream_response = lambda: 1
+    panel = panel_stub(
+        spoken=[],
+        _response_count=1,
+        _stream_response=1,
+        _assistant_narrated_this_turn=False,
+        _begin_stream_response=lambda: 1,
+        GetParent=lambda: None,
+    )
     # The real one, minus the wx parent lookup a stub has no way to satisfy.
     panel._say = lambda text, kind="assistant": app.SessionPanel._say(panel, text, kind)
-    panel.GetParent = lambda: None
     panel.announce_calls = panel.spoken
     return panel
 
@@ -151,23 +146,6 @@ def test_nothing_is_narrated_after_stop_was_pressed(monkeypatch, _capture):
 
 # ----- the menu -----
 wx = pytest.importorskip("wx")
-
-
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        return wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-
-
-@pytest.fixture
-def frame(wx_app):
-    window = wx.Frame(None)
-    try:
-        yield window
-    finally:
-        window.Destroy()
 
 
 def test_the_menu_offers_both_modes_as_an_exclusive_choice(frame):

@@ -24,35 +24,14 @@ from types import SimpleNamespace
 import pytest
 
 import blindpilot_app as app
-
-
-class _Earcons:
-    def __init__(self):
-        self.played: list[str] = []
-        self.enabled = True
-        self.cues = {}
-
-    def stop_progress(self):
-        self.played.append("stop")
-
-    def play_error(self):
-        self.played.append("error")
+from doubles import panel_stub
 
 
 def _panel(monkeypatch):
-    panel = type("PanelStub", (), {})()
-    panel._stopping = False
-    panel._turns = []
-    panel._stream_response = None
-    panel._rows = []
-    panel._response_count = 0
-    panel._worker = None
-    panel._earcons = _Earcons()
-    panel._show_working = lambda: None
-    panel._hide_working = lambda: None
-    panel.announced: list[tuple] = []
+    panel = panel_stub(refreshed=0)
+    # Recorded with the urgency, not just the words: whether an error
+    # interrupts is the other half of what this file is about.
     panel._announce = lambda text, urgent=False: panel.announced.append((text, urgent))
-    panel.refreshed = 0
 
     def _refresh_list():
         panel.refreshed += 1
@@ -72,7 +51,7 @@ def test_a_failed_turn_plays_the_error_cue(monkeypatch):
 
     app.SessionPanel._on_failed(panel, "the turn stopped")
 
-    assert "error" in panel._earcons.played
+    assert "error" in panel._earcons.calls
 
 
 def test_a_turn_the_user_stopped_is_not_an_error(monkeypatch):
@@ -82,7 +61,7 @@ def test_a_turn_the_user_stopped_is_not_an_error(monkeypatch):
 
     app.SessionPanel._on_failed(panel, "FreeBuff reported that the response was interrupted")
 
-    assert panel._earcons.played == []
+    assert panel._earcons.calls == []
     assert panel.announced == []
 
 

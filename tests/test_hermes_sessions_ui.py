@@ -8,35 +8,13 @@ the suite.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 wx = pytest.importorskip("wx")
 
 import blindpilot_app  # noqa: E402
 from blindpilot_app import HermesSessionsDialog, hermes_session_label  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        application = wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-    yield application
-
-
-@pytest.fixture
-def frame(wx_app):
-    window = wx.Frame(None)
-    try:
-        yield window
-    finally:
-        window.Destroy()
 
 
 CATALOG = [

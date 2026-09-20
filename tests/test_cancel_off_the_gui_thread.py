@@ -25,6 +25,7 @@ import time
 
 
 import blindpilot_app as app
+from doubles import panel_stub
 
 
 class _Worker:
@@ -63,14 +64,9 @@ class _Page:
 
 
 def _panel(worker=None):
-    panel = _Page()
-    panel._worker = worker
-    panel._earcons = type("E", (), {"stop_progress": lambda self: None})()
-    panel._show_working = lambda: None
-    panel._hide_working = lambda: None
-    panel._dictation_timer = None
-    panel._close_question_dialog = lambda: None
-    return panel
+    # Built on _Page rather than the shared stub's own type: the closing
+    # handlers pick the session tabs out of the notebook by isinstance.
+    return panel_stub(_Page, _worker=worker)
 
 
 # ----- closing one tab -----

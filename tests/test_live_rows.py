@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from blindpilot_app import _result_label, _tool_result_text, _tool_use_label  # noqa: E402
+from doubles import panel_stub  # noqa: E402
 from markdown_rows import Row, reassemble, reassemble_all  # noqa: E402
 from test_claude_stream_resilience import _FakeProc as _ClaudeFakeProc  # noqa: E402
 
@@ -392,63 +393,9 @@ if __name__ == "__main__":
 
 
 # ----- Stopping a run -----
-class _Button:
-    """Minimal stand-in for the wx buttons the lifecycle handlers touch."""
-
-    def __init__(self) -> None:
-        self.enabled = True
-
-    def Enable(self) -> None:
-        self.enabled = True
-
-    def Disable(self) -> None:
-        self.enabled = False
-
-
-class _Earcons:
-    def __init__(self) -> None:
-        self.stopped = 0
-
-    def stop_progress(self) -> None:
-        self.stopped += 1
-
-    def play_received(self) -> None:
-        pass
-
-
 def _stub_panel(app, **overrides):
-    """A SessionPanel stand-in carrying only the state these handlers use."""
-    panel = type("PanelStub", (), {})()
-    panel._earcons = _Earcons()
-    panel._show_working = lambda: None
-    panel._hide_working = lambda: None
-    panel._turns = []
-    panel._rows = []
-    panel._response_count = 0
-    panel._stream_response = None
-    panel._streamed_assistant = ""
-    panel._stopping = False
-    panel._assistant_narrated_this_turn = True
-    panel._session_backend = app.BACKEND_FREEBUFF
-    panel.announced = []
-    panel.status = []
-    # The real `_announce` speaks and mirrors to the status bar; a stub that
-    # only recorded one of the two would hide which of them a caller used.
-    panel._announce = lambda text: (panel.announced.append(text), panel.status.append(text))
-    panel._set_status = lambda text: panel.status.append(text)
-    panel._refresh_list = lambda: None
-    panel._say = lambda _text, _kind="assistant": False
-    # Whether a turn is still going is asked through the real method, so a stub
-    # cannot quietly disagree with the window about it.
-    panel._worker = None
-    panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
-    panel.send_btn = _Button()
-    panel.steer_btn = _Button()
-    panel.stop_btn = _Button()
-    panel._finish_stopped_turn = lambda: app.SessionPanel._finish_stopped_turn(panel)
-    for name, value in overrides.items():
-        setattr(panel, name, value)
-    return panel
+    """The shared stand-in, on the backend these lifecycle handlers assume."""
+    return panel_stub(_session_backend=app.BACKEND_FREEBUFF, **overrides)
 
 
 def test_stopping_keeps_the_partial_answer_and_is_not_reported_as_an_error():

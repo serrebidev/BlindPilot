@@ -172,23 +172,6 @@ def test_the_answer_still_stops_the_loop_with_every_cue_off(earcons):
 wx = pytest.importorskip("wx")
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        return wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-
-
-@pytest.fixture
-def frame(wx_app):
-    window = wx.Frame(None)
-    try:
-        yield window
-    finally:
-        window.Destroy()
-
-
 def test_the_submenu_offers_one_switch_per_cue(frame):
     menu = app.MainFrame._build_sound_cue_menu(frame)
     try:

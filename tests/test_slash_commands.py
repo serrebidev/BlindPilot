@@ -11,14 +11,10 @@ Run from the project root:
 
 from __future__ import annotations
 
-import os
-import sys
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from agent_backends import BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_FREEBUFF, BACKEND_IDS  # noqa: E402
-from blindpilot_app import SessionPanel, _slash_commands_for_backend  # noqa: E402
+from agent_backends import BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_FREEBUFF, BACKEND_IDS
+from blindpilot_app import SessionPanel, _slash_commands_for_backend
 
 
 def _names(backend: str) -> list[str]:

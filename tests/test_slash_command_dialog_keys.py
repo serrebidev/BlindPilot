@@ -1,13 +1,14 @@
 """Enter, Escape, double click and construction, in the slash-command picker.
 
 SlashCommandDialog replaced a stock wx.SingleChoiceDialog in
-_pick_slash_command. HistoryDialog and HermesSessionsDialog each got a
-dedicated test_*_dialog_keys.py file when the same EVT_CHAR_HOOK Enter and
-Escape handling was added to them; this one had none.
+_pick_slash_command. HistoryDialog and HermesSessionsDialog were covered when
+the same EVT_CHAR_HOOK Enter and Escape handling was added to them; this one
+had none.
 
-The key-handling tests below stub the dialog the way test_history_dialog_keys.py
-does, so they run without a display and call the real bound _on_key and
-_accept methods on the stub. The remaining tests build a real dialog, the way
+The key-handling tests below stub the dialog the way
+test_conversation_dialog_keys.py does, so they run without a display and call
+the real bound _on_key and _accept methods on the stub. The remaining tests
+build a real dialog, the way
 test_hermes_sessions_ui.py does with its frame fixture, because selecting the
 first row, setting the title, and showing the message all happen in __init__,
 and double click has to be proven through the real EVT_LISTBOX_DCLICK
@@ -16,16 +17,13 @@ binding, not reimplemented.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 wx = pytest.importorskip("wx")
 
 import blindpilot_app as app  # noqa: E402
+from doubles import Button, KeyEvent  # noqa: E402
 
 LABELS = ["/help. Show help", "/clear. Clear the conversation", "/model. Switch model"]
 MESSAGE = "Choose a slash command. It will be placed in the prompt ready to send."
@@ -34,25 +32,9 @@ MESSAGE = "Choose a slash command. It will be placed in the prompt ready to send
 # -- Enter and Escape, stubbed, no display needed --------------------------
 
 
-class _Button:
-    """Stands in for `wx.Button`, which the handler has to recognise."""
-
-
-class _Event:
-    def __init__(self, key):
-        self._key = key
-        self.skipped = False
-
-    def GetKeyCode(self):
-        return self._key
-
-    def Skip(self):
-        self.skipped = True
-
-
 @pytest.fixture
 def stub(monkeypatch):
-    monkeypatch.setattr(app.wx, "Button", _Button)
+    monkeypatch.setattr(app.wx, "Button", Button)
     dialog = type("DialogStub", (), {})()
     dialog.ended: list[int] = []
     dialog.EndModal = dialog.ended.append
@@ -64,7 +46,7 @@ def stub(monkeypatch):
 
 
 def _press(dialog, key):
-    event = _Event(key)
+    event = KeyEvent(key)
     app.SlashCommandDialog._on_key(dialog, event)
     return event
 
@@ -87,7 +69,7 @@ def test_enter_from_the_numpad_also_accepts(stub):
 
 def test_enter_on_a_button_does_not_accept(stub):
     """Tabbing to Cancel and pressing Enter must cancel, not choose a command."""
-    stub.focus = _Button()
+    stub.focus = Button()
 
     event = _press(stub, app.wx.WXK_RETURN)
 
@@ -96,7 +78,7 @@ def test_enter_on_a_button_does_not_accept(stub):
 
 
 def test_escape_cancels_from_anywhere(stub):
-    stub.focus = _Button()
+    stub.focus = Button()
 
     _press(stub, app.wx.WXK_ESCAPE)
 
@@ -113,24 +95,6 @@ def test_an_unrelated_key_is_left_for_the_focused_control(stub):
 
 
 # -- title, message, initial selection and double click, for real ---------
-
-
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        application = wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-    yield application
-
-
-@pytest.fixture
-def frame(wx_app):
-    window = wx.Frame(None)
-    try:
-        yield window
-    finally:
-        window.Destroy()
 
 
 @pytest.fixture

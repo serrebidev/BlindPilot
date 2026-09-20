@@ -15,6 +15,7 @@ import re
 import pytest
 
 import blindpilot_app
+from doubles import Prompt
 from blindpilot_app import SessionPanel
 from markdown_rows import Row
 
@@ -39,14 +40,6 @@ class _Panel:
     _action_copy_response = SessionPanel._action_copy_response
 
 
-class _Prompt:
-    def __init__(self, text: str = ""):
-        self._text = text
-
-    def GetValue(self) -> str:
-        return self._text
-
-
 class _Worker:
     def __init__(self, alive: bool = True, steered: bool = True):
         self._alive = alive
@@ -64,7 +57,7 @@ def _row(payload: str = "some text") -> Row:
 
 
 def test_steering_with_nothing_running_says_so():
-    panel = _Panel(_worker=None, prompt=_Prompt("go on then"))
+    panel = _Panel(_worker=None, prompt=Prompt("go on then"))
 
     SessionPanel._on_steer(panel)
 
@@ -72,7 +65,7 @@ def test_steering_with_nothing_running_says_so():
 
 
 def test_steering_an_empty_prompt_says_so():
-    panel = _Panel(_worker=_Worker(), prompt=_Prompt("   "))
+    panel = _Panel(_worker=_Worker(), prompt=Prompt("   "))
 
     SessionPanel._on_steer(panel)
 
@@ -81,7 +74,7 @@ def test_steering_an_empty_prompt_says_so():
 
 def test_steering_a_run_that_just_finished_says_so():
     """The narrowest window there is, and the one nobody would guess at."""
-    panel = _Panel(_worker=_Worker(steered=False), prompt=_Prompt("go on then"))
+    panel = _Panel(_worker=_Worker(steered=False), prompt=Prompt("go on then"))
 
     SessionPanel._on_steer(panel)
 

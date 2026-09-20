@@ -298,17 +298,15 @@ def test_the_verify_budget_is_half_the_teardown_budget():
     assert agent_backends._CODEX_INTERRUPT_VERIFY_SECONDS == blindpilot_app._CANCEL_JOIN_SECONDS / 2
 
 
-def test_an_interrupt_with_no_thread_id_sends_nothing():
+@pytest.mark.parametrize(
+    ("thread_id", "turn_id"),
+    [("", "turn-1"), ("thread-1", "")],
+    ids=["no thread id", "no turn id"],
+)
+def test_an_interrupt_missing_either_id_sends_nothing(thread_id, turn_id):
     proc = _FakeProc()
     server = agent_backends.CodexServer(proc)
-    assert server.interrupt("", "turn-1", 0.01) is False
-    assert proc.stdin.written == []
-
-
-def test_an_interrupt_with_no_turn_id_sends_nothing():
-    proc = _FakeProc()
-    server = agent_backends.CodexServer(proc)
-    assert server.interrupt("thread-1", "", 0.01) is False
+    assert server.interrupt(thread_id, turn_id, 0.01) is False
     assert proc.stdin.written == []
 
 

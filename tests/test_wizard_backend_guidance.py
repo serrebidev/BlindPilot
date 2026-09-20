@@ -23,14 +23,6 @@ from agent_backends import BACKEND_CODEX, BACKEND_COMMANDCODE, BACKEND_HERMES
 wx = pytest.importorskip("wx")
 
 
-@pytest.fixture(scope="module")
-def wx_app():
-    try:
-        return wx.App(False)
-    except Exception as exc:  # pragma: no cover - depends on the machine
-        pytest.skip(f"no display for wxPython: {exc}")
-
-
 class _Widget:
     def __init__(self):
         self.text = ""
