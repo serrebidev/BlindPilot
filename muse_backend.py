@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from hermes_backend import (
+    StdioTransport,
     _no_window_kwargs,
     _text_output_kwargs,
     wsl_exe,
@@ -54,6 +55,12 @@ MUSE_LAUNCHER = "muse"
 # a preference cache rather than the truth: the catalog changes with Muse
 # releases, and the picker always re-reads it when the cache has expired.
 MODEL_CACHE_SECONDS = 900.0
+
+# How long a live MSP host gets to answer one request of the catalog's. Two
+# of them are asked -- initialize, then model/list -- and a host that has
+# started at all answers both in well under a second; the budget is for a
+# cold distribution, not for thinking.
+MODEL_QUERY_TIMEOUT = 20.0
 
 # How long any single CLI probe may take. `muse --version` is instant once
 # the launcher has resolved itself, but its first run under a cold WSL
@@ -382,15 +389,14 @@ _catalog_lock = threading.Lock()
 _catalog_cache: tuple[float, tuple[list[str], list[str], str, str]] | None = None
 
 
-def muse_model_catalog(
-    cwd: Optional[str] = None, timeout: float = 90.0
-) -> tuple[list[str], list[str], str, str]:
+def muse_model_catalog(cwd: Optional[str] = None) -> tuple[list[str], list[str], str, str]:
     """(models, efforts, current model, current effort) from a live MSP host.
 
-    The catalog comes from `model/list` on a real `muse serve`, which is the
-    same request the picker's model switch is served by. Effort levels are
-    the protocol's ReasoningEffort enum, read from `muse --help`, which
-    documents them rather than asking a model.
+    The catalog comes from `model/list` on a real `muse serve`, reached over
+    the same stdio transport a turn uses, which is the same request the
+    picker's model switch is served by. Effort levels are the protocol's
+    ReasoningEffort enum, read from `muse --help`, which documents them
+    rather than asking a model.
 
     Returns empty lists rather than raising: a Muse that will not start --
     a cold WSL distribution, a broken install -- is reported by the caller
@@ -405,96 +411,46 @@ def muse_model_catalog(
     command = muse_command(cwd)
     if not command:
         return [], [], "", ""
-    models: list[str] = []
-    current = ""
+    transport = StdioTransport(cwd or str(Path.home()), argv=[*command, "serve"], peer="Muse Code")
     try:
-        proc = subprocess.Popen(
-            [*command, "serve"],
-            # On Windows the working directory was handed to WSL in the argv;
-            # Popen's own cwd would only accept a Windows path.
-            cwd=None if platform.system() == "Windows" else cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-            **_no_window_kwargs(),
-        )
+        transport.start()
     except OSError:
         return [], [], "", ""
-    frames: list[dict] = []
-    lock = threading.Lock()
-    got_catalog = threading.Event()
 
-    def _read() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
+    def _reply(request_id: int) -> Optional[dict]:
+        """The answer to one request, or None if the host never gives one."""
+        deadline = time.monotonic() + MODEL_QUERY_TIMEOUT
+        while time.monotonic() < deadline:
+            frame = transport.receive(0.5)
+            if frame is None:
+                if not transport.connected():
+                    return None
                 continue
-            try:
-                frame = json.loads(line)
-            except ValueError:
-                continue
-            with lock:
-                frames.append(frame)
-                # Anything addressed or announced unblocks the writer; the
-                # exact frame is picked out of `frames` by its id afterwards.
-                got_catalog.set()
+            if frame.get("id") == request_id:
+                return frame
+        return None
 
-    reader = threading.Thread(target=_read, daemon=True)
-    reader.start()
     try:
-        assert proc.stdin is not None
-        proc.stdin.write(
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    # MSP requires clientInfo.name to match ^[a-z0-9_]+$: a
-                    # mixed-case display name is invalid params.
-                    "params": {"clientInfo": {"name": "blindpilot", "version": "1"}},
-                }
-            )
-            + "\n"
+        transport.send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                # MSP requires clientInfo.name to match ^[a-z0-9_]+$: a
+                # mixed-case display name is invalid params.
+                "params": {"clientInfo": {"name": "blindpilot", "version": "1"}},
+            }
         )
-        proc.stdin.flush()
-        if not got_catalog.wait(20.0):
-            raise OSError("muse serve did not answer initialize")
-        with lock:
-            frames.clear()
-        got_catalog.clear()
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "initialized"}) + "\n")
-        proc.stdin.flush()
-        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "model/list"}) + "\n")
-        proc.stdin.flush()
-        got_catalog.wait(20.0)
-        with lock:
-            reply = next((f for f in frames if f.get("id") == 2), None)
+        if _reply(1) is None:
+            return [], [], "", ""
+        transport.send({"jsonrpc": "2.0", "method": "initialized"})
+        transport.send({"jsonrpc": "2.0", "id": 2, "method": "model/list"})
+        reply = _reply(2)
     finally:
-        try:
-            if proc.stdin is not None:
-                proc.stdin.close()
-        except (OSError, ValueError):
-            pass
-        try:
-            proc.terminate()
-            proc.wait(timeout=3)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        for stream in (proc.stdout, proc.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except (OSError, ValueError):
-                    pass
+        transport.close()
 
+    models: list[str] = []
+    current = ""
     if isinstance(reply, dict) and isinstance(reply.get("result"), dict):
         rows = reply["result"].get("models")
         if isinstance(rows, list):

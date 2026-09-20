@@ -841,15 +841,56 @@ class Transport(Protocol):
         ...
 
 
+class JsonRpcCalls:
+    """Request numbering and frame shapes for a worker driving a JSON-RPC peer.
+
+    Hermes' gateway and Muse's host are both JSON-RPC 2.0 over a
+    line-delimited pipe, so both workers number their requests and build
+    their frames the same way; what differs is only what each does with the
+    replies, which stays in the workers.
+
+    Ids start at 101 because both peers also send requests of their own down
+    the same pipe (approvals, questions), and a client that started at 1
+    would be numbering alongside them.
+    """
+
+    _request_id = 100
+
+    def _next_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
+
+    @staticmethod
+    def _rpc_frame(method: str, params: Optional[dict], request_id: Optional[int] = None) -> dict:
+        """One frame: a request when given an id, a notification without one."""
+        frame: dict = {"jsonrpc": "2.0"}
+        if request_id is not None:
+            frame["id"] = request_id
+        frame["method"] = method
+        if params is not None:
+            frame["params"] = params
+        return frame
+
+
 class StdioTransport:
-    """Hermes' gateway as a child process, spoken to over its pipes.
+    """A JSON-RPC host as a child process, spoken to over its pipes.
 
     This is the zero-configuration path: no address, no port, no key. The
     frames are newline-delimited JSON, which is why stdout is read by line.
+
+    Hermes' gateway is what it runs by default, and finding that gateway is
+    the only part of this class that is about Hermes. ``muse serve`` speaks
+    the same framing down the same kind of pipe, so it is driven through this
+    class as well: ``argv`` is a command line the caller has already worked
+    out, and ``peer`` is the name a failure message calls it by.
     """
 
-    def __init__(self, cwd: str) -> None:
+    def __init__(
+        self, cwd: str, *, argv: Optional[Sequence[str]] = None, peer: str = "Hermes"
+    ) -> None:
         self._cwd = cwd
+        self._argv = list(argv) if argv is not None else None
+        self._peer = peer
         self._proc: Optional[subprocess.Popen] = None
         self._frames: "list[dict]" = []
         self._frames_lock = threading.Lock()
@@ -861,7 +902,34 @@ class StdioTransport:
         self._send_lock = threading.Lock()
 
     def start(self) -> None:
-        """Launch the gateway. Raises ``OSError`` if it cannot be started."""
+        """Launch the child. Raises ``OSError`` if it cannot be started."""
+        command, cwd, env = self._launch_arguments()
+        self._proc = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            **_no_window_kwargs(),
+        )
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
+
+    def _launch_arguments(self) -> tuple[list[str], Optional[str], Optional[dict[str, str]]]:
+        """What to run, where to run it, and in which environment."""
+        if self._argv is not None:
+            # A caller that already knows its command line: Muse, whose
+            # launcher muse_backend has located and which wants nothing
+            # changed in its environment. On Windows that argv runs through
+            # wsl.exe and carries its own --cd, so Popen is given no working
+            # directory -- it would only accept a Windows path anyway.
+            cwd = None if platform.system() == "Windows" else self._cwd
+            return list(self._argv), cwd, None
         python = hermes_python()
         root = hermes_source_root()
         env = os.environ.copy()
@@ -901,21 +969,7 @@ class StdioTransport:
             ]
             # Popen's cwd is a Windows path; WSL was already told where to run.
             cwd = None
-        self._proc = subprocess.Popen(
-            command,
-            cwd=cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            **_no_window_kwargs(),
-        )
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+        return command, cwd, env
 
     def _read_stdout(self) -> None:
         proc = self._proc
@@ -1014,17 +1068,20 @@ class StdioTransport:
             self._frames_ready.notify_all()
 
     def connected(self) -> bool:
-        """Whether the local Hermes is still running and usable.
+        """Whether the child process is still running and usable.
 
         The counterpart of the remote check, so a caller holding a connection
-        between turns asks the same question of either transport.
+        between turns asks the same question of either transport. The process
+        is polled rather than trusted: a host that died without closing its
+        pipe would otherwise be reported as connected, and a caller waiting
+        on it would sit out its whole deadline.
         """
         proc = self._proc
         return proc is not None and proc.poll() is None and not self._closed
 
     def failure_detail(self) -> str:
         detail = "\n".join(self._stderr[-6:]).strip()
-        return detail or "Hermes closed the connection before the turn completed"
+        return detail or f"{self._peer} closed the connection before the turn completed"
 
 
 class WebSocketTransport:

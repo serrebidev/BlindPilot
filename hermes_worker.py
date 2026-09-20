@@ -22,6 +22,7 @@ from typing import Callable, Optional, Sequence
 
 from agent_backends import AskQuestions, Question, QuestionOption, question_summary
 from hermes_backend import (
+    JsonRpcCalls,
     StdioTransport,
     Transport,
     WebSocketTransport,
@@ -490,7 +491,7 @@ class HeldConnection:
             transport.close()
 
 
-class HermesWorker(threading.Thread):
+class HermesWorker(JsonRpcCalls, threading.Thread):
     """Run one Hermes turn, reporting it through BlindPilot's callbacks.
 
     The signature matches the other backends' workers so the window can hold
@@ -597,7 +598,6 @@ class HermesWorker(threading.Thread):
         # The picker row the live session is known to run; see HeldConnection.
         self._session_model = ""
         self._accepting_input = threading.Event()
-        self._request_id = 100
         self._gateway_session = session_id or ""
         # The per-process session id Hermes addresses turns with. Distinct from
         # the stored id above, which is what survives a restart.
@@ -695,18 +695,13 @@ class HermesWorker(threading.Thread):
 
     # -- protocol plumbing -------------------------------------------------
 
-    def _next_id(self) -> int:
-        self._request_id += 1
-        return self._request_id
-
     def _send(self, method: str, params: dict) -> Optional[int]:
         """Send one request. Returns the id to await, or None when it could not go."""
         transport = self._transport
         if transport is None:
             return None
         request_id = self._next_id()
-        frame = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-        return request_id if transport.send(frame) else None
+        return request_id if transport.send(self._rpc_frame(method, params, request_id)) else None
 
     def _request(self, method: str, params: dict) -> bool:
         return self._send(method, params) is not None

@@ -29,9 +29,7 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import json
-import queue
 import platform
-import subprocess
 import threading
 import time
 import uuid
@@ -42,9 +40,8 @@ from agent_backends import (
     AskQuestions,
     Question,
     QuestionOption,
-    no_window_kwargs,
 )
-from hermes_backend import STDERR_KEEP_LINES, windows_path_to_wsl
+from hermes_backend import JsonRpcCalls, StdioTransport, windows_path_to_wsl
 from markdown_rows import complete_sentences as _complete_sentences
 
 from muse_backend import muse_command, muse_session_access_error
@@ -105,133 +102,22 @@ def _uuid() -> str:
     return str(uuid.UUID(int=value))
 
 
-class MuseTransport:
+def _muse_transport(cwd: str) -> StdioTransport:
     """`muse serve` as a child process, spoken to over its pipes.
 
-    Line-delimited JSON both ways, the same framing Hermes' StdioTransport
-    speaks, so the contract written for that transport describes this one too.
+    MSP is line-delimited JSON-RPC, which is the framing Hermes' gateway
+    speaks down the same kind of pipe, so the connection is Hermes'
+    StdioTransport with Muse's own command line rather than a second copy of
+    it. Raises OSError when Muse is not installed where this process can
+    reach it, which is what the caller reports.
     """
-
-    def __init__(self, cwd: str) -> None:
-        self._cwd = cwd
-        self._proc: Optional[subprocess.Popen] = None
-        self._frames: "queue.Queue[dict]" = queue.Queue()
-        self._stderr: list[str] = []
-        self._closed = False
-        self._send_lock = threading.Lock()
-
-    def start(self) -> None:
-        """Launch `muse serve`. Raises OSError when it cannot be started."""
-        command = muse_command(self._cwd)
-        if not command:
-            raise OSError("Muse Code is not installed where this process can reach it")
-        self._proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            [*command, "serve"],
-            cwd=None,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-            **no_window_kwargs(),
-        )
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
-
-    def _read_stdout(self) -> None:
-        proc = self._proc
-        if proc is None or proc.stdout is None:
-            return
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                frame = json.loads(line)
-            except ValueError:
-                # Not protocol; remembered for the failure message, like stderr.
-                with self._send_lock:
-                    self._stderr.append(line[:400])
-                    del self._stderr[:-STDERR_KEEP_LINES]
-                continue
-            self._frames.put(frame)
-        self._closed = True
-
-    def _read_stderr(self) -> None:
-        proc = self._proc
-        if proc is None or proc.stderr is None:
-            return
-        for line in proc.stderr:
-            line = line.strip()
-            if line:
-                with self._send_lock:
-                    self._stderr.append(line)
-                    del self._stderr[:-STDERR_KEEP_LINES]
-
-    def send(self, message: dict) -> bool:
-        proc = self._proc
-        if proc is None or proc.stdin is None:
-            return False
-        try:
-            with self._send_lock:
-                proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-                proc.stdin.flush()
-        except (OSError, ValueError):
-            return False
-        return True
-
-    def receive(self, timeout: float) -> Optional[dict]:
-        try:
-            return self._frames.get(timeout=max(0.0, timeout))
-        except queue.Empty:
-            return None
-
-    def connected(self) -> bool:
-        return not self._closed
-
-    def failure_detail(self) -> str:
-        with self._send_lock:
-            lines = list(self._stderr)
-        detail = "; ".join(lines[-3:])
-        # Never empty: after close() this is what the user is told instead of
-        # "Muse did not respond in time", and the transport contract requires
-        # a failure to say something a person can act on.
-        return detail or "Muse Code closed the connection before the turn completed"
-
-    def close(self) -> None:
-        proc = self._proc
-        self._closed = True
-        if proc is None:
-            return
-        try:
-            if proc.stdin is not None:
-                proc.stdin.close()
-        except (OSError, ValueError):
-            pass
-        if proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except (OSError, subprocess.TimeoutExpired):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-        for stream in (proc.stdout, proc.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except (OSError, ValueError):
-                    pass
-        # Closed pipes and a waited process: same discipline as Hermes' close,
-        # because an unclosed pipe is a ResourceWarning that pytest -W error
-        # turns into a failed build against whichever test was running.
-        self._proc = None
+    command = muse_command(cwd)
+    if not command:
+        raise OSError("Muse Code is not installed where this process can reach it")
+    return StdioTransport(cwd, argv=[*command, "serve"], peer="Muse Code")
 
 
-class MuseWorker(threading.Thread):
+class MuseWorker(JsonRpcCalls, threading.Thread):
     """Run one Muse turn, reporting it through BlindPilot's callbacks.
 
     The signature matches the other backends' workers so the window can hold
@@ -274,7 +160,7 @@ class MuseWorker(threading.Thread):
         self._on_done = on_done
         self._on_question = on_question
 
-        self._transport: Optional[MuseTransport] = None
+        self._transport: Optional[StdioTransport] = None
         self._cancelled = False
         self._clean_end = False
         self._failed = False
@@ -284,7 +170,6 @@ class MuseWorker(threading.Thread):
         # here. The person is never asked, which is what the mode means.
         self._auto_approve = permission_mode == "bypassPermissions"
         self._accepting_input = threading.Event()
-        self._request_id = 100
         # Streaming frames that arrive while a request reply is awaited are
         # parked here for the turn loop to process first, so a turn never
         # loses an item because a handshake was still in flight when it
@@ -359,10 +244,6 @@ class MuseWorker(threading.Thread):
 
     # -- protocol plumbing -------------------------------------------------
 
-    def _next_id(self) -> int:
-        self._request_id += 1
-        return self._request_id
-
     def _fire(self, method: str, params: Optional[dict] = None) -> bool:
         """One notification-shaped send that does not wait for a reply.
 
@@ -373,10 +254,7 @@ class MuseWorker(threading.Thread):
         transport = self._transport
         if transport is None or not transport.connected():
             return False
-        message: dict = {"jsonrpc": "2.0", "method": method}
-        if params is not None:
-            message["params"] = params
-        return transport.send(message)
+        return transport.send(self._rpc_frame(method, params))
 
     def _request(
         self, method: str, params: Optional[dict] = None, timeout: float = 45.0
@@ -386,10 +264,7 @@ class MuseWorker(threading.Thread):
         if transport is None or not transport.connected():
             return None
         request_id = self._next_id()
-        message: dict = {"jsonrpc": "2.0", "id": request_id, "method": method}
-        if params is not None:
-            message["params"] = params
-        if not transport.send(message):
+        if not transport.send(self._rpc_frame(method, params, request_id)):
             return None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -423,8 +298,8 @@ class MuseWorker(threading.Thread):
     # -- the turn -----------------------------------------------------------
 
     def _do_run(self) -> None:
-        transport = MuseTransport(self._cwd)
         try:
+            transport = _muse_transport(self._cwd)
             transport.start()
         except OSError as exc:
             self._fail(str(exc))
