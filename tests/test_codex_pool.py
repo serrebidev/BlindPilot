@@ -147,7 +147,7 @@ def test_nothing_said_the_instant_a_thread_starts_can_fall_between_the_two():
     }
     proc = _FakeProc([json.dumps(reply), json.dumps(straight_after)])
     server = agent_backends.CodexServer(proc)
-    inbox = server.inbox()
+    inbox = queue.Queue()
     server.expect_thread(11, inbox)
     server.start_readers()
 
@@ -164,14 +164,14 @@ def test_what_a_finished_turn_says_on_its_way_out_is_not_kept_for_the_next_one()
     """
     proc = _FakeProc()
     server = agent_backends.CodexServer(proc)
-    first = server.inbox()
+    first = queue.Queue()
     server.attach("thread-1", first)
     server.detach_listener(first)
 
     server._route({"method": "item/completed", "params": {"threadId": "thread-1", "item": {}}})
 
     assert server._threads == {}, "a conversation nobody is reading was kept anyway"
-    second = server.inbox()
+    second = queue.Queue()
     server.attach("thread-1", second)
     assert second.empty(), "the next turn was handed the last turn's leftovers"
 
@@ -200,7 +200,7 @@ def _cancelled_before_it_read_its_reply(server):
     server and an empty `_thread_id`, so it cannot detach by id.
     """
     worker = _bare_worker()
-    inbox = server.inbox()
+    inbox = queue.Queue()
     server.expect_thread(11, inbox)
     server._route({"id": 11, "result": {"thread": {"id": "thread-new"}}})
     assert server._threads == {"thread-new": inbox}, "the reply did not bind the conversation"
@@ -237,7 +237,7 @@ def test_only_the_tabs_actually_reading_count_towards_ambiguity():
     warning = {"method": "configWarning", "params": {"summary": "check your config"}}
     server = agent_backends.CodexServer(_FakeProc())
     _cancelled_before_it_read_its_reply(server)._release()
-    live = server.inbox()
+    live = queue.Queue()
     server.attach("thread-2", live)
 
     server._route(warning)
@@ -250,8 +250,8 @@ def test_a_reply_goes_to_the_turn_that_asked_and_not_to_another_tab():
     reply = {"id": 11, "result": {"thread": {"id": "thread-1"}}}
     proc = _FakeProc([json.dumps(reply)])
     server = agent_backends.CodexServer(proc)
-    mine = server.inbox()
-    theirs = server.inbox()
+    mine = queue.Queue()
+    theirs = queue.Queue()
     server.attach("thread-2", theirs)
     server.expect(11, mine)
     server.start_readers()
@@ -265,8 +265,8 @@ def test_each_tab_only_hears_its_own_conversation():
     theirs = {"method": "item/completed", "params": {"threadId": "thread-2", "item": {}}}
     proc = _FakeProc([json.dumps(theirs), json.dumps(mine)])
     server = agent_backends.CodexServer(proc)
-    first = server.inbox()
-    second = server.inbox()
+    first = queue.Queue()
+    second = queue.Queue()
     server.attach("thread-1", first)
     server.attach("thread-2", second)
     server.start_readers()
@@ -278,7 +278,7 @@ def test_each_tab_only_hears_its_own_conversation():
 def test_a_turn_reading_a_server_that_dies_is_woken_rather_than_left_waiting():
     proc = _FakeProc([])
     server = agent_backends.CodexServer(proc)
-    inbox = server.inbox()
+    inbox = queue.Queue()
     server.attach("thread-1", inbox)
     server.start_readers()
 
@@ -786,7 +786,7 @@ def test_a_turn_gives_its_borrow_back_when_it_ends():
     server = agent_backends.CodexServer(_FakeProc())
     worker = _bare_worker()
     worker._server = server
-    worker._inbox = server.inbox()
+    worker._inbox = queue.Queue()
     server.borrow()
     worker._borrowed = True
 
@@ -807,9 +807,9 @@ def test_a_reply_of_the_wrong_shape_does_not_end_every_tabs_turn():
     healthy = {"method": "item/started", "params": {"threadId": "thread-1", "item": {}}}
     proc = _FakeProc([json.dumps(nonsense), json.dumps(healthy)])
     server = agent_backends.CodexServer(proc)
-    mine = server.inbox()
+    mine = queue.Queue()
     server.expect_thread(11, mine)
-    other = server.inbox()
+    other = queue.Queue()
     server.attach("thread-1", other)
     server.start_readers()
 
@@ -1093,14 +1093,16 @@ def test_a_server_is_not_dropped_while_another_tab_is_registering_its_borrow(mon
 
     handed_over = threading.Event()
     carry_on = threading.Event()
-    registered = server.inbox
+    # `stderr_mark` is read between the take and the borrow, so holding it
+    # open is holding the window under test open.
+    marking = server.stderr_mark
 
     def between_the_take_and_the_borrow():
         handed_over.set()
         carry_on.wait(10)
-        return registered()
+        return marking()
 
-    monkeypatch.setattr(server, "inbox", between_the_take_and_the_borrow)
+    monkeypatch.setattr(server, "stderr_mark", between_the_take_and_the_borrow)
     arriving = _bare_worker()
     borrowing = threading.Thread(target=arriving._borrow_server, daemon=True)
     borrowing.start()
@@ -1131,7 +1133,7 @@ def test_a_message_that_cannot_be_routed_is_written_down(caplog):
     """
     proc = _FakeProc([json.dumps({"id": 11, "result": {"thread": "not an object"}})])
     server = agent_backends.CodexServer(proc)
-    mine = server.inbox()
+    mine = queue.Queue()
     server.expect_thread(11, mine)
 
     def explode(_message):
@@ -1305,7 +1307,7 @@ def test_a_stopped_turn_looks_for_its_own_name_before_it_leaves():
     """What makes that wait worth having: the reply is read, not raced for."""
     server = agent_backends.CodexServer(_FakeProc())
     worker = _stoppable(server, turn_id="")
-    inbox = server.inbox()
+    inbox = queue.Queue()
     inbox.put({"method": "item/agentMessage/delta", "params": {"delta": "half a sentence"}})
     inbox.put({"id": 42, "result": {"turn": {"id": "turn-9"}}})
 
@@ -1320,7 +1322,7 @@ def test_a_turn_codex_refused_leaves_the_thread_alone():
     """An error reply means no turn ever ran, so there is nothing to give up."""
     server = agent_backends.CodexServer(_FakeProc())
     worker = _stoppable(server, turn_id="")
-    inbox = server.inbox()
+    inbox = queue.Queue()
     inbox.put({"id": 42, "error": {"message": "no"}})
 
     worker._name_the_stopped_turn(inbox, 42)
@@ -1673,7 +1675,7 @@ def test_a_server_request_is_not_mistaken_for_the_reply_naming_the_turn():
     """
     server = agent_backends.CodexServer(_FakeProc())
     worker = _stoppable(server, turn_id="")
-    inbox = server.inbox()
+    inbox = queue.Queue()
     inbox.put({"method": "item/commandExecution/approval", "id": 42, "params": {}})
     inbox.put({"id": 42, "result": {"turn": {"id": "turn-9"}}})
 
@@ -1932,7 +1934,7 @@ def test_a_name_learned_after_the_cancel_gave_up_waiting_is_still_left_behind():
     worker.cancel()
     assert worker.abandoned_thread == "thread-1"
 
-    inbox = server.inbox()
+    inbox = queue.Queue()
     inbox.put({"id": 42, "result": {"turn": {"id": "turn-late"}}})
     worker._name_the_stopped_turn(inbox, 42)
 
@@ -2055,7 +2057,7 @@ def test_a_death_is_explained_by_this_turns_stderr_and_not_an_earlier_turns(monk
     server.start_readers()
     try:
         pipe.say("a warning from three turns ago")
-        _until(lambda: server.stderr_lines() == ["a warning from three turns ago"], "not read")
+        _until(lambda: server.stderr_since(0) == ["a warning from three turns ago"], "not read")
 
         worker = _bare_worker()
         worker._server = server
@@ -2066,7 +2068,7 @@ def test_a_death_is_explained_by_this_turns_stderr_and_not_an_earlier_turns(monk
         )
 
         pipe.say("thread 'main' panicked")
-        _until(lambda: len(server.stderr_lines()) == 2, "the panic was never read")
+        _until(lambda: len(server.stderr_since(0)) == 2, "the panic was never read")
         assert worker._why_it_died("Codex app server closed") == "thread 'main' panicked"
     finally:
         pipe.close()
@@ -2086,7 +2088,7 @@ def test_the_stderr_of_a_process_that_outlives_thousands_of_turns_is_capped():
     pipe.close()
     server.await_last_words(10)
 
-    lines = server.stderr_lines()
+    lines = server.stderr_since(0)
     assert len(lines) == agent_backends._CODEX_STDERR_LINES, f"kept {len(lines)} lines"
     assert lines[-1] == f"line {total - 1}", "the newest line, which is the one that says why"
     # A turn whose own output overran the cap gets what is left of it, not a

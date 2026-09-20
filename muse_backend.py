@@ -30,10 +30,12 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import threading
+import time
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Optional, Sequence
 
 from hermes_backend import (
     _no_window_kwargs,
@@ -46,10 +48,6 @@ from hermes_backend import (
 # Windows cannot run it (its platform check is Darwin/Linux), which is why a
 # Windows desktop reaches Muse inside WSL; macOS and Linux run it directly.
 MUSE_LAUNCHER = "muse"
-
-# Muse stores its account credentials here after `muse login` completes,
-# measured on 1.0.3. ~/.config/muse/auth.json, honouring XDG_CONFIG_HOME.
-MUSE_CREDENTIAL_RELPATH = ("muse", "auth.json")
 
 # `model/list` needs a live MSP host to ask, and a host costs a WSL process
 # on Windows; the answer is cached per machine for a while instead. This is
@@ -167,30 +165,6 @@ def reset_discovery() -> None:
     global _WSL_MUSE, _WSL_MUSE_CHECKED
     _WSL_MUSE = None
     _WSL_MUSE_CHECKED = False
-
-
-def muse_popen_wrapper() -> Optional["Callable[..., subprocess.Popen]"]:
-    """A Popen that runs ``[muse, *args]`` where Muse can actually run.
-
-    The login runner builds ``[binary, *login_args]`` and hands it to Popen.
-    On Windows that binary is a bash script inside a WSL distribution, which
-    Popen cannot execute, so the argv is rebuilt here as ``[wsl.exe, -e,
-    <launcher>, *args]`` -- the same bridge every other Muse path uses.
-    None where no rebuild is needed, so the caller keeps plain Popen.
-    """
-    if platform.system() != "Windows":
-        return None
-    launcher = wsl_exe()
-    path = wsl_muse_path()
-    if not launcher or not path:
-        return None
-
-    def popen(args: list[str], **kwargs: Any) -> subprocess.Popen:
-        return subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            [launcher, "-e", path, *args[1:]], **kwargs
-        )
-
-    return popen
 
 
 def muse_command(cwd: Optional[str] = None) -> Optional[list[str]]:
@@ -423,8 +397,6 @@ def muse_model_catalog(
     as "no catalog", not by this function crashing.
     """
     global _catalog_cache
-    import time
-
     with _catalog_lock:
         cached = _catalog_cache
         if cached is not None and time.monotonic() - cached[0] < MODEL_CACHE_SECONDS:
@@ -452,11 +424,9 @@ def muse_model_catalog(
         )
     except OSError:
         return [], [], "", ""
-    import threading as _threading
-
     frames: list[dict] = []
-    lock = _threading.Lock()
-    got_catalog = _threading.Event()
+    lock = threading.Lock()
+    got_catalog = threading.Event()
 
     def _read() -> None:
         assert proc.stdout is not None
@@ -474,7 +444,7 @@ def muse_model_catalog(
                 # exact frame is picked out of `frames` by its id afterwards.
                 got_catalog.set()
 
-    reader = _threading.Thread(target=_read, daemon=True)
+    reader = threading.Thread(target=_read, daemon=True)
     reader.start()
     try:
         assert proc.stdin is not None
@@ -492,7 +462,7 @@ def muse_model_catalog(
             + "\n"
         )
         proc.stdin.flush()
-        if not _wait_event(got_catalog, 20.0):
+        if not got_catalog.wait(20.0):
             raise OSError("muse serve did not answer initialize")
         with lock:
             frames.clear()
@@ -501,7 +471,7 @@ def muse_model_catalog(
         proc.stdin.flush()
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "model/list"}) + "\n")
         proc.stdin.flush()
-        _wait_event(got_catalog, 20.0)
+        got_catalog.wait(20.0)
         with lock:
             reply = next((f for f in frames if f.get("id") == 2), None)
     finally:
@@ -542,10 +512,6 @@ def muse_model_catalog(
     return models, efforts, current, ""
 
 
-def _wait_event(event: threading.Event, timeout: float) -> bool:
-    return event.wait(timeout)
-
-
 def _muse_effort_levels(command: Sequence[str]) -> list[str]:
     """Reasoning effort levels out of `muse --help`, kept to the protocol's.
 
@@ -571,8 +537,6 @@ def _muse_effort_levels(command: Sequence[str]) -> list[str]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
-    import re
-
     match = re.search(r"--reasoning-effort <EFFORT>\s*\n?\s*([^)]+)", proc.stdout or "")
     if not match:
         return []

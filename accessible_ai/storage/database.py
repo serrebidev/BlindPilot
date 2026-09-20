@@ -398,7 +398,7 @@ class Database:
                 (row["conversation_id"],),
             )
 
-    def list_conversations(self, limit: int = 500) -> list[ConversationSummary]:
+    def list_conversations(self) -> list[ConversationSummary]:
         """Every conversation on this machine, most recently touched first.
 
         Conversations were written and never read: the table has been filled
@@ -417,9 +417,8 @@ class Database:
                 LEFT JOIN profiles p ON p.id = c.profile_id
                 LEFT JOIN accounts a ON a.id = c.account_id
                 ORDER BY c.updated_at DESC, c.id DESC
-                LIMIT ?
-                """,
-                (int(limit),),
+                LIMIT 500
+                """
             ).fetchall()
         return [
             ConversationSummary(

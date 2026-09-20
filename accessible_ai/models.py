@@ -198,9 +198,8 @@ OPENROUTER_SERVER_TOOLS: tuple[tuple[str, str, str], ...] = (
 
 SERVER_TOOL_NAMES = tuple(name for name, _label, _description in OPENROUTER_SERVER_TOOLS)
 
-# The two tools that take settings of their own.
+# The one tool that takes settings of its own.
 SERVER_TOOL_WEB_SEARCH = "openrouter:web_search"
-SERVER_TOOL_SUBAGENT = "openrouter:subagent"
 
 
 @dataclass(slots=True)

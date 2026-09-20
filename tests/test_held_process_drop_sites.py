@@ -70,6 +70,7 @@ def test_dropping_stops_every_backend_this_panel_held():
         alive=lambda h: h.running,
         interrupt=lambda _h, _t: True,
         stop=lambda h: h.stop(),
+        busy=lambda _h: False,
     )
     panel = type("_Panel", (), {})()
     pool = backend_pool.pool()
@@ -108,6 +109,7 @@ def test_dropping_leaves_the_process_wide_backends_alone():
         alive=lambda _h: True,
         interrupt=lambda _h, _t: True,
         stop=lambda h: h.stop(),
+        busy=lambda _h: False,
     )
     panel = type("_Panel", (), {})()
     pool = backend_pool.pool()

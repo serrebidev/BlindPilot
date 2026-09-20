@@ -53,20 +53,18 @@ EDIT_DIALOG_MIN_SIZE = wx.Size(500, 300)
 
 
 class _ActionState:
-    """Small MenuItem-compatible state holder used by the embedded panel."""
+    """A MenuItem-shaped no-op, for a panel embedded without the menu.
 
-    def __init__(self, checked: bool = False):
-        self.enabled = True
-        self.checked = checked
+    MainFrame swaps each of these for the real menu item it owns, so nothing
+    reads the state back off one: the panel only has to be able to call
+    ``Enable`` and ``Check`` before that swap happens.
+    """
 
     def Enable(self, enabled: bool = True) -> None:
-        self.enabled = enabled
+        pass
 
     def Check(self, checked: bool = True) -> None:
-        self.checked = checked
-
-    def IsChecked(self) -> bool:
-        return self.checked
+        pass
 
 
 class ChatPanel(wx.Panel):
@@ -119,9 +117,8 @@ class ChatPanel(wx.Panel):
         self.regenerating_message_id: int | None = None
         self.closing = False
 
-        self.regenerate_item = _ActionState()
         self.refresh_models_item = _ActionState()
-        self.history_list_view_item = _ActionState(checked=True)
+        self.history_list_view_item = _ActionState()
         self.history_text_view_item = _ActionState()
         self._build_ui()
         # A window that opens on a conversation nobody has started yet never
@@ -984,7 +981,6 @@ class ChatPanel(wx.Panel):
     def _update_regenerate_enabled(self) -> None:
         enabled = not self.generating and self._last_assistant_message() is not None
         self.regenerate_button.Enable(enabled)
-        self.regenerate_item.Enable(enabled)
 
     @staticmethod
     def _attachment_display_lines(attachments: list[MessageAttachment]) -> str:
@@ -1160,7 +1156,6 @@ class ChatPanel(wx.Panel):
         self.assistant_announcement_buffer = ""
         self.generation_cancel = Event()
         self.regenerate_button.Disable()
-        self.regenerate_item.Enable(False)
         self.add_files_button.Disable()
         self.remove_files_button.Disable()
         self.clear_files_button.Disable()

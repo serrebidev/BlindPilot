@@ -24,6 +24,7 @@ from typing import Callable, Optional, cast
 import backend_pool
 from agent_backends import (
     BACKEND_CLAUDE,
+    ask_through_the_tool,
     end_process_group,
     own_group_kwargs,
     subprocess_env,
@@ -59,25 +60,7 @@ class Wants:
     session_id: Optional[str] = None
 
 
-# Why a question has to be asked with the tool rather than written out.
-#
-# BlindPilot announces an AskUserQuestion call and opens it in a dialog. A
-# question written into the answer instead arrives as ordinary prose: nothing
-# announces it, no dialog opens, and the turn ends with somebody waiting on an
-# answer nobody was told was wanted. A skill that runs an interview -- "grill
-# me" is the one this was found through -- asks in prose as a matter of
-# course, which is why the reason is spelled out here rather than left as a
-# preference: an instruction that only says "prefer this tool" loses to a
-# skill that says to interview in prose.
-ASK_THROUGH_THE_TOOL = (
-    "You are running inside BlindPilot, which a blind person is driving with a "
-    "screen reader. When you want an answer from them, ask with the "
-    "AskUserQuestion tool rather than writing the question into your reply. "
-    "BlindPilot speaks a tool question and opens it in a dialog; a question "
-    "written into a reply is neither spoken as a question nor shown as one, so "
-    "the turn ends and nothing tells them an answer is wanted. This holds for "
-    "every question, including an interview that asks them one at a time."
-)
+ASK_THROUGH_THE_TOOL = ask_through_the_tool("AskUserQuestion")
 
 
 def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:

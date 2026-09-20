@@ -65,7 +65,6 @@ class UpdateDialog(wx.Dialog):
         parent: wx.Window,
         current_version: str,
         speak: Callable[[str], None],
-        check: Callable[[str], Optional[ReleaseInfo]] = fetch_latest_release,
         start_check: bool = True,
     ):
         super().__init__(
@@ -77,7 +76,6 @@ class UpdateDialog(wx.Dialog):
         self.SetSize(self.FromDIP(FULL_SIZE))
         self.current_version = current_version
         self.speak = speak
-        self.check = check
         self.release: Optional[ReleaseInfo] = None
         self.archive: Optional[Path] = None
         self.cancel_event = threading.Event()
@@ -145,7 +143,6 @@ class UpdateDialog(wx.Dialog):
         secondary: str,
         notes: str = "",
         show_progress: bool = False,
-        announce: bool = True,
     ) -> None:
         self.status.SetLabel(message)
         self.status.Wrap(self.FromDIP(STATUS_WRAP))
@@ -164,8 +161,7 @@ class UpdateDialog(wx.Dialog):
         target = self.primary_button if primary is not None else self.secondary_button
         target.SetDefault()
         target.SetFocus()
-        if announce:
-            self.speak(message)
+        self.speak(message)
 
     def _fit_to_state(self, has_notes: bool) -> None:
         """Size the dialog to what it shows and lay the panel out again.
@@ -250,7 +246,7 @@ class UpdateDialog(wx.Dialog):
 
     def _check_worker(self) -> None:
         try:
-            release = self.check(self.current_version)
+            release = fetch_latest_release(self.current_version)
         except UpdateError as exc:
             _call_after(self._check_failed, str(exc))
             return

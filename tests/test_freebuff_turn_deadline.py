@@ -72,7 +72,7 @@ def _run(monkeypatch, screens, seconds=1.0, hold=None):
     worker._write = write
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
     monkeypatch.setattr(agent_backends, "set_freebuff_model", lambda _model: None)
-    monkeypatch.setattr(agent_backends, "freebuff_model_options", lambda: (["m"], [], "m", "", ""))
+    monkeypatch.setattr(agent_backends, "freebuff_model_options", lambda: (["m"], "m", ""))
     monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(spawn))
     monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", seconds)
 

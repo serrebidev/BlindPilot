@@ -131,10 +131,9 @@ class ConversationList(wx.VListBox):
         """The width to measure at: pinned across a resize until cleared.
 
         Set by the first measurement taken while the cache is empty, and
-        dropped whenever the cache is cleared - a Set, a resize, or an
-        explicit ForgetMeasurementWidth. Between those, every measurement in
-        the session keys on the same width even if GTK has not applied the
-        size the control was given yet.
+        dropped whenever the cache is cleared - a Set or a resize. Between
+        those, every measurement in the session keys on the same width even
+        if GTK has not applied the size the control was given yet.
         """
         if self._frozen_width is None:
             self._frozen_width = self.GetClientSize().width

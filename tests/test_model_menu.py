@@ -52,7 +52,7 @@ class _Panel(app.SessionPanel):
     def open_connect_dialog(self) -> None:
         self.opened.append("connect")
 
-    def _set_mode(self, value: str, speak: bool = True) -> None:
+    def _set_mode(self, value: str) -> None:
         self.set_modes.append(value)
         self.mode = value
 

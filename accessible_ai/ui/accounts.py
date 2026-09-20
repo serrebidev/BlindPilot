@@ -290,11 +290,9 @@ class AccountEditorDialog(wx.Dialog):
         parent: wx.Window,
         label: str,
         name: str,
-        password: bool = False,
     ) -> wx.TextCtrl:
         grid.Add(wx.StaticText(parent, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
-        style = wx.TE_PASSWORD if password else 0
-        control = wx.TextCtrl(parent, style=style)
+        control = wx.TextCtrl(parent)
         control.SetName(name)
         grid.Add(control, 1, wx.EXPAND)
         return control
@@ -657,16 +655,7 @@ class AccountsDialog(wx.Dialog):
         account = self.selected()
         if not account:
             return
-        self.model_action_running = True
-        for control in (
-            self.add_button,
-            self.edit_button,
-            self.delete_button,
-            self.test_button,
-            self.refresh_button,
-            self.close_button,
-        ):
-            control.Disable()
+        self._set_busy(True)
 
         def work() -> None:
             try:
@@ -678,8 +667,9 @@ class AccountsDialog(wx.Dialog):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _model_action_done(self, message: str, is_error: bool = False) -> None:
-        self.model_action_running = False
+    def _set_busy(self, busy: bool) -> None:
+        """Hold the whole dialog while a test or refresh talks to the provider."""
+        self.model_action_running = busy
         for control in (
             self.add_button,
             self.edit_button,
@@ -688,7 +678,10 @@ class AccountsDialog(wx.Dialog):
             self.refresh_button,
             self.close_button,
         ):
-            control.Enable()
+            control.Enable(not busy)
+
+    def _model_action_done(self, message: str, is_error: bool = False) -> None:
+        self._set_busy(False)
         wx.MessageBox(
             message, "Accounts", wx.OK | (wx.ICON_ERROR if is_error else wx.ICON_INFORMATION), self
         )
