@@ -118,14 +118,39 @@ _TURN_LIMIT_FAILURE = (
 )
 
 # What bypass still does not cover, said once when a turn in bypass mode has a
-# tool refused. Command Code checks these before it checks the mode, so they
-# refuse in bypass exactly as they do in default (measured at 1.54.0), and a
-# listener who chose "bypass permissions" has every reason to expect otherwise.
+# tool refused. Command Code checks the rules and the root/home breaker before
+# it checks the mode, so an ask rule and that breaker stop a bypass run exactly
+# as they stop any other (measured at 1.58.1), and a listener who chose "bypass
+# permissions" has every reason to expect otherwise.
+#
+# Deliberately not in here: the tools a headless run withholds, which _tool_denied
+# already names on the refusal itself, and a bare "destructive shell command",
+# which is not what bypass refuses - bypass runs one, and the only removal that
+# still asks first is the filesystem root or the home directory.
 _BYPASS_GAP_NOTE = (
-    "Bypass does not cover this. Command Code still refuses a permissions.deny "
-    "match, a permissions.ask match and a destructive shell command in a "
-    "headless run, and the tools it withholds from a headless run are not a "
-    "permission question at all."
+    "Bypass does not cover this. Command Code applies a permissions.deny or "
+    "permissions.ask rule in bypass exactly as it does elsewhere, and a removal "
+    "of the filesystem root or your home directory still asks first."
+)
+
+# A refusal that is not a policy one ends the whole run rather than being handed
+# back to the model, and Command Code's print mode still exits 0 with whatever
+# text the turn had produced - measured against the CLI installed here, where a
+# permissions.ask rule matched by a bypass run stops it that way. So the answer
+# that follows is one that was cut off mid-work and not a failure, and this is
+# said before it for that reason.
+_PERMISSION_STOP_NOTE = (
+    "Command Code stopped the turn at a tool it would have asked about, and a "
+    "headless run has nobody to answer it. What follows is as far as the turn "
+    "had got, not a finished answer."
+)
+
+# The same stop with nothing to hand back. A run that ended before it had said
+# anything did not produce a partial answer, so it is reported as the failure it
+# is rather than as a turn that was cut short.
+_PERMISSION_STOP_FAILURE = (
+    "Command Code stopped the turn: a tool needed approval and a headless run "
+    "has nobody to give it."
 )
 
 # Command Code's documented print-mode exit codes, said as something a listener
@@ -245,6 +270,11 @@ class CommandcodeWorker(threading.Thread):
         self._session_seen = ""
         self._tool_names: dict[str, str] = {}
         self._tool_subjects: dict[str, str] = {}
+        # The last tool Command Code refused, as the sentence _tool_denied or
+        # _tool_refused already built. A stop that comes from a refusal has no
+        # stderr to read and no reason on the stream, so this is the only place
+        # the name of the tool survives.
+        self._last_refusal = ""
         # The bypass caveat is worth hearing once a turn, not once a refusal.
         self._gap_note_said = False
 
@@ -565,6 +595,7 @@ class CommandcodeWorker(threading.Thread):
         line = f"Refused: {name}: {subject}" if subject else f"Refused: {name}"
         if name in _WITHHELD_HEADLESS_TOOLS:
             line += " — Command Code withholds this tool from a headless run."
+        self._last_refusal = line
         self._on_activity("tool", line)
         self._say_bypass_gap()
 
@@ -581,7 +612,9 @@ class CommandcodeWorker(threading.Thread):
         detail = str(event.get("hookOutput") or event.get("error") or "").strip()
         first = detail.splitlines()[0][:200] if detail else ""
         verb = "Blocked" if blocked else "Failed"
-        self._on_activity("tool", f"{verb}: {name}: {first}" if first else f"{verb}: {name}")
+        line = f"{verb}: {name}: {first}" if first else f"{verb}: {name}"
+        self._last_refusal = line
+        self._on_activity("tool", line)
         if blocked:
             self._say_bypass_gap()
 
@@ -649,21 +682,38 @@ class CommandcodeWorker(threading.Thread):
             self._on_complete(text)
             return
         if str(frame.get("stopReason") or "") == "permission_denied":
-            # Not every refusal is handed back to the model. One that did not
-            # come from a permission rule -- an ask rule, a destructive shell
-            # command, a hook -- ends the whole turn instead, and a headless
-            # run has nobody to approve it. The turn then stops with no final
-            # text, which used to arrive as "Finished with nothing to say."
-            self._say_bypass_gap()
-            self._fail(
-                "Command Code stopped the turn: a tool needed approval and a headless run "
-                "has nobody to give it."
-            )
+            self._permission_stopped(frame)
             return
         final = str(frame.get("finalText") or "").strip()
         text = final or "".join(self._assistant_parts).strip()
         self._completed = True
         self._on_complete(text or "Finished with nothing to say.")
+
+    def _permission_stopped(self, frame: dict) -> None:
+        """A refusal nobody could answer ended the run, and the answer it made
+        is kept.
+
+        Command Code hands a policy denial back to the model - a permissions.deny
+        match, a mode gate, a tool name that does not exist - and the turn carries
+        on. A denial from anywhere else ends the whole run instead, which is what
+        a prompt becomes when there is nobody to answer it: a permissions.ask
+        rule, the root and home deletion breaker, a hook, or a permission check
+        that threw. Measured here: a bypass run with a permissions.ask rule that
+        matched exits 0, carries the text the turn had produced, and stops. That
+        text is an answer cut off, so it is kept and said to be partial, the same
+        way a turn out of turns is - only a stop with nothing to hand back is the
+        failure it used to be reported as every time.
+        """
+        self._say_bypass_gap()
+        lead = f"{self._last_refusal} — " if self._last_refusal else ""
+        final = str(frame.get("finalText") or "").strip()
+        text = final or "".join(self._assistant_parts).strip()
+        if not text:
+            self._fail(f"{lead}{_PERMISSION_STOP_FAILURE}")
+            return
+        self._on_activity("notice", f"{lead}{_PERMISSION_STOP_NOTE}")
+        self._completed = True
+        self._on_complete(text)
 
     def _error_text(self, frame: dict) -> str:
         error = frame.get("error")
