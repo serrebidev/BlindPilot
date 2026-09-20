@@ -2686,12 +2686,24 @@ def _question_options(raw: object) -> tuple[QuestionOption, ...]:
     )
 
 
-def _codex_questions(raw: object) -> tuple[Question, ...]:
-    """Read request_user_input's params into BlindPilot's own question shape.
+def _questions(
+    raw: object,
+    *,
+    multi_key: str = "",
+    custom_key: str = "",
+    secret_key: str = "",
+    id_key: str = "",
+) -> tuple[Question, ...]:
+    """Read a provider's list of question dicts into BlindPilot's own shape.
 
-    A question with no options is a free-text one; `isOther` is Codex asking
-    for the "Other" answer its tool description tells the model not to write
-    itself, so the two together decide whether typing is offered.
+    All four providers send the same thing — a list of dicts carrying a
+    question, a header and labelled options — and differ only in what they
+    call the flags beside them, and in which of those they send at all. Each
+    key is therefore named by its caller, and a key left empty means the
+    provider has nothing to say on that point and the `Question` default
+    stands: only Codex numbers its questions or marks an answer secret, only
+    opencode and Claude Code ask for more than one answer, and every one of
+    them lets an answer be typed instead of picked.
     """
     if not isinstance(raw, list):
         return ()
@@ -2708,12 +2720,25 @@ def _codex_questions(raw: object) -> tuple[Question, ...]:
                 question=text,
                 header=str(entry.get("header") or ""),
                 options=options,
-                allow_custom=bool(entry.get("isOther")) or not options,
-                secret=bool(entry.get("isSecret")),
-                id=str(entry.get("id") or ""),
+                multi_select=bool(entry.get(multi_key)) if multi_key else False,
+                # A question with no options is a free-text one whatever the
+                # flag says, so the two together decide whether typing is
+                # offered.
+                allow_custom=(bool(entry.get(custom_key)) or not options) if custom_key else True,
+                secret=bool(entry.get(secret_key)) if secret_key else False,
+                id=str(entry.get(id_key) or "") if id_key else "",
             )
         )
     return tuple(questions)
+
+
+def _codex_questions(raw: object) -> tuple[Question, ...]:
+    """Read request_user_input's params into BlindPilot's own question shape.
+
+    `isOther` is Codex asking for the "Other" answer its tool description
+    tells the model not to write itself.
+    """
+    return _questions(raw, custom_key="isOther", secret_key="isSecret", id_key="id")
 
 
 # How long a failing Codex turn waits for the last line of stderr, which is
@@ -2913,13 +2938,12 @@ class CodexServer:
 
     # ----- routing -----
 
-    def expect(self, request_id: int, listener: "queue.Queue[object]") -> None:
-        """Send this request's reply to that queue. Register before sending."""
-        self._expect(request_id, listener, binds_thread=False)
+    def expect(
+        self, request_id: int, listener: "queue.Queue[object]", *, binds_thread: bool = False
+    ) -> None:
+        """Send this request's reply to that queue. Register before sending.
 
-    def expect_thread(self, request_id: int, listener: "queue.Queue[object]") -> None:
-        """As `expect`, and subscribe the thread the reply names.
-
+        `binds_thread` also subscribes the conversation the reply names.
         `thread/start` and `thread/resume` both answer with the conversation's
         id (both `required: ["thread", ...]` in the app server's own schema),
         and the reader binds that conversation to this queue *before* it hands
@@ -2932,9 +2956,6 @@ class CodexServer:
         Codex sends between creating a thread and answering for it is
         `mcpServer/startupStatus/updated`, which this worker ignores.
         """
-        self._expect(request_id, listener, binds_thread=True)
-
-    def _expect(self, request_id: int, listener: "queue.Queue[object]", binds_thread: bool) -> None:
         with self._state_lock:
             closed = self._closed
             if not closed:
@@ -2953,9 +2974,9 @@ class CodexServer:
     def attach(self, thread_id: str, listener: "queue.Queue[object]") -> None:
         """Read this conversation's notifications from that queue.
 
-        Ordinarily `expect_thread` has already done this from the reply. This
-        is the belt and braces for a turn that had to fall back to the session
-        id it was given, and it is idempotent.
+        Ordinarily `expect(..., binds_thread=True)` has already done this from
+        the reply. This is the belt and braces for a turn that had to fall
+        back to the session id it was given, and it is idempotent.
         """
         if not thread_id:
             return
@@ -3333,8 +3354,26 @@ def codex_adapter() -> backend_pool.Adapter:
     )
 
 
-class CodexWorker(threading.Thread):
-    """Run one Codex turn through the official app-server JSONL protocol."""
+class _TurnWorker(threading.Thread):
+    """What every turn in this module is built on, whichever backend runs it.
+
+    The three workers below differ in how they talk to a provider, not in how
+    a turn starts and stops: each is handed the same message, conversation and
+    six callbacks, each has to say why it stopped exactly once, and each has to
+    report a crash rather than leave the window silent with Send re-enabled.
+    Written out per backend, that scaffold was three copies, and a fix to one
+    of them was a fix to one third of the app.
+
+    A subclass supplies `_do_run` (the turn itself), `_setup` for the fields
+    its own protocol needs, and, if it borrowed anything, `_teardown`. It does
+    not restate the signature: the window builds whichever worker the backend
+    chose from one set of arguments, and writing that set out once is what
+    keeps the three of them interchangeable.
+    """
+
+    # This backend as `BACKENDS` names it: the diagnostics record is filed
+    # under it, and a crash report calls the provider by its label.
+    _backend = ""
 
     def __init__(
         self,
@@ -3362,7 +3401,8 @@ class CodexWorker(threading.Thread):
         self._model = model
         self._effort = effort
         # Compaction is a request of its own rather than a message, so this
-        # turn summarises the conversation instead of adding to it.
+        # turn summarises the conversation instead of adding to it. Backends
+        # that cannot compact are never asked to (see `supports_compaction`).
         self._compact = compact
         self._on_session = on_session
         self._on_started = on_started
@@ -3371,6 +3411,66 @@ class CodexWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
+        self._cancelled = False
+        # Set once the turn's ending has been reported, whichever way it
+        # ended. The first account of a failure is the one that can be acted
+        # on; a crash while cleaning up after it is not worth speaking over
+        # the top of it. An Event rather than a flag because either thread can
+        # get there first -- a turn can end on the reader while the window's
+        # own thread is failing it.
+        self._settled = threading.Event()
+        self._accepting_input = threading.Event()
+        self._setup()
+
+    def _setup(self) -> None:
+        """The state this backend's turn needs on top of the shared fields."""
+
+    def accepting_input(self) -> bool:
+        return self._accepting_input.is_set() and not self._cancelled
+
+    def _fail(self, message: str) -> None:
+        """Report why the turn ended, once."""
+        if self._settled.is_set():
+            return
+        self._settled.set()
+        diagnostics.log_unfinished_turn(
+            self._backend,
+            session_id=self._session_id or "(new)",
+            permission_mode=self._permission_mode,
+            model=self._model or "(default)",
+            cancelled=self._cancelled,
+            detail=message,
+        )
+        self._on_failed(message)
+
+    def run(self) -> None:
+        try:
+            self._do_run()
+        except Exception as exc:
+            # `finally` re-enables Send and stops the progress earcon either
+            # way, so anything thrown here used to end the turn exactly as a
+            # finished one ends - with no answer and nothing said. The
+            # traceback went to a stderr the windowed build does not have.
+            self._fail(f"BlindPilot stopped reading {backend_label(self._backend)}: {exc}")
+        finally:
+            self._accepting_input.clear()
+            self._teardown()
+            self._on_done()
+
+    def _do_run(self) -> None:
+        """The turn itself. Every subclass has one."""
+        raise NotImplementedError
+
+    def _teardown(self) -> None:
+        """Let go of whatever this turn borrowed, however it ended."""
+
+
+class CodexWorker(_TurnWorker):
+    """Run one Codex turn through the official app-server JSONL protocol."""
+
+    _backend = BACKEND_CODEX
+
+    def _setup(self) -> None:
         # Borrowed from the pool, which starts and stops it; other tabs read it too.
         self._server: Optional[CodexServer] = None
         self._held: Optional[backend_pool.HeldProcess] = None
@@ -3384,9 +3484,7 @@ class CodexWorker(threading.Thread):
         self._inbox: Optional["queue.Queue[object]"] = None
         self._expected: list[int] = []
         self._borrowed = False
-        self._cancelled = False
-        self._accepting_input = threading.Event()
-        self._thread_id = session_id or ""
+        self._thread_id = self._session_id or ""
         self._turn_id = ""
         # The conversation given up after an unconfirmed interrupt. The next
         # turn resumes it from disk; the server stays, other tabs are on it.
@@ -3414,7 +3512,6 @@ class CodexWorker(threading.Thread):
         self._assistant_streams: dict[str, list[str]] = {}
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
-        self._failed = False
 
     @property
     def _stderr_lines(self) -> list[str]:
@@ -3432,9 +3529,6 @@ class CodexWorker(threading.Thread):
         """
         server = self._server
         return server.stderr_since(self._stderr_mark) if server is not None else []
-
-    def accepting_input(self) -> bool:
-        return self._accepting_input.is_set() and not self._cancelled
 
     def _send(self, message: dict) -> bool:
         server = self._server
@@ -3574,50 +3668,20 @@ class CodexWorker(threading.Thread):
         if server is not None:
             server.abandon_turn(thread_id, turn_id)
 
-    def _fail(self, message: str) -> None:
-        """Report why the turn ended, once.
-
-        The first account of a failure is the one that can be acted on. A crash
-        while cleaning up after it is not worth speaking over the top of it.
-        """
-        if self._failed:
-            return
-        self._failed = True
-        diagnostics.log_unfinished_turn(
-            "codex",
-            session_id=self._session_id or "(new)",
-            permission_mode=self._permission_mode,
-            model=self._model or "(default)",
-            cancelled=self._cancelled,
-            detail=message,
-        )
-        self._on_failed(message)
-
-    def run(self) -> None:
-        try:
-            self._do_run()
-        except Exception as exc:
-            # `finally` re-enables Send and stops the progress earcon either
-            # way, so anything thrown here used to end the turn exactly as a
-            # finished one ends - with no answer and nothing said. The
-            # traceback went to a stderr the windowed build does not have.
-            self._fail(f"BlindPilot stopped reading Codex: {exc}")
-        finally:
-            self._accepting_input.clear()
-            # This turn is over, however it ended. Read by `cancel` before it
-            # interrupts anything, because the watch it would wait on is about
-            # to be given back below.
-            self._finished.set()
-            # Nothing more will be read, so no further name can be learned. A
-            # cancel racing the end of the turn stops waiting for one rather
-            # than spending its whole grace on a thread that has gone.
-            self._turn_id_known.set()
-            # The process belongs to the pool now, not to this turn. It is
-            # stopped when the conversation goes away, when it is found dead,
-            # or when the reaper decides nobody is using it. All the turn
-            # gives back is its place in the server's routing tables.
-            self._release()
-            self._on_done()
+    def _teardown(self) -> None:
+        # This turn is over, however it ended. Read by `cancel` before it
+        # interrupts anything, because the watch it would wait on is about
+        # to be given back below.
+        self._finished.set()
+        # Nothing more will be read, so no further name can be learned. A
+        # cancel racing the end of the turn stops waiting for one rather
+        # than spending its whole grace on a thread that has gone.
+        self._turn_id_known.set()
+        # The process belongs to the pool now, not to this turn. It is
+        # stopped when the conversation goes away, when it is found dead,
+        # or when the reaper decides nobody is using it. All the turn
+        # gives back is its place in the server's routing tables.
+        self._release()
 
     def _release(self) -> None:
         """Stop the shared reader delivering to a turn that has ended."""
@@ -3755,10 +3819,9 @@ class CodexWorker(threading.Thread):
             if self._model:
                 params["model"] = self._model
             request = {"method": "thread/start", "id": thread_request, "params": params}
-        # `expect_thread`, not `expect`: this is the reply that names the
-        # conversation, and the reader subscribes it before handing the reply
-        # on, leaving no window in which a notification for it has nowhere
-        # to go.
+        # `binds_thread`: this is the reply that names the conversation, and
+        # the reader subscribes it before handing the reply on, leaving no
+        # window in which a notification for it has nowhere to go.
         self._expect(thread_request, binds_thread=True)
         self._send(request)
 
@@ -4008,10 +4071,7 @@ class CodexWorker(threading.Thread):
         if server is None or inbox is None:
             return
         self._expected.append(request_id)
-        if binds_thread:
-            server.expect_thread(request_id, inbox)
-        else:
-            server.expect(request_id, inbox)
+        server.expect(request_id, inbox, binds_thread=binds_thread)
 
     def _watch_turn(self) -> None:
         """Let a cancel on another thread find out when this turn stops.
@@ -4880,6 +4940,49 @@ class FreebuffTerminal(Protocol):
     def close(self, force: bool = False) -> object: ...
 
 
+def _drain_to_queue(
+    read_one: Callable[[], Optional[str]], stream_ended: threading.Event
+) -> Callable[[float], str]:
+    """Pump a terminal into a queue on a thread of its own, and hand back a reader.
+
+    Draining starts at launch rather than when somebody first asks for
+    output: a prewarmed terminal has no worker reading it yet, and a full PTY
+    buffer blocks the TUI before it can process input even though its
+    connection log says ready.
+
+    ``read_one`` hands back whatever has arrived, "" for nothing yet, and
+    None once nothing more ever will. Reading to that rather than while the
+    terminal is alive is what keeps the last line of a terminal that died at
+    startup -- the one that says why -- still buffered after isalive() goes
+    false.
+    """
+    chunks: queue.Queue[str] = queue.Queue()
+
+    def pump() -> None:
+        try:
+            while not stream_ended.is_set():
+                data = read_one()
+                if data is None:
+                    break
+                if data:
+                    chunks.put(data)
+        finally:
+            # Nothing more will ever arrive. Saying so turns a terminal that
+            # died at startup into a reported failure instead of an hour of
+            # silence.
+            stream_ended.set()
+
+    threading.Thread(target=pump, daemon=True).start()
+
+    def read(timeout: float) -> str:
+        try:
+            return chunks.get(timeout=timeout)
+        except queue.Empty:
+            return ""
+
+    return read
+
+
 def _spawn_freebuff_pty(
     args: list[str], cwd: str, stream_ended: threading.Event
 ) -> tuple[FreebuffTerminal, Callable[[float], str]]:
@@ -4935,35 +5038,17 @@ def _spawn_freebuff_pty(
         pty_pid = getattr(pty, "pid", 0)
         if pty_pid:
             roots.add(int(pty_pid))
-        chunks: queue.Queue[str] = queue.Queue()
 
-        def pump() -> None:
-            # Read to EOF rather than while alive: a terminal that dies at
-            # startup has its last line, the one that says why, still
-            # buffered after isalive() goes false.
+        def read_one() -> Optional[str]:
+            # ConPTY has no timeout of its own: the read blocks until either
+            # bytes or the end of the terminal, and anything it raises is
+            # the end of it.
             try:
-                while True:
-                    try:
-                        data = pty.read(4096)
-                    except Exception:
-                        break
-                    if data:
-                        chunks.put(data)
-            finally:
-                # Nothing more will ever arrive. Saying so turns a terminal
-                # that died at startup into a reported failure instead of an
-                # hour of silence.
-                stream_ended.set()
+                return cast(str, pty.read(4096))
+            except Exception:
+                return None
 
-        threading.Thread(target=pump, daemon=True).start()
-
-        def read(timeout: float) -> str:
-            try:
-                return chunks.get(timeout=timeout)
-            except queue.Empty:
-                return ""
-
-        return pty, read
+        return pty, _drain_to_queue(read_one, stream_ended)
 
     import pexpect
 
@@ -4981,34 +5066,17 @@ def _spawn_freebuff_pty(
         timeout=0.25,
     )
 
-    posix_chunks: queue.Queue[str] = queue.Queue()
-
-    def pump_posix() -> None:
-        # A prewarmed terminal has no worker reading it yet. Drain it from
-        # launch, as on Windows, or a full PTY buffer blocks the TUI before
-        # it can process input even though its connection log says ready.
+    def read_one_posix() -> Optional[str]:
+        # pexpect reads with a timeout of its own, so a quiet terminal is a
+        # TIMEOUT rather than the end of one.
         try:
-            while not stream_ended.is_set():
-                try:
-                    data = child.read_nonblocking(4096, timeout=0.25)
-                except pexpect.TIMEOUT:
-                    continue
-                except (pexpect.EOF, OSError):
-                    break
-                if data:
-                    posix_chunks.put(data)
-        finally:
-            stream_ended.set()
-
-    threading.Thread(target=pump_posix, daemon=True).start()
-
-    def read_posix(timeout: float) -> str:
-        try:
-            return posix_chunks.get(timeout=timeout)
-        except queue.Empty:
+            return cast(str, child.read_nonblocking(4096, timeout=0.25))
+        except pexpect.TIMEOUT:
             return ""
+        except (pexpect.EOF, OSError):
+            return None
 
-    return child, read_posix
+    return child, _drain_to_queue(read_one_posix, stream_ended)
 
 
 class _HiddenConsoleProcess:
@@ -5274,7 +5342,7 @@ def _take_freebuff_prewarm(cwd: str, session_id: Optional[str], model: str) -> O
 atexit.register(discard_freebuff_prewarm)
 
 
-class FreebuffWorker(threading.Thread):
+class FreebuffWorker(_TurnWorker):
     """Drive FreeBuff's interactive TUI through a pseudo-terminal.
 
     FreeBuff currently has no JSON or headless interface.  A PTY is therefore
@@ -5282,6 +5350,8 @@ class FreebuffWorker(threading.Thread):
     The adapter keeps live narration useful by turning visible TUI updates into
     activity rows and resumes the chat id FreeBuff creates on the next turn.
     """
+
+    _backend = BACKEND_FREEBUFF
 
     # The quoted form is drawn first on the composer in 0.0.168, before the
     # caption has scrolled in; matching it means readiness is seen at once
@@ -5293,37 +5363,13 @@ class FreebuffWorker(threading.Thread):
         r"(?mi)(?:thinking(?:\.\.\.|…)|working(?:\.\.\.|…)|■\s*Esc|Esc\s+to\s+(?:stop|interrupt))"
     )
 
-    def __init__(
-        self,
-        prompt: str,
-        session_id: Optional[str],
-        cwd: str,
-        permission_mode: str,
-        *,
-        model: str = "",
-        effort: str = "",
-        on_session: Callable[[str], None],
-        on_started: Callable[[], None],
-        on_activity: Callable[[str, str], None],
-        on_complete: Callable[[str], None],
-        on_failed: Callable[[str], None],
-        on_done: Callable[[], None],
-        on_question: Optional[AskQuestions] = None,
-    ) -> None:
-        super().__init__(daemon=True)
-        self._prompt = prompt
-        self._session_id = session_id
-        self._cwd = cwd
-        self._model = model.strip()
-        self._on_session = on_session
-        self._on_started = on_started
-        self._on_activity = on_activity
-        self._on_complete = on_complete
-        self._on_failed = on_failed
-        self._on_done = on_done
-        self._on_question = on_question
-        self._cancelled = False
-        self._accepting_input = threading.Event()
+    def _setup(self) -> None:
+        self._model = self._model.strip()
+        # FreeBuff is driven through its TUI, which takes no permission mode
+        # and no reasoning effort: the window passes both because every
+        # backend is built from one set of arguments, and this is what the
+        # diagnostics record says was in force instead.
+        self._permission_mode = "n/a"
         self._write_lock = threading.Lock()
         self._pty: Optional[FreebuffTerminal] = None
         # Set once the terminal can produce no further output.
@@ -5332,10 +5378,6 @@ class FreebuffWorker(threading.Thread):
         # see a second time before believing it.
         self._narrated: dict[str, str] = {}
         self._pending_frame: dict[str, str] = {}
-        self._failed = False
-
-    def accepting_input(self) -> bool:
-        return self._accepting_input.is_set() and not self._cancelled
 
     def steer(self, text: str) -> bool:
         if not self.accepting_input():
@@ -5369,32 +5411,10 @@ class FreebuffWorker(threading.Thread):
             # a terminal that was stopped but never closed piles up.
             end_hidden_terminal(pty)
 
-    def _fail(self, message: str) -> None:
-        """Report why the turn ended, once."""
-        if self._failed:
-            return
-        self._failed = True
-        diagnostics.log_unfinished_turn(
-            "freebuff",
-            session_id=self._session_id or "(new)",
-            permission_mode="n/a",
-            model=self._model or "(default)",
-            cancelled=self._cancelled,
-            detail=message,
-        )
-        self._on_failed(message)
-
-    def run(self) -> None:
-        try:
-            self._do_run()
-        except Exception as exc:
-            # See CodexWorker.run: without this the terminal is torn down, Send
-            # comes back, and the turn is over with nothing said about why.
-            self._fail(f"BlindPilot stopped reading FreeBuff: {exc}")
-        finally:
-            self._accepting_input.clear()
-            self.cancel()
-            self._on_done()
+    def _teardown(self) -> None:
+        # Cancelling is how this backend lets go: there is no request to send,
+        # only a terminal to close, and `cancel` is already that.
+        self.cancel()
 
     def _do_run(self) -> None:
         binary = find_backend_cli(BACKEND_FREEBUFF)
@@ -6605,27 +6625,39 @@ def opencode_auth_methods(provider_id: str) -> list[dict]:
     return [{"type": "api", "label": "Manually enter API key"}]
 
 
+def _opencode_write(
+    method: str, path: str, body: Optional[dict], timeout: int, failure: str
+) -> str:
+    """Change what opencode has stored. Returns "" on success, else the error.
+
+    Every one of these writes leaves the cached provider list stale, so the
+    invalidation belongs with the write rather than with each caller: forget
+    it once and the sign-in screen goes on showing an account that has just
+    been disconnected.
+    """
+    try:
+        opencode_server().request(method, path, body=body, timeout=timeout)
+    except (OSError, ValueError) as exc:
+        return opencode_error_text(exc, failure)
+    invalidate_backend_cache(BACKEND_OPENCODE)
+    return ""
+
+
 def opencode_connect_api_key(provider_id: str, key: str, metadata: Optional[dict] = None) -> str:
     """Store an API key for a provider. Returns "" on success, else the error."""
     body: dict = {"type": "api", "key": key}
     if metadata:
         body["metadata"] = {str(k): str(v) for k, v in metadata.items() if v}
-    try:
-        opencode_server().request("PUT", f"/auth/{provider_id}", body=body, timeout=60)
-    except (OSError, ValueError) as exc:
-        return opencode_error_text(exc, f"Could not connect {provider_id}.")
-    invalidate_backend_cache(BACKEND_OPENCODE)
-    return ""
+    return _opencode_write(
+        "PUT", f"/auth/{provider_id}", body, 60, f"Could not connect {provider_id}."
+    )
 
 
 def opencode_disconnect(provider_id: str) -> str:
     """Forget a provider's credentials. Returns "" on success, else the error."""
-    try:
-        opencode_server().request("DELETE", f"/auth/{provider_id}", timeout=60)
-    except (OSError, ValueError) as exc:
-        return opencode_error_text(exc, f"Could not disconnect {provider_id}.")
-    invalidate_backend_cache(BACKEND_OPENCODE)
-    return ""
+    return _opencode_write(
+        "DELETE", f"/auth/{provider_id}", None, 60, f"Could not disconnect {provider_id}."
+    )
 
 
 def opencode_oauth_start(
@@ -6654,14 +6686,13 @@ def opencode_oauth_finish(provider_id: str, method: int, code: str = "") -> str:
     body: dict = {"method": method}
     if code:
         body["code"] = code
-    try:
-        opencode_server().request(
-            "POST", f"/provider/{provider_id}/oauth/callback", body=body, timeout=300
-        )
-    except (OSError, ValueError) as exc:
-        return opencode_error_text(exc, f"Could not finish signing in to {provider_id}.")
-    invalidate_backend_cache(BACKEND_OPENCODE)
-    return ""
+    return _opencode_write(
+        "POST",
+        f"/provider/{provider_id}/oauth/callback",
+        body,
+        300,
+        f"Could not finish signing in to {provider_id}.",
+    )
 
 
 def _opencode_tool_label(name: str, arguments: object) -> str:
@@ -6727,78 +6758,28 @@ def _opencode_questions(raw: object) -> tuple[Question, ...]:
     model not to offer an "Other" of its own because the client adds one, so a
     typed answer is offered whether or not `custom` was set.
     """
-    if not isinstance(raw, list):
-        return ()
-    questions: list[Question] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        text = str(entry.get("question") or "").strip()
-        if not text:
-            continue
-        questions.append(
-            Question(
-                question=text,
-                header=str(entry.get("header") or ""),
-                options=_question_options(entry.get("options")),
-                multi_select=bool(entry.get("multiple")),
-            )
-        )
-    return tuple(questions)
+    return _questions(raw, multi_key="multiple")
 
 
-class OpencodeWorker(threading.Thread):
+class OpencodeWorker(_TurnWorker):
     """Run one opencode turn against the shared headless server."""
 
-    def __init__(
-        self,
-        prompt: str,
-        session_id: Optional[str],
-        cwd: str,
-        permission_mode: str,
-        *,
-        model: str = "",
-        effort: str = "",
-        compact: bool = False,
-        on_session: Callable[[str], None],
-        on_started: Callable[[], None],
-        on_activity: Callable[[str, str], None],
-        on_complete: Callable[[str], None],
-        on_failed: Callable[[str], None],
-        on_done: Callable[[], None],
-        on_question: Optional[AskQuestions] = None,
-    ) -> None:
-        super().__init__(daemon=True)
-        self._prompt = prompt
-        self._session_id = session_id or ""
-        self._cwd = cwd
-        self._permission_mode = permission_mode
-        self._model = model
-        self._effort = effort
-        # Compaction is a request of its own rather than a message, so this
-        # turn summarises the conversation instead of adding to it.
-        self._compact = compact
-        self._on_session = on_session
-        self._on_started = on_started
-        self._on_activity = on_activity
-        self._on_complete = on_complete
-        self._on_failed = on_failed
-        self._on_done = on_done
-        self._on_question = on_question
+    _backend = BACKEND_OPENCODE
+
+    # Every route this worker calls names the session, so a turn that has not
+    # got one yet carries the empty string rather than None.
+    _session_id: str
+
+    def _setup(self) -> None:
+        self._session_id = self._session_id or ""
         self._server: Optional[OpencodeServer] = None
         self._stream: object = None
         # Resolved once the turn starts. Working out whether a model offers the
         # chosen effort can mean reading opencode's catalog, and a message can
         # be steered into a running turn from the window's own thread.
         self._variant = ""
-        self._cancelled = False
-        self._accepting_input = threading.Event()
         self._roles: dict[str, str] = {}
         self._emitted: set[str] = set()
-        # A command runs on a request that only answers once the turn is over,
-        # so a failure can be noticed from either thread. This is what keeps
-        # the turn from being reported as failed twice.
-        self._settled = threading.Event()
         self._answer: list[str] = []
         self._tools_running: set[str] = set()
         # Set when a question was answered this turn. The provider poison that
@@ -6810,9 +6791,6 @@ class OpencodeWorker(threading.Thread):
         self._history_repaired = False
 
     # ----- what the window drives -----
-
-    def accepting_input(self) -> bool:
-        return self._accepting_input.is_set() and not self._cancelled
 
     def steer(self, text: str) -> bool:
         """Add a message to the turn that is already running.
@@ -6868,17 +6846,8 @@ class OpencodeWorker(threading.Thread):
         # itself is shared, and stays up for the next turn.
         self._close_stream()
 
-    def run(self) -> None:
-        try:
-            self._do_run()
-        except Exception as exc:
-            # See CodexWorker.run: without this the event stream is closed, Send
-            # comes back, and the turn is over with nothing said about why.
-            self._fail(f"BlindPilot stopped reading opencode: {exc}")
-        finally:
-            self._accepting_input.clear()
-            self._close_stream()
-            self._on_done()
+    def _teardown(self) -> None:
+        self._close_stream()
 
     def _close_stream(self) -> None:
         stream = self._stream
@@ -6889,19 +6858,6 @@ class OpencodeWorker(threading.Thread):
                 pass
 
     # ----- the turn -----
-
-    def _fail(self, message: str) -> None:
-        if not self._settled.is_set():
-            self._settled.set()
-            diagnostics.log_unfinished_turn(
-                "opencode",
-                session_id=self._session_id or "(new)",
-                permission_mode=self._permission_mode,
-                model=self._model or "(default)",
-                cancelled=self._cancelled,
-                detail=message,
-            )
-            self._on_failed(message)
 
     def _on_session_error(self, properties: dict) -> bool:
         """A session.error ends the turn — unless one repair attempt fits.

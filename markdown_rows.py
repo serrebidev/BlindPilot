@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from markdown_it import MarkdownIt
 
@@ -436,3 +436,36 @@ def complete_sentences(text: str) -> str:
     """The part of ``text`` that reads as finished, or nothing yet."""
     match = _SENTENCE_END_RE.search(text)
     return match.group(0).rstrip() if match else ""
+
+
+def release_finished(text: str, streamed: int, emit: Callable[[str], None]) -> int:
+    """Speak the sentences ``text`` has finished past ``streamed``.
+
+    The listener hears the answer while the model is still writing it, rather
+    than waiting for the whole turn. Only finished sentences go out: the live
+    edge of the stream is a half-written word, and half a word read aloud is
+    what makes a run sound broken.
+
+    Returns how much of ``text`` has now been spoken, for the caller to keep.
+    Lives here beside ``complete_sentences`` because every backend that
+    streams an answer needs exactly this, and each having its own copy is how
+    two of them end up releasing on different rules.
+    """
+    if len(text) <= streamed:
+        return streamed
+    spoken = complete_sentences(text[streamed:])
+    if not spoken:
+        return streamed
+    emit(spoken)
+    return streamed + len(spoken)
+
+
+def release_remainder(text: str, streamed: int, emit: Callable[[str], None]) -> int:
+    """Speak whatever of ``text`` is left, finished or not.
+
+    What the end of a turn calls: nothing more is coming, so the half-written
+    edge ``release_finished`` held back is all there will ever be of it.
+    """
+    if len(text) > streamed:
+        emit(text[streamed:])
+    return len(text)
