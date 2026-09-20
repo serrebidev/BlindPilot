@@ -158,6 +158,20 @@ def test_the_tools_that_would_answer_for_the_person_stay_withheld():
     assert "exit_plan_mode" not in enabled
 
 
+@pytest.mark.parametrize("mode", ["bypassPermissions", "default", "plan"])
+def test_the_turn_budget_is_raised_past_print_modes_own_default(mode):
+    """`-p` stops at 100 turns, which is the budget for a script.
+
+    A piece of work spends a turn on every step - read, edit, run the tests,
+    read again - and interactive Command Code has no cap at all, so the same
+    task that finishes in a terminal stopped here mid-way.
+    """
+    argv = build_command("command-code", mode)
+
+    assert argv[argv.index("--max-turns") + 1] == str(commandcode_worker.COMMANDCODE_MAX_TURNS)
+    assert commandcode_worker.COMMANDCODE_MAX_TURNS > 100
+
+
 def test_model_effort_and_resume_are_passed_through():
     argv = build_command("command-code", "plan", "gpt-5.5", "high", "abc-123")
     assert argv[argv.index("--model") + 1] == "gpt-5.5"
@@ -256,14 +270,58 @@ def test_an_error_result_is_reported(worker_env):
     assert "complete" not in rec.kinds()
 
 
-def test_max_turns_is_explained_rather_than_numbered(worker_env):
+def test_a_turn_cut_off_at_the_turn_limit_keeps_what_it_produced(worker_env):
+    """Print mode hands the partial answer back and exits 8; it did not fail.
+
+    Reporting that as an error threw away everything the turn had finished -
+    files written, tests run - and left a failure where the work should be.
+    """
     worker_env["proc"] = _FakeProcess(
-        lines=[_result(subtype="max_turns", sessionId="s1", finalText="partial")], returncode=8
+        lines=[_result(subtype="max_turns", sessionId="s1", finalText="what I got done")],
+        returncode=8,
     )
 
     _worker, rec = _run()
 
-    assert any("maximum number of turns" in text for text in rec.texts("failed"))
+    assert rec.texts("complete") == ["what I got done"]
+    assert rec.texts("failed") == []
+    # Said as a notice, which is the kind that is spoken whatever the narration
+    # mode, because "this is not the whole answer" is BlindPilot's own words.
+    notice = rec.activity("notice")
+    assert len(notice) == 1
+    assert str(commandcode_worker.COMMANDCODE_MAX_TURNS) in notice[0]
+    assert "not a finished answer" in notice[0]
+
+
+def test_a_turn_cut_off_at_the_turn_limit_with_nothing_to_show_still_fails(worker_env):
+    """There is no partial answer to keep, so there is nothing to call a turn."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[_result(subtype="max_turns", sessionId="s1", finalText="")], returncode=8
+    )
+
+    _worker, rec = _run()
+
+    assert rec.texts("complete") == []
+    assert rec.activity("notice") == []
+    failure = " ".join(rec.texts("failed"))
+    assert str(commandcode_worker.COMMANDCODE_MAX_TURNS) in failure
+    assert "without finishing an answer" in failure
+
+
+def test_a_partial_answer_streamed_before_the_limit_is_kept_too(worker_env):
+    """A release that streams its text and leaves finalText empty still counts."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "text_delta", "delta": "half an answer"}),
+            _result(subtype="max_turns", sessionId="s1", finalText=""),
+        ],
+        returncode=8,
+    )
+
+    _worker, rec = _run()
+
+    assert "half an answer" in "".join(rec.texts("complete"))
+    assert rec.texts("failed") == []
 
 
 def test_a_nonzero_exit_without_a_result_is_explained(worker_env):
