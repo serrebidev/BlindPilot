@@ -185,7 +185,9 @@ Behind a reverse proxy, Hermes must be told what address it answers to, or it re
 hermes config set dashboard.public_url https://hermes.example.com
 ```
 
-BlindPilot reads the status Hermes refused with and says which of these it is, rather than reporting every refusal as a wrong key.
+BlindPilot reads the status Hermes refused with and says which of these it is, rather than reporting every refusal as a wrong key. It also says whether the refusal came from Hermes or from something answering in its place, because a proxy that refuses the connection writes its own page and names itself.
+
+Behind a load balancer in front of more than one Hermes, the connection has to land on the same one that signed you in: a ticket is only known to the process that issued it. BlindPilot sends the session its login opened with the connection, which is what a load balancer with cookie affinity, and an authenticating proxy, both place it by.
 
 `websocket-client` is only needed for the remote path. If it is missing, BlindPilot names it as an installable package and keeps running.
 

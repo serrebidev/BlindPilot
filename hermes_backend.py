@@ -37,6 +37,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence
 
@@ -550,8 +551,8 @@ def hermes_asks_for_a_login(url: str, timeout: float = REMOTE_CONNECT_TIMEOUT) -
         return None
 
 
-def mint_ws_ticket(url: str, username: str, password: str) -> str:
-    """Log in with a password and return a one-shot WebSocket ticket.
+def mint_ws_ticket(url: str, username: str, password: str) -> tuple[str, str]:
+    """Log in with a password and return a WebSocket ticket and its session.
 
     A Hermes reachable from another machine requires a login of its own, and
     its WebSocket upgrade then accepts only a ticket, which lives thirty
@@ -559,19 +560,30 @@ def mint_ws_ticket(url: str, username: str, password: str) -> str:
     connects, rather than asking anyone to paste a value that expires while
     they are typing it.
 
+    Returns ``(ticket, cookies)``: the ticket for the upgrade's query string,
+    and the ``Cookie:`` header value of the session this login established, for
+    the same upgrade to send. See :func:`_cookie_header` for why the second
+    half is not optional.
+
     Raises ``OSError`` with a message worth showing when the login fails.
     """
     import urllib.error
     import urllib.request
-    from http.cookiejar import CookieJar
 
     base = _http_base(url)
 
+    # One jar spans the whole exchange and is handed back to the caller. The
+    # login sets Hermes' own session cookie on it, and whatever sits between
+    # the desktop and Hermes sets its own alongside: a load balancer's affinity
+    # cookie, an auth proxy's session. A jar made here and dropped on return is
+    # how the upgrade went out with no cookie at all while every client that
+    # worked sent one.
+    jar = CookieJar()
     # The packaged build's trust store, not OpenSSL's default, which the frozen
     # macOS build ships empty.
     opener = urllib.request.build_opener(
         urllib.request.HTTPSHandler(context=certificate_context()),
-        urllib.request.HTTPCookieProcessor(CookieJar()),
+        urllib.request.HTTPCookieProcessor(jar),
     )
 
     def _post(path: str, body: Optional[dict]) -> dict:
@@ -624,7 +636,33 @@ def mint_ws_ticket(url: str, username: str, password: str) -> str:
     ticket = str(payload.get("ticket") or "")
     if not ticket:
         raise OSError(f"Signed in to Hermes at {base}, but it issued no ticket.")
-    return ticket
+    return ticket, _cookie_header(jar, url)
+
+
+def _cookie_header(jar: "CookieJar", url: str) -> str:
+    """The ``Cookie:`` value a WebSocket upgrade should carry, from the login's jar.
+
+    ``?ticket=`` is what Hermes' own upgrade reads, but it is not the only
+    thing the request has to get past. A load balancer picks its back end from
+    an affinity cookie and hands a cookie-less client whichever instance it
+    likes, so a ticket minted on one is unknown to the next; an auth proxy
+    decides from a session cookie of its own. Both set those cookies on the
+    login that has just happened, and every client that works -- the dashboard
+    in a browser, Hermes' own desktop -- sends them on the upgrade. BlindPilot
+    sent none, which is asking to be refused by whichever layer was watching
+    while every other client is let through.
+
+    The jar is asked which cookies it would send to this address rather than
+    read out wholesale, so a cookie belonging to another host -- an SSO host
+    the login was redirected through -- stays there, an expired one is dropped,
+    and a Secure one is withheld over an unencrypted ``ws://``. ``wss`` counts
+    as secure, which is what a browser does with the same cookie.
+    """
+    import urllib.request
+
+    request = urllib.request.Request(url)
+    jar.add_cookie_header(request)
+    return request.get_header("Cookie") or ""
 
 
 def _no_ticket_message(base: str, code: int) -> str:
@@ -763,6 +801,30 @@ def _handshake_status(exc: Exception) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _refusal_evidence(exc: Exception) -> str:
+    """Something in front of Hermes by its own name, or "" when Hermes refused.
+
+    Hermes' own refusal is bare -- an empty 403 with no body, measured against
+    ``hermes serve`` -- because uvicorn answers a WebSocket its application
+    turns down with a blank 403 and nothing else. Anything that leaves a body
+    of its own is a different program writing its own error page, which is the
+    only way from here to tell "Hermes turned down the ticket" apart from
+    "something between this computer and Hermes turned down the WebSocket".
+    Both look like a 403 otherwise, and they have opposite fixes.
+
+    The name is quoted rather than trusted: a ``Server`` header is whatever the
+    daemon chooses to call itself.
+    """
+    headers = getattr(exc, "resp_headers", None)
+    body = getattr(exc, "resp_body", None) or b""
+    if not body:
+        return ""
+    server = ""
+    if isinstance(headers, dict):
+        server = str(headers.get("server") or headers.get("Server") or "").strip()
+    return f"something calling itself {server}" if server else "something that is not Hermes"
+
+
 def _upgrade_refused_message(
     url: str,
     status: int,
@@ -770,6 +832,7 @@ def _upgrade_refused_message(
     credential: str,
     verified: bool,
     asks_for_login: Optional[bool],
+    refuser: str = "",
 ) -> str:
     """Explain a refused WebSocket upgrade from the evidence, not from habit.
 
@@ -777,15 +840,38 @@ def _upgrade_refused_message(
     most of them -- the sign-in had just succeeded on one of these paths -- so
     the one thing the user was told to check was the one thing that was fine.
     The status, plus which credential was presented, says which layer refused.
+
+    ``refuser`` is :func:`_refusal_evidence`'s reading of the refusal itself,
+    and it matters most on the password path, where the message used to send
+    the user off to check that a proxy allows WebSocket connections -- the one
+    thing a working browser dashboard already proves. It does not say which
+    Hermes gate answered, because a refused handshake carries no close code;
+    it says whether Hermes answered at all.
     """
     if status in (401, 403):
-        if verified:
+        if verified and refuser:
             # The sign-in for this very connection already succeeded, so the
-            # password is proven. Saying "check the key" here is simply untrue.
+            # password is proven, and the refusal is not Hermes'. Saying "check
+            # the key" or "check that the proxy allows WebSockets" would both be
+            # untrue: something is answering in Hermes' place.
             return (
                 f"Hermes at {url} accepted the username and password, then refused the "
-                f"connection (HTTP {status}). The sign-in is not the problem: check that "
-                "Hermes, and any proxy in front of it, allow WebSocket connections."
+                f"connection (HTTP {status}), but the refusal is not Hermes' own: it came "
+                f"from {refuser}. The password is not the problem and neither is the key, "
+                "so look at what is between this computer and Hermes."
+            )
+        if verified:
+            # Empty refusal, so Hermes answered and turned the ticket down. A
+            # ticket is only known to the process that minted it, and the login
+            # that minted this one reached Hermes, so the WebSocket has to reach
+            # the same Hermes -- which a load balancer in front of several does
+            # not manage without session affinity.
+            return (
+                f"Hermes at {url} accepted the username and password, then refused the "
+                f"connection (HTTP {status}) and gave no reason of its own, which is how it "
+                "refuses a ticket it did not issue. The password is not the problem: the "
+                "WebSocket has to reach the same Hermes that signed you in. If that address "
+                "is a load balancer in front of more than one Hermes, that is what to check."
             )
         if credential == "token" and asks_for_login:
             return (
@@ -1100,6 +1186,13 @@ class WebSocketTransport:
     ``ticket`` for the one-shot ticket minted after a password login on a
     server reachable from outside this machine.
 
+    The ticket is not the only thing the upgrade carries. The cookies the login
+    established go with it, because a ticket is known only to the process that
+    minted it: a load balancer that hands the upgrade to a different Hermes
+    refuses one it never issued, and an auth proxy refuses an upgrade with no
+    session of its own. Both are decided by a cookie, and every client that
+    works sends one. See ``_cookie_header``.
+
     The connection is read by a thread of its own, which matters for a
     connection held between turns. A Hermes bound to a public address (the
     case whenever it is reached over a private network) pings every 20 seconds
@@ -1146,11 +1239,12 @@ class WebSocketTransport:
                 "Remote Hermes needs the websocket-client package: pip install websocket-client"
             ) from exc
         signed_in = False
+        cookies = ""
         if self._credential == "password":
             # A Hermes reachable from another machine requires its own login,
             # and the ticket it then issues lives thirty seconds -- so it is
             # minted here, immediately before use, rather than stored.
-            ticket = mint_ws_ticket(self._base_url, self._username, self._token)
+            ticket, cookies = mint_ws_ticket(self._base_url, self._username, self._token)
             url = _authenticated_ws_url(self._base_url, ticket, "ticket")
             # Past this point the password is proven: Hermes checked it and
             # issued a ticket. A refusal from here on is not a wrong key, and
@@ -1158,6 +1252,10 @@ class WebSocketTransport:
             signed_in = True
         else:
             url = _authenticated_ws_url(self._base_url, self._token, "token")
+        # The credentials the login was given, so the upgrade arrives as the
+        # same client the sign-in did rather than as a stranger asking for a
+        # ticket nobody minted for it. See `_cookie_header`.
+        extra: dict = {"cookie": cookies} if cookies else {}
         try:
             self._ws = create_connection(
                 url,
@@ -1168,6 +1266,7 @@ class WebSocketTransport:
                 enable_multithread=True,
                 # The packaged build's trust store; see certificates.py.
                 sslopt={"context": certificate_context()},
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 - any failure is "cannot reach it"
             self._error = str(exc)
@@ -1188,6 +1287,7 @@ class WebSocketTransport:
                     credential=self._credential,
                     verified=signed_in,
                     asks_for_login=asks,
+                    refuser=_refusal_evidence(exc),
                 )
             ) from exc
         self._closing.clear()
