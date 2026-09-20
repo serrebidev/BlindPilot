@@ -89,6 +89,34 @@ _WITHHELD_HEADLESS_TOOLS = (
     "cron_delete",
 )
 
+# How many turns one print-mode run may take, passed as --max-turns.
+#
+# Left unset, `-p` uses its own default of 100, which is the right number for
+# the job that default was chosen for: a script pipes a question in and reads
+# an answer out. A piece of real work spends a turn on every one of its steps -
+# read, edit, run the tests, read again - and interactive Command Code has no
+# cap at all, so the same task that finishes in a terminal stops here at 100.
+# Measured on 1.58.1: the flag is there, it takes any number, and it documents
+# no upper bound. It is a print-mode-only flag and not a config setting, so
+# nothing the person set for their own sessions is being overridden here.
+#
+# So this is a runaway guard rather than the budget for real work, and it is
+# five times the default to leave a long task room to finish. A turn that
+# reaches it keeps what it produced and says so (see _TURN_LIMIT_NOTE), so
+# raising the number cannot hide a loop - it makes one visible for longer.
+COMMANDCODE_MAX_TURNS = 500
+
+# Out of turns. Print mode returns the partial answer in the same result rather
+# than failing, so the note is what a listener hears when there is an answer to
+# keep, and the failure is for a run that had nothing to hand back at all.
+_TURN_LIMIT_NOTE = (
+    f"Command Code stopped at its turn limit of {COMMANDCODE_MAX_TURNS} turns before "
+    "finishing. What follows is as far as it had got, not a finished answer."
+)
+_TURN_LIMIT_FAILURE = (
+    f"Command Code used all {COMMANDCODE_MAX_TURNS} of its turns without finishing an answer."
+)
+
 # What bypass still does not cover, said once when a turn in bypass mode has a
 # tool refused. Command Code checks these before it checks the mode, so they
 # refuse in bypass exactly as they do in default (measured at 1.54.0), and a
@@ -108,7 +136,7 @@ _EXIT_MESSAGES = {
     5: "Command Code is rate limited. Wait a moment, then try again.",
     6: "Command Code could not reach the network.",
     7: "Command Code's server returned an error.",
-    8: "Command Code reached its maximum number of turns before finishing.",
+    8: _TURN_LIMIT_FAILURE,
     9: "Command Code produced no response.",
     10: "Command Code has insufficient credits for this request.",
     130: "Command Code was interrupted.",
@@ -145,6 +173,9 @@ def build_command(
     # Code does not consider withheld are ignored with a warning on stderr, so
     # this stays harmless if a release stops withholding them.
     command += ["--tools-enable", ",".join(_RESTORED_HEADLESS_TOOLS)]
+    # See COMMANDCODE_MAX_TURNS: print mode's own default is the budget for a
+    # script, not for a piece of work.
+    command += ["--max-turns", str(COMMANDCODE_MAX_TURNS)]
     if model:
         command += ["--model", model]
     if effort:
@@ -600,7 +631,22 @@ class CommandcodeWorker(threading.Thread):
             self._fail(self._error_text(frame) or "Command Code reported an error.")
             return
         if subtype == "max_turns":
-            self._fail("Command Code reached its maximum number of turns before finishing.")
+            # Out of turns, which is not the same as a failed turn: print mode
+            # returns the partial answer in this result and exits 8, the way it
+            # returns an answer cut off any other way. Reporting it as an error
+            # threw away everything the turn had done - the files written, the
+            # tests run - and left the user with a failure and no work to show.
+            final = str(frame.get("finalText") or "").strip()
+            text = final or "".join(self._assistant_parts).strip()
+            if not text:
+                self._fail(_TURN_LIMIT_FAILURE)
+                return
+            # Kept, not discarded, and said before the answer is settled so it
+            # is not mistaken for a finished one - the same treatment a FreeBuff
+            # turn cut off at its hour gets.
+            self._on_activity("notice", _TURN_LIMIT_NOTE)
+            self._completed = True
+            self._on_complete(text)
             return
         if str(frame.get("stopReason") or "") == "permission_denied":
             # Not every refusal is handed back to the model. One that did not
