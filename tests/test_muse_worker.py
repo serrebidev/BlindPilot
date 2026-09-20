@@ -111,7 +111,7 @@ def _run(worker: MuseWorker, timeout: float = 10.0) -> None:
 def _with_script(monkeypatch, frames: list[dict]) -> _ScriptedMuseTransport:
     """Point the worker at a scripted host and hand the fake back for asserts."""
     transport = _ScriptedMuseTransport(frames)
-    monkeypatch.setattr(muse_worker, "MuseTransport", lambda _cwd: transport)
+    monkeypatch.setattr(muse_worker, "_muse_transport", lambda _cwd: transport)
     return transport
 
 
