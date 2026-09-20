@@ -1,7 +1,6 @@
-# BlindPilot 0.29.8
+# BlindPilot 0.29.9
 
-Documentation only: the design and task plan for the held Claude Code process are out of the tree, now that the work they describe has shipped.
+Two cleanups from a whole-repo audit: code nothing called, and test doubles that were copied into every file. Nothing you hear or type changed.
 
-- `docs/claude-session/01-design.md` and `02-plan.md` described an intention rather than the code: a design for keeping one Claude Code process per tab between turns, approved on 2026-09-05, and the eight-task plan an agent followed to build it. That work shipped in 0.22.1.
-- `applied.md` stays, and is the record of what actually shipped and what was left out. The two removed files are still in git history.
-- Nothing you hear or type changed.
+- Thirty-four unused parameters, constants and helpers are gone (PR #50). `BACKEND_IDS` and `BACKEND_LABELS` are derived from `BACKENDS` instead of restated in the same order by hand; `supports_steering` was true for all seven backends and read nowhere, so it is gone; `freebuff_model_options` returns three values instead of a five-tuple whose last two were always empty; keywords no caller ever passed are gone; and dead names such as `CodexServer.inbox()`, `backend_pool.stop_reaper`, `muse_popen_wrapper` and `ChatPanel.regenerate_item` are removed. The settings toggles in the main window and the Accounts enable/disable loops share one helper each, and every announced sentence is unchanged.
+- The test suite's stand-ins are shared rather than copied (PR #51). `tests/doubles.py` replaces the Earcons, Button, Prompt, KeyEvent and SessionPanel stubs that nine files each built by hand, `tests/conftest.py` gains the `wx_app` and `frame` fixtures, and the two dialog-key test files that differed only in the dialog class became one parametrised file. 303 lines fewer across 35 files, the same tests, no behaviour change.
