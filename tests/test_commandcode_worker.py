@@ -595,7 +595,10 @@ def test_a_hook_block_repeats_the_reason_the_hook_gave(worker_env):
 
 
 def test_a_turn_that_permission_denied_stopped_says_so(worker_env):
-    """It used to arrive as "Finished with nothing to say."."""
+    """It used to arrive as "Finished with nothing to say.".
+
+    A stop with nothing to hand back is the one case that is still a failure.
+    """
     worker_env["proc"] = _FakeProcess(
         lines=[
             _event({"type": "run_start", "sessionId": "s1"}),
@@ -609,6 +612,63 @@ def test_a_turn_that_permission_denied_stopped_says_so(worker_env):
 
     assert rec.texts("complete") == []
     assert any("nobody to give it" in message for message in rec.texts("failed"))
+
+
+def test_a_permission_stop_keeps_the_answer_it_had_and_names_the_tool(worker_env):
+    """Measured against the CLI here: a bypass run whose permissions.ask rule
+    matched a call exits 0 and carries the text the turn had produced.
+
+    That text was thrown away and the turn reported as a failure, so the work it
+    had finished went with it. The reason the run stopped is on no stream of its
+    own either - the event carries the tool name and nothing else, and stderr is
+    empty - so the refusal the tool events already spelled out is what names it.
+    """
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event(
+                {
+                    "type": "tool_queued",
+                    "toolCallId": "c1",
+                    "toolName": "shell_command",
+                    "input": {"command": "echo hi"},
+                }
+            ),
+            _event({"type": "tool_denied", "toolCallId": "c1", "toolName": "shell_command"}),
+            _result(
+                subtype="success",
+                sessionId="s1",
+                stopReason="permission_denied",
+                finalText="## Running the command",
+            ),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert rec.texts("complete") == ["## Running the command"]
+    assert rec.texts("failed") == []
+    notice = rec.activity("notice")
+    assert len(notice) == 1
+    assert "Refused: shell_command: echo hi" in notice[0]
+    assert "not a finished answer" in notice[0]
+
+
+def test_a_permission_stop_keeps_an_answer_that_only_arrived_streamed(worker_env):
+    """A release that streams its text and leaves finalText empty still counts."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "text_delta", "delta": "half an answer"}),
+            _result(
+                subtype="success", sessionId="s1", stopReason="permission_denied", finalText=""
+            ),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert "half an answer" in "".join(rec.texts("complete"))
+    assert rec.texts("failed") == []
 
 
 def _bypass_worker(recorder, cwd):
