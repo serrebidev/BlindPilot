@@ -491,8 +491,9 @@ def test_a_replay_worker_never_submits_a_prompt(monkeypatch):
     transport = _FakeTransport(
         [
             _ready(),
+            _reply(101, {"server_requests": ["clarify", "approval", "sudo", "secret"]}),
             _reply(
-                101,
+                102,
                 {
                     "session_id": "live-abc",
                     "stored_session_id": "stored-1",
@@ -510,7 +511,67 @@ def test_a_replay_worker_never_submits_a_prompt(monkeypatch):
 
     worker._do_run()
 
-    assert [m.get("method") for m in transport.sent] == ["session.resume"]
+    assert [m.get("method") for m in transport.sent] == [
+        "client.capabilities",
+        "session.resume",
+    ]
+
+
+def test_reopening_a_conversation_answers_the_question_it_is_parked_on(monkeypatch):
+    """An unanswered request is handed back with the session on a resume.
+
+    A request written while no client was attached is not lost: ``session.resume``
+    returns it in ``open_requests``, shaped exactly like the frame it was sent
+    as, for the client to deliver to itself. That is the conversation parked on a
+    question right now -- the one the Hermes Conversations list exists to reopen
+    -- and without this the window attached to a session it then could not
+    unblock while the agent waited out the rest of its deadline.
+    """
+    asked = []
+
+    def on_question(questions):
+        asked.append(list(questions))
+        return [["AirPlay"]]
+
+    transport = _FakeTransport(
+        [
+            _ready(),
+            _reply(101, {"server_requests": ["clarify", "approval", "sudo", "secret"]}),
+            _reply(
+                102,
+                {
+                    "session_id": "live-abc",
+                    "stored_session_id": "stored-1",
+                    "running": False,
+                    "messages": [],
+                    "open_requests": [
+                        {
+                            "id": "srq-abc123",
+                            "method": "clarify",
+                            "params": {
+                                "session_id": "live-abc",
+                                "question": "Which device?",
+                                "choices": ["Chromecast", "AirPlay"],
+                            },
+                        }
+                    ],
+                },
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        hermes_worker, "WebSocketTransport", lambda *a, **k: transport, raising=True
+    )
+    worker = _worker(on_question=on_question)
+    worker._remote_url = "ws://host:9119/api/ws"
+
+    worker._do_run()
+
+    assert len(asked) == 1
+    assert asked[0][0].question == "Which device?"
+    assert [m for m in transport.sent if m.get("id") == "srq-abc123"] == [
+        {"jsonrpc": "2.0", "id": "srq-abc123", "result": {"answer": "AirPlay"}}
+    ]
 
 
 def test_catalog_keeps_the_good_rows_when_one_is_malformed(monkeypatch):
