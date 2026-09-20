@@ -936,7 +936,7 @@ def test_a_password_buys_a_ticket_because_tickets_expire_in_thirty_seconds(monke
     monkeypatch.setattr(
         hermes_backend,
         "mint_ws_ticket",
-        lambda url, user, secret: minted.append((url, user, secret)) or "fresh-ticket",
+        lambda url, user, secret: minted.append((url, user, secret)) or ("fresh-ticket", ""),
     )
     opened = {}
 
@@ -970,6 +970,9 @@ def test_a_password_buys_a_ticket_because_tickets_expire_in_thirty_seconds(monke
     # unconditionally refused once the auth gate engages.
     assert opened["url"] == "ws://box:9119/api/ws?ticket=fresh-ticket"
     assert "secret-pass" not in opened["url"]
+    # A login that set no cookie must not put an empty Cookie header on the
+    # wire: a session token is not owed to a server that never opened one.
+    assert "cookie" not in opened["kwargs"]
 
 
 def test_the_settings_credentials_are_not_the_wire_credentials():
@@ -1090,11 +1093,20 @@ def test_connection_failures_say_what_to_do_about_them():
 
 
 class _Refused(Exception):
-    """websocket-client's WebSocketBadStatusException, near enough to reason about."""
+    """websocket-client's WebSocketBadStatusException, near enough to reason about.
 
-    def __init__(self, status_code: int) -> None:
+    The response it carries is the evidence a refusal is read from, so it is
+    reproduced here too: a bare one is Hermes' own (measured against
+    ``hermes serve``), and one with a body of its own is somebody else's.
+    """
+
+    def __init__(
+        self, status_code: int, headers: dict | None = None, body: bytes | None = None
+    ) -> None:
         super().__init__(f"Handshake status {status_code} Forbidden")
         self.status_code = status_code
+        self.resp_headers = headers
+        self.resp_body = body
 
 
 class _Ok:
@@ -1197,7 +1209,7 @@ def test_a_missing_gateway_and_a_failing_proxy_are_named_as_such():
 
 def test_the_transport_reports_a_refused_upgrade_from_its_own_evidence(monkeypatch):
     """End to end through the transport, which is where the user's message comes from."""
-    monkeypatch.setattr(hermes_backend, "mint_ws_ticket", lambda url, user, secret: "ticket")
+    monkeypatch.setattr(hermes_backend, "mint_ws_ticket", lambda url, user, secret: ("ticket", ""))
 
     def _refuse(url, timeout=None, **kwargs):
         raise _Refused(403)
@@ -1209,6 +1221,139 @@ def test_the_transport_reports_a_refused_upgrade_from_its_own_evidence(monkeypat
 
     assert "not the problem" in message
     assert "Check the key" not in message
+
+
+def test_a_refusal_from_something_other_than_hermes_says_so():
+    """A proxy writing its own error page is not Hermes, and its fix is not Hermes'."""
+    refused = _Refused(
+        403, {"server": "cloudflare", "content-length": "22"}, b"<html>denied</html>"
+    )
+
+    assert "cloudflare" in hermes_backend._refusal_evidence(refused)
+
+    message = hermes_backend._upgrade_refused_message(
+        "wss://box/api/ws",
+        403,
+        credential="password",
+        verified=True,
+        asks_for_login=None,
+        refuser=hermes_backend._refusal_evidence(refused),
+    )
+
+    assert "cloudflare" in message
+    assert "not Hermes' own" in message
+
+
+def test_hermes_own_refusal_does_not_send_the_user_back_to_the_proxy():
+    """What the reporter of #44 had already checked, and it was not the answer.
+
+    Hermes answers an upgrade it turns down with an empty 403 and nothing else,
+    so an empty refusal means Hermes itself refused -- which happens when the
+    ticket is one it never issued, not when a proxy declines to carry a
+    WebSocket it carries for every other client.
+    """
+    assert hermes_backend._refusal_evidence(_Refused(403)) == ""
+
+    message = hermes_backend._upgrade_refused_message(
+        "wss://box/api/ws", 403, credential="password", verified=True, asks_for_login=None
+    )
+
+    assert "load balancer" in message
+    assert "allow WebSocket connections" not in message
+
+
+def test_the_session_the_login_opened_rides_on_the_upgrade(monkeypatch):
+    """A ticket is known only to the process that minted it.
+
+    A load balancer picks its back end from an affinity cookie and an auth
+    proxy from a session cookie, and both are set by the login this connection
+    has just performed. The upgrade went out with no cookie at all, which is
+    how one client is let through with the ticket it was given while another,
+    asking with the same ticket, is refused.
+    """
+    monkeypatch.setattr(
+        hermes_backend,
+        "mint_ws_ticket",
+        lambda url, user, secret: ("fresh-ticket", "aff=1; sid=2"),
+    )
+    opened = {}
+
+    class _FakeSocket:
+        def recv(self):
+            raise OSError("closed")
+
+        def close(self):
+            return None
+
+    def _fake_create(url, timeout=None, **kwargs):
+        opened["url"] = url
+        opened.update(kwargs)
+        return _FakeSocket()
+
+    monkeypatch.setitem(
+        sys.modules, "websocket", types.SimpleNamespace(create_connection=_fake_create)
+    )
+
+    hermes_backend.WebSocketTransport("ws://box:9119/api/ws", "pw", "password", "pilot").start()
+
+    assert opened["cookie"] == "aff=1; sid=2"
+    # The ticket still travels where the upgrade looks for it.
+    assert opened["url"] == "ws://box:9119/api/ws?ticket=fresh-ticket"
+
+
+def test_only_the_gateway_s_own_cookies_ride_on_the_upgrade():
+    """The jar is asked what it would send here, not read out wholesale.
+
+    A login redirected through an SSO host leaves that host's cookie in the
+    same jar, and handing it to Hermes would pass one server another's session.
+    A Secure cookie over an unencrypted ws:// is withheld the same way a
+    browser withholds it.
+    """
+    import http.cookiejar
+
+    def _cookie(name: str, value: str, *, domain: str = "box.example.com", secure: bool = False):
+        return http.cookiejar.Cookie(
+            version=0,
+            name=name,
+            value=value,
+            port=None,
+            port_specified=False,
+            domain=domain,
+            domain_specified=True,
+            domain_initial_dot=False,
+            path="/",
+            path_specified=True,
+            secure=secure,
+            expires=None,
+            discard=False,
+            comment=None,
+            comment_url=None,
+            rest={},
+            rfc2109=False,
+        )
+
+    jar = hermes_backend.CookieJar()
+    jar.set_cookie(_cookie("sid", "abc"))
+    jar.set_cookie(_cookie("aff", "7"))
+    jar.set_cookie(_cookie("sso", "someone-else", domain="login.other.test"))
+    jar.set_cookie(_cookie("secure", "s", secure=True))
+
+    encrypted = hermes_backend._cookie_header(jar, "wss://box.example.com:9119/api/ws")
+
+    assert "sid=abc" in encrypted
+    assert "aff=7" in encrypted
+    assert "secure=s" in encrypted
+    assert "someone-else" not in encrypted
+
+    # The same jar over an unencrypted connection drops the Secure cookie.
+    plain = hermes_backend._cookie_header(jar, "ws://box.example.com:9119/api/ws")
+
+    assert "sid=abc" in plain
+    assert "secure=s" not in plain
+
+    # A jar with nothing in it asks for no header at all.
+    empty = hermes_backend.CookieJar()
+    assert hermes_backend._cookie_header(empty, "wss://box.example.com/api/ws") == ""
 
 
 def test_the_transport_asks_whether_a_token_was_the_wrong_kind_of_credential(monkeypatch):
