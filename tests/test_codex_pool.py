@@ -148,7 +148,7 @@ def test_nothing_said_the_instant_a_thread_starts_can_fall_between_the_two():
     proc = _FakeProc([json.dumps(reply), json.dumps(straight_after)])
     server = agent_backends.CodexServer(proc)
     inbox = queue.Queue()
-    server.expect_thread(11, inbox)
+    server.expect(11, inbox, binds_thread=True)
     server.start_readers()
 
     assert inbox.get(timeout=5) == reply
@@ -201,7 +201,7 @@ def _cancelled_before_it_read_its_reply(server):
     """
     worker = _bare_worker()
     inbox = queue.Queue()
-    server.expect_thread(11, inbox)
+    server.expect(11, inbox, binds_thread=True)
     server._route({"id": 11, "result": {"thread": {"id": "thread-new"}}})
     assert server._threads == {"thread-new": inbox}, "the reply did not bind the conversation"
     worker._server = server
@@ -806,7 +806,7 @@ def test_a_reply_of_the_wrong_shape_does_not_end_every_tabs_turn():
     proc = _FakeProc([json.dumps(nonsense), json.dumps(healthy)])
     server = agent_backends.CodexServer(proc)
     mine = queue.Queue()
-    server.expect_thread(11, mine)
+    server.expect(11, mine, binds_thread=True)
     other = queue.Queue()
     server.attach("thread-1", other)
     server.start_readers()
@@ -1132,7 +1132,7 @@ def test_a_message_that_cannot_be_routed_is_written_down(caplog):
     proc = _FakeProc([json.dumps({"id": 11, "result": {"thread": "not an object"}})])
     server = agent_backends.CodexServer(proc)
     mine = queue.Queue()
-    server.expect_thread(11, mine)
+    server.expect(11, mine, binds_thread=True)
 
     def explode(_message):
         raise TypeError("something nobody anticipated")
