@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.14 - 2026-09-21
+
+- The update dialog's worker test no longer calls GitHub. Its stand-in carried a `check` that nothing read, a leftover from the injectable check that went in 0.29.9: `UpdateDialog._check_worker` asks the module's own `fetch_latest_release`, so every run made an unauthenticated request to the GitHub API. On a machine that has spent its anonymous rate limit that answers 403, and the `HTTPError` holds an unopened response body that warns when it is collected - which `-W error`, the command CI and the release workflow both run, turns into a failure in a test about what the dialog does after `wx.App` is gone. The answer is stubbed at the seam the worker actually uses, the dead field is gone, and the test still fails if `_call_after`'s no-application guard is removed. No product change.
+
 ## v0.29.13 - 2026-09-21
 
 - A FreeBuff turn that runs on a model you did not pick now says so out loud. FreeBuff drops models between releases, and when the chosen one is gone from the picker there is no card to walk to, so after five seconds BlindPilot presses Enter on whatever is highlighted and runs the turn on that. The row announcing the swap was filed as agent activity, and Narration, Keep up drops every kind but "assistant" and "notice" - so the one mode where an answer unlike the chosen model's is least likely to be noticed was the mode that never heard why. It is a notice now, the kind that is spoken whatever the narration mode, as the boot hold and the mid-turn drop beside it already were.
