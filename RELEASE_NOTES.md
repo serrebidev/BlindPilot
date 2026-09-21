@@ -1,11 +1,28 @@
-# BlindPilot 0.29.12
+# BlindPilot 0.29.13
 
-Two fixes about a turn that stopped waiting on a prompt: a Hermes that asks its blocking questions now gets them answered, and a Command Code turn that a refusal ended keeps the work it had already done.
+Three FreeBuff fixes from an end-to-end audit of the backend, and the audit
+itself.
 
-- A current Hermes stops its turn to ask you something, and it has moved those prompts onto requests of its own rather than events: the gateway writes a request with an id, waits for a response frame carrying that id, and asks only a client that has said it answers them. BlindPilot said nothing, so on a current Hermes the agent stopped on the first question it had and sat out its whole deadline on one nobody had been shown.
-- BlindPilot answers all four kinds now - a question, a dangerous-command approval, a password and a secret - on the request's own id, and says as it connects that it does. The prompts it has no window to serve (reading Hermes' in-app terminal, its browser preview or a native window, driving a tour, the password-manager prompts) are declined with an error, which the gateway settles exactly as it settles an answer. A Hermes old enough to still send these as events is answered the same way it always was.
-- Reopening the conversation that is parked on a question hands that question back, so it gets answered instead of attaching to a session this window could not unblock. Verified against the Hermes installed here (0.21.3) over BlindPilot's own local pipe.
-- Command Code hands a denial it can explain back to the model - a `permissions.deny` match, a mode gate, a tool name that does not exist - and the turn carries on. A denial from anywhere else ends the whole run instead, which is what a prompt becomes when there is nobody to answer it: a `permissions.ask` rule (which prompts in bypass exactly as it does in default), the root and home deletion breaker, a hook, or a permission check that threw.
-- BlindPilot reported that stop as a bare failure. Measured against the CLI installed here, a bypass run whose ask rule matched a call exits 0 and hands the text the turn had produced back on stdout, so the files written and the tests run under it were being thrown away behind an error message.
-- The answer is kept now and spoken as one that was cut off rather than finished, in a notice that is heard whatever your narration mode - the same treatment a turn that runs out of turns already gets - and it names the tool that was refused, which is recorded nowhere else. Only a stop with nothing to hand back is still reported as a failure.
-- The sentence that explains a refusal in bypass named things bypass does not refuse. It claimed bypass still refuses a destructive shell command, which it runs, and it recited the tools a headless run withholds, which the refusal already names one at a time. It now names the two things a bypass turn is really still held to: an ask rule, and a removal of the filesystem root or your home directory.
+- A FreeBuff turn run on a model you did not pick now says so out loud.
+  FreeBuff drops models between releases, and when the chosen one is gone from
+  its picker there is no card to walk to, so after five seconds BlindPilot
+  takes whatever is highlighted and runs the turn on that. The row announcing
+  the swap was filed as agent activity, which Narration, Keep up drops along
+  with every tool call - so the one mode where an answer unlike the chosen
+  model's is least likely to be noticed was the mode that never heard why.
+- A conversation you reopen keeps its own identity when its chat folder cannot
+  be found: a chat deleted since the history list was drawn, or filed under a
+  bucket this release no longer uses. The rule that learns a new conversation's
+  id was still armed on that turn, and what it learns is whatever appeared under
+  FreeBuff's projects since the turn began - which, with FreeBuff running in
+  another tab, is the other tab's conversation. The id was overwritten and the
+  next message resumed something you never opened. A turn that already knows its
+  conversation keeps it now, in the watching loop and in the choice of what to
+  start for the next message alike.
+- Help, About BlindPilot names all seven backends again. It listed five, and had
+  already been corrected by hand once; Muse Code and Command Code were both
+  shipped without it, in a sentence read aloud. It is built from the backend
+  table now, so the next backend cannot go missing from it.
+- The audit is `docs/code-audit/freebuff.md`. It also records what was checked
+  and deliberately left alone, and one open item that needs a captured frame
+  from a real steered turn to settle.
