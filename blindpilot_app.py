@@ -2,7 +2,8 @@
 
 Based on the original Claude Code Reader application. BlindPilot retains the
 original application's accessibility-first design while adding pluggable
-Claude Code, Codex, FreeBuff, opencode, and Hermes backends.
+Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, and Command Code
+backends.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 SPDX-License-Identifier: MIT
@@ -319,6 +320,27 @@ ORIGINAL_APP_CREDIT = (
     "Based on the original Claude Code Reader application by doubletaponair.\n"
     "https://github.com/doubletaponair/claude-code-reader"
 )
+
+
+def about_description() -> str:
+    """What Help, About BlindPilot says.
+
+    The list of backends is read off the ones that exist rather than written
+    out. Written out it was corrected by hand once and went stale twice over:
+    Muse Code and Command Code were both shipped without it, in a sentence a
+    screen reader reads aloud. ``BACKEND_LABELS`` is derived from ``BACKENDS``
+    for the same reason.
+    """
+    labels = list(BACKEND_LABELS.values())
+    listed = ", ".join(labels[:-1] + [f"and {labels[-1]}"]) if labels else ""
+    return (
+        f"An accessible desktop frontend for {listed}.\n\n"
+        f"{ORIGINAL_APP_CREDIT}\n"
+        "BlindPilot preserves and extends its accessibility-first work.\n\n"
+        "Licensed under the MIT License. See LICENSE and CREDITS.md."
+    )
+
+
 CLAUDE_BIN = "claude"
 
 
@@ -10441,13 +10463,7 @@ class MainFrame(wx.Frame):
             announce(APPEARANCE_RESTART_NOTE)
 
     def _show_about(self) -> None:
-        description = (
-            "An accessible desktop frontend for Claude Code, Codex, FreeBuff, "
-            "opencode, and Hermes.\n\n"
-            f"{ORIGINAL_APP_CREDIT}\n"
-            "BlindPilot preserves and extends its accessibility-first work.\n\n"
-            "Licensed under the MIT License. See LICENSE and CREDITS.md."
-        )
+        description = about_description()
         # The native About panel on macOS carries the app icon and the name
         # from the bundle, which is what a Mac user expects. Where the native
         # panel is unavailable it falls back to a plain message box.
