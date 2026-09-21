@@ -4528,6 +4528,11 @@ _FREEBUFF_STARTUP_SILENCE_SECONDS = 120.0
 # a moment of patience would have saved.
 _FREEBUFF_DROP_PATIENCE_SECONDS = 30.0
 
+# How long the model picker is walked before the chosen model is given up on.
+# The navigation above it is a fixed number of arrow keys, so this only ever
+# elapses when the model is not on the cards at all — see the swap below.
+_FREEBUFF_PICKER_PATIENCE_SECONDS = 5.0
+
 
 def _unwrap_screen_text(text: str) -> str:
     """Rejoin the lines the terminal broke, keeping the ones the answer meant.
@@ -5307,7 +5312,6 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
         timer = threading.Timer(_FREEBUFF_PREWARM_TTL, expire)
         timer.daemon = True
         holding["timer"] = timer
-        stale = None
         global _freebuff_prewarm
         stale, _freebuff_prewarm = _freebuff_prewarm, holding
         timer.start()
@@ -5666,13 +5670,17 @@ class FreebuffWorker(_TurnWorker):
                     self._write("\r")
                     accepted_recommended_model = True
                     continue
-                if time.monotonic() - picker_expanded_at >= 5:
+                if time.monotonic() - picker_expanded_at >= _FREEBUFF_PICKER_PATIENCE_SECONDS:
                     # FreeBuff drops models between releases. Throwing the
                     # message away over that is a worse answer than running it
                     # on what FreeBuff is offering instead, provided the swap
-                    # is said out loud rather than made quietly.
+                    # is said out loud rather than made quietly. "notice" is
+                    # the kind that is heard whatever the narration mode;
+                    # "tool" would reach Follow everything and nothing else,
+                    # and a turn run on a model nobody picked is exactly the
+                    # silent substitution keep-up must not swallow.
                     self._on_activity(
-                        "tool",
+                        "notice",
                         f"FreeBuff no longer offers {self._model}; "
                         "using the model it recommends instead",
                     )
@@ -5743,14 +5751,10 @@ class FreebuffWorker(_TurnWorker):
                 return
             if sent and now >= next_session_check:
                 next_session_check = now + 1.0
+                # Once the chat is known there is nothing left to learn, and
+                # the scan is a walk of every project bucket.
                 if chat_path is None:
-                    after = _freebuff_chat_dirs(self._cwd)
-                    new_ids = set(after) - set(before)
-                    discovered = (
-                        max(new_ids, key=lambda chat_id: after[chat_id])
-                        if new_ids
-                        else self._session_id
-                    )
+                    discovered = self._adopt_new_chat(before)
                     if discovered:
                         self._session_id = discovered
                         chat_path = _freebuff_chat_path(self._cwd, discovered)
@@ -5889,15 +5893,32 @@ class FreebuffWorker(_TurnWorker):
             self._fail("No response received from FreeBuff")
             return
 
-        after = _freebuff_chat_dirs(self._cwd)
-        new_ids = set(after) - set(before)
-        session = max(new_ids, key=lambda chat_id: after[chat_id]) if new_ids else self._session_id
+        session = self._adopt_new_chat(before) or self._session_id
         if session and not session_reported:
             self._on_session(session)
         # The next message in this conversation should not have to wait for a
         # terminal to start, so start one now, while nobody is waiting on it.
         if session:
             prewarm_freebuff(self._cwd, session, self._model, delay=1.0)
+
+    def _adopt_new_chat(self, before: dict[str, float]) -> Optional[str]:
+        """The id of a chat this launch created, or None if this turn has one.
+
+        FreeBuff creates a new conversation's folder when its terminal starts,
+        so the id that conversation belongs to is whatever appeared under
+        FreeBuff's projects since the turn began. A turn that was *resumed*
+        already knows which conversation it is, and the folders that appear
+        while it runs are somebody else's: adopting the newest is how a tab
+        ends up resuming a conversation nobody opened -- the id is overwritten
+        and the next message continues that one instead.
+        """
+        if self._session_id:
+            return None
+        after = _freebuff_chat_dirs(self._cwd)
+        new_ids = set(after) - set(before)
+        if not new_ids:
+            return None
+        return max(new_ids, key=lambda chat_id: after[chat_id])
 
     def _press(self, key: str, times: int = 1) -> None:
         """Send one of the box's keys, giving OpenTUI time to repaint."""
