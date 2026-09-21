@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import wx
 
+import update_dialog
 from app_updater import ReleaseInfo
 from update_dialog import UpdateDialog
 
@@ -118,8 +119,16 @@ def test_a_check_that_finishes_after_the_app_is_gone_stays_quiet(monkeypatch):
         raise AssertionError("No wx.App created yet")
 
     monkeypatch.setattr(wx, "CallAfter", no_app)
+    # The check the worker runs is the module's own `fetch_latest_release`; it
+    # reads nothing off the object it is handed, so this is the only place the
+    # answer can come from. The stub used to carry a `check` that nothing read
+    # -- a leftover from the injectable check that went in 0.29.9 -- and every
+    # run of this test asked GitHub for the latest release and got a 403 back.
+    # Under `-W error`, which is what CI runs, the unclosed response body in
+    # that HTTPError turned this into a failure on any machine that had spent
+    # its anonymous rate limit.
+    monkeypatch.setattr(update_dialog, "fetch_latest_release", lambda _version: _release())
     stub = SimpleNamespace(
-        check=lambda _version: _release(),
         current_version="1.0.0",
         _check_finished=lambda _release: None,
         _check_failed=lambda _message: None,
@@ -129,5 +138,5 @@ def test_a_check_that_finishes_after_the_app_is_gone_stays_quiet(monkeypatch):
     def stalled(_version):
         raise RuntimeError("stalled")
 
-    stub.check = stalled
+    monkeypatch.setattr(update_dialog, "fetch_latest_release", stalled)
     UpdateDialog._check_worker(stub)
