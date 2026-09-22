@@ -49,8 +49,9 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence
+from typing import Callable, Iterator, List, Optional, Sequence
 
 from agent_backends import (
     BACKEND_CLAUDE,
@@ -306,6 +307,117 @@ def _same_dir_across_wsl(recorded: str, wanted: str) -> bool:
     return left.rstrip("/").lower() == right.rstrip("/").lower()
 
 
+# ----- JSONL transcripts -----
+#
+# Claude Code, Codex and Command Code each keep one conversation per file, one
+# JSON record per line. Three things differ between them -- where the files
+# are, which record says what the session is, and how a message's role and
+# text are read -- and nothing else does. Each of the three is named once in
+# `_JsonlFormat` below; the scanning and the replaying happen once, here.
+
+
+@dataclass(frozen=True)
+class _JsonlFormat:
+    """What one backend's JSONL transcripts do differently from the others'."""
+
+    backend: str
+
+    # Every transcript worth looking at, given the directory being asked about
+    # (``None`` for all of them). Claude Code's folder names *are* the working
+    # directory, so it answers with one folder's files; the other two answer
+    # with everything they have and are filtered by what they recorded.
+    paths: Callable[[Optional[str]], List[Path]]
+
+    # The session id and working directory this record gives, or ``None`` if
+    # it is not a record that gives them. Handed the file as well, because
+    # Claude Code has no header record at all: its file name is the id.
+    session_of: Callable[[Path, dict], Optional[tuple[str, str]]]
+
+    # The role ("user" or "assistant") and text of this record, or ("", "")
+    # for anything else. This is where each CLI's own traffic -- tool calls,
+    # reasoning, injected context, subagent chatter -- is left out.
+    message_of: Callable[[dict], tuple[str, str]]
+
+    # Whether a recorded working directory other than the one being asked
+    # about hides the conversation. For Claude Code ``paths`` has already
+    # answered that question, and the cwd in its records is only what the
+    # picker displays.
+    scoped_by_recorded_cwd: bool = True
+
+
+def _globbed(root: Path, pattern: str) -> List[Path]:
+    """Files matching ``pattern`` under ``root``, or none if it cannot be walked."""
+    try:
+        return list(root.glob(pattern))
+    except OSError:
+        return []
+
+
+def _jsonl_entry(fmt: _JsonlFormat, path: Path, cwd: Optional[str]) -> Optional[HistoryEntry]:
+    """One transcript as a listing entry, or ``None`` if it cannot be offered.
+
+    Reads only as far as the first thing the person typed, because that is the
+    title and the newest conversations have to appear the moment the dialog
+    opens.
+    """
+    session_id = ""
+    session_cwd = ""
+    title = ""
+    for record in _iter_jsonl(path, _MAX_HEAD_LINES):
+        said = fmt.session_of(path, record)
+        if said is not None:
+            # First answer wins: a later header missing a field must not wipe
+            # what an earlier record already said.
+            session_id = session_id or said[0]
+            session_cwd = session_cwd or said[1]
+        role, text = fmt.message_of(record)
+        if role == "user":
+            title = make_title(text)
+            break
+    if not session_id or not title:
+        # Nothing was ever asked here, or there is no id to resume it by, so
+        # there is nothing to carry on with either way.
+        return None
+    if fmt.scoped_by_recorded_cwd and cwd and not _same_dir(session_cwd, cwd):
+        return None
+    session_cwd = session_cwd or (cwd or "")
+    return HistoryEntry(
+        backend=fmt.backend,
+        session_id=session_id,
+        title=title,
+        path=str(path),
+        modified=_mtime(path),
+        cwd=session_cwd,
+        folder=_folder_name(session_cwd),
+    )
+
+
+def _jsonl_entries(fmt: _JsonlFormat, cwd: Optional[str]) -> List[HistoryEntry]:
+    entries: List[HistoryEntry] = []
+    for path in fmt.paths(cwd):
+        entry = _jsonl_entry(fmt, path, cwd)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _jsonl_turns(fmt: _JsonlFormat, entry: HistoryEntry) -> List[HistoryTurn]:
+    """A whole transcript read back as prompt-and-answer turns."""
+    turns: List[HistoryTurn] = []
+    for record in _iter_jsonl(Path(entry.path)):
+        role, text = fmt.message_of(record)
+        if role == "user":
+            turns.append(HistoryTurn(prompt=text))
+        elif role == "assistant":
+            if not turns:
+                # An answer with nothing asked before it: a transcript that
+                # begins mid-conversation, or one whose opening prompt was
+                # entirely the CLI's own injected context.
+                turns.append(HistoryTurn())
+            turns[-1].response = _append(turns[-1].response, text)
+    return turns
+
+
 # ----- Claude Code -----
 
 
@@ -323,6 +435,19 @@ def _claude_project_dirs(cwd: Optional[str]) -> List[Path]:
         return sorted(path for path in root.iterdir() if path.is_dir())
     except OSError:
         return []
+
+
+def _claude_paths(cwd: Optional[str]) -> List[Path]:
+    return [path for folder in _claude_project_dirs(cwd) for path in _globbed(folder, "*.jsonl")]
+
+
+def _claude_session(path: Path, record: dict) -> tuple[str, str]:
+    """Claude Code writes no header record: the file name is the session id.
+
+    The working directory is repeated on every record instead, so whichever
+    record is read first answers for the session.
+    """
+    return path.stem, str(record.get("cwd") or "")
 
 
 def _claude_user_text(record: dict) -> str:
@@ -348,63 +473,49 @@ def _claude_assistant_text(record: dict) -> str:
     return _content_text(message.get("content"), ("text",))
 
 
-def _claude_entry(path: Path, fallback_cwd: Optional[str]) -> Optional[HistoryEntry]:
-    title = ""
-    cwd = ""
-    for record in _iter_jsonl(path, _MAX_HEAD_LINES):
-        if not cwd and record.get("cwd"):
-            cwd = str(record.get("cwd") or "")
-        text = _claude_user_text(record)
-        if text:
-            title = make_title(text)
-            break
-    if not title:
-        # Nothing was ever asked in this session, so there is nothing to resume.
-        return None
-    cwd = cwd or (fallback_cwd or "")
-    return HistoryEntry(
-        backend=BACKEND_CLAUDE,
-        session_id=path.stem,
-        title=title,
-        path=str(path),
-        modified=_mtime(path),
-        cwd=cwd,
-        folder=_folder_name(cwd),
-    )
+def _claude_message(record: dict) -> tuple[str, str]:
+    """(role, text) for a Claude Code transcript record, or ("", "").
+
+    Two tests rather than one, because the two sides of a Claude Code
+    transcript are recognised by different fields.
+    """
+    typed = _claude_user_text(record)
+    if typed:
+        return "user", typed
+    answer = _claude_assistant_text(record)
+    if answer:
+        return "assistant", answer
+    return "", ""
 
 
-def _claude_entries(cwd: Optional[str]) -> List[HistoryEntry]:
-    entries: List[HistoryEntry] = []
-    for folder in _claude_project_dirs(cwd):
-        try:
-            paths = list(folder.glob("*.jsonl"))
-        except OSError:
-            continue
-        for path in paths:
-            entry = _claude_entry(path, cwd)
-            if entry is not None:
-                entries.append(entry)
-    return entries
-
-
-def _claude_turns(entry: HistoryEntry) -> List[HistoryTurn]:
-    path = Path(entry.path)
-    turns: List[HistoryTurn] = []
-    for record in _iter_jsonl(path):
-        prompt = _claude_user_text(record)
-        if prompt:
-            turns.append(HistoryTurn(prompt=prompt))
-            continue
-        answer = _claude_assistant_text(record)
-        if not answer:
-            continue
-        if not turns:
-            turns.append(HistoryTurn())
-        turns[-1].response = _append(turns[-1].response, answer)
-    return turns
+_CLAUDE = _JsonlFormat(
+    backend=BACKEND_CLAUDE,
+    paths=_claude_paths,
+    session_of=_claude_session,
+    message_of=_claude_message,
+    scoped_by_recorded_cwd=False,
+)
 
 
 # ----- Codex -----
+
+
+def _codex_paths(_cwd: Optional[str]) -> List[Path]:
+    # A folder per year, per month and per day, so the search goes all the
+    # way down rather than one level.
+    return _globbed(_home() / ".codex" / "sessions", "**/*.jsonl")
+
+
+def _codex_session(_path: Path, record: dict) -> Optional[tuple[str, str]]:
+    if record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    return (
+        str(payload.get("session_id") or payload.get("id") or ""),
+        str(payload.get("cwd") or ""),
+    )
 
 
 def _codex_message(record: dict) -> tuple[str, str]:
@@ -426,62 +537,12 @@ def _codex_message(record: dict) -> tuple[str, str]:
     return role, text
 
 
-def _codex_entry(path: Path, cwd: Optional[str]) -> Optional[HistoryEntry]:
-    session_id = ""
-    session_cwd = ""
-    title = ""
-    for record in _iter_jsonl(path, _MAX_HEAD_LINES):
-        if record.get("type") == "session_meta":
-            payload = record.get("payload")
-            if isinstance(payload, dict):
-                session_id = str(payload.get("session_id") or payload.get("id") or "")
-                session_cwd = str(payload.get("cwd") or "")
-            continue
-        role, text = _codex_message(record)
-        if role == "user":
-            title = make_title(text)
-            break
-    if not session_id or not title:
-        return None
-    if cwd and not _same_dir(session_cwd, cwd):
-        return None
-    return HistoryEntry(
-        backend=BACKEND_CODEX,
-        session_id=session_id,
-        title=title,
-        path=str(path),
-        modified=_mtime(path),
-        cwd=session_cwd,
-        folder=_folder_name(session_cwd),
-    )
-
-
-def _codex_entries(cwd: Optional[str]) -> List[HistoryEntry]:
-    root = _home() / ".codex" / "sessions"
-    try:
-        paths = list(root.glob("**/*.jsonl"))
-    except OSError:
-        return []
-    entries: List[HistoryEntry] = []
-    for path in paths:
-        entry = _codex_entry(path, cwd)
-        if entry is not None:
-            entries.append(entry)
-    return entries
-
-
-def _codex_turns(entry: HistoryEntry) -> List[HistoryTurn]:
-    path = Path(entry.path)
-    turns: List[HistoryTurn] = []
-    for record in _iter_jsonl(path):
-        role, text = _codex_message(record)
-        if role == "user":
-            turns.append(HistoryTurn(prompt=text))
-        elif role == "assistant":
-            if not turns:
-                turns.append(HistoryTurn())
-            turns[-1].response = _append(turns[-1].response, text)
-    return turns
+_CODEX = _JsonlFormat(
+    backend=BACKEND_CODEX,
+    paths=_codex_paths,
+    session_of=_codex_session,
+    message_of=_codex_message,
+)
 
 
 # ----- Command Code -----
@@ -510,6 +571,17 @@ def _commandcode_transcript(path: Path) -> bool:
     return not any(name.endswith(f"{side}.jsonl") for side in _COMMANDCODE_SIDECARS)
 
 
+def _commandcode_paths(_cwd: Optional[str]) -> List[Path]:
+    root = _home() / ".commandcode" / "projects"
+    return [path for path in _globbed(root, "*/*.jsonl") if _commandcode_transcript(path)]
+
+
+def _commandcode_session(_path: Path, record: dict) -> Optional[tuple[str, str]]:
+    if record.get("type") != "session":
+        return None
+    return str(record.get("id") or ""), str(record.get("cwd") or "")
+
+
 def _commandcode_message(record: dict) -> tuple[str, str]:
     """(role, text) for a Command Code message record, or ("", "")."""
     if record.get("type") != "message":
@@ -528,59 +600,12 @@ def _commandcode_message(record: dict) -> tuple[str, str]:
     return role, text
 
 
-def _commandcode_entry(path: Path, cwd: Optional[str]) -> Optional[HistoryEntry]:
-    session_id = ""
-    session_cwd = ""
-    title = ""
-    for record in _iter_jsonl(path, _MAX_HEAD_LINES):
-        if record.get("type") == "session":
-            session_id = str(record.get("id") or "")
-            session_cwd = str(record.get("cwd") or "")
-            continue
-        role, text = _commandcode_message(record)
-        if role == "user":
-            title = make_title(text)
-            break
-    if not session_id or not title:
-        return None
-    if cwd and not _same_dir(session_cwd, cwd):
-        return None
-    return HistoryEntry(
-        backend=BACKEND_COMMANDCODE,
-        session_id=session_id,
-        title=title,
-        path=str(path),
-        modified=_mtime(path),
-        cwd=session_cwd,
-        folder=_folder_name(session_cwd),
-    )
-
-
-def _commandcode_entries(cwd: Optional[str]) -> List[HistoryEntry]:
-    root = _home() / ".commandcode" / "projects"
-    try:
-        paths = [path for path in root.glob("*/*.jsonl") if _commandcode_transcript(path)]
-    except OSError:
-        return []
-    entries: List[HistoryEntry] = []
-    for path in paths:
-        entry = _commandcode_entry(path, cwd)
-        if entry is not None:
-            entries.append(entry)
-    return entries
-
-
-def _commandcode_turns(entry: HistoryEntry) -> List[HistoryTurn]:
-    turns: List[HistoryTurn] = []
-    for record in _iter_jsonl(Path(entry.path)):
-        role, text = _commandcode_message(record)
-        if role == "user":
-            turns.append(HistoryTurn(prompt=text))
-        elif role == "assistant":
-            if not turns:
-                turns.append(HistoryTurn())
-            turns[-1].response = _append(turns[-1].response, text)
-    return turns
+_COMMANDCODE = _JsonlFormat(
+    backend=BACKEND_COMMANDCODE,
+    paths=_commandcode_paths,
+    session_of=_commandcode_session,
+    message_of=_commandcode_message,
+)
 
 
 # ----- Hermes -----
@@ -1087,25 +1112,25 @@ def _opencode_turns(entry: HistoryEntry) -> List[HistoryTurn]:
 
 # ----- Public API -----
 
-_LISTERS = {
-    BACKEND_CLAUDE: _claude_entries,
-    BACKEND_CODEX: _codex_entries,
+_LISTERS: dict[str, Callable[[Optional[str]], List[HistoryEntry]]] = {
+    BACKEND_CLAUDE: partial(_jsonl_entries, _CLAUDE),
+    BACKEND_CODEX: partial(_jsonl_entries, _CODEX),
     BACKEND_FREEBUFF: _freebuff_entries,
     BACKEND_OPENCODE: _opencode_entries,
     BACKEND_HERMES: _hermes_entries,
-    BACKEND_COMMANDCODE: _commandcode_entries,
+    BACKEND_COMMANDCODE: partial(_jsonl_entries, _COMMANDCODE),
 }
 
 # Readers are given the whole entry rather than its path, because opencode and
 # Hermes each keep every conversation in one database: what identifies their
 # transcript is the session id, not a file of its own.
-_READERS = {
-    BACKEND_CLAUDE: _claude_turns,
-    BACKEND_CODEX: _codex_turns,
+_READERS: dict[str, Callable[[HistoryEntry], List[HistoryTurn]]] = {
+    BACKEND_CLAUDE: partial(_jsonl_turns, _CLAUDE),
+    BACKEND_CODEX: partial(_jsonl_turns, _CODEX),
     BACKEND_FREEBUFF: _freebuff_turns,
     BACKEND_OPENCODE: _opencode_turns,
     BACKEND_HERMES: _hermes_turns,
-    BACKEND_COMMANDCODE: _commandcode_turns,
+    BACKEND_COMMANDCODE: partial(_jsonl_turns, _COMMANDCODE),
 }
 
 
