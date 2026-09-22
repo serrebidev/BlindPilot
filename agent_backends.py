@@ -4586,6 +4586,20 @@ def _keyed(text: str, letters_only: bool = False) -> tuple[str, list[int]]:
     return "".join(kept), positions
 
 
+def _freebuff_echo(text: str) -> tuple[str, str]:
+    """What to look for on screen for a message typed into FreeBuff.
+
+    FreeBuff writes what it is given into the transcript as plain text, with
+    nothing to mark it as the person's own words, so an echo is recognised by
+    its content: the first line, which is what a transcript line is matched
+    against, and the whole message reduced to letters and digits, which is what
+    says whether the lines below that match are the rest of the echo or the
+    reply's first line.
+    """
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return first[:60], _keyed(text, letters_only=True)[0]
+
+
 def _unspoken_tail(narrated: str, answer: str) -> str:
     """The part of the finished answer that was never read out.
 
@@ -5378,6 +5392,10 @@ class FreebuffWorker(_TurnWorker):
         self._pty: Optional[FreebuffTerminal] = None
         # Set once the terminal can produce no further output.
         self._stream_ended = threading.Event()
+        # Everything typed into FreeBuff's composer this turn, as its echo is
+        # recognised on screen: the prompt, and a steer if one is sent. Only
+        # the prompt is a boundary -- see `_freebuff_sections`.
+        self._echoes: list[tuple[str, str]] = [_freebuff_echo(self._prompt)]
         # Everything read out this turn, and the frame each kind is waiting to
         # see a second time before believing it.
         self._narrated: dict[str, str] = {}
@@ -5386,7 +5404,14 @@ class FreebuffWorker(_TurnWorker):
     def steer(self, text: str) -> bool:
         if not self.accepting_input():
             return False
-        return self._submit_text(text)
+        if not self._submit_text(text):
+            return False
+        # FreeBuff echoes this into the transcript like the prompt, so the
+        # lines it lands on have to be recognised and left out of the reading.
+        # Appended rather than replaced: the prompt's echo is still the
+        # boundary, and this one sits below it.
+        self._echoes.append(_freebuff_echo(text))
+        return True
 
     def _submit_text(self, text: str) -> bool:
         # OpenTUI handles paste and Enter as separate input events. Sending
@@ -6063,19 +6088,60 @@ class FreebuffWorker(_TurnWorker):
         self._pty, read = _spawn_freebuff_pty(args, self._cwd, self._stream_ended)
         return read
 
+    def _echo_spans(self, raw_lines: list[str]) -> set[int]:
+        """The lines of the transcript that hold echoes of what we typed.
+
+        A line is where a message's first line appears, and it is only the
+        start: an echo runs on while what has been collected still spells a
+        beginning of the message, because the terminal breaks what it is given
+        at its own width. Cutting at the matched line alone left the wrap of a
+        long message behind, and that tail was read as the answer.
+
+        A reply's first line does not continue the message's own characters
+        unless the reply opens by repeating it, so the run stops there. A line
+        that matched by accident -- the needle appearing inside a paragraph of
+        the answer -- collects nothing, since it is not a beginning of the
+        message it matched.
+        """
+        skipped: set[int] = set()
+        for needle, key in self._echoes:
+            if not needle or not key:
+                continue
+            found = -1
+            for index, raw in enumerate(raw_lines):
+                if needle in raw:
+                    found = index
+            if found < 0:
+                continue
+            for position in range(found, len(raw_lines)):
+                collected = _keyed("\n".join(raw_lines[found : position + 1]), letters_only=True)[0]
+                if not key.startswith(collected):
+                    break
+                skipped.add(position)
+        return skipped
+
     def _freebuff_sections(self, visible: str) -> tuple[str, str]:
         """Extract reasoning and answer text from FreeBuff's rendered screen."""
         raw_lines = _strip_terminal_noise(visible).splitlines()
         # This turn's output is whatever follows the echo of this turn's prompt.
         # A resumed conversation paints the turn before it above that, reasoning
         # and all, and none of that is an answer to what was just asked.
-        needle = next((line.strip() for line in self._prompt.splitlines() if line.strip()), "")[:60]
+        prompt_needle = self._echoes[0][0]
         prompt_index = -1
-        if needle:
+        if prompt_needle:
             for index, raw in enumerate(raw_lines):
-                if needle in raw:
+                if prompt_needle in raw:
                     prompt_index = index
         start = prompt_index + 1 if prompt_index >= 0 else 0
+
+        # Every echo this turn produced is then taken out of the lines below
+        # that boundary, so nothing the person typed is read as the answer.
+        # A steer is a second message typed into the same composer while the
+        # turn runs, and FreeBuff writes it into the transcript exactly as it
+        # writes the reply: plain text, with nothing to say whose words they
+        # are. Cutting only at the prompt's echo left it inside the section
+        # that gets spoken, so it was read out as though the model had said it.
+        skipped = self._echo_spans(raw_lines)
 
         thinking_index = -1
         thinking_indent = 0
@@ -6086,17 +6152,20 @@ class FreebuffWorker(_TurnWorker):
                 thinking_indent = len(raw) - len(raw.lstrip())
 
         if thinking_index >= 0:
-            candidates = raw_lines[thinking_index + 1 :]
+            base = thinking_index + 1
             in_thinking = True
         elif prompt_index >= 0:
-            candidates = raw_lines[start:]
+            base = start
             in_thinking = False
         else:
             # The prompt has scrolled off the top, so there is no way to tell
             # this turn's output from the conversation above it. What is missed
             # here is read out from the saved chat once the turn ends.
-            candidates = []
+            base = len(raw_lines)
             in_thinking = False
+        candidates = [
+            raw for index, raw in enumerate(raw_lines) if index >= base and index not in skipped
+        ]
 
         thinking: list[str] = []
         answer: list[str] = []
