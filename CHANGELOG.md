@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.15 - 2026-09-21
+
+- A steered FreeBuff message is no longer read out as part of the answer. Steering types a second message into the same composer the prompt went through, and FreeBuff writes it into the transcript exactly as it writes the reply - plain text, with nothing to say whose words they are - which is why the reading cuts the transcript at the echo of what was typed. Only the prompt was ever looked for, so a steer's echo landed inside the section that gets spoken and the person heard their own instruction read back as though the model had said it. Moving the boundary to the newer echo would have cost the answer above it, and on the path where no saved chat can be found that is the first half of the turn's work, so the echoes are taken out instead: every message typed this turn is remembered, and the lines each one covers are skipped when the reading is built. By span rather than by the one matched line, because an echo the terminal had to wrap is taller than one line, which fixes the older half of the same bug - a long prompt's wrapped tail was read as the answer too. The last open item from `docs/code-audit/freebuff.md`.
+
 ## v0.29.14 - 2026-09-21
 
 - The update dialog's worker test no longer calls GitHub. Its stand-in carried a `check` that nothing read, a leftover from the injectable check that went in 0.29.9: `UpdateDialog._check_worker` asks the module's own `fetch_latest_release`, so every run made an unauthenticated request to the GitHub API. On a machine that has spent its anonymous rate limit that answers 403, and the `HTTPError` holds an unopened response body that warns when it is collected - which `-W error`, the command CI and the release workflow both run, turns into a failure in a test about what the dialog does after `wx.App` is gone. The answer is stubbed at the seam the worker actually uses, the dead field is gone, and the test still fails if `_call_after`'s no-application guard is removed. No product change.
