@@ -4,11 +4,11 @@ Read-only audit, 2026-09-21, followed by the fixes listed at the end. Line
 numbers are as of this date. Ruff, `ruff format` and mypy are clean on the
 whole tree before and after, and the FreeBuff test files pass before and after.
 
-Four defects were found and all four are fixed. The fourth was written down as
-an open item first, because the two obvious fixes for it are both wrong and
-FreeBuff is not installed on this machine to check either against; the shape it
-was eventually fixed in needs nothing checked against a live session that the
-existing reading does not already assume.
+Five defects were found and all five are fixed. Four came from reading the code
+against its own comments; the fifth came from finally running it, and it is the
+proof of what the other four kept saying about this backend: every one of them
+is about a screen that was described rather than seen. The live runs are in
+"Verified against the release itself" below.
 
 ## What "FreeBuff" is, in this repo
 
@@ -167,11 +167,38 @@ answer too. A wrapped steer echo joined into exactly that: against the previous
 code the test sees
 `assistant: Part one of the answer. please run the full test suite and then commit it`.
 
-Test: `tests/test_freebuff_steer.py`. It has not been run against a real steered
-session -- FreeBuff is not installed on this machine -- so what it establishes
-is that the reading now behaves as designed for the shapes it is designed for,
-not that a live steer is echoed the way these frames assume. That assumption was
-already load-bearing.
+Test: `tests/test_freebuff_steer.py`. What that file establishes is that the
+reading behaves as designed for the shapes it is designed for, and it was
+written in that order: no live capture existed yet, so the assumption behind it,
+that an echo contains the text we sent, was taken from the prompt's cut. It has
+since been run against the release itself -- which found the fifth defect below,
+and left the four above standing.
+
+### 5. A message's divider is read out as the answer -- LOW / high
+
+`agent_backends.py:4398`, `:6139`. Found by running it, not by reading it.
+
+0.0.180 draws each message in the transcript under a divider carrying the time
+it was sent, so a message is two lines rather than one:
+
+```
+   [05:23 PM]
+   Reply with the single word: pong
+```
+
+The prompt's divider sits above the boundary and went unread by accident. A
+steer's sits below it, so removing the message line left the divider behind and
+it was read out on its own, `assistant: [05:30 PM]`, measured on the release --
+and joined to the front of the next row as `Kumquat \n kumquat \n [05:30 PM]`.
+
+Fix: the divider immediately above a matched line belongs to that message's
+span, since it is how the message is drawn rather than anything the model said.
+Recognised by shape (`_FREEBUFF_TIMESTAMP_RE`), so a release that stops drawing
+dividers takes nothing with it -- there is no line to match.
+
+Test: the two `V180_STEERED_SCREEN` cases in `tests/test_freebuff_steer.py`,
+built from the live capture. Both report `[05:23 PM]` as the answer against the
+previous reading.
 
 ## Dead code and small things
 
@@ -215,6 +242,45 @@ already load-bearing.
   installed release and is cached per release stamp, in memory and on disk.
   Already the fix for the slow path; nothing to add.
 
+## Verified against the release itself
+
+The FreeBuff installed here is 0.0.180, four releases newer than the 0.0.168
+these comments were written against, and it is signed in. Everything below was
+run through `FreebuffWorker` -- the real worker, the real hidden pseudo-terminal,
+the real CLI -- from a scratch directory outside this repository.
+
+What was already right, on a release nothing in the suite has ever seen:
+
+- `find_backend_cli`, `_freebuff_signed_in` and the rest of the status path all
+  answer correctly.
+- `_freebuff_models_from_install` reads all five models out of 0.0.180's 126 MB
+  executable: `z-ai/glm-5.3-flash`, `openai/gpt-5.6-luna`, `upstage/solar-pro4`,
+  `meta/muse-spark-1.2-contributor`, `mimo/mimo-v2.5`. That scan is the most
+  brittle code in this backend and it survived a release it had never seen.
+- A plain turn: the boot hold fires and says so, the message sends, the chat id
+  is discovered and reported, the reasoning arrives as a thinking row, the answer
+  as an assistant row, and completion is detected. Thirty-six seconds from
+  launch, twenty-two of them FreeBuff starting.
+
+What the steered turn showed, with everything else held equal:
+
+| Reading | Rows containing the steer | Rows containing a divider |
+|---|---|---|
+| Before the fixes | 1, `assistant: Also say the single word kumquat` | 2 |
+| After the fixes | 0 | 0 |
+
+The previous reading put the person's own instruction in front of them as the
+model's words, copy marker and all, and mangled the answer around it: the same
+thinking paragraph was read out four times as the section the reading compares
+against shifted underneath it. The fixed reading delivered `pong` and `kumquat`,
+one row each, and nothing else.
+
+Also worth knowing, and not a BlindPilot defect: FreeBuff picked up this
+machine's global agent instructions, because the scratch directory sits under the
+home directory, and the answers came back with the `## ` headings those
+instructions ask for. A conversation in a project folder gets whatever
+instructions that folder's tree holds, which is what FreeBuff intends.
+
 ## Fixes applied
 
 | # | Where | Change |
@@ -223,7 +289,8 @@ already load-bearing.
 | 2 | `agent_backends.py:5746` | the chat-discovery scan needs a turn that has no session yet |
 | 3 | `blindpilot_app.py:10443-10450`, `:5` | the About sentence is derived from `BACKEND_LABELS` |
 | 4 | `agent_backends.py:5404`, `:6091` | every echo this turn made is removed by span, not just the prompt's |
-| 5 | `agent_backends.py:5310` | dead `stale = None` removed |
+| 5 | `agent_backends.py:6139` | a message's timestamp divider goes with the message |
+| 6 | `agent_backends.py:5310` | dead `stale = None` removed |
 
 Tests added: `test_freebuff_model_swap.py`, `test_freebuff_resumed_session.py`,
 `test_freebuff_steer.py`, `test_about_lists_every_backend.py`.
