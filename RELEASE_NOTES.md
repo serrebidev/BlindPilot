@@ -1,21 +1,24 @@
-# BlindPilot 0.29.15
+# BlindPilot 0.29.16
 
-The last item from the FreeBuff audit: your own steered message is no longer
-read back to you as though the model had said it.
+FreeBuff was run for real against the release installed here, 0.0.180, and it
+found one more thing to fix.
 
-- Steering types a second message into the same composer the prompt went
-  through, and FreeBuff writes it into the transcript exactly as it writes the
-  reply - plain text, with nothing to say whose words they are. That is why the
-  reading cuts the transcript at the echo of what was typed, and only the prompt
-  was ever looked for: a steer's echo landed inside the section that gets
-  spoken, and the person heard their own instruction read out as the answer.
-- Moving the boundary to the newer echo would have cost the answer above it, and
-  where no saved chat can be found that is the first half of the turn's work.
-  The echoes are taken out instead: every message typed this turn is remembered,
-  and the lines each one covers are skipped when the reading is built. The text
-  either side of a steer is kept, and a steer that asks for work still reaches
-  FreeBuff unchanged.
-- By span rather than by the single matched line, because an echo the terminal
-  had to wrap is taller than one line. That fixes the older half of the same
-  bug as well: a long prompt's wrapped tail was being read as the answer, with
-  or without a steer.
+- FreeBuff draws each message in the transcript under a divider carrying the time
+  it was sent, so a message is two lines rather than one. The prompt's divider
+  sits above the reading's boundary and went unread by accident; a steer's sits
+  below it, so taking the steer's own line out left the divider behind, and the
+  time was read out on its own and joined onto the front of the next row.
+- The divider above a message is now part of that message, recognised by shape,
+  so a release that stops drawing dividers takes nothing with it.
+- The steered turn is also what showed the previous release's fix working. Before
+  it, the reading put the person's own instruction in front of them as the
+  model's words, copy marker and all, and repeated the same thinking paragraph
+  four times as the text it compares against shifted underneath it. After it, the
+  turn read `pong` and `kumquat`, one row each, with no echo of the message that
+  asked for them.
+- The same run confirmed what had only ever been assumed. The model catalog is
+  read out of 0.0.180's own 126 MB executable and all five models come back; the
+  boot hold, the reasoning split, learning the conversation's id and noticing the
+  turn had finished all work on a release the test suite has never seen.
+
+The measurements are in `docs/code-audit/freebuff.md`.
