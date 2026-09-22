@@ -2,8 +2,13 @@
 
 Read-only audit, 2026-09-21, followed by the fixes listed at the end. Line
 numbers are as of this date. Ruff, `ruff format` and mypy are clean on the
-whole tree before and after, and the six FreeBuff test files (41 cases) pass
-before and after.
+whole tree before and after, and the FreeBuff test files pass before and after.
+
+Four defects were found and all four are fixed. The fourth was written down as
+an open item first, because the two obvious fixes for it are both wrong and
+FreeBuff is not installed on this machine to check either against; the shape it
+was eventually fixed in needs nothing checked against a live session that the
+existing reading does not already assume.
 
 ## What "FreeBuff" is, in this repo
 
@@ -125,6 +130,49 @@ by `_show_about`. The sentence shape is unchanged.
 Test: `tests/test_about_lists_every_backend.py` -- every label appears in it,
 and the list is comma-separated with a final "and".
 
+### 4. A steered message is read out as part of the answer -- MEDIUM / high
+
+`agent_backends.py:5404`, `:6091`.
+
+`steer` submits its text to the same composer the prompt went through, and the
+reading's boundary is the echo of the prompt alone. FreeBuff writes what it is
+given into the transcript exactly as it writes the reply -- plain text, with
+nothing to say whose words they are -- so a steer's echo sat inside the section
+that gets spoken, and the person heard their own instruction read back as
+though the model had said it. `_freebuff_sections`'s own comment says the cut
+exists because the echo is unmarked, so the reasoning was there and the second
+message was not followed to the same conclusion.
+
+The two fixes that suggest themselves are both wrong, which is why this was
+written down rather than guessed at first. Moving the boundary to the newest
+echo loses the answer above it: `_freebuff_sections` returns only what follows
+the boundary, and on the degraded path where no chat folder can be found there
+is no saved answer to fall back on, so the first half of the turn's work would
+be dropped from the transcript. Leaving the boundary alone and removing the
+echo's own lines keeps both halves.
+
+Fix: every message typed this turn is remembered as an echo (`_freebuff_echo`),
+and `_echo_spans` returns the lines each one covers, which are then skipped
+when the reading is built. Only the prompt's echo is still a boundary; a
+steer's span is removed from inside the section. That needs nothing new to be
+known about FreeBuff, because the content-matching it relies on is the same
+assumption the prompt's cut already rests on.
+
+The span, not the single matched line, because an echo is taller than one line
+when the terminal has to wrap it: `_keyed`-reduced lines are walked while what
+has been collected still spells a beginning of the message, and the reply's
+first line stops that run. The same walk now covers the prompt's echo, which
+fixes the older half of the bug -- a long prompt's wrapped tail was read as the
+answer too. A wrapped steer echo joined into exactly that: against the previous
+code the test sees
+`assistant: Part one of the answer. please run the full test suite and then commit it`.
+
+Test: `tests/test_freebuff_steer.py`. It has not been run against a real steered
+session -- FreeBuff is not installed on this machine -- so what it establishes
+is that the reading now behaves as designed for the shapes it is designed for,
+not that a live steer is echoed the way these frames assume. That assumption was
+already load-bearing.
+
 ## Dead code and small things
 
 - `agent_backends.py:5310`: `stale = None` is overwritten by the very next
@@ -159,29 +207,13 @@ and the list is comma-separated with a final "and".
   read-back after every keystroke.
 - **`_freebuff_sections` cuts the reading at the last occurrence of the
   prompt's first line.** That is what keeps a resumed conversation's previous
-  answer out of this turn's reading. See the open item below.
+  answer out of this turn's reading. See bug 4.
 - **`_freebuff_screen._RepairedScreen.display`** mutates the screen in place.
   It is the documented repair for pyte 0.8.2 and `test_freebuff_screen_repair.py`
   feeds it the real terminal sequence that crashes the unpatched class.
 - **The catalog scan** (`_freebuff_models_from_install`) reads the whole
   installed release and is cached per release stamp, in memory and on disk.
   Already the fix for the slow path; nothing to add.
-
-## Open item, not fixed
-
-**A steered message may be read out as part of the answer.** `steer` submits
-its text to the same composer (`:5382`) and does not touch `self._prompt`, so
-`_freebuff_sections` still cuts at the echo of the *original* prompt. FreeBuff
-echoes typed messages into the transcript -- that is why the cut exists at all
--- so a steered message lands inside the section that is read aloud.
-
-Not fixed, because the two readings I can make are both wrong to ship blind.
-Cutting at the newest echo instead would leave the pre-steer answer out of the
-section, and `_append_delta`'s "these two do not line up" branch would then read
-the whole post-steer section again as new text: a duplication, which is worse
-than the current leak. Fixing it properly means teaching the reading which
-lines are the user's own, which needs one captured frame from a real steered
-turn. Nothing here can produce one; FreeBuff is not installed on this machine.
 
 ## Fixes applied
 
@@ -190,7 +222,8 @@ turn. Nothing here can produce one; FreeBuff is not installed on this machine.
 | 1 | `agent_backends.py:5669-5681` | picker patience named; the swap is a `notice` |
 | 2 | `agent_backends.py:5746` | the chat-discovery scan needs a turn that has no session yet |
 | 3 | `blindpilot_app.py:10443-10450`, `:5` | the About sentence is derived from `BACKEND_LABELS` |
-| 4 | `agent_backends.py:5310` | dead `stale = None` removed |
+| 4 | `agent_backends.py:5404`, `:6091` | every echo this turn made is removed by span, not just the prompt's |
+| 5 | `agent_backends.py:5310` | dead `stale = None` removed |
 
 Tests added: `test_freebuff_model_swap.py`, `test_freebuff_resumed_session.py`,
-`test_about_lists_every_backend.py`.
+`test_freebuff_steer.py`, `test_about_lists_every_backend.py`.
