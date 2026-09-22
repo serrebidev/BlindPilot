@@ -143,3 +143,72 @@ def test_an_unwrapped_prompt_echo_is_still_left_out(monkeypatch):
 
     assert "do the work" not in turn.spoken, turn.activity
     assert "do the work" not in turn.answer, turn.answer
+
+
+# FreeBuff 0.0.180, captured live mid-turn with a steer sent to it: the
+# transcript of the two messages and the composer below them. Each message is
+# drawn under a divider carrying the time it was sent, which is what made it
+# two lines rather than one. The notice about a git subdirectory, the
+# directory line and the advertising box the release draws above this are
+# trimmed; every line below is verbatim, the trailing U+2398 marker and the
+# U+258D in front of the composer included.
+V180_STEERED_SCREEN = "\n".join(
+    [
+        "  Freebuff will run commands on your behalf to help you build.",
+        "   [05:23 PM]",
+        "   Reply with the single word: pong \u2398",
+        "   [05:23 PM]",
+        "   Reply with the single word: ping \u2398",
+        " thinking...                                                                             1s  \u25a0 Esc",
+        "\u2502  \u258dEnter a coding task or / for commands                                              \u2502",
+    ]
+)
+
+
+def _sections(prompt: str, steer: str, screen: str):
+    """What the reading makes of a captured screen, with both messages typed."""
+    worker = FreebuffWorker(
+        prompt,
+        None,
+        ".",
+        "default",
+        model="z-ai/glm-5.3-flash",
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda _kind, _text: None,
+        on_complete=lambda _text: None,
+        on_failed=lambda _text: None,
+        on_done=lambda: None,
+    )
+    worker._echoes.append(agent_backends._freebuff_echo(steer))
+    return worker._freebuff_sections(screen)
+
+
+def test_the_real_steered_screen_reads_no_echo_at_all():
+    """Every line of both messages is gone: their text, and the divider each is
+    drawn under. What is left is the composer's own chrome, which the reading
+    has always dropped."""
+    _thinking, answer = _sections(
+        "Reply with the single word: pong",
+        "Reply with the single word: ping",
+        V180_STEERED_SCREEN,
+    )
+
+    assert answer == "", answer
+    assert "05:23" not in answer, answer
+
+
+def test_the_real_steered_screen_keeps_an_answer_below_it():
+    """The same screen with the reply under it: the divider and both messages
+    go, the answer stays."""
+    screen = V180_STEERED_SCREEN.replace(
+        " thinking...",
+        "  The answer the model wrote.\n thinking...",
+    )
+    _thinking, answer = _sections(
+        "Reply with the single word: pong",
+        "Reply with the single word: ping",
+        screen,
+    )
+
+    assert answer == "The answer the model wrote.", answer
