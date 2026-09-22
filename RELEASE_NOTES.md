@@ -1,18 +1,21 @@
-# BlindPilot 0.29.14
+# BlindPilot 0.29.15
 
-One fix, to the test suite. Nothing a user of BlindPilot would notice changes.
+The last item from the FreeBuff audit: your own steered message is no longer
+read back to you as though the model had said it.
 
-- The update dialog's worker test stopped calling GitHub. Its stand-in carried a
-  `check` that nothing read, left over from the injectable check removed in
-  0.29.9, while `UpdateDialog._check_worker` asks the module's own
-  `fetch_latest_release`. Every run therefore made an unauthenticated request to
-  the GitHub API. On a machine that has spent its anonymous rate limit that
-  request answers 403, and the `HTTPError` holds an unopened response body that
-  warns when it is collected. The suite runs with `-W error`, as CI and this
-  release workflow both do, so that warning was a failure - in a test about what
-  the dialog does after `wx.App` is gone. It reproduced five times out of five
-  here once the limit was reached, and passed on the runners only because their
-  limit was not.
-- The answer is stubbed where the worker actually looks for it, and the test
-  still fails if `_call_after`'s no-application guard is removed, which is what
-  it exists to cover.
+- Steering types a second message into the same composer the prompt went
+  through, and FreeBuff writes it into the transcript exactly as it writes the
+  reply - plain text, with nothing to say whose words they are. That is why the
+  reading cuts the transcript at the echo of what was typed, and only the prompt
+  was ever looked for: a steer's echo landed inside the section that gets
+  spoken, and the person heard their own instruction read out as the answer.
+- Moving the boundary to the newer echo would have cost the answer above it, and
+  where no saved chat can be found that is the first half of the turn's work.
+  The echoes are taken out instead: every message typed this turn is remembered,
+  and the lines each one covers are skipped when the reading is built. The text
+  either side of a steer is kept, and a steer that asks for work still reaches
+  FreeBuff unchanged.
+- By span rather than by the single matched line, because an echo the terminal
+  had to wrap is taller than one line. That fixes the older half of the same
+  bug as well: a long prompt's wrapped tail was being read as the answer, with
+  or without a steer.
