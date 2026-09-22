@@ -4390,6 +4390,13 @@ _FREEBUFF_PICKER_EXPANDED_RE = re.compile(r"(?i)show fewer|see all \d+ models?")
 # is what says a turn has stopped to ask something.
 _FREEBUFF_QUESTION_MARKER = "Some questions for you"
 
+# 0.0.180 draws each message in the transcript under a divider carrying the
+# time it was sent, so a message is two lines rather than one. Measured on the
+# release itself: "   [05:23 PM]" then "   Reply with the single word: pong".
+# Dropping the message line and leaving the divider behind reads the time out
+# as if the answer had said it.
+_FREEBUFF_TIMESTAMP_RE = re.compile(r"^\[\d{1,2}:\d{2}\s*[AP]M\]$", re.IGNORECASE)
+
 # A question in that box: collapsed (right-pointing) or open (down-pointing),
 # numbered only when there is more than one.
 _FREEBUFF_QUESTION_RE = re.compile(r"^([▼▶])\s*(?:\d+\.\s*)?(\S.*?)\s*$")
@@ -6097,6 +6104,11 @@ class FreebuffWorker(_TurnWorker):
         at its own width. Cutting at the matched line alone left the wrap of a
         long message behind, and that tail was read as the answer.
 
+        The divider FreeBuff draws above the message goes with it, since it is
+        part of how the message is drawn rather than anything the model said.
+        Left behind, a steer's timestamp was read out on its own: the live
+        measurement is in `_FREEBUFF_TIMESTAMP_RE`.
+
         A reply's first line does not continue the message's own characters
         unless the reply opens by repeating it, so the run stops there. A line
         that matched by accident -- the needle appearing inside a paragraph of
@@ -6113,11 +6125,20 @@ class FreebuffWorker(_TurnWorker):
                     found = index
             if found < 0:
                 continue
+            covered: set[int] = set()
             for position in range(found, len(raw_lines)):
                 collected = _keyed("\n".join(raw_lines[found : position + 1]), letters_only=True)[0]
                 if not key.startswith(collected):
                     break
-                skipped.add(position)
+                covered.add(position)
+            if not covered:
+                # A line that matched by accident -- the needle appearing inside
+                # a paragraph of the answer -- is not a beginning of the message
+                # it matched, and takes nothing with it.
+                continue
+            if found > 0 and _FREEBUFF_TIMESTAMP_RE.match(raw_lines[found - 1].strip()):
+                covered.add(found - 1)
+            skipped |= covered
         return skipped
 
     def _freebuff_sections(self, visible: str) -> tuple[str, str]:
