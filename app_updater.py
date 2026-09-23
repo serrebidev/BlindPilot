@@ -103,10 +103,9 @@ def asset_name_for_platform(
             return "BlindPilot-Setup-x64.exe"
         return "BlindPilot-Windows-x64.zip"
     if system == "darwin":
+        # Apple Silicon only; Intel Macs fall through to the error below.
         if machine in ("arm64", "aarch64"):
             return "BlindPilot-macOS-arm64.zip"
-        if machine in ("x86_64", "amd64"):
-            return "BlindPilot-macOS-x64.zip"
     raise UpdateError(
         f"Automatic updates are not available for {platform.system()} {platform.machine()}."
     )
