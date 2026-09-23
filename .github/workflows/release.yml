@@ -28,10 +28,6 @@ jobs:
             runner: macos-15
             asset: BlindPilot-macOS-arm64.zip
             kind: macos
-          - label: macOS Intel
-            runner: macos-15-intel
-            asset: BlindPilot-macOS-x64.zip
-            kind: macos
     runs-on: ${{ matrix.runner }}
     # PyInstaller and Inno Setup make this the slow one; a green build is
     # about fifteen minutes. The default is six hours, which is what a

@@ -38,7 +38,7 @@ Windows installer. Download `BlindPilot-Setup-x64.exe` and run it. It installs p
 
 Windows portable. Download `BlindPilot-Windows-x64.zip`, extract it anywhere, run `BlindPilot.exe`.
 
-macOS. Download `BlindPilot-macOS-arm64.zip` for Apple Silicon or `BlindPilot-macOS-x64.zip` for Intel. The builds are ad-hoc signed and not notarized, so the first launch may need approval in System Settings, Privacy & Security.
+macOS. Download `BlindPilot-macOS-arm64.zip`; BlindPilot is built for Apple Silicon Macs only. The builds are ad-hoc signed and not notarized, so the first launch may need approval in System Settings, Privacy & Security.
 
 Linux. There is no packaged build. Run from source as described below.
 
@@ -230,7 +230,7 @@ python -m pip install -r requirements-build.txt
 python -m PyInstaller --noconfirm --clean BlindPilot.spec
 ```
 
-`BlindPilot.spec` reads the version from `APP_VERSION` and carries the bundle identifier, minimum macOS version, and icon (`tools/make_icon.py` generates the icon files into `packaging/`). The one-directory layout is what lets the updater replace the app after it exits. The Windows installer is `installer/BlindPilot.iss`. Pushing a `v*` tag runs `.github/workflows/release.yml`, which runs the tests and the packaged startup checks, then publishes the Windows installer, the Windows zip, both macOS zips, and their SHA-256 files.
+`BlindPilot.spec` reads the version from `APP_VERSION` and carries the bundle identifier, minimum macOS version, and icon (`tools/make_icon.py` generates the icon files into `packaging/`). The one-directory layout is what lets the updater replace the app after it exits. The Windows installer is `installer/BlindPilot.iss`. Pushing a `v*` tag runs `.github/workflows/release.yml`, which runs the tests and the packaged startup checks, then publishes the Windows installer, the Windows zip, the Apple Silicon macOS zip, and their SHA-256 files.
 
 Before opening a pull request:
 
