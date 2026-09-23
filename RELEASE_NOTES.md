@@ -1,6 +1,8 @@
-# BlindPilot 0.29.17
+# BlindPilot 0.29.18
 
-The three JSONL transcript formats are now read by one reader instead of three copies.
+Tabs on different backends no longer send to the wrong one.
 
-- Claude Code, Codex and Command Code each keep one conversation per file, one JSON record per line. Only three things differ between them - where the files live, which record shapes they use, and how a turn's text is found - so the three near-identical readers in `session_history.py` are now a single reader with the per-format differences passed in.
-- No behaviour change is intended: the same transcripts read exactly the same way, with less code to keep in step. Contributed by blindndangerous in #53.
+- Each tab now keeps its own backend. Before, the backend was one setting for the whole app: picking Codex for a new tab moved your other tabs to Codex too, so a message typed into a Claude tab went to Codex without warning. Model, Backend now changes only the tab you are in. A new tab starts on the backend of the tab you are in, and the menu follows whichever tab you switch to.
+- Once your tabs use more than one backend, every tab tells you which one it sends to. The tab name starts with the backend, for example "Codex: fix login bug". The prompt is named after it, for example "Codex prompt", so your screen reader says it when you land in the box. Switching tabs announces it, for example "Session 2 of 3, Codex". And the send sound has a different pitch for each backend, with Claude Code keeping the original.
+- With only one backend open, nothing reads or sounds any different.
+- The version shown inside the app is correct again: 0.29.17 still called itself 0.29.16.

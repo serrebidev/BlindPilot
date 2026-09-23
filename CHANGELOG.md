@@ -2,6 +2,15 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.18 - 2026-09-22
+
+- Each tab keeps its own backend. The backend was one app-wide setting, so choosing Codex for a new tab moved every other tab to Codex too, and the next message typed into a Claude tab silently started a Codex conversation. Model, Backend now changes the visible tab only; a new tab starts on the backend of the tab in front, the menu follows the tab you switch to, and resuming a past conversation puts only its own tab on that conversation's backend. While the open tabs use more than one backend, each says where it sends: the tab name starts with the backend, the prompt is called "Codex prompt" and so on, switching tabs announces it, and the send sound is pitched per backend. With a single backend nothing reads or sounds any different. Suggested by a user who sent a message to the wrong place.
+- The version inside the app is right again. 0.29.17 was released still calling itself 0.29.16.
+
+## v0.29.17 - 2026-09-22
+
+- The three JSONL transcript formats (Claude Code, Codex, Command Code) are read by one reader instead of three copies. No behaviour change. Contributed by blindndangerous in #53.
+
 ## v0.29.16 - 2026-09-21
 
 - FreeBuff's message divider is no longer read out as the answer. 0.0.180 draws each message in the transcript under a divider carrying the time it was sent - `[05:23 PM]` - so a message is two lines rather than one. The prompt's divider sits above the reading's boundary and went unread by accident; a steer's sits below it, so removing the steer's own line left the divider behind and it was spoken on its own, and joined onto the front of the next row. The divider above a matched line is now part of that message's span, recognised by shape so that a release which stops drawing dividers takes nothing with it. Found by running the backend against the installed FreeBuff 0.0.180 rather than by reading it: the steered turn put the person's own instruction in front of them as the model's words, copy marker and all, and repeated the same thinking paragraph four times as the section the reading compares against shifted underneath it. The same run confirmed what had only ever been assumed - the catalog scan reads all five of 0.0.180's models out of its executable, the boot hold, the reasoning split, session discovery and completion all work on a release the suite has never seen, and after the fix a steered turn reads `pong` and `kumquat`, one row each, with no echo of the message that asked for them. Also records the live measurements in `docs/code-audit/freebuff.md`.
