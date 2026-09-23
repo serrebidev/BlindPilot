@@ -11,7 +11,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 
 ## What it does
 
-- Runs seven coding agents, picked from Model, Backend. The choice is remembered.
+- Runs seven coding agents, picked per tab from Model, Backend. New tabs start on the backend of the tab you are in, and the choice is remembered. Once your tabs use more than one backend, each tab's name, its prompt, the announcement when you switch to it, and the pitch of its send sound all say which backend it sends to.
 - Runs every backend in Bypass permissions mode by default, so a task does not stop to ask for approval. Change this under Model, Permission Mode.
 - Splits every answer into rows you can arrow through, one per heading, paragraph, list item, quote, code block, thought, tool call, and tool result.
 - Reads answers aloud as they stream, or stays silent until the whole answer is in.
