@@ -110,7 +110,7 @@ def test_the_close_handler_uses_the_non_blocking_form(monkeypatch):
             "DeletePage": lambda self, i: None,
         },
     )()
-    frame._sync_tab_switcher = lambda: None
+    frame._follow_tab_backend = lambda: None
     frame._set_status_text = lambda text: None
 
     app.MainFrame._close_current_session(frame)

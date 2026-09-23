@@ -49,6 +49,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 import weakref
 import webbrowser
 import zipfile
@@ -2968,6 +2969,24 @@ class WrappedText(wx.StaticText):
             self._wrapping = False
 
 
+def _faster_wav(path: str, factor: float) -> str:
+    """A copy of a WAV that plays ``factor`` times faster, so higher.
+
+    Only the header's sample rate changes; the player does the resampling.
+    Written once to the temp folder and reused.
+    """
+    out = os.path.join(tempfile.gettempdir(), f"blindpilot-{Path(path).stem}-{factor:.3f}.wav")
+    if os.path.isfile(out):
+        return out
+    with wave.open(path, "rb") as src:
+        params = src.getparams()
+        frames = src.readframes(params.nframes)
+    with wave.open(out, "wb") as dst:
+        dst.setparams(params._replace(framerate=round(params.framerate * factor)))
+        dst.writeframes(frames)
+    return out
+
+
 class Earcons:
     """Non-speech audio cues.
 
@@ -3002,6 +3021,8 @@ class Earcons:
         # that raises an unraisable exception, which CI's `-W error` turns
         # into a failed build.
         self._reaping: list[subprocess.Popen] = []
+        self.per_backend_send = False
+        self._send_variants: dict[str, Optional[str]] = {}
 
     def _resolve(self, *basenames: str) -> Optional[str]:
         for name in basenames:
@@ -3067,9 +3088,32 @@ class Earcons:
 
         threading.Thread(target=_reap, daemon=True).start()
 
-    def play_send(self) -> None:
+    def play_send(self, backend: str = "") -> None:
+        """The send cue, pitched per backend while tabs use more than one.
+
+        The frame turns ``per_backend_send`` on when the open tabs do not all
+        use the same backend, so a message sent to the wrong one sounds wrong
+        before anything is spoken. With one backend the cue stays the one the
+        person already knows.
+        """
         if self._wanted("send"):
-            self._play_once(self.send)
+            path = self.send
+            if self.per_backend_send and backend:
+                path = self._send_for(backend)
+            self._play_once(path)
+
+    def _send_for(self, backend: str) -> Optional[str]:
+        if backend not in self._send_variants:
+            index = BACKEND_IDS.index(backend) if backend in BACKEND_IDS else 0
+            path = self.send
+            if index and path and path.lower().endswith(".wav"):
+                try:
+                    # Two semitones higher per backend, from Claude's own pitch.
+                    path = _faster_wav(path, 2 ** (index * 2 / 12))
+                except Exception:
+                    path = self.send
+            self._send_variants[backend] = path
+        return self._send_variants[backend]
 
     def _play_system_error(self) -> None:
         """The platform's own error sound, rather than an asset of our own.
@@ -5490,7 +5534,10 @@ class SessionPanel(wx.Panel):
         # drains, if the conversation it belongs to is still the one here.
         self._late_turn_waiting: Optional[int] = None
         self._session_id: Optional[str] = None
-        self._session_backend = normalize_backend(self._get_backend())
+        self._backend = normalize_backend(self._get_backend())
+        self._session_backend = self._backend
+        # The conversation's name as the tab shows it; the frame keeps it.
+        self.tab_title = self._session_title
         self._worker: Optional[AgentWorker] = None
         self._pending_messages: list[tuple[str, list[str], str]] = []
         self._queue_paused = False
@@ -5546,7 +5593,7 @@ class SessionPanel(wx.Panel):
         self.responses_text.Bind(wx.EVT_CONTEXT_MENU, lambda _e: self._show_row_menu())
         self.responses_text.Bind(wx.EVT_SET_FOCUS, self._on_text_view_focus)
 
-        prompt_label = wx.StaticText(self, label="Prompt:")
+        prompt_label = self._prompt_label = wx.StaticText(self, label="Prompt:")
         self.prompt = wx.TextCtrl(
             self,
             style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER | wx.TE_RICH2,
@@ -5806,7 +5853,25 @@ class SessionPanel(wx.Panel):
 
     # ----- Backend -----
     def selected_backend(self) -> str:
-        return normalize_backend(self._get_backend())
+        """This tab's backend. Each tab keeps its own, so two tabs can differ."""
+        return self._backend
+
+    def set_backend(self, backend: str) -> None:
+        """Point this tab's next turn at ``backend``; other tabs keep theirs."""
+        self._backend = normalize_backend(backend)
+        self.backend_changed()
+
+    def show_backend_in_prompt(self, shown: bool) -> None:
+        """Name the prompt after the backend it sends to, while tabs are mixed.
+
+        The mistake this prevents happens at Enter, not at the tab switch, so
+        the box itself says where the message goes. Both the visible label and
+        the control's name change: screen readers take the label from either.
+        """
+        name = f"{backend_label(self._backend)} prompt" if shown else "Prompt"
+        if self.prompt.GetName() != name:
+            self.prompt.SetName(name)
+            self._prompt_label.SetLabel(f"{name}:")
 
     def backend_changed(self) -> None:
         """Refresh the visible provider label after File → Backend changes."""
@@ -6441,7 +6506,7 @@ class SessionPanel(wx.Panel):
         self._pending_messages = pending
         self.prompt.SetValue("")
         self._attachments = []
-        self._earcons.play_send()
+        self._earcons.play_send(self._session_backend)
         if steering:
             if self._worker is not None and self._worker.is_alive() and not self._stopping:
                 self._on_stop()
@@ -6766,7 +6831,7 @@ class SessionPanel(wx.Panel):
         self.send_btn.Disable()
         # Earcons: a one-shot "send", then loop "in progress" until the
         # response arrives (or the request fails).
-        self._earcons.play_send()
+        self._earcons.play_send(self._session_backend)
         self._earcons.start_progress()
         self._show_working()
 
@@ -6914,7 +6979,7 @@ class SessionPanel(wx.Panel):
             self._announce("Error: The run already finished. Press Send to ask it now.")
             return
         self.prompt.SetValue("")
-        self._earcons.play_send()
+        self._earcons.play_send(self._session_backend)
         self._add_your_message(text, steering=True)
         self._announce(f"Steered: {text}")
 
@@ -7147,6 +7212,7 @@ class SessionPanel(wx.Panel):
         # the tab below.
         self._session_title = ""
         self._session_backend = normalize_backend(entry.backend)
+        self._backend = self._session_backend
         self._turns = [Turn(prompt=turn.prompt, response=turn.response) for turn in turns]
         self._rows = []
         self._displayed = []
@@ -7205,6 +7271,7 @@ class SessionPanel(wx.Panel):
         # whatever was here before is not it.
         self._session_title = ""
         self._session_backend = BACKEND_HERMES
+        self._backend = BACKEND_HERMES
         self._turns = []
         self._rows = []
         self._displayed = []
@@ -10352,23 +10419,70 @@ class MainFrame(wx.Frame):
         if backend == self._backend:
             return
         self._backend = backend
-        for key, item in self._backend_items.items():
-            item.Check(key == backend)
         cfg = _load_config()
         cfg["backend"] = backend
         # Now rather than when the next message starts a terminal, so the
         # console cannot arrive in the middle of a turn.
         reserve_console_if_needed(backend)
         _save_config(cfg)
-        for page in self._session_panels():
-            page.backend_changed()
+        # The visible tab only. Every tab used to follow this one setting, so
+        # picking a backend for a new tab quietly moved the others to it too
+        # and their next message went somewhere the person had not chosen.
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.set_backend(backend)
+        self._refresh_backend_items()
+        self._relabel_tabs()
+        message = (
+            f"Backend changed to {backend_label(backend)} for this tab. "
+            "It will be used for the next new turn."
+        )
+        self._announce_setting(message)
+
+    def _refresh_backend_items(self) -> None:
+        """Point the menu, and what depends on the backend, at ``_backend``."""
+        for key, item in self._backend_items.items():
+            item.Check(key == self._backend)
         self._refresh_compact_item()
         self._refresh_connect_item()
         self._refresh_hermes_sessions_item()
-        message = (
-            f"Backend changed to {backend_label(backend)}. It will be used for the next new turn."
-        )
-        self._announce_setting(message)
+
+    def _follow_tab_backend(self) -> None:
+        """Make the visible tab's backend the one the menu shows.
+
+        It is also what the next new tab starts on, which is the backend the
+        person was looking at when they asked for one.
+        """
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel) and page.selected_backend() != self._backend:
+            self._backend = page.selected_backend()
+            self._refresh_backend_items()
+        self._relabel_tabs()
+
+    def _backends_mixed(self) -> bool:
+        """Whether the open tabs do not all use the same backend."""
+        return len({page.selected_backend() for page in self._session_panels()}) > 1
+
+    def _relabel_tabs(self) -> None:
+        """Name each tab, with its backend first while tabs use more than one.
+
+        With a single backend the tag would be the same word on every tab, so
+        it is left off; the moment a second backend is open, every tab, its
+        prompt and its send cue say which one they belong to.
+        """
+        mixed = self._backends_mixed()
+        self.earcons.per_backend_send = mixed
+        for index in range(self.notebook.GetPageCount()):
+            page = self.notebook.GetPage(index)
+            if not isinstance(page, SessionPanel):
+                continue
+            label = _tab_label(getattr(page, "tab_title", ""), page.cwd)
+            if mixed:
+                label = f"{backend_label(page.selected_backend())}: {label}"
+            page.show_backend_in_prompt(mixed)
+            if self.notebook.GetPageText(index) != label:
+                self.notebook.SetPageText(index, label)
+        self._sync_tab_switcher()
 
     def _manage_backends(self) -> None:
         """Open the accessible setup flow for the current provider."""
@@ -10589,7 +10703,7 @@ class MainFrame(wx.Frame):
         # and an unnamed tab is the one thing a screen reader cannot tell from
         # its neighbour.
         self.notebook.AddPage(panel, _tab_label(session_title, cwd), select=True)
-        self._sync_tab_switcher()
+        self._relabel_tabs()
         if initial_prompt:
             panel.prompt.SetValue(initial_prompt)
             # Defer so the page is shown before the request fires.
@@ -11310,6 +11424,7 @@ class MainFrame(wx.Frame):
         title = str(entry.get("title") or "").strip() or str(entry.get("preview") or "").strip()
         panel = self._add_session(self._history_cwd())
         panel.open_hermes_session(session_id, title, attaching)
+        self._follow_tab_backend()
         if attaching:
             wx.CallAfter(
                 announce,
@@ -11326,11 +11441,6 @@ class MainFrame(wx.Frame):
         if not turns:
             announce(f"Error: {entry.title} could not be read back")
             return
-        # A tab only continues a conversation while the app-wide backend still
-        # matches the one that conversation belongs to — a mismatch starts a
-        # new conversation on the next send — so resuming switches to it.
-        if normalize_backend(entry.backend) != self._backend:
-            self._set_backend(entry.backend)
         cwd = self._history_cwd()
         if entry.cwd:
             candidate = entry.cwd
@@ -11348,6 +11458,8 @@ class MainFrame(wx.Frame):
         # renames the tab: that title is what tells this conversation apart
         # from the others open in the same folder.
         panel.restore_history(entry, turns)
+        # The resumed tab took the conversation's own backend.
+        self._follow_tab_backend()
         responses = "1 response" if len(turns) == 1 else f"{len(turns)} responses"
         wx.CallAfter(announce, f"Resumed {entry.title}, {responses}")
 
@@ -11427,7 +11539,8 @@ class MainFrame(wx.Frame):
             # be destroyed, so there is nothing its worker can still tell us.
             page.cancel_worker(wait=False)
         self.notebook.DeletePage(sel)
-        self._sync_tab_switcher()
+        # Closing the last tab of a backend can leave them all on one again.
+        self._follow_tab_backend()
 
     def _on_tab_changed(self, event: wx.BookCtrlEvent) -> None:
         event.Skip()
@@ -11438,8 +11551,9 @@ class MainFrame(wx.Frame):
             return
         self._set_status_text(page.last_status)
         # Before the early return below: arrowing the tab strip is exactly
-        # when the tab changes, and the mode belongs to the tab.
+        # when the tab changes, and the mode and backend belong to the tab.
         self._refresh_mode_items()
+        self._follow_tab_backend()
         # Arrowing along the tab strip changes the page on every keypress. The
         # strip has to keep focus through that, or the second arrow press never
         # reaches it, and the native tab control has already said which tab is
@@ -11450,16 +11564,16 @@ class MainFrame(wx.Frame):
             wx.Window.FindFocus(), self.tab_switcher
         ):
             return
-        # The tab's own name first — it is the conversation, and that is what
-        # tells two tabs in the same folder apart — then which tab of how many,
-        # then the folder it runs in.
-        name = self.notebook.GetPageText(sel)
+        # Which tab of how many, its backend when tabs use more than one, then
+        # its own name — the conversation, which is what tells two tabs in the
+        # same folder apart — then the folder it runs in.
+        name = _tab_label(getattr(page, "tab_title", ""), page.cwd)
         folder = _short_label(page.cwd)
         spoken = name if name and name != folder else folder
-        wx.CallAfter(
-            announce,
-            f"Session {sel + 1} of {self.notebook.GetPageCount()}: {spoken}, in {folder}",
-        )
+        where = f"Session {sel + 1} of {self.notebook.GetPageCount()}"
+        if self._backends_mixed():
+            where += f", {backend_label(page.selected_backend())}"
+        wx.CallAfter(announce, f"{where}: {spoken}, in {folder}")
         wx.CallAfter(page.focus_prompt)
 
     # ----- Status routing -----
@@ -11479,14 +11593,8 @@ class MainFrame(wx.Frame):
         by identity rather than by the current selection: a background tab can
         finish restoring, or be sent a side chat, while another one is in front.
         """
-        label = _tab_label(title, panel.cwd)
-        for index in range(self.notebook.GetPageCount()):
-            if self.notebook.GetPage(index) is not panel:
-                continue
-            if self.notebook.GetPageText(index) != label:
-                self.notebook.SetPageText(index, label)
-                self._sync_tab_switcher()
-            return
+        panel.tab_title = title
+        self._relabel_tabs()
 
     # ----- Focus delegation -----
     def _focus_active(self, which: str) -> None:

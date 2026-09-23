@@ -22,7 +22,7 @@ class Earcons:
         self.enabled = True
         self.cues: dict = {}
 
-    def play_send(self) -> None:
+    def play_send(self, backend: str = "") -> None:
         self.calls.append("send")
 
     def play_received(self) -> None:
