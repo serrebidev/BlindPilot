@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.22 - 2026-09-24
+
+- Streamed answers from Muse Code, Hermes and Command Code keep their Markdown shape. Each sentence was parsed as a row of its own, so numbered lists lost their numbers and lines split at their colons. Sentences are still spoken as they arrive, but a row is added only once its paragraph, list or heading is finished, and rows are only appended, so the list never rebuilds under the reader.
+- Hermes keeps the spaces and paragraph breaks between streamed sentences instead of running paragraphs together.
+- Muse tool rows name what they are about: search shows its pattern, and write_todos lists its items instead of reading out its bookkeeping JSON.
+
 ## v0.29.21 - 2026-09-24
 
 - Muse Code no longer says it refused a permission you gave. Under load Muse 1.3.0 answers a permission choice with an internal error even though it has already saved the choice and the command runs, so BlindPilot read out a refusal that never happened. BlindPilot now sends the same choice once more with the same command id, which Muse answers with its first result, so you only hear a refusal if the second try fails as well. That also covers the rare case where Muse really did lose the choice, which would otherwise have left the turn waiting.

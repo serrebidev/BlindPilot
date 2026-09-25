@@ -1517,9 +1517,10 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         if not ready:
             return
         self._streamed += len(ready)
-        spoken = ready.strip()
-        if spoken:
-            self._on_activity("assistant", spoken)
+        if ready.strip():
+            # Leading whitespace kept: the window joins these back into the
+            # message, and a paragraph break it drops merges two paragraphs.
+            self._on_activity("assistant", ready.rstrip())
 
     def _tool_start(self, payload: dict) -> None:
         name = str(payload.get("name") or "tool")

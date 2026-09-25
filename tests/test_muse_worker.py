@@ -13,6 +13,7 @@ contract the real ``StdioTransport`` answers to.
 
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
@@ -982,3 +983,35 @@ def test_a_model_picked_for_a_reopened_conversation_is_applied(monkeypatch):
 
     sent = transport.sent_with_method("session/setModel")
     assert sent and sent[0]["params"]["model"] == {"modelId": "muse-spark-1.3"}
+
+
+def test_tool_rows_name_what_search_and_todos_are_about(monkeypatch):
+    # Measured 1.3.0: search sends its query as "pattern", write_todos a list
+    # of todos, and write_todos answers bookkeeping JSON nobody needs read.
+    def tool(item_id: str, name: str, args: dict, output: str) -> list[dict]:
+        item = {"itemId": item_id, "kind": "toolCall", "tool": name, "args": json.dumps(args)}
+        return [
+            {"jsonrpc": "2.0", "method": "item/started", "params": {"item": item}},
+            {
+                "jsonrpc": "2.0",
+                "method": "item/completed",
+                "params": {"item": {**item, "visibleOutput": output}},
+            },
+        ]
+
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        *tool("t1", "search", {"output_mode": "text", "pattern": "def _uuid"}, "a.py:1:def _uuid"),
+        *tool("t2", "write_todos", {"todos": [{"text": "Audit", "status": "done"}]}, '{"ok":true}'),
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    assert recorder.said("tool") == ["search: def _uuid", "write_todos: Audit"]
+    assert recorder.said("result") == ["search: a.py:1:def _uuid"]

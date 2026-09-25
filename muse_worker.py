@@ -622,9 +622,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             try:
                 parsed_args = json.loads(item.get("args") or "{}")
                 if isinstance(parsed_args, dict):
-                    subject = str(
-                        parsed_args.get("command") or parsed_args.get("path") or ""
-                    ).strip()
+                    subject = _args_subject(parsed_args)
             except ValueError:
                 subject = ""
             if not subject:
@@ -692,7 +690,8 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                 or str(item.get("visibleOutput") or "")
                 or "".join(self._tool_output_parts.get(item_id, []))
             )
-            if result_text.strip():
+            # write_todos answers bookkeeping JSON; its row already lists the todos.
+            if result_text.strip() and name != "write_todos":
                 self._on_activity("result", f"{name}: {result_text.strip()}")
             self._tool_output_parts.pop(item_id, None)
         elif kind == "reasoning":
@@ -1003,6 +1002,23 @@ def _choice(params: dict, decisions: Sequence[str]) -> str:
 def _refusal(params: dict) -> str:
     """The choice that cannot push work forward: deny, else abort."""
     return _choice(params, _MUSE_REFUSALS) or "denied"
+
+
+def _args_subject(args: dict) -> str:
+    """What a tool call is about, from its args (measured 1.3.0: search sends
+    ``pattern``, write_todos a ``todos`` list of {text, status})."""
+    for key in ("command", "path", "pattern", "query", "url"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    todos = args.get("todos")
+    if isinstance(todos, list):
+        return "; ".join(
+            str(todo.get("text") or "").strip()
+            for todo in todos
+            if isinstance(todo, dict) and str(todo.get("text") or "").strip()
+        )
+    return ""
 
 
 def _item_text(item: dict) -> str:

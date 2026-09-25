@@ -209,6 +209,7 @@ def test_reopening_a_finished_conversation_closes_the_replayed_response():
     panel._stopping = False
     panel._turns = []
     panel._stream_response = 1
+    panel._flush_live_answer = lambda: None
     panel._rows = [
         blindpilot_app.Row(kind="header", label="Response 1", payload="", response_number=1)
     ]
