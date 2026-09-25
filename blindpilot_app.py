@@ -40,6 +40,7 @@ import queue
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import tarfile
 import tempfile
@@ -53,7 +54,7 @@ import weakref
 import webbrowser
 import zipfile
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, cast
 
@@ -300,7 +301,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.23"
+APP_VERSION = "0.29.24"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1693,6 +1694,8 @@ class ModelOptions:
     current_effort: str = ""  # e.g. "medium"
     error: str = ""  # non-empty when the probe fell back to defaults
     from_cache: bool = False  # served from a recent probe, not a fresh one
+    # alias -> the model it currently resolves to, e.g. "opus" -> "Opus 5.5".
+    labels: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_model_aliases(text: str) -> List[str]:
@@ -1724,6 +1727,43 @@ def _parse_current_model(text: str) -> tuple[str, str]:
     if not match:
         return "", ""
     return match.group(1).strip(), (match.group(2) or "").strip()
+
+
+def _parse_alias_target(text: str) -> str:
+    """The model an alias names, out of `/model <alias>`'s reply::
+
+    Set model to `Opus 5.5` for this session only
+    """
+    match = re.search(r"Set model to\s*`?([^`\n]+?)`?\s+for this session", text, re.I)
+    return match.group(1).strip() if match else ""
+
+
+def _model_choice(model: str, labels: dict[str, str]) -> str:
+    """A model-box entry: the alias, plus the version it means when known."""
+    label = labels.get(model, "")
+    return f"{model}: {label}" if label and label.lower() != model.lower() else model
+
+
+def _resolve_claude_aliases(binary: str, aliases: List[str], cwd: Optional[str]) -> dict:
+    """Ask the CLI what each alias means today, all at once.
+
+    Claude Code lists only aliases ("opus"), which says nothing about which
+    Opus. `/model <alias>` in print mode names the model and changes nothing
+    outside that one throwaway session.
+    """
+
+    def one(alias: str) -> str:
+        reply = _run_claude(
+            binary,
+            ["-p", f"/model {alias}", "--no-session-persistence", "--output-format", "text"],
+            cwd,
+            45,
+        )
+        return _parse_alias_target(reply)
+
+    with ThreadPoolExecutor(max_workers=max(1, len(aliases))) as pool:
+        targets = list(pool.map(one, aliases))
+    return {alias: target for alias, target in zip(aliases, targets, strict=True) if target}
 
 
 def _parse_effort_levels(help_text: str) -> List[str]:
@@ -1928,6 +1968,7 @@ def probe_model_options(
     status = _run_claude(binary, ["-p", "/model", "--output-format", "text"], cwd, 45)
     models = _parse_model_aliases(status)
     current_model, current_effort = _parse_current_model(status)
+    labels = _resolve_claude_aliases(binary, models, cwd) if models else {}
     help_thread.join(30)
     efforts = _parse_effort_levels(help_text[0] if help_text else "")
 
@@ -1941,7 +1982,7 @@ def probe_model_options(
     error = ""
     if problems:
         error = f"Could not read the {' and '.join(problems)} from Claude Code; showing the built-in list."
-    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    options = ModelOptions(models, efforts, current_model, current_effort, error, labels=labels)
     if not problems:
         # Only a clean answer is worth reusing; a failed probe should be retried.
         _remember_model_options(backend, cwd, binary, options)
@@ -4036,16 +4077,21 @@ class ModelDialog(wx.Dialog):
         # "Leave it alone" is the first entry in both boxes, and it says what
         # leaving it alone actually means rather than just "(CLI default)".
         self._model_keep = _keep_choice(options.current_model)
+        # Each alias is shown with the version it resolves to, "opus: Opus 5.5",
+        # and mapped back to the bare alias when picked.
+        self._model_by_choice = {_model_choice(m, options.labels): m for m in options.models}
         self._effort_keep = _keep_choice(options.current_effort)
 
         model_label = wx.StaticText(self, label="&Model:")
         self.model_box = wx.ComboBox(
             self,
-            choices=[self._model_keep, *options.models],
+            choices=[self._model_keep, *self._model_by_choice],
             style=wx.CB_DROPDOWN,
         )
         self.model_box.SetName("Model")
-        self.model_box.SetValue(selected_model or self._model_keep)
+        self.model_box.SetValue(
+            _model_choice(selected_model, options.labels) if selected_model else self._model_keep
+        )
 
         efforts = list(options.efforts)
         if selected_effort and selected_effort not in efforts:
@@ -4091,6 +4137,7 @@ class ModelDialog(wx.Dialog):
     def selection(self) -> tuple[str, str]:
         """(model, effort), with "" for either one left as the backend has it."""
         model = self.model_box.GetValue().strip()
+        model = self._model_by_choice.get(model, model)
         effort = self.effort_box.GetValue().strip()
         return (
             "" if model in (DEFAULT_CHOICE, self._model_keep) else model,
