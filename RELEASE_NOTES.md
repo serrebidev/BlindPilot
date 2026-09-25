@@ -1,7 +1,10 @@
-# BlindPilot 0.29.22
+# BlindPilot 0.29.23
 
-Answers from Muse Code, Hermes and Command Code now read the way they were written, found by checking a real Muse session against Muse's own saved record of it.
+Command Code now reads like Claude Code and Codex. The difference was found by running a real Command Code turn that used every common tool, then playing its output back through BlindPilot next to what Claude produces for the same work.
 
-- Streamed answers keep their shape. These backends send their answer a sentence at a time so you hear it straight away, and BlindPilot turned every sentence into a row of its own. A numbered list lost its numbers and fell apart into single lines, and a line such as "Fallback: sound." was split at its colon. Each sentence is still spoken the moment it arrives, but a row is now added only once its whole paragraph, list or heading is finished. Rows are only ever added to the end, so the list never rebuilds or moves under you while you read.
-- Hermes answers keep their paragraph breaks. The spaces and blank lines between sentences were dropped on the way to the window, which ran separate paragraphs together.
-- Muse tool steps say what they are doing. A search read only "search" because Muse sends the search text in a field BlindPilot did not look at; it now reads, for example, "search: def _uuid". A to-do update names its items instead of reading out a line of bookkeeping like "items 4, ok true, revision 1".
+- Tool steps say what is happening. Command Code's steps read out the raw tool name and the whole absolute path, for example "read_file: C:\Users\you\projects\app\a.txt". They now use the same wording as Claude: "Reading a.txt", "Editing a.txt, 1 line added, 1 removed", "Writing b.txt, 2 lines", "Running: git status", "Searching for gamma" and "Listing src".
+- Results show just the output. A tool's result no longer starts with the tool's name, so its preview line is the first line of what the tool returned, the same as on Claude and Codex.
+- Thinking is one row per thought. When Show thinking is on, Command Code's reasoning arrived a word or two at a time and each piece became a row and was spoken separately. Each thought is now one row.
+- Narration between tools is its own paragraph. Command Code writes a short line before each tool call, such as a heading saying what it is about to do. That line had no full stop, so it was held back and then glued onto the next one, giving "## Reading a.txt## Editing a.txt". Each line is now finished and read before its tool runs.
+- Streamed answers are not split mid-word. A full stop at the very end of a streamed chunk was treated as the end of a sentence even when the next chunk carried on the word, so "*.txt" could be read as "*." and "txt" on two rows. This affected Command Code and Muse Code.
+- Command Code's partial tool output no longer adds a row that just says "tool_update".
