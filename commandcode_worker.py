@@ -28,6 +28,7 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 from typing import Callable, Optional
@@ -35,6 +36,7 @@ from typing import Callable, Optional
 from agent_backends import (
     BACKEND_COMMANDCODE,
     AskQuestions,
+    _tool_use_label,
     end_process_group,
     find_backend_cli,
     no_window_kwargs,
@@ -55,6 +57,24 @@ _PERMISSION_MODES = {
     "dontAsk": "dont-ask",
 }
 _BYPASS_MODE = "bypassPermissions"
+
+# Command Code's tool names mapped to Claude Code's, whose inputs they share
+# (file_path, old_string, new_string, content, pattern, command, todos -
+# measured at 1.65.2), so a step reads the way it does on Claude: "Reading
+# a.txt" rather than "read_file: " and the whole absolute path.
+_CLAUDE_TOOL_NAMES = {
+    "read_file": "Read",
+    "edit_file": "Edit",
+    "write_file": "Write",
+    "shell_command": "Bash",
+    "run_command": "Bash",
+    "powershell": "PowerShell",
+    "grep": "Grep",
+    "glob": "Glob",
+    "web_fetch": "WebFetch",
+    "web_search": "WebSearch",
+    "todo_write": "TodoWrite",
+}
 
 # The tools ``-p`` withholds, and the two BlindPilot asks back.
 #
@@ -266,10 +286,13 @@ class CommandcodeWorker(threading.Thread):
         self._error_lock = threading.Lock()
 
         self._assistant_parts: list[str] = []
+        self._message_streamed = False
+        self._thinking_parts: list[str] = []
         self._streamed = 0
         self._session_seen = ""
         self._tool_names: dict[str, str] = {}
         self._tool_subjects: dict[str, str] = {}
+        self._tool_inputs: dict[str, dict] = {}
         # The last tool Command Code refused, as the sentence _tool_denied or
         # _tool_refused already built. A stop that comes from a refusal has no
         # stderr to read and no reason on the stream, so this is the only place
@@ -515,16 +538,23 @@ class CommandcodeWorker(threading.Thread):
                 # Assistant answer text, held until it completes a sentence so
                 # the screen reader never reads a torn word.
                 self._assistant_parts.append(delta)
+                self._message_streamed = True
                 self._release_streamed()
         elif etype == "thinking_delta":
-            delta = str(event.get("delta") or "")
-            if delta:
-                self._on_activity("thinking", delta)
+            # Held for thinking_end: a row per delta was a row per word.
+            self._thinking_parts.append(str(event.get("delta") or ""))
+        elif etype == "thinking_end":
+            thought = str(event.get("text") or "") or "".join(self._thinking_parts)
+            self._thinking_parts = []
+            if thought.strip():
+                self._on_activity("thinking", thought.strip())
         elif etype == "tool_queued":
             call_id = str(event.get("toolCallId") or "")
             if call_id:
                 self._tool_names[call_id] = str(event.get("toolName") or "tool")
                 self._tool_subjects[call_id] = _tool_subject(event.get("input"))
+                params = event.get("input")
+                self._tool_inputs[call_id] = params if isinstance(params, dict) else {}
         elif etype == "tool_running":
             self._tool_running(event)
         elif etype == "tool_completed":
@@ -533,11 +563,14 @@ class CommandcodeWorker(threading.Thread):
             self._tool_denied(event)
         elif etype in ("tool_errored", "tool_hook_blocked"):
             self._tool_refused(event)
-        elif etype in ("message_end", "message_update"):
-            self._fallback_message_text(event)
+        elif etype == "message_end":
+            self._end_message(event)
         elif etype in (
             "turn_start",
             "message_start",
+            "message_update",
+            # Partial output of a running tool; tool_completed carries all of it.
+            "tool_update",
             "model_request_start",
             "model_request_end",
             "model_trace",
@@ -565,19 +598,20 @@ class CommandcodeWorker(threading.Thread):
     def _tool_running(self, event: dict) -> None:
         call_id = str(event.get("toolCallId") or "")
         name = str(event.get("toolName") or self._tool_names.get(call_id, "tool"))
-        # The description is often null; the queued frame's input is the part
-        # worth hearing either way.
-        subject = str(event.get("description") or "").strip() or self._tool_subjects.get(
-            call_id, ""
-        )
-        self._on_activity("tool", f"{name}: {subject}" if subject else name)
+        params = dict(self._tool_inputs.get(call_id, {}))
+        # Usually null; when set it is the best detail for a tool with no
+        # phrasing of its own.
+        description = str(event.get("description") or "").strip()
+        if description:
+            params["description"] = description
+        self._on_activity("tool", _tool_label(name, params))
 
     def _tool_completed(self, event: dict) -> None:
-        call_id = str(event.get("toolCallId") or "")
-        name = str(event.get("toolName") or self._tool_names.get(call_id, "tool"))
-        result = _result_text(event.get("result"))
-        if result.strip():
-            self._on_activity("result", f"{name}: {result.strip()}")
+        result = _result_text(event.get("result")).strip()
+        if result:
+            # The output alone, as Claude and Codex show it: the step row above
+            # already said which tool this was.
+            self._on_activity("result", result)
 
     def _tool_denied(self, event: dict) -> None:
         """Say which tool was refused, and why bypass did not stop it.
@@ -625,19 +659,27 @@ class CommandcodeWorker(threading.Thread):
         self._gap_note_said = True
         self._on_activity("tool", _BYPASS_GAP_NOTE)
 
-    def _fallback_message_text(self, event: dict) -> None:
-        """Use a whole-message text if no streaming deltas arrived.
+    def _end_message(self, event: dict) -> None:
+        """Finish one model message before the next begins.
 
-        Some models or releases answer in one content block rather than a
-        stream of deltas; without this, such a turn would end with nothing
-        having been said until the final result line.
+        A turn with tools is several messages, and their deltas arrive with no
+        break between them, so "## Reading a.txt" and "## Editing a.txt" ran
+        together into one line and waited for a sentence end that never came.
+        Each message now ends its paragraph here, the way each of Claude's
+        text blocks is its own. A message that came whole rather than as
+        deltas is taken from its content.
         """
-        if self._assistant_parts:
-            return
-        text = _content_text(event.get("content"))
-        if text.strip():
-            self._assistant_parts = [text]
-            self._release_all()
+        if not self._message_streamed:
+            text = _content_text(event.get("content"))
+            if text.strip():
+                self._assistant_parts.append(text)
+        self._message_streamed = False
+        self._release_all()
+        text = "".join(self._assistant_parts)
+        if text.strip() and not text.endswith("\n\n"):
+            # Already said, so marked as streamed: only the break is added.
+            self._assistant_parts.append("\n\n")
+            self._streamed = len(text) + 2
 
     def _generic_event(self, etype: str, event: dict) -> None:
         """Say something for an event kind this file has never heard of.
@@ -808,6 +850,15 @@ def _result_text(result: object) -> str:
     if isinstance(result, str):
         return result
     return ""
+
+
+def _tool_label(name: str, params: dict) -> str:
+    """The spoken step for a tool call, phrased the way Claude's are."""
+    if name == "read_directory":
+        path = str(params.get("path") or "").rstrip("/\\")
+        folder = os.path.basename(path)
+        return f"Listing {folder}" if folder else "Listing a folder"
+    return _tool_use_label(_CLAUDE_TOOL_NAMES.get(name, name), params)
 
 
 def _tool_subject(payload: object) -> str:

@@ -2,6 +2,15 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.23 - 2026-09-25
+
+- Command Code tool steps read the way Claude's and Codex's do. A step said the raw tool name and the whole absolute path, such as "read_file: C:\Users\...\a.txt"; it now says "Reading a.txt", "Editing a.txt, 1 line added, 1 removed", "Running: git status" or "Listing src", using the same wording Claude's steps have always used.
+- Command Code results show the tool's output on its own, as on Claude and Codex, instead of repeating the tool's name in front of it.
+- Command Code's thinking, when shown, is one row per thought rather than one row per word.
+- Command Code's narration between tool calls is its own paragraph and is said before the tool runs. Each message's heading or line was held back waiting for a sentence end and then glued onto the next one, such as "## Reading a.txt## Editing a.txt".
+- A streamed answer on Command Code or Muse is no longer split mid-word at a full stop that the next chunk carries on, such as "*." then "txt".
+- Command Code's partial tool output no longer adds a bare "tool_update" row.
+
 ## v0.29.22 - 2026-09-24
 
 - Streamed answers from Muse Code, Hermes and Command Code keep their Markdown shape. Each sentence was parsed as a row of its own, so numbered lists lost their numbers and lines split at their colons. Sentences are still spoken as they arrive, but a row is added only once its paragraph, list or heading is finished, and rows are only appended, so the list never rebuilds under the reader.

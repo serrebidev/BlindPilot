@@ -32,7 +32,6 @@ from __future__ import annotations
 import bisect
 import hashlib
 import importlib.util
-import difflib
 import json
 import logging
 import os
@@ -78,6 +77,7 @@ from app_updater import (
     version_tuple,
 )
 from agent_backends import (
+    _tool_use_label,
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
@@ -300,7 +300,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.22"
+APP_VERSION = "0.29.23"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2291,108 +2291,6 @@ def _tab_label(title: str, cwd: str) -> str:
     real name as soon as Hermes titles the conversation.
     """
     return _tab_title(title) or (_short_label(cwd) if cwd else "New session")
-
-
-def _line_change_counts(old: str, new: str) -> tuple[int, int]:
-    """Lines added and removed between two versions of a block.
-
-    A real diff rather than a count of the lines involved: replacing a
-    twenty-line function to change two of its lines is a two-line edit, and
-    "twenty added, twenty removed" would be a worse answer than none.
-    """
-    added = removed = 0
-    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
-    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
-        if tag in ("replace", "delete"):
-            removed += old_end - old_start
-        if tag in ("replace", "insert"):
-            added += new_end - new_start
-    return added, removed
-
-
-def _lines_phrase(added: int, removed: int) -> str:
-    """ ", 5 lines added, 3 removed" - or nothing at all.
-
-    Appended to the line the tool call already has rather than spoken as a
-    second one: this narration is long enough to fall behind on a fan-out
-    without adding an utterance per edit. Halves that are zero are left out,
-    because "0 removed" is a word said for no reason every time.
-    """
-    parts = []
-    if added:
-        parts.append(f"{added} line{'' if added == 1 else 's'} added")
-    if removed:
-        # "added" already carried the word "lines" when both are present.
-        word = "" if added else f" line{'' if removed == 1 else 's'}"
-        parts.append(f"{removed}{word} removed")
-    return ", " + ", ".join(parts) if parts else ""
-
-
-def _tool_use_label(name: str, params: dict) -> str:
-    """One spoken line describing the tool Claude just invoked.
-
-    This is the narration that answers "what is it doing right now" — the CLI
-    does not forward thinking blocks in print mode, so the tool calls are the
-    live signal. Phrased as an action ("Reading foo.py") rather than a raw tool
-    name and JSON blob.
-    """
-
-    def first(*keys: str) -> str:
-        for key in keys:
-            value = params.get(key)
-            if isinstance(value, str) and value.strip():
-                return " ".join(value.split())
-        return ""
-
-    target = first("file_path", "path", "notebook_path")
-    short = os.path.basename(target) if target else ""
-
-    def text(key: str) -> str:
-        value = params.get(key)
-        return value if isinstance(value, str) else ""
-
-    if name == "Read":
-        return f"Reading {short}" if short else "Reading a file"
-    if name in ("Edit", "NotebookEdit", "MultiEdit"):
-        # How much it changed is the only sense of scale available to somebody
-        # who cannot see the diff, and "changed a line" and "rewrote the file"
-        # are the same sentence without it.
-        edits = params.get("edits")
-        if isinstance(edits, list):
-            added = removed = 0
-            for edit in edits:
-                if not isinstance(edit, dict):
-                    continue
-                one, two = edit.get("old_string"), edit.get("new_string")
-                if isinstance(one, str) and isinstance(two, str):
-                    more, fewer = _line_change_counts(one, two)
-                    added += more
-                    removed += fewer
-        else:
-            added, removed = _line_change_counts(text("old_string"), text("new_string"))
-        where = f"Editing {short}" if short else "Editing a file"
-        return where + _lines_phrase(added, removed)
-    if name == "Write":
-        where = f"Writing {short}" if short else "Writing a file"
-        written = len(text("content").splitlines())
-        if not written:
-            return where
-        return f"{where}, {written} line{'' if written == 1 else 's'}"
-    if name in ("Bash", "PowerShell"):
-        cmd = first("command")
-        return f"Running: {cmd}" if cmd else f"Running a {name} command"
-    if name in ("Grep", "Glob"):
-        pattern = first("pattern")
-        return f"Searching for {pattern}" if pattern else "Searching"
-    if name in ("WebFetch", "WebSearch"):
-        what = first("url", "query")
-        return f"Fetching {what}" if what else "Searching the web"
-    if name == "Task":
-        return f"Delegating: {first('description') or 'a subtask'}"
-    if name == "TodoWrite":
-        return "Updating the task list"
-    detail = first("description", "command", "query", "prompt")
-    return f"Using {name}: {detail}" if detail else f"Using {name}"
 
 
 def _tool_result_text(content: object) -> str:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
 
 import commandcode_worker
@@ -195,6 +196,7 @@ def test_a_turn_streams_text_tools_and_the_session(worker_env):
             _event({"type": "run_start", "sessionId": "s1"}),
             _event({"type": "turn_start", "turnNumber": 1}),
             _event({"type": "thinking_delta", "delta": "thinking hard"}),
+            _event({"type": "thinking_end", "text": "thinking hard"}),
             _event({"type": "text_delta", "delta": "Hello there. "}),
             _event(
                 {
@@ -230,8 +232,9 @@ def test_a_turn_streams_text_tools_and_the_session(worker_env):
     assert rec.texts("session") == ["s1"]
     assert rec.texts("started") == [None]
     assert "thinking hard" in rec.activity("thinking")
-    assert "read_file: x.py" in rec.activity("tool")
-    assert any("read_file" in row and "print(1)" in row for row in rec.activity("result"))
+    # Phrased the way Claude's steps are, and the output shown on its own.
+    assert "Reading x.py" in rec.activity("tool")
+    assert rec.activity("result") == ["print(1)"]
     assert rec.texts("complete") == ["Hello there. print(1)"]
     assert rec.kinds()[-1] == "done"
     assert "failed" not in rec.kinds()
@@ -725,3 +728,83 @@ def test_a_quiet_settings_file_says_nothing(worker_env, tmp_path, monkeypatch):
     worker.join(20)
 
     assert rec.activity("tool") == []
+
+
+def test_tool_steps_read_like_claudes():
+    """Command Code shares Claude's input keys, so its steps get Claude's
+    phrasing instead of a snake_case name and a whole absolute path
+    (inputs as measured at Command Code 1.65.2)."""
+    from commandcode_worker import _tool_label
+
+    folder = os.path.join(os.sep, "work", "proj")
+    path = os.path.join(folder, "a.txt")
+    assert _tool_label("read_file", {"file_path": path}) == "Reading a.txt"
+    assert (
+        _tool_label("edit_file", {"file_path": path, "old_string": "beta", "new_string": "BETA"})
+        == "Editing a.txt, 1 line added, 1 removed"
+    )
+    written = _tool_label("write_file", {"file_path": path, "content": "one\ntwo\n"})
+    assert written == "Writing a.txt, 2 lines"
+    assert _tool_label("shell_command", {"command": "echo hi"}) == "Running: echo hi"
+    assert _tool_label("grep", {"pattern": "gamma", "path": folder}) == "Searching for gamma"
+    assert _tool_label("glob", {"pattern": "*.txt"}) == "Searching for *.txt"
+    assert _tool_label("read_directory", {"path": folder}) == "Listing proj"
+    assert _tool_label("todo_write", {"todos": []}) == "Updating the task list"
+    assert _tool_label("task_list", {}) == "Using task_list"
+
+
+def test_each_message_is_its_own_paragraph_and_thinking_one_row(worker_env):
+    """Shaped like a real 1.65.2 turn: thinking arrives a word at a time, a
+    message's heading has no sentence end, and the next message follows a tool
+    with no break. That read as a row per word of thinking, and as
+    "## Reading a.txt## Editing a.txt" glued together."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "thinking_start"}),
+            _event({"type": "thinking_delta", "delta": "Read"}),
+            _event({"type": "thinking_delta", "delta": " it first."}),
+            _event({"type": "thinking_end", "text": "Read it first."}),
+            _event({"type": "text_delta", "delta": "## Reading"}),
+            _event({"type": "text_delta", "delta": " a.txt"}),
+            _event({"type": "message_update", "content": [{"type": "text", "text": "## Reading"}]}),
+            _event(
+                {"type": "message_end", "content": [{"type": "text", "text": "## Reading a.txt"}]}
+            ),
+            _event(
+                {
+                    "type": "tool_update",
+                    "toolCallId": "c1",
+                    "partial": [{"type": "text", "text": "hi"}],
+                }
+            ),
+            _event({"type": "text_delta", "delta": "## Editing a.txt"}),
+            _event(
+                {"type": "message_end", "content": [{"type": "text", "text": "## Editing a.txt"}]}
+            ),
+            _event({"type": "message_end", "content": [{"type": "text", "text": "done"}]}),
+            _result(subtype="success", sessionId="s1"),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert rec.activity("thinking") == ["Read it first."]
+    assert rec.activity("assistant") == ["## Reading a.txt", "## Editing a.txt", "done"]
+    assert rec.activity("tool") == []
+    assert rec.texts("complete") == ["## Reading a.txt\n\n## Editing a.txt\n\ndone"]
+
+
+def test_a_stop_at_the_live_edge_waits_for_the_next_delta(worker_env):
+    """ "*." then "txt" is one word, not a sentence that ended at the dot."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "text_delta", "delta": "## Globbing *."}),
+            _event({"type": "text_delta", "delta": "txt"}),
+            _event({"type": "message_end", "content": []}),
+            _result(subtype="success", sessionId="s1", finalText="done"),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert rec.activity("assistant") == ["## Globbing *.txt"]

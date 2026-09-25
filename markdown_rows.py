@@ -430,6 +430,9 @@ def reassemble_all(rows: List[Row]) -> str:
 # its first caller so both the streaming backends and the Hermes worker can
 # share one definition without importing each other.
 _SENTENCE_END_RE = re.compile(r"(?s)^.*(?:[.!?:;…][\"'”’)\]]*(?=\s|$)|\n)")
+# The same, but a stop at the very end of a still-growing stream does not
+# count: the next delta may carry on the word, as "*." then "txt" did.
+_LIVE_SENTENCE_END_RE = re.compile(r"(?s)^.*(?:[.!?:;…][\"'”’)\]]*(?=\s)|\n)")
 
 
 def complete_sentences(text: str) -> str:
@@ -453,7 +456,8 @@ def release_finished(text: str, streamed: int, emit: Callable[[str], None]) -> i
     """
     if len(text) <= streamed:
         return streamed
-    spoken = complete_sentences(text[streamed:])
+    match = _LIVE_SENTENCE_END_RE.search(text[streamed:])
+    spoken = match.group(0).rstrip() if match else ""
     if not spoken:
         return streamed
     emit(spoken)
