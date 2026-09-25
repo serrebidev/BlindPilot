@@ -300,7 +300,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.21"
+APP_VERSION = "0.29.22"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -5518,6 +5518,9 @@ class SessionPanel(wx.Panel):
         # Answer text already put into the list for the turn in flight, so the
         # finished answer can be checked against it rather than assumed shown.
         self._streamed_assistant = ""
+        # The message being streamed a sentence at a time: [response number,
+        # speaker, its text so far, rows already added]. See _stream_answer_rows.
+        self._live_answer: Optional[list] = None
         # Set while the user's Stop is being carried out, so the backend's own
         # "cancelled" report is not announced to them as an error.
         self._stopping = False
@@ -7032,6 +7035,7 @@ class SessionPanel(wx.Panel):
 
     def _finish_stopped_turn(self) -> None:
         """Close out a turn the user stopped, without reporting it as failed."""
+        self._flush_live_answer()
         self._earcons.stop_progress()
         self._hide_working()
         partial = self._streamed_assistant.strip()
@@ -7394,6 +7398,10 @@ class SessionPanel(wx.Panel):
             # row, but would still speak the bare backend name.
             return
         n = self._begin_stream_response()
+        if kind in ("you", "result", "tool", "thinking"):
+            # Something else is being said, so the message streamed so far has
+            # ended and its last block is finished too.
+            self._flush_live_answer()
         if kind == "you":
             # A replayed conversation carries the user's own messages, which a
             # live turn adds itself (_add_your_message) before the worker
@@ -7451,11 +7459,7 @@ class SessionPanel(wx.Panel):
                 # Named so the row says whose words these are: several
                 # agents' commentary arrives interleaved on one stream.
                 speaker = f"{speaker} subagent"
-            segments = parse_response(text, n)[1:]
-            for i, row in enumerate(segments):
-                if i == 0 and row.kind != "code":
-                    row.label = f"{speaker}: {row.label}"
-                self._rows.append(row)
+            self._stream_answer_rows(text, n, speaker)
             if not from_subagent:
                 # A subagent's words are not this turn's answer, and were
                 # already kept out of it upstream.
@@ -7464,6 +7468,48 @@ class SessionPanel(wx.Panel):
                 self._assistant_narrated_this_turn = True
         if refresh:
             self._refresh_list()
+
+    def _stream_answer_rows(self, text: str, n: int, speaker: str) -> None:
+        """Add streamed answer text to the list, one finished block at a time.
+
+        Streaming backends hand over a sentence at a time so it is spoken at
+        once. Parsed alone, every sentence became a row of its own: a numbered
+        list lost its numbers, and a line was split at its colon. The sentences
+        of one message are parsed together instead, and a block becomes a row
+        once the next block has begun, so rows are only ever appended and the
+        list never rebuilds under the reader.
+        """
+        live = getattr(self, "_live_answer", None)
+        if live is None or live[0] != n or live[1] != speaker:
+            self._flush_live_answer()
+            live = self._live_answer = [n, speaker, "", 0]
+        if live[2] and not text[:1].isspace():
+            # A chunk that arrived trimmed. A line break keeps a list item or
+            # heading that starts it a block of its own, and is otherwise just
+            # a space inside the paragraph.
+            live[2] += "\n"
+        live[2] += text
+        self._add_live_answer_rows(final=False)
+
+    def _add_live_answer_rows(self, final: bool) -> None:
+        live = self._live_answer
+        if live is None:
+            return
+        n, speaker, text, done = live
+        segments = parse_response(text, n)[1:]
+        ready = segments if final else segments[:-1]
+        for i in range(done, len(ready)):
+            row = ready[i]
+            if i == 0 and row.kind != "code":
+                row.label = f"{speaker}: {row.label}"
+            self._rows.append(row)
+        live[3] = max(done, len(ready))
+
+    def _flush_live_answer(self) -> None:
+        """Add the last block of the message being streamed; it has ended."""
+        if getattr(self, "_live_answer", None) is not None:
+            self._add_live_answer_rows(final=True)
+            self._live_answer = None
 
     def _say(self, text: str, kind: str = "assistant") -> bool:
         """Speak live activity, and mirror a short form to the status bar.
@@ -7500,6 +7546,7 @@ class SessionPanel(wx.Panel):
     def _on_response_complete(self, text: str) -> None:
         # The turn beat the cancellation, so it is a normal response.
         self._stopping = False
+        self._flush_live_answer()
         # Stop the in-progress loop and play the "received" cue.
         self._earcons.play_received()
         # Kept rather than asked here: the turn is still finishing, and a modal
@@ -7564,6 +7611,7 @@ class SessionPanel(wx.Panel):
             # for it, so it is not news, and it is not an error.
             return
         self._queue_paused = True
+        self._flush_live_answer()
         self._earcons.stop_progress()
         self._hide_working()
         self._earcons.play_error()
@@ -7599,6 +7647,9 @@ class SessionPanel(wx.Panel):
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()
         self._hide_working()
+        if getattr(self, "_live_answer", None) is not None:
+            self._flush_live_answer()
+            self._refresh_list()
         if self._stopping:
             self._stopping = False
             self._finish_stopped_turn()

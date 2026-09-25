@@ -1701,7 +1701,8 @@ def test_the_last_clause_is_released_when_the_turn_ends():
     worker._handle_event(_event("message.complete", {"status": "complete"}))
 
     assert ("assistant", "Done.") in rows
-    assert ("assistant", "No full stop here") in rows
+    # Its leading space kept: the window joins the pieces back into one message.
+    assert ("assistant", " No full stop here") in rows
     # The final text is still the whole answer, so nothing depends on the rows.
     assert completed == ["Done. No full stop here"]
 
@@ -1720,7 +1721,7 @@ def test_no_part_of_the_answer_is_streamed_twice():
     worker._handle_event(_event("message.complete", {"status": "complete"}))
 
     streamed = [text for kind, text in rows if kind == "assistant"]
-    assert " ".join(streamed) == "One. Two. Three. Four"
+    assert "".join(streamed) == "One. Two. Three. Four"
 
 
 # -- one connection per conversation -------------------------------------

@@ -1080,3 +1080,37 @@ def test_a_successful_result_is_still_just_a_result():
     )
     assert ("result", "x = 1") in activity
     assert not any(kind == "tool" for kind, _text in activity)
+
+
+def test_streamed_sentences_become_rows_of_whole_markdown_blocks(monkeypatch):
+    """A streaming backend hands over a sentence at a time. Parsed alone, each
+    became its own row: numbered lists lost their numbers and "X: sound." was
+    split at its colon (seen in a Muse Code audit answer)."""
+    import blindpilot_app as app
+    from markdown_rows import complete_sentences
+
+    panel = _stub_panel(app)
+    panel._session_backend = app.BACKEND_FREEBUFF
+    panel._begin_stream_response = lambda: 1
+    monkeypatch.setattr(app.SETTINGS, "live_rows", True)
+    answer = (
+        "**Audit:**\n\n- Fallback (`a.py`): sound. Order holds.\n- Tests match.\n\n"
+        "**Findings:**\n\n1. Fixed: the docstring. Now accurate.\n2. No action: build output."
+    )
+    streamed = 0
+    while True:
+        ready = complete_sentences(answer[streamed:])
+        if not ready:
+            break
+        app.SessionPanel._on_activity(panel, "assistant", ready)
+        streamed += len(ready)
+    # The last block only lands once something else is said: here, a tool.
+    app.SessionPanel._on_activity(panel, "assistant", answer[streamed:])
+    app.SessionPanel._on_activity(panel, "tool", "git status")
+
+    assert [row.kind for row in panel._rows] == ["prose", "list", "prose", "list", "tool"]
+    assert panel._rows[0].label == "FreeBuff: Audit:"
+    assert panel._rows[1].label == "List: Fallback (a.py): sound. Order holds. Tests match."
+    assert (
+        panel._rows[3].label == "List: Fixed: the docstring. Now accurate. No action: build output."
+    )
