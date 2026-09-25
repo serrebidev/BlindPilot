@@ -582,6 +582,28 @@ def test_a_refused_fired_command_is_said_not_swallowed(monkeypatch):
     assert any("bad choice" in line for line in recorder.said("tool"))
 
 
+def test_an_internal_decide_failure_is_resent_once_with_the_same_command(monkeypatch):
+    # Measured on 1.3.0 under load: approval/decide answered an internal
+    # "durability fence" error though the decision was saved. A resend with
+    # the same commandId gets the first result back, so it is retried, not said.
+    transport = _approval_turn(monkeypatch, {"availableChoices": _approval_choices()})
+    internal = {"code": -32603, "message": "fence", "data": {"kind": "internal"}}
+    transport._frames[4:4] = [
+        {"jsonrpc": "2.0", "id": 104, "error": internal},
+        {"jsonrpc": "2.0", "id": 105, "error": internal},
+    ]
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    decides = transport.sent_with_method("approval/decide")
+    assert len(decides) == 2
+    assert decides[0]["params"] == decides[1]["params"]
+    # The retry failed too, so that one is said.
+    assert recorder.said("tool").count("Muse Code refused: fence (internal)") == 1
+
+
 def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
     # Measured on 1.3.0: a reasoning item streams on field "summary.0".
     frames = [
@@ -694,6 +716,93 @@ def test_a_mid_run_question_is_answered_with_the_picked_label(monkeypatch):
     assert answer and answer[0]["params"]["answers"] == [
         {"questionId": "q1", "selectedLabel": "SQLite"}
     ]
+
+
+def _question_turn(monkeypatch) -> _ScriptedMuseTransport:
+    return _with_script(
+        monkeypatch,
+        [
+            _init_reply(101),
+            {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+            {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "userInput/requested",
+                "params": {
+                    "userInputId": "ui-3",
+                    "sessionId": "sess-1",
+                    "questions": [
+                        {
+                            "id": "q1",
+                            "question": "Which database?",
+                            "options": [{"label": "Postgres"}, {"label": "SQLite"}],
+                            "selection": {"mode": "single"},
+                        }
+                    ],
+                },
+            },
+            {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+        ],
+    )
+
+
+def test_a_request_from_the_host_gets_its_presentation_receipt(monkeypatch):
+    # MSP: userInput/request is a must-answer request whose reply is an
+    # empty receipt; the answer itself still goes as userInput/answer.
+    transport = _question_turn(monkeypatch)
+    request = {"jsonrpc": "2.0", "id": 1, "method": "userInput/request", "params": {}}
+    transport._frames.insert(3, request)
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "bypassPermissions",
+        on_question=lambda questions: [["SQLite"]],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    assert {"jsonrpc": "2.0", "id": 1, "result": {}} in transport.sent
+    assert len(transport.sent_with_method("userInput/answer")) == 1
+
+
+def test_a_typed_answer_goes_as_free_text_not_as_a_label(monkeypatch):
+    # MSP rejects a selectedLabel that is not one of the options (-32057) and
+    # keeps the prompt open, so a typed "Other" answer wedged the turn.
+    transport = _question_turn(monkeypatch)
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "bypassPermissions",
+        on_question=lambda questions: [["DuckDB, please"]],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    answer = transport.sent_with_method("userInput/answer")
+    assert answer[0]["params"]["answers"] == [{"questionId": "q1", "freeText": "DuckDB, please"}]
+
+
+def test_a_closed_question_dialog_cancels_rather_than_sending_a_blank(monkeypatch):
+    # A blank answer is invalid to MSP and the prompt stays open, so closing
+    # the dialog used to leave the turn waiting forever.
+    transport = _question_turn(monkeypatch)
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "bypassPermissions",
+        on_question=lambda questions: None,
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    assert not transport.sent_with_method("userInput/answer")
+    assert transport.sent_with_method("userInput/cancel")
 
 
 def test_a_question_nobody_is_here_to_answer_is_cancelled_not_dropped(monkeypatch):

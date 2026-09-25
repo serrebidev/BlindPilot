@@ -2,6 +2,14 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.21 - 2026-09-24
+
+- Muse Code no longer says it refused a permission you gave. Under load Muse 1.3.0 answers a permission choice with an internal error even though it has already saved the choice and the command runs, so BlindPilot read out a refusal that never happened. BlindPilot now sends the same choice once more with the same command id, which Muse answers with its first result, so you only hear a refusal if the second try fails as well. That also covers the rare case where Muse really did lose the choice, which would otherwise have left the turn waiting.
+- Answering a Muse question in your own words works. A typed answer was sent as though it were one of the listed options, which Muse rejects, and the turn then waited on the question forever. It is now sent as your own text.
+- Closing a Muse question without answering it, or pressing Stop while one is open, tells Muse the question was declined. Before, an empty answer was sent, Muse rejected it, and the turn stayed stuck.
+- BlindPilot now sends Muse the short acknowledgement Muse's protocol requires when it shows a question or a permission request.
+- Two requests sent at the same moment, for example pressing Stop while a turn is sending its own request, can no longer be given the same number, on Hermes or Muse.
+
 ## v0.29.20 - 2026-09-24
 
 - Muse Code no longer hangs when it asks permission. Allow, Reject, Stop and steering were sent in a form Muse 1.3.0 silently ignores, so any turn that needed approval waited forever and Stop stopped nothing. They now reach Muse, and if Muse refuses one, the refusal is read out instead of lost.
