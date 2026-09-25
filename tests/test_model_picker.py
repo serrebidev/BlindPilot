@@ -123,7 +123,12 @@ def _probe_with(
 ) -> blindpilot_app.ModelOptions:
     def fake_run(binary, args, cwd, timeout):
         _RUNS.append(list(args))
-        return help_output if args == ["--help"] else model_output
+        if args == ["--help"]:
+            return help_output
+        if args[1].startswith("/model ") and model_output == MODEL_OUTPUT:
+            alias = args[1].split(" ", 1)[1]
+            return f"Set model to `{alias.title()} 5.5` for this session only"
+        return model_output
 
     real_find, real_run = blindpilot_app._find_claude, blindpilot_app._run_claude
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
@@ -147,6 +152,15 @@ def test_probe_reports_what_the_cli_said():
     assert options.current_model == "Opus 5"
     assert options.current_effort == "medium"
     assert options.error == ""
+    assert options.labels["opus"] == "Opus 5.5"
+    alias_run = next(r for r in _RUNS if "/model opus" in r)
+    assert "--no-session-persistence" in alias_run
+
+
+def test_alias_target_is_read_from_the_set_model_reply():
+    reply = "Set model to `Fable 5.1` for this session only · Draws from usage credits"
+    assert blindpilot_app._parse_alias_target(reply) == "Fable 5.1"
+    assert blindpilot_app._parse_alias_target("nothing useful") == ""
 
 
 def test_probe_falls_back_and_says_so_when_the_cli_output_changes():
@@ -357,6 +371,40 @@ def test_the_effort_box_keeps_a_saved_effort_the_backend_no_longer_lists():
         try:
             assert dlg.effort_box.GetStringSelection() == "xhigh"
             assert dlg.selection() == ("", "xhigh")
+        finally:
+            dlg.Destroy()
+    finally:
+        frame.Destroy()
+        app.ProcessPendingEvents()
+        if owns_app:
+            app.Destroy()
+
+
+def test_the_model_box_shows_each_alias_with_its_version():
+    """People looking for "Opus 5.5" could not find it: the box listed only
+    "opus". It now says both, and hands the CLI the bare alias back."""
+    import pytest
+
+    wx = pytest.importorskip("wx")
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    frame = wx.Frame(None)
+    try:
+        options = blindpilot_app.ModelOptions(
+            ["opus", "haiku", "opusplan"],
+            ["high"],
+            labels={"opus": "Opus 5.5", "haiku": "Haiku 4.5"},
+        )
+        dlg = blindpilot_app.ModelDialog(frame, options, "opus", "", "Claude Code")
+        try:
+            assert "opus: Opus 5.5" in dlg.model_box.GetStrings()
+            assert "opusplan" in dlg.model_box.GetStrings()
+            assert dlg.model_box.GetValue() == "opus: Opus 5.5"
+            assert dlg.selection() == ("opus", "")
+            dlg.model_box.SetValue("haiku: Haiku 4.5")
+            assert dlg.selection() == ("haiku", "")
+            dlg.model_box.SetValue("claude-opus-5-5")
+            assert dlg.selection() == ("claude-opus-5-5", "")
         finally:
             dlg.Destroy()
     finally:

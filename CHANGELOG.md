@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.24 - 2026-09-25
+
+- Claude Code's model picker says which version each choice is. The list only offered aliases such as "opus" and "sonnet", so people looking for Opus 5.5 could not find it. Each entry now names the model it currently resolves to, such as "opus: Opus 5.5", "sonnet: Sonnet 5", "haiku: Haiku 4.5" and "fable: Fable 5.1", read from the installed Claude Code rather than written into BlindPilot, so a new model shows up the day Claude Code ships it. Picking an entry still hands Claude Code the alias, and a full model ID can still be typed.
+
 ## v0.29.23 - 2026-09-25
 
 - Command Code tool steps read the way Claude's and Codex's do. A step said the raw tool name and the whole absolute path, such as "read_file: C:\Users\...\a.txt"; it now says "Reading a.txt", "Editing a.txt, 1 line added, 1 removed", "Running: git status" or "Listing src", using the same wording Claude's steps have always used.
