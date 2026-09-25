@@ -941,10 +941,14 @@ class JsonRpcCalls:
     """
 
     _request_id = 100
+    # Stop and steer fire from the window's thread while the turn loop
+    # numbers its own requests; an unlocked += can hand both the same id.
+    _id_lock = threading.Lock()
 
     def _next_id(self) -> int:
-        self._request_id += 1
-        return self._request_id
+        with self._id_lock:
+            self._request_id += 1
+            return self._request_id
 
     @staticmethod
     def _rpc_frame(method: str, params: Optional[dict], request_id: Optional[int] = None) -> dict:

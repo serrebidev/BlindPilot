@@ -1,13 +1,9 @@
-# BlindPilot 0.29.20
+# BlindPilot 0.29.21
 
-Muse Code works properly now, including every time it asks for permission.
+More Muse Code fixes, found by checking a long real session against Muse's own saved record of it.
 
-- Muse no longer freezes when it asks permission. Before, choosing Allow or Reject, pressing Stop, or steering a running turn did nothing with Muse 1.3.0, so any turn that needed your approval waited forever. All of these now reach Muse. If Muse turns one down, you hear why instead of silence.
-- The permission dialog now shows Muse's own choices. You will hear Allow once, Always allow in this workspace, and Reject, which is exactly what Muse offers. The old menu offered two answers Muse did not accept.
-- Commands joined with a pipe, for example git status piped into head, now run. Muse asks about each part of a pipe separately, and only the first part used to get an answer.
-- Muse's thinking is read as thinking. Its reasoning summary used to be read and saved as though it were the answer.
-- Each Muse answer is read once. Before, it was read as it arrived and then read again when it finished. When Muse sent several messages in one turn, only the last one was kept.
-- Muse no longer says "agentMessage" or "Reminder child session" on every turn. Those were Muse's own behind-the-scenes steps.
-- Picking a different model for a Muse conversation you reopened now takes effect. Before, the model was only set when a conversation first started.
-- Muse's max reasoning effort is now in the picker.
-- On every backend, a blank piece of a streamed answer no longer makes your screen reader say just the backend's name.
+- Muse no longer reads out a refusal for a permission you gave. When Muse was busy, it sometimes replied to your Allow with an internal error even though it had already saved your choice and run the command. You heard "Muse Code refused" for something that went ahead. BlindPilot now quietly sends the same choice once more, which Muse treats as the same choice rather than a second one. You only hear a refusal if that second try fails too. This also covers the rare case where Muse really did lose your choice, which would otherwise have left the turn waiting.
+- You can answer a Muse question in your own words. When you typed your own answer instead of picking an option, Muse rejected it and the turn waited on the question forever. Your typed text now reaches Muse as your answer.
+- Closing a Muse question without answering, or pressing Stop while one is open, now tells Muse you declined. Before, the turn stayed stuck on the question.
+- BlindPilot now sends the short acknowledgement Muse expects each time it shows you a question or a permission request.
+- On Hermes and Muse, pressing Stop at the exact moment a turn sends its own request can no longer give both the same number, which could have sent a reply to the wrong place.

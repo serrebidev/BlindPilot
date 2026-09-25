@@ -193,6 +193,8 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         # (approval/updated does not repeat it).
         self._answered_stages: set[str] = set()
         self._approval_tools: dict[str, str] = {}
+        # Fired commands awaiting their reply: id -> (method, params, may retry).
+        self._fired: dict[object, tuple[str, Optional[dict], bool]] = {}
 
     # -- public surface the window drives ---------------------------------
 
@@ -250,7 +252,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
 
     # -- protocol plumbing -------------------------------------------------
 
-    def _fire(self, method: str, params: Optional[dict] = None) -> bool:
+    def _fire(self, method: str, params: Optional[dict] = None, retry: bool = True) -> bool:
         """One request sent without waiting for its reply.
 
         Steering, cancelling, and answering questions all write from a thread
@@ -258,11 +260,36 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         MSP answers them on the view stream, which the turn loop reads. They
         still carry an id: measured on 1.3.0, an id-less turn/cancel or
         approval/decide is dropped without a word and the turn hangs.
+
+        Each one is remembered until answered so an internal failure can be
+        resent once; see _fired_reply.
         """
         transport = self._transport
         if transport is None or not transport.connected():
             return False
-        return transport.send(self._rpc_frame(method, params, self._next_id()))
+        request_id = self._next_id()
+        self._fired[request_id] = (method, params, retry)
+        return transport.send(self._rpc_frame(method, params, request_id))
+
+    def _fired_reply(self, frame: dict) -> None:
+        """A reply to a fired command: resend an internal failure once.
+
+        Measured on 1.3.0 under load: approval/decide answered "approval
+        ledger durability fence ... left records unflushed (internal)" while
+        the decision had in fact been saved and the tool ran. Every fired
+        command carries a commandId, and a resend with the same one is
+        answered with the first result (measured), so one retry is safe and
+        turns the false "refused" into the real outcome. Anything else, or a
+        second failure, is said rather than lost.
+        """
+        method, params, retry = self._fired.pop(frame.get("id"), ("", None, False))
+        error = frame.get("error")
+        if error is None:
+            return
+        kind = error.get("data", {}).get("kind") if isinstance(error, dict) else None
+        if retry and kind == "internal" and self._fire(method, params, retry=False):
+            return
+        self._on_activity("tool", f"Muse Code refused: {self._error_text(error)}")
 
     def _request(
         self, method: str, params: Optional[dict] = None, timeout: float = 45.0
@@ -537,12 +564,13 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         if "id" in frame and ("result" in frame or "error" in frame):
             # A reply to a fired steer/cancel/answer. Its outcome arrives on
             # the view stream, which this loop is already reading; a refusal
-            # does not, so it is said here rather than lost.
-            if "error" in frame:
-                self._on_activity("tool", f"Muse Code refused: {self._error_text(frame['error'])}")
+            # does not, so it is handled here rather than lost.
+            self._fired_reply(frame)
             return False
         method = str(frame.get("method") or "")
         params = frame.get("params") or {}
+        if "id" in frame and method:
+            self._receipt(frame["id"], method)
 
         if method == "item/started":
             self._item_started(params.get("item"))
@@ -558,6 +586,24 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             self._turn_completed(params)
             return True
         return False
+
+    def _receipt(self, request_id: object, method: str) -> None:
+        """Answer a request the host sent us, as MSP requires of a client.
+
+        approval/request and userInput/request are "must-answer": the reply
+        is an empty presentation receipt, and the decision itself still
+        travels as approval/decide or userInput/answer, driven by the
+        matching .../requested notification. Anything else is not ours.
+        """
+        transport = self._transport
+        if transport is None:
+            return
+        reply: dict = {"jsonrpc": "2.0", "id": request_id}
+        if method in ("approval/request", "userInput/request"):
+            reply["result"] = {}
+        else:
+            reply["error"] = {"code": -32601, "message": f"{method} is not supported"}
+        transport.send(reply)
 
     # -- items --------------------------------------------------------------
 
@@ -785,6 +831,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             self._cancel_input(params)
             return
         answers = self._on_question(questions)
+        if self._cancelled:
+            # Stop was pressed while the dialog was up; answering would let
+            # the work go on past it, the same rule approvals follow.
+            self._cancel_input(params)
+            return
         self._send_answers(params, questions, answers)
 
     def _send_answers(
@@ -793,15 +844,31 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         questions: Sequence[Question],
         answers: Optional[list[list[str]]],
     ) -> None:
+        # MSP wants exactly one of selectedLabel, selectedLabels or freeText
+        # per question, labels from the offered options only, and answers
+        # anything else -32057 while the prompt stays open -- so a closed
+        # dialog, or a question left blank, used to wedge the turn, and a
+        # typed "Other" answer was sent as a label the host has never heard of.
         body_answers = []
         for index, question in enumerate(questions):
-            chosen = answers[index] if answers and index < len(answers) else []
+            chosen = [str(c) for c in (answers[index] if answers and index < len(answers) else [])]
+            chosen = [c for c in chosen if c.strip()]
+            if not chosen:
+                self._cancel_input(params)
+                return
+            labels = {option.label for option in question.options}
+            picked = [c for c in chosen if c in labels]
+            typed = "\n".join(c for c in chosen if c not in labels)[:500]
             entry: dict = {"questionId": question.id}
-            if chosen:
-                if question.multi_select:
-                    entry["selectedLabels"] = [str(c) for c in chosen]
-                else:
-                    entry["selectedLabel"] = str(chosen[0])
+            if picked and question.multi_select:
+                entry["selectedLabels"] = picked
+            elif picked:
+                entry["selectedLabel"] = picked[0]
+            else:
+                entry["freeText"] = typed
+                typed = ""
+            if typed:
+                entry["note"] = typed
             body_answers.append(entry)
         self._fire(
             "userInput/answer",
