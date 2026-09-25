@@ -300,7 +300,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.19"
+APP_VERSION = "0.29.20"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7388,6 +7388,10 @@ class SessionPanel(wx.Panel):
         them a reopened conversation would show nothing at all.
         """
         if not SETTINGS.live_rows and not self._replaying:
+            return
+        if not text.strip():
+            # A blank stream chunk (a message's trailing newline) makes no
+            # row, but would still speak the bare backend name.
             return
         n = self._begin_stream_response()
         if kind == "you":
