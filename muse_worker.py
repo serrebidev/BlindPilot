@@ -77,10 +77,10 @@ _MUSE_APPROVAL_MODES = {
 _MUSE_DEFAULT_MODE = "promptUnmatched"
 
 
-# MSP approval decisions the window's answers map onto.
+# MSP approval decisions. The person picks from the server's own choices;
+# these name the two the worker picks by itself (bypass, and refusals).
 _MUSE_APPROVE_ONCE = "approved"
-_MUSE_APPROVE_SESSION = "approvedForSession"
-_MUSE_DENY = "denied"
+_MUSE_REFUSALS = ("denied", "abort")
 
 
 def _uuid() -> str:
@@ -187,6 +187,12 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._streamed = 0
         self._tool_names: dict[str, str] = {}
         self._tool_output_parts: dict[str, list[str]] = {}
+        # Answer text seen so far per agentMessage item.
+        self._answer_items: dict[str, str] = {}
+        # Approval stages already answered, and each approval's tool name
+        # (approval/updated does not repeat it).
+        self._answered_stages: set[str] = set()
+        self._approval_tools: dict[str, str] = {}
 
     # -- public surface the window drives ---------------------------------
 
@@ -245,16 +251,18 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
     # -- protocol plumbing -------------------------------------------------
 
     def _fire(self, method: str, params: Optional[dict] = None) -> bool:
-        """One notification-shaped send that does not wait for a reply.
+        """One request sent without waiting for its reply.
 
         Steering, cancelling, and answering questions all write from a thread
         that is not the turn loop's; none of them can afford the wait, and
-        MSP answers them on the view stream, which the turn loop reads.
+        MSP answers them on the view stream, which the turn loop reads. They
+        still carry an id: measured on 1.3.0, an id-less turn/cancel or
+        approval/decide is dropped without a word and the turn hangs.
         """
         transport = self._transport
         if transport is None or not transport.connected():
             return False
-        return transport.send(self._rpc_frame(method, params))
+        return transport.send(self._rpc_frame(method, params, self._next_id()))
 
     def _request(
         self, method: str, params: Optional[dict] = None, timeout: float = 45.0
@@ -348,7 +356,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         if "error" in reply:
             self._fail(self._error_text(reply["error"]))
             return False
-        self._fire("initialized")
+        # The one true notification: given an id, the host answers it "Not
+        # initialized" and refuses everything after (measured 1.3.0).
+        if self._transport is not None:
+            self._transport.send(self._rpc_frame("initialized", None))
         return True
 
     def _ensure_session(self) -> bool:
@@ -364,6 +375,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                 self._live_session = str(session.get("sessionId") or self._session_id)
                 self._session_log_path = str(session.get("path") or "")
                 self._on_session(self._live_session)
+                if self._model and self._model != session.get("modelId"):
+                    # session/start is the only other place a model is sent;
+                    # without this a picker change on a reopened
+                    # conversation was silently ignored.
+                    self._set_model()
                 return True
             # The stored conversation no longer exists on this host. The
             # window keeps its session id either way; saying so beats
@@ -391,6 +407,20 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         if self._live_session:
             self._on_session(self._live_session)
         return True
+
+    def _set_model(self) -> None:
+        """Switch a resumed session to the picked model; a refusal is said, not fatal."""
+        reply = self._request(
+            "session/setModel",
+            {
+                "commandId": _uuid(),
+                "sessionId": self._live_session,
+                "model": {"modelId": self._model},
+            },
+        )
+        if reply is None or "error" in reply:
+            reason = self._error_text(reply["error"]) if reply else "no answer"
+            self._on_activity("tool", f"Muse Code kept its model ({reason})")
 
     def _workspace_root(self) -> str:
         """The workspace root as the host sees it, always absolute.
@@ -506,7 +536,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         """One inbound frame. Returns True when the turn has ended."""
         if "id" in frame and ("result" in frame or "error" in frame):
             # A reply to a fired steer/cancel/answer. Its outcome arrives on
-            # the view stream, which this loop is already reading.
+            # the view stream, which this loop is already reading; a refusal
+            # does not, so it is said here rather than lost.
+            if "error" in frame:
+                self._on_activity("tool", f"Muse Code refused: {self._error_text(frame['error'])}")
             return False
         method = str(frame.get("method") or "")
         params = frame.get("params") or {}
@@ -517,7 +550,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             self._item_delta(params)
         elif method == "item/completed":
             self._item_completed(params.get("item"))
-        elif method == "approval/requested":
+        elif method in ("approval/requested", "approval/updated"):
             self._approval_requested(params)
         elif method == "userInput/requested":
             self._user_input_requested(params)
@@ -551,9 +584,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             if not subject:
                 subject = _item_text(item).strip()
             self._on_activity("tool", f"{name}: {subject}" if subject else name)
-        elif kind not in ("userMessage", "reasoning"):
-            # The user's own message is already on the transcript, and
-            # reasoning is worth saying only when it has content. Anything
+        elif kind not in ("userMessage", "reasoning", "agentMessage", "reminderChild"):
+            # The user's own message is already on the transcript, reasoning
+            # and the answer are said as their text arrives, and a
+            # reminderChild is Muse's internal housekeeping (measured 1.3.0:
+            # two per turn, "Reminder child session"). Anything
             # else -- including kinds this file has never heard of -- gets
             # a generic line, per the protocol's own requirement: kind name
             # plus fallbackText when the server gives one.
@@ -567,7 +602,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         delta = str(params.get("delta") or "")
         if not delta:
             return
-        if field.startswith("reasoning"):
+        # A reasoning item streams its summary as "summary.0", "summary.1"...
+        # (measured 1.3.0); taken for answer text, it was spoken and saved as
+        # the reply.
+        if field.startswith(("reasoning", "summary")):
             self._on_activity("thinking", delta)
             return
         if field.startswith("output") or item_id in self._tool_names:
@@ -575,8 +613,17 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             return
         # Assistant answer text, streamed a fragment at a time. Held until it
         # completes a sentence so the screen reader never reads torn words.
-        self._assistant_parts.append(delta)
+        self._answer_part(item_id, delta)
         self._release_streamed()
+
+    def _answer_part(self, item_id: str, text: str) -> None:
+        """Add answer text, a blank line apart from an earlier message's."""
+        if item_id not in self._answer_items:
+            self._answer_items[item_id] = ""
+            if self._assistant_parts:
+                self._assistant_parts.append("\n\n")
+        self._answer_items[item_id] += text
+        self._assistant_parts.append(text)
 
     def _item_completed(self, item: object) -> None:
         if not isinstance(item, dict):
@@ -585,12 +632,13 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         item_id = str(item.get("itemId") or "")
         if kind == "agentMessage":
             text = _item_text(item)
-            if text.strip():
-                # The authoritative whole replaces whatever fragments of it
-                # were already spoken.
-                self._assistant_parts = [text]
-                self._streamed = 0
-                self._release_all()
+            streamed = self._answer_items.get(item_id, "")
+            # The whole message adds only what its deltas did not already
+            # carry: resetting to it re-spoke every streamed sentence, and
+            # dropped any earlier message of the same turn.
+            if text.startswith(streamed) and text[len(streamed) :].strip():
+                self._answer_part(item_id, text[len(streamed) :])
+            self._release_all()
         elif kind == "toolCall":
             name = self._tool_names.get(item_id, str(item.get("tool") or "tool"))
             result_text = (
@@ -630,20 +678,33 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         approval_id = str(params.get("approvalId") or "")
         if not approval_id:
             return
+        # A piped command is approved one stage at a time: the decide for
+        # stage 0 is answered "terminal": false and stage 1 arrives as
+        # approval/updated with a new currentRequirementId (measured 1.3.0).
+        # Each stage is answered once; other updates repeat a stage.
+        stage = json.dumps(params.get("currentRequirementId"), sort_keys=True)
+        if stage in self._answered_stages:
+            return
+        self._answered_stages.add(stage)
+        if params.get("toolName"):
+            self._approval_tools[approval_id] = str(params["toolName"])
         if self._cancelled:
             # A cancel arrived while the host was composing this request:
             # answering it would restart work the person just stopped.
-            self._decide_approval(params, _MUSE_DENY)
+            self._decide_approval(params, _refusal(params))
             return
         if self._auto_approve:
-            self._decide_approval(params, _MUSE_APPROVE_ONCE)
+            self._decide_approval(
+                params, _choice(params, (_MUSE_APPROVE_ONCE,)) or _refusal(params)
+            )
             return
-        if self._on_question is None:
+        choices = _choices(params)
+        if self._on_question is None or not choices:
             # Nobody is here to answer: deny rather than leave the run wedged
             # on an approval nobody can see.
-            self._decide_approval(params, _MUSE_DENY)
+            self._decide_approval(params, _refusal(params))
             return
-        tool = str(params.get("toolName") or "A tool")
+        tool = self._approval_tools.get(approval_id, "A tool")
         subject = params.get("subject") or {}
         detail = ""
         if isinstance(subject, dict):
@@ -654,16 +715,16 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                 or subject.get("host")
                 or ""
             ).strip()
+        # The server's own choices, in its words. Measured on 1.3.0, a shell
+        # approval offers allow once, always allow in this workspace, and
+        # reject -- no session scope and no "denied" -- so a fixed menu
+        # mapped onto decisions sent choice ids the host does not have.
         question = Question(
             question=f"{tool} wants permission" + (f": {detail}" if detail else ""),
             header="Approval",
-            options=(
-                QuestionOption(label="Allow once", description="Approve this one use"),
-                QuestionOption(
-                    label="Allow for this conversation",
-                    description="Approve for the rest of this session",
-                ),
-                QuestionOption(label="Deny", description="Refuse this use"),
+            options=tuple(
+                QuestionOption(label=_label(choice), description=str(choice.get("scope") or ""))
+                for choice in choices
             ),
             allow_custom=False,
         )
@@ -672,53 +733,26 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             # The person pressed Stop while the dialog was up. That stop wins
             # over whatever the still-open dialog was answered with: approving
             # here would let work continue past the cancel.
-            self._decide_approval(params, _MUSE_DENY)
+            self._decide_approval(params, _refusal(params))
             return
-        pick = ((answers or [[]])[0] or ["Deny"])[0]
-        if pick.startswith("Allow for"):
-            decision = _MUSE_APPROVE_SESSION
-        elif pick.startswith("Allow"):
-            decision = _MUSE_APPROVE_ONCE
-        else:
-            decision = _MUSE_DENY
-        self._decide_approval(params, decision)
+        pick = ((answers or [[]])[0] or [""])[0]
+        chosen = next((c for c in choices if _label(c) == pick), None)
+        self._decide_approval(params, str(chosen["choiceId"]) if chosen else _refusal(params))
 
-    def _decide_approval(self, params: dict, decision: str) -> None:
+    def _decide_approval(self, params: dict, choice_id: str) -> None:
         # currentRequirementId is the ApprovalRequirementRef object itself,
         # carried through verbatim: it is the multi-stage race guard, and a
         # decision aimed at one stage must never satisfy another.
-        requirement = params.get("currentRequirementId")
         self._fire(
             "approval/decide",
             {
                 "approvalId": params.get("approvalId"),
                 "sessionId": params.get("sessionId") or self._live_session,
                 "commandId": _uuid(),
-                "choiceId": self._resolve_choice(params, decision),
-                "requirementId": requirement,
+                "choiceId": choice_id,
+                "requirementId": params.get("currentRequirementId"),
             },
         )
-
-    def _resolve_choice(self, params: dict, decision: str) -> str:
-        """The server's choiceId whose decision is the one we mean.
-
-        The schema is explicit: choiceId must be "one of the current
-        availableChoices", and those ids belong to the server -- a raw
-        "approved" sent back as an id is answered -32052. The request names
-        each choice with the decision it stands for, so the answer is looked
-        up, not assumed. When the intended decision is not on offer, a
-        refusal is -- the one answer that cannot push work forward.
-        """
-        choices = [
-            choice for choice in (params.get("availableChoices") or []) if isinstance(choice, dict)
-        ]
-        for choice in choices:
-            if str(choice.get("decision") or "") == decision:
-                return str(choice.get("choiceId") or decision)
-        for choice in choices:
-            if str(choice.get("decision") or "") == "denied":
-                return str(choice.get("choiceId") or decision)
-        return decision
 
     def _user_input_requested(self, params: dict) -> None:
         if self._on_question is None:
@@ -875,6 +909,33 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
     def _release_all(self) -> None:
         text = "".join(self._assistant_parts)
         self._streamed = release_remainder(text, self._streamed, self._emit_answer)
+
+
+def _choices(params: dict) -> list[dict]:
+    """The approval's availableChoices; choiceId must be one of these (-32052)."""
+    return [
+        choice
+        for choice in (params.get("availableChoices") or [])
+        if isinstance(choice, dict) and choice.get("choiceId")
+    ]
+
+
+def _label(choice: dict) -> str:
+    return str(choice.get("label") or choice["choiceId"])
+
+
+def _choice(params: dict, decisions: Sequence[str]) -> str:
+    """The server's choiceId for the first of ``decisions`` it offers, or ""."""
+    for decision in decisions:
+        for choice in _choices(params):
+            if str(choice.get("decision") or "") == decision:
+                return str(choice["choiceId"])
+    return ""
+
+
+def _refusal(params: dict) -> str:
+    """The choice that cannot push work forward: deny, else abort."""
+    return _choice(params, _MUSE_REFUSALS) or "denied"
 
 
 def _item_text(item: dict) -> str:

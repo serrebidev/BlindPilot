@@ -477,7 +477,7 @@ def test_an_approval_is_answered_with_the_choice_and_the_requirement_carried_thr
         None,
         ".",
         "default",
-        on_question=lambda questions: [["Allow once"]],
+        on_question=lambda questions: [["Approve"]],
         **_Recorder().callbacks(),
     )
 
@@ -508,7 +508,7 @@ def test_an_approval_for_the_session_maps_to_the_session_choice(monkeypatch):
         None,
         ".",
         "default",
-        on_question=lambda questions: [["Allow for this conversation"]],
+        on_question=lambda questions: [["Approve for session"]],
         **_Recorder().callbacks(),
     )
 
@@ -518,25 +518,141 @@ def test_an_approval_for_the_session_maps_to_the_session_choice(monkeypatch):
     assert decide and decide[0]["params"]["choiceId"] == "c-session"
 
 
-def test_a_decision_not_on_the_menu_falls_back_to_the_denial_choice(monkeypatch):
-    # The host offered only allow-once and deny; answering with a session-wide
-    # approval would be an invalid choiceId, so the refusal is answered
-    # instead -- the one choice that cannot push work forward.
-    choices = [c for c in _approval_choices() if c["decision"] != "approvedForSession"]
+def test_the_menu_is_the_servers_own_choices_and_reject_is_the_refusal(monkeypatch):
+    # Measured on 1.3.0: a shell approval offers allow once, always allow in
+    # this workspace, and reject ("abort") -- no session scope, no "denied".
+    # A fixed menu sent choice ids the host does not have (-32052), so the
+    # person picks from the server's labels, and a refusal falls to abort.
+    choices = [
+        {"choiceId": "allow_once", "decision": "approved", "label": "Allow once", "scope": "once"},
+        {
+            "choiceId": "allow_local_prefix",
+            "decision": "approvedPolicyAmendment",
+            "label": "Always allow in this workspace: make ...",
+            "scope": "localPersistent",
+        },
+        {"choiceId": "abort", "decision": "abort", "label": "Reject", "scope": "once"},
+    ]
     transport = _approval_turn(monkeypatch, {"availableChoices": choices})
+    asked: list = []
     worker = MuseWorker(
         "go",
         None,
         ".",
         "default",
-        on_question=lambda questions: [["Allow for this conversation"]],
+        on_question=lambda questions: asked.append(questions) or [["Something else"]],
         **_Recorder().callbacks(),
     )
 
     _run(worker)
 
+    labels = [option.label for option in asked[0][0].options]
+    assert labels == ["Allow once", "Always allow in this workspace: make ...", "Reject"]
     decide = transport.sent_with_method("approval/decide")
-    assert decide and decide[0]["params"]["choiceId"] == "c-deny"
+    assert decide and decide[0]["params"]["choiceId"] == "abort"
+
+
+def test_fired_commands_carry_an_id_but_initialized_does_not(monkeypatch):
+    # Measured on 1.3.0: an id-less approval/decide or turn/cancel is dropped
+    # silently and the turn hangs; an initialized WITH an id is answered "Not
+    # initialized" and every later request is refused.
+    transport = _approval_turn(monkeypatch, {"availableChoices": _approval_choices()})
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **_Recorder().callbacks())
+
+    _run(worker)
+
+    assert "id" not in transport.sent_with_method("initialized")[0]
+    assert "id" in transport.sent_with_method("approval/decide")[0]
+
+
+def test_a_refused_fired_command_is_said_not_swallowed(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "id": 104, "error": {"code": -32052, "message": "bad choice"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "default", **recorder.callbacks())
+
+    _run(worker)
+
+    assert any("bad choice" in line for line in recorder.said("tool"))
+
+
+def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
+    # Measured on 1.3.0: a reasoning item streams on field "summary.0".
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/delta",
+            "params": {"itemId": "r1", "field": "summary.0", "delta": "Checking the maths."},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/delta",
+            "params": {"itemId": "a1", "field": "text", "delta": "No."},
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    assert recorder.said("thinking") == ["Checking the maths."]
+    assert recorder.completed == ["No."]
+
+
+def test_a_completed_message_is_not_spoken_twice_and_earlier_ones_are_kept(monkeypatch):
+    # item/completed carries the whole message its deltas already streamed.
+    # Resetting to it spoke every sentence again and dropped the turn's
+    # earlier messages from the final answer.
+    def message(item_id: str, text: str) -> list[dict]:
+        return [
+            {
+                "jsonrpc": "2.0",
+                "method": "item/started",
+                "params": {"item": {"itemId": item_id, "kind": "agentMessage", "text": ""}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "item/delta",
+                "params": {"itemId": item_id, "field": "text", "delta": text},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "item/completed",
+                "params": {
+                    "item": {"itemId": item_id, "kind": "agentMessage", "text": text + "\n"}
+                },
+            },
+        ]
+
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        *message("a1", "Looking now."),
+        *message("a2", "Found it."),
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    spoken = [text.strip() for text in recorder.said("assistant") if text.strip()]
+    assert spoken == ["Looking now.", "Found it."]
+    assert recorder.completed == ["Looking now.\n\nFound it."]
+    assert not any("agentMessage" in line for line in recorder.said("tool"))
 
 
 def test_a_mid_run_question_is_answered_with_the_picked_label(monkeypatch):
@@ -696,3 +812,64 @@ def test_turn_kinds_are_declared_up_front(worker_args, expected):
         assert worker._resume_only is expected
     else:
         assert worker._compact is False and worker._resume_only is False
+
+
+def test_each_stage_of_a_piped_command_is_answered_once(monkeypatch):
+    # Measured on 1.3.0: `git status | head` is approved per stage. The
+    # decide for stage 0 is not terminal; stage 1 arrives as approval/updated
+    # with a new currentRequirementId. Ignoring it stalled the turn.
+    def stage(method: str, index: int) -> dict:
+        return {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": {
+                "approvalId": "ap-1",
+                "sessionId": "sess-1",
+                "subject": {"command": "git status | head"},
+                "availableChoices": _approval_choices(),
+                "currentRequirementId": {"approvalId": "ap-1", "sourceIndex": index},
+            },
+        }
+
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        stage("approval/requested", 0),
+        stage("approval/updated", 1),
+        stage("approval/updated", 1),
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **_Recorder().callbacks())
+
+    _run(worker)
+
+    decide = transport.sent_with_method("approval/decide")
+    assert [d["params"]["requirementId"]["sourceIndex"] for d in decide] == [0, 1]
+    assert all(d["params"]["choiceId"] == "c-approve" for d in decide)
+
+
+def test_a_model_picked_for_a_reopened_conversation_is_applied(monkeypatch):
+    # session/start is the only other place a model is sent; a resumed
+    # conversation kept its old model whatever the picker said.
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {"session": {"sessionId": "sess-1", "modelId": "muse-spark-1.3-contributor"}},
+        },
+        {"jsonrpc": "2.0", "id": 103, "result": {"status": "accepted"}},
+        {"jsonrpc": "2.0", "id": 104, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    worker = MuseWorker(
+        "go", "sess-1", ".", "default", model="muse-spark-1.3", **_Recorder().callbacks()
+    )
+
+    _run(worker)
+
+    sent = transport.sent_with_method("session/setModel")
+    assert sent and sent[0]["params"]["model"] == {"modelId": "muse-spark-1.3"}

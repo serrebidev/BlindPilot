@@ -2,6 +2,22 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.20 - 2026-09-24
+
+- Muse Code no longer hangs when it asks permission. Allow, Reject, Stop and steering were sent in a form Muse 1.3.0 silently ignores, so any turn that needed approval waited forever and Stop stopped nothing. They now reach Muse, and if Muse refuses one, the refusal is read out instead of lost.
+- The Muse permission menu offers Muse's own choices. BlindPilot used to show a fixed Allow once, Allow for this conversation, Deny menu, but Muse 1.3.0 offers Allow once, Always allow in this workspace, and Reject, so two of the three old answers were invalid. The dialog now lists exactly what Muse offers, in its own words.
+- Piped commands such as git status piped into head run under Muse. Muse approves each stage of a pipe separately, and only the first stage was ever answered, so the command stalled.
+- Muse's thinking is read as thinking, not as its answer. Its reasoning summary was spoken and saved as though it were the reply.
+- Muse answers are spoken once. Each message was read as it streamed in and then read again when it finished, and when a turn had more than one message only the last was kept as the answer.
+- Muse's internal housekeeping is no longer read out. Every turn used to say "agentMessage" and "Reminder child session" twice.
+- A model picked for a reopened Muse conversation is now used. The model was only ever sent when a conversation started, so changing it later did nothing. The picker also lists Muse's model ids, which is what gets sent back.
+- Muse's max reasoning effort is offered now that Muse accepts it.
+- A blank piece of a streamed answer no longer makes the screen reader say just the backend's name, on any backend.
+
+## v0.29.19 - 2026-09-24
+
+- The macOS download is built for Apple Silicon only. The release notes shipped with this version were still those of 0.29.18.
+
 ## v0.29.18 - 2026-09-22
 
 - Each tab keeps its own backend. The backend was one app-wide setting, so choosing Codex for a new tab moved every other tab to Codex too, and the next message typed into a Claude tab silently started a Codex conversation. Model, Backend now changes the visible tab only; a new tab starts on the backend of the tab in front, the menu follows the tab you switch to, and resuming a past conversation puts only its own tab on that conversation's backend. While the open tabs use more than one backend, each says where it sends: the tab name starts with the backend, the prompt is called "Codex prompt" and so on, switching tabs announces it, and the send sound is pitched per backend. With a single backend nothing reads or sounds any different. Suggested by a user who sent a message to the wrong place.

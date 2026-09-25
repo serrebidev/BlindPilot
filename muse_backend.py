@@ -68,8 +68,8 @@ MODEL_QUERY_TIMEOUT = 20.0
 CLI_PROBE_TIMEOUT = 45
 
 # MSP's ReasoningEffort enum, the closed vocabulary `turn/start` accepts
-# (MSP schema at Muse 1.0.3). The CLI's own list is filtered to this.
-_MSP_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "ultra"})
+# (MSP schema; 1.3.0 added "max"). The CLI's own list is filtered to this.
+_MSP_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 
 # --------------------------------------------------------------------------
 # Locating Muse
@@ -457,7 +457,9 @@ def muse_model_catalog(cwd: Optional[str] = None) -> tuple[list[str], list[str],
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                label = str(row.get("displayLabel") or row.get("modelId") or "").strip()
+                # The id, not displayLabel: the pick goes back to Muse as
+                # modelId, and the two are free to differ.
+                label = str(row.get("modelId") or "").strip()
                 if label and label not in models:
                     models.append(label)
                 if row.get("isDefault") and not current:
@@ -475,7 +477,7 @@ def _muse_effort_levels(command: Sequence[str]) -> list[str]:
     "none|minimal|low|medium|high|xhigh|max|ultra"), and reading the CLI rather
     than hardcoding means a release that widens it is picked up without a
     change here. But `turn/start` sends the value over MSP, whose
-    ReasoningEffort is closed and has no "max": a tier the protocol would
+    ReasoningEffort is closed (it lacked "max" until 1.3.0): a tier the protocol would
     reject is offered to nobody, so the CLI's answer is filtered to what the
     protocol accepts. A CLI tier dropped here can still be picked inside Muse
     itself. (Measured order at 1.0.3: minimal, low, medium, high, xhigh --
