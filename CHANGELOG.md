@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.25 - 2026-09-25
+
+- Command Code no longer opens console windows on Windows while it builds or runs things. Its background commands, such as builds and dev servers, are started detached, which on Windows leaves them without a console, so every console program they ran (cmd, PowerShell, compilers, npm) popped up a window of its own and could take focus away from BlindPilot. BlindPilot now hands Command Code a small Node preload that keeps any command it asked to hide on the hidden console BlindPilot started it with.
+
 ## v0.29.24 - 2026-09-25
 
 - Claude Code's model picker says which version each choice is. The list only offered aliases such as "opus" and "sonnet", so people looking for Opus 5.5 could not find it. Each entry now names the model it currently resolves to, such as "opus: Opus 5.5", "sonnet: Sonnet 5", "haiku: Haiku 4.5" and "fable: Fable 5.1", read from the installed Claude Code rather than written into BlindPilot, so a new model shows up the day Claude Code ships it. Picking an entry still hands Claude Code the alias, and a full model ID can still be typed.
