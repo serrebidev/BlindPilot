@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.29.26 - 2026-09-25
+
+- Muse Code in bypass mode can reach your network and Windows. BlindPilot started `muse serve` with Muse's shell sandbox left on, and that sandbox is fixed when the host starts, so asking for bypass could not lift it. Every command Muse ran had no local network, could not start Windows programs from WSL, could not write to its home folder, and lost anything saved in /tmp by the next message, so a request such as "set this app as the home screen on my TV" failed on the first turn and died outright on the second, when the adb it had downloaded was gone. In bypass mode BlindPilot now starts Muse with `--disable-sandbox --trust-workspace`, the same two things Muse's own `--yolo` turns off. The other permission modes keep the sandbox.
+
 ## v0.29.25 - 2026-09-25
 
 - Command Code no longer opens console windows on Windows while it builds or runs things. Its background commands, such as builds and dev servers, are started detached, which on Windows leaves them without a console, so every console program they ran (cmd, PowerShell, compilers, npm) popped up a window of its own and could take focus away from BlindPilot. BlindPilot now hands Command Code a small Node preload that keeps any command it asked to hide on the hidden console BlindPilot started it with.

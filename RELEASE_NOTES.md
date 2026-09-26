@@ -1,8 +1,7 @@
-# BlindPilot 0.29.25
+# BlindPilot 0.29.26
 
-Command Code no longer pops up command windows on Windows. People reported that when Command Code built something, or ran a longer command, cmd or PowerShell windows kept appearing on screen, which is distracting and can pull focus away from BlindPilot and your screen reader.
+Muse Code can now actually do things on your machine and your network when you run it in bypass mode. People found that Muse could read files and talk about a job, but the moment it had to reach a device, such as setting an app as the home screen on an Android TV, it said it could not reach it, and on the next message it failed again with tools it had just downloaded now missing.
 
-- The cause was in how Command Code starts background commands. Its ordinary commands already run hidden, but the ones it runs in the background, such as builds, test runs and dev servers, are started "detached". On Windows a detached command has no console of its own to borrow, so every console program it launched, whether cmd, PowerShell, a compiler or npm, was given a brand new visible window.
-- BlindPilot now keeps those commands out of sight. When it starts Command Code it loads a small Node preload that keeps any command Command Code asked to hide attached to the hidden console BlindPilot started it with. Nothing else about the command changes: it still runs in the background, its output still reaches Command Code, and Command Code still stops it the same way.
-- Any NODE_OPTIONS you have set yourself are kept; the preload is added after them.
-- This is Windows only. macOS and Linux never had the problem and are unchanged.
+- The cause was Muse's own shell sandbox. Muse runs every shell command inside a sandbox that, by default, only lets traffic out through its proxy, has no route to your local network, cannot start Windows programs from WSL, keeps its home folder read-only, and throws away /tmp between messages. That is why adb reported "Network is unreachable", why powershell.exe failed with a WSL socket error, and why the adb Muse downloaded on the first message was gone on the second.
+- The sandbox is chosen when `muse serve` starts and cannot be changed afterwards, so choosing bypass in BlindPilot only skipped the approval questions and left the sandbox in place. In bypass mode BlindPilot now starts Muse with `--disable-sandbox --trust-workspace`, which are exactly the two things Muse's own `--yolo` switch turns off. Muse can then reach your local network, run Windows programs such as adb.exe and PowerShell, and keep files between messages.
+- The other permission modes are unchanged and keep Muse's sandbox on, so if you want Muse boxed in, leave bypass off.

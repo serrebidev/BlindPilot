@@ -102,7 +102,7 @@ def _uuid() -> str:
     return str(uuid.UUID(int=value))
 
 
-def _muse_transport(cwd: str) -> StdioTransport:
+def _muse_transport(cwd: str, *, unsandboxed: bool = False) -> StdioTransport:
     """`muse serve` as a child process, spoken to over its pipes.
 
     MSP is line-delimited JSON-RPC, which is the framing Hermes' gateway
@@ -114,7 +114,14 @@ def _muse_transport(cwd: str) -> StdioTransport:
     command = muse_command(cwd)
     if not command:
         raise OSError("Muse Code is not installed where this process can reach it")
-    return StdioTransport(cwd, argv=[*command, "serve"], peer="Muse Code")
+    # The shell sandbox is fixed when the host starts and cannot be changed
+    # over the wire. Left on, a bypass turn's shell has no LAN, no Windows
+    # interop from WSL, a read-only home and a /tmp that is gone next turn:
+    # "adb connect" answered "Network is unreachable" and powershell.exe
+    # failed on UtilBindVsockAnyPort. These two flags are what Muse's own
+    # --yolo turns off, which is what bypass means.
+    flags = ["--disable-sandbox", "--trust-workspace"] if unsandboxed else []
+    return StdioTransport(cwd, argv=[*command, "serve", *flags], peer="Muse Code")
 
 
 class MuseWorker(JsonRpcCalls, threading.Thread):
@@ -334,7 +341,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
 
     def _do_run(self) -> None:
         try:
-            transport = _muse_transport(self._cwd)
+            transport = _muse_transport(self._cwd, unsandboxed=self._auto_approve)
             transport.start()
         except OSError as exc:
             self._fail(str(exc))
