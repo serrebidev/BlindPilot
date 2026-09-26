@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import threading
+import urllib.parse
 from typing import Callable, Optional
 
 from agent_backends import (
@@ -57,6 +59,34 @@ _PERMISSION_MODES = {
     "dontAsk": "dont-ask",
 }
 _BYPASS_MODE = "bypassPermissions"
+
+# Command Code starts background commands (builds, dev servers) with Node's
+# `detached: true`. On Windows that means DETACHED_PROCESS: the shell gets no
+# console, so every console program it runs opens a visible window of its own,
+# `windowsHide` notwithstanding. This preload, handed to Command Code's Node
+# through NODE_OPTIONS, keeps a spawn that asked to be hidden attached to the
+# hidden console BlindPilot started it with. Nothing else about the spawn
+# changes; Command Code still tracks and stops those processes itself.
+_HIDE_DETACHED_SPAWNS = (
+    'import cp from"node:child_process";'
+    'import{syncBuiltinESMExports}from"node:module";'
+    "const s=cp.spawn;cp.spawn=function(c,a,o){const x=Array.isArray(a)?o:a;"
+    "if(x&&x.detached&&x.windowsHide)x.detached=false;return s.apply(this,arguments)};"
+    "syncBuiltinESMExports();"
+)
+
+
+def _commandcode_env(binary: str) -> dict[str, str]:
+    """The environment a turn runs in: the usual one, plus the preload above on
+    Windows, added to whatever NODE_OPTIONS the user already has."""
+    env = subprocess_env(binary)
+    if platform.system() == "Windows":
+        preload = "--import=data:text/javascript," + urllib.parse.quote(
+            _HIDE_DETACHED_SPAWNS, safe=""
+        )
+        env["NODE_OPTIONS"] = f"{env.get('NODE_OPTIONS', '')} {preload}".strip()
+    return env
+
 
 # Command Code's tool names mapped to Claude Code's, whose inputs they share
 # (file_path, old_string, new_string, content, pattern, command, todos -
@@ -429,7 +459,7 @@ class CommandcodeWorker(threading.Thread):
                 bufsize=1,
                 encoding="utf-8",
                 errors="replace",
-                env=subprocess_env(binary),
+                env=_commandcode_env(binary),
                 **own_group_kwargs(),
                 **no_window_kwargs(),
             )
