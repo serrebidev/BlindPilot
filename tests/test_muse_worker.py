@@ -112,7 +112,7 @@ def _run(worker: MuseWorker, timeout: float = 10.0) -> None:
 def _with_script(monkeypatch, frames: list[dict]) -> _ScriptedMuseTransport:
     """Point the worker at a scripted host and hand the fake back for asserts."""
     transport = _ScriptedMuseTransport(frames)
-    monkeypatch.setattr(muse_worker, "_muse_transport", lambda _cwd: transport)
+    monkeypatch.setattr(muse_worker, "_muse_transport", lambda _cwd, **_kw: transport)
     return transport
 
 
@@ -197,6 +197,23 @@ def test_the_client_introduces_itself_with_a_protocol_valid_name(monkeypatch):
     initialize = transport.sent[0]
     assert initialize["method"] == "initialize"
     assert initialize["params"]["clientInfo"]["name"] == "blindpilot"
+
+
+def test_only_bypass_starts_muse_without_its_shell_sandbox(monkeypatch):
+    """The sandbox is fixed when `muse serve` starts, so bypass has to say so on
+    its command line. Left on, a bypass turn's shell had no LAN and no Windows
+    interop, and "adb connect" to a TV on the network failed every time."""
+    monkeypatch.setattr(muse_worker, "muse_command", lambda _cwd: ["muse"])
+    seen = {}
+    monkeypatch.setattr(
+        muse_worker,
+        "StdioTransport",
+        lambda cwd, argv, peer: seen.setdefault("argv", argv),
+    )
+    muse_worker._muse_transport("/w", unsandboxed=True)
+    assert seen.pop("argv") == ["muse", "serve", "--disable-sandbox", "--trust-workspace"]
+    muse_worker._muse_transport("/w")
+    assert seen.pop("argv") == ["muse", "serve"]
 
 
 def test_permission_modes_map_onto_the_protocol_vocabulary(monkeypatch):
