@@ -392,3 +392,51 @@ def test_update_backend_updates_hermes_with_the_official_installer(monkeypatch):
 
     assert not any("npm" in line for line in log)
     assert any("up to date" in line for line in log)
+
+
+def test_update_backend_measures_a_hermes_update_by_the_new_version_not_the_exit_code():
+    """A friend reported "Hermes update exited with code 4294901760" for an
+    update that had worked. The iex'd PowerShell installer never calls `exit`
+    itself, so the process code is whatever the last native command inside it
+    returned, negatives arriving unsigned: 4294901760 is plain -65536,
+    measured against this machine's PowerShell. The verdict has to come from
+    the launcher's version afterwards."""
+    log: list[str] = []
+    binary = "C:/Users/u/.local/bin/hermes.exe"
+    versions = iter(["hermes 0.9.0", "hermes 0.9.1"])
+
+    with _Patch(
+        _find_claude=lambda: None,
+        find_backend_cli=lambda _backend: binary,
+        _hermes_install_argv=lambda: ["powershell.exe", "-Command", "install"],
+        _run_logged_process=lambda _argv, _log, env=None: 4294901760,
+        _add_to_process_path=lambda _path: None,
+        _hermes_binary_after_install=lambda: binary,
+        _executable_version=lambda _binary: next(versions),
+    ):
+        assert app.update_backend(BACKEND_HERMES, log.append) is True
+
+    assert any("0.9.1" in line for line in log)
+    assert not any("4294901760" in line for line in log)
+    assert any("up to date" in line for line in log)
+
+
+def test_update_backend_still_fails_a_hermes_update_that_left_the_old_version():
+    """The other side of not trusting the exit code: a real failure that
+    leaves the old launcher standing must not be reported as success just
+    because the launcher is there."""
+    log: list[str] = []
+    binary = "C:/Users/u/.local/bin/hermes.exe"
+
+    with _Patch(
+        _find_claude=lambda: None,
+        find_backend_cli=lambda _backend: binary,
+        _hermes_install_argv=lambda: ["powershell.exe", "-Command", "install"],
+        _run_logged_process=lambda _argv, _log, env=None: 4294901760,
+        _add_to_process_path=lambda _path: None,
+        _hermes_binary_after_install=lambda: binary,
+        _executable_version=lambda _binary: "hermes 0.9.0",
+    ):
+        assert app.update_backend(BACKEND_HERMES, log.append) is False
+
+    assert any("may not have completed" in line for line in log)

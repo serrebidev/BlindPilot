@@ -301,7 +301,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.27"
+APP_VERSION = "0.29.28"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1733,15 +1733,36 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
         if hermes_argv is None:
             log(_hermes_missing_prereq_message())
             return False
+        # The iex'd PowerShell installer never exits on its own -- install.ps1
+        # says so deliberately, so it cannot close the user's window -- so the
+        # process exit code is whatever the last native command inside the
+        # installer returned, and a negative one arrives unsigned: a friend's
+        # "exited with code 4294901760" is plain -65536, measured against this
+        # machine's PowerShell. The installer's own failure guard (assigning
+        # $global:LASTEXITCODE, not exiting) does not reach the process code
+        # either. The exit code says nothing about the update; the version the
+        # launcher reports afterwards is the only fact that does.
+        before = version_tuple(_executable_version(binary))
         log(f"Running the official {label} installer to update...")
         rc = _run_logged_process(hermes_argv, log, env=_hermes_installer_env(log))
         if rc is None:
             return False
-        if rc != 0:
-            log(f"{label} update exited with code {rc}.")
-            return False
-        if _hermes_binary_after_install() is None:
+        found = _hermes_binary_after_install()
+        if found is None:
+            if rc != 0:
+                log(f"{label} update exited with code {rc}.")
             log(f"{label} update finished, but `hermes` was not found afterwards.")
+            return False
+        text = _executable_version(found)
+        if version_tuple(text) > before:
+            log(f"{label} updated. It now reports {text}.")
+        elif rc != 0:
+            log(
+                f"{label} is still at its current version and the installer did not "
+                "finish cleanly, so the update may not have completed. Read the "
+                "installer output above, or try the update again -- running it "
+                "again is safe."
+            )
             return False
         log(f"{label} is up to date.")
         return True
