@@ -88,6 +88,13 @@ def test_hermes_install_missing_prereq_message_names_the_missing_tool():
     assert "PowerShell" in monkeypatch_message or "curl" in monkeypatch_message
 
 
+# `ensure_on_path` is stubbed wherever an install is allowed to succeed. The
+# real one writes HKCU\Environment on Windows and the login shell's startup
+# file elsewhere, so an unstubbed test leaves the made-up launcher folder on
+# the computer that ran the test -- which is how "C:\Users\u\.local\bin" ended
+# up in a real PATH. test_cli_install.py has always stubbed it.
+
+
 def test_install_hermes_runs_the_installer_and_reports_the_found_binary():
     log: list[str] = []
     runs: list[list[str]] = []
@@ -97,6 +104,7 @@ def test_install_hermes_runs_the_installer_and_reports_the_found_binary():
         _hermes_install_argv=lambda: ["powershell.exe", "-Command", "install"],
         _run_logged_process=lambda argv, _log, env=None: runs.append(list(argv)) or 0,
         _add_to_process_path=lambda _path: None,
+        ensure_on_path=lambda _directory: None,
         _hermes_binary_after_install=lambda: found,
     ):
         result = app.install_hermes(log.append)
@@ -114,6 +122,7 @@ def test_install_hermes_measures_success_by_the_binary_not_the_exit_code():
         _hermes_install_argv=lambda: ["bash", "-c", "install"],
         _run_logged_process=lambda _argv, _log, env=None: 3,
         _add_to_process_path=lambda _path: None,
+        ensure_on_path=lambda _directory: None,
         _hermes_binary_after_install=lambda: found,
     ):
         assert app.install_hermes(lambda _line: None) == found
@@ -159,6 +168,9 @@ def test_install_hermes_reports_failure_when_nothing_is_found_afterwards():
 def _clean_windows(monkeypatch, tmp_path):
     """A Windows box with nothing configured and nothing synced."""
     monkeypatch.setattr(app.platform, "system", lambda: "Windows")
+    # The registry lives only on real Windows; this fake must not import it
+    # when the suite runs on the macOS/Linux CI lanes.
+    monkeypatch.setattr(app, "ensure_on_windows_path", lambda _directory: True)
     monkeypatch.delenv(app.UV_PYTHON_DIR_ENV, raising=False)
     monkeypatch.delenv("OneDrive", raising=False)
     monkeypatch.delenv("OneDriveConsumer", raising=False)
@@ -312,6 +324,7 @@ def test_install_hermes_passes_the_python_folder_to_the_installer(monkeypatch, t
         _hermes_install_argv=lambda: ["powershell.exe", "-Command", "install"],
         _run_logged_process=installer,
         _add_to_process_path=lambda _path: None,
+        ensure_on_path=lambda _directory: None,
         _hermes_binary_after_install=lambda: (
             "C:/Users/u/.hermes/hermes-agent/venv/Scripts/hermes.exe"
         ),
