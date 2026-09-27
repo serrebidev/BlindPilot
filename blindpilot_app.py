@@ -301,7 +301,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.26"
+APP_VERSION = "0.29.27"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -922,6 +922,182 @@ def _hermes_missing_prereq_message() -> str:
     return _missing_prereq_message("Hermes' installer")
 
 
+# Where uv -- the tool Hermes' installer bootstraps a Python with -- keeps the
+# interpreters it downloads. Measured with ``uv python dir`` on a healthy
+# machine: %APPDATA%\\uv\\python, the ROAMING folder. Roaming is also the one
+# folder a roaming profile or a cloud-sync client takes over, and Windows
+# refuses to walk through a folder it does not trust when an executable is
+# about to live under it. uv then dies at "Downloading Python" with
+# "Failed to create Python minor version link directory ... (os error 448)" --
+# ERROR_TRUSTING_PATH -- while the installer around it still exits 0.
+UV_PYTHON_DIR_ENV = "UV_PYTHON_INSTALL_DIR"
+
+
+def _uv_roaming_python_dir() -> Path:
+    """Where uv would put its managed Pythons if nothing were configured."""
+    roaming = os.environ.get("APPDATA", "").strip()
+    base = Path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
+    return base / "uv" / "python"
+
+
+def _uv_local_python_dir() -> Path:
+    """The same folder under local app data, where uv keeps its cache."""
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    base = Path(local) if local else Path.home() / "AppData" / "Local"
+    return base / "uv" / "python"
+
+
+def _windows_file_attributes(directory: Path) -> Optional[int]:
+    """The Windows ``st_file_attributes`` of a folder, or None when it cannot be asked."""
+    try:
+        return getattr(os.stat(directory), "st_file_attributes", 0)
+    except OSError:
+        return None
+
+
+def _folder_is_behind_reparse_point(directory: Path) -> bool:
+    """Whether a step on the way to *directory* is a reparse point.
+
+    That is what a cloud-sync placeholder or a roaming redirect looks like to
+    Windows, and it is what makes it refuse to place a program underneath.
+    Only folders that already exist can be asked, so the walk stops at the
+    first one that does not -- a path uv has not created yet is judged by the
+    deepest part of it that exists.
+    """
+    current = directory
+    while True:
+        attributes = _windows_file_attributes(current)
+        if attributes is None:
+            return False
+        if attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
+def _folder_is_cloud_synced(directory: Path) -> bool:
+    """Whether *directory* sits inside a folder a sync client owns.
+
+    Two signals, because each alone misses a machine: the reparse attribute
+    Windows puts on the synced folder, and OneDrive's own recorded roots, which
+    name the tree even where nothing has been turned into a placeholder yet.
+    """
+    if _folder_is_behind_reparse_point(directory):
+        return True
+    try:
+        candidate = os.path.normcase(os.path.abspath(str(directory)))
+    except OSError:
+        return False
+    for name in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        root = os.environ.get(name, "").strip()
+        if not root:
+            continue
+        try:
+            prefix = os.path.normcase(os.path.abspath(root)) + os.sep
+        except OSError:
+            continue
+        if candidate.startswith(prefix):
+            return True
+    return False
+
+
+def _remember_windows_env_var(name: str, value: str) -> None:
+    """Set one user environment variable for every program started later.
+
+    ``HKCU\\Environment`` is the registry twin of ``setx``, read by cmd,
+    PowerShell and Windows Terminal when they start. Raises OSError when the
+    write fails.
+    """
+    import winreg  # after the platform check -- the module is Windows-only
+
+    os.environ[name] = value
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER,
+        r"Environment",
+        0,
+        winreg.KEY_READ | winreg.KEY_WRITE,
+    ) as key:
+        try:
+            current, regtype = winreg.QueryValueEx(key, name)
+        except OSError:
+            current, regtype = None, winreg.REG_EXPAND_SZ
+        if current == value:
+            return
+        if regtype not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+            regtype = winreg.REG_EXPAND_SZ
+        winreg.SetValueEx(key, name, 0, regtype, value)
+    _broadcast_environment_change()
+
+
+def _hermes_installer_env(log: Callable[[str], None]) -> Optional[dict[str, str]]:
+    """The environment Hermes' installer runs in, or None to change nothing.
+
+    Its Python bootstrap is uv's, and uv's default home for interpreters is the
+    roaming folder (see ``UV_PYTHON_DIR_ENV``). On the machines that report
+    ``os error 448`` that folder sits behind a cloud-sync placeholder, so the
+    interpreters are sent to local app data instead -- where uv already keeps
+    its cache, and which no sync client owns. Asked for on every Windows
+    install rather than only when the check below agrees, because a synced
+    folder is not always recognisable from here and a wrong guess costs a
+    folder, while a missed one costs the install.
+
+    A location the user configured themselves is left exactly as it is.
+    """
+    if platform.system() != "Windows":
+        return None
+    if os.environ.get(UV_PYTHON_DIR_ENV, "").strip():
+        return None
+    local = _uv_local_python_dir()
+    if _folder_is_cloud_synced(local):
+        log(
+            "Both of the usual folders for Hermes' Python sit inside a folder that a "
+            "cloud-sync program owns, and Windows will not put a program there. Set "
+            "UV_PYTHON_INSTALL_DIR to a folder outside every synced folder, then try again."
+        )
+        return None
+    if _folder_is_cloud_synced(_uv_roaming_python_dir()):
+        # Remembered, not just handed to this one installer run: the same
+        # bootstrap runs again whenever Hermes is updated from a terminal, and
+        # an environment variable BlindPilot set for one child process does not
+        # reach that one.
+        try:
+            _remember_windows_env_var(UV_PYTHON_DIR_ENV, str(local))
+            log(
+                "Your roaming AppData is inside a synced folder, which Windows will not "
+                f"put Hermes' Python in. It will go in {local} instead, and Windows has "
+                "been told so that Hermes' own updater finds it again."
+            )
+        except OSError as exc:
+            log(
+                "Hermes' Python will go in the local app-data folder for this install, "
+                f"but Windows could not be told to keep doing so: {exc}"
+            )
+    return {UV_PYTHON_DIR_ENV: str(local)}
+
+
+def _hermes_bootstrap_failure(lines: Sequence[str]) -> str:
+    """What to hear when Hermes' installer left no Python and no clear reason.
+
+    uv's own sentence for a folder it is not allowed through is localised -- on
+    a Polish machine it begins "Nie można przejść do tej ścieżki" -- and the
+    installer exits 0 regardless, so the only stable text in the whole log is
+    the error number and the name of the step that failed. Both are looked for
+    here, because "exit code 0 but hermes was not found" describes nothing a
+    user can act on.
+    """
+    text = "\n".join(lines).lower()
+    if "os error 448" not in text and "minor version link" not in text:
+        return ""
+    return (
+        "Windows refused to put the Python Hermes needs inside a folder owned by a "
+        "cloud-sync program. BlindPilot uses the local app-data folder for it instead; if "
+        "this still fails, set UV_PYTHON_INSTALL_DIR to a folder outside every synced "
+        "folder and try again."
+    )
+
+
 def _hermes_binary_after_install() -> Optional[str]:
     """The Hermes launcher after an install, with its install dirs on PATH.
 
@@ -961,13 +1137,22 @@ def install_hermes(log: Callable[[str], None]) -> Optional[str]:
     log(
         "Downloading and running the official Hermes installer. This usually takes a minute or two."
     )
-    rc = _run_logged_process(argv, log)
+    heard: List[str] = []
+
+    def logged(line: str) -> None:
+        heard.append(line)
+        log(line)
+
+    rc = _run_logged_process(argv, logged, env=_hermes_installer_env(log))
     if rc is None:
         return None
 
     binary = _hermes_binary_after_install()
     if binary is None:
         log(f"The installer finished with exit code {rc} but `hermes` was not found afterwards.")
+        problem = _hermes_bootstrap_failure(heard)
+        if problem:
+            log(problem)
         return None
 
     log(f"Installed: {binary}")
@@ -1549,7 +1734,7 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
             log(_hermes_missing_prereq_message())
             return False
         log(f"Running the official {label} installer to update...")
-        rc = _run_logged_process(hermes_argv, log)
+        rc = _run_logged_process(hermes_argv, log, env=_hermes_installer_env(log))
         if rc is None:
             return False
         if rc != 0:

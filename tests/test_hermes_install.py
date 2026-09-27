@@ -145,6 +145,207 @@ def test_install_hermes_reports_failure_when_nothing_is_found_afterwards():
     assert any("not found afterwards" in line for line in log)
 
 
+# --- the Python that Hermes' installer bootstraps with uv -----------------
+#
+# A user on a machine whose AppData is cloud-synced reported the installer
+# dying at "Downloading Python 3.14" with
+# "Failed to create Python minor version link directory ... (os error 448)" --
+# Windows refusing to place a program under a folder it does not trust -- and
+# BlindPilot then reporting only "exit code 0 but hermes was not found". uv
+# puts its managed Pythons under %APPDATA% by default; the fix is to ask for
+# the local app-data folder, which no sync client owns.
+
+
+def _clean_windows(monkeypatch, tmp_path):
+    """A Windows box with nothing configured and nothing synced."""
+    monkeypatch.setattr(app.platform, "system", lambda: "Windows")
+    monkeypatch.delenv(app.UV_PYTHON_DIR_ENV, raising=False)
+    monkeypatch.delenv("OneDrive", raising=False)
+    monkeypatch.delenv("OneDriveConsumer", raising=False)
+    monkeypatch.delenv("OneDriveCommercial", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+
+
+def test_uv_python_folder_default_is_the_roaming_one_that_breaks(tmp_path, monkeypatch):
+    """The reason this exists: uv's own answer is the roaming folder."""
+    _clean_windows(monkeypatch, tmp_path)
+    assert app._uv_roaming_python_dir() == tmp_path / "Roaming" / "uv" / "python"
+    assert app._uv_local_python_dir() == tmp_path / "Local" / "uv" / "python"
+
+
+def test_an_ordinary_folder_is_not_reported_as_synced(tmp_path):
+    """The walk must not fire on a machine that never had the problem."""
+    nested = tmp_path / "uv" / "python"
+    assert app._folder_is_cloud_synced(tmp_path) is False
+    assert app._folder_is_cloud_synced(nested) is False
+
+
+def test_a_folder_inside_one_drive_is_reported_as_synced(tmp_path, monkeypatch):
+    """OneDrive names its own root, which catches it before placeholders do."""
+    monkeypatch.setenv("OneDrive", str(tmp_path))
+    assert app._folder_is_cloud_synced(tmp_path / "AppData" / "Roaming" / "uv") is True
+
+
+def test_a_reparse_point_on_the_way_makes_a_folder_unusable(tmp_path, monkeypatch):
+    """The other signal: a step on the path that Windows will not traverse."""
+    target = tmp_path / "Roaming" / "uv" / "python"
+    monkeypatch.setattr(
+        app,
+        "_windows_file_attributes",
+        lambda path: 0x400 if "Roaming" in str(path) else 0,
+    )
+    assert app._folder_is_cloud_synced(target) is True
+
+
+def test_hermes_installer_env_moves_uvs_python_off_the_roaming_folder(monkeypatch, tmp_path):
+    _clean_windows(monkeypatch, tmp_path)
+    log: list[str] = []
+
+    env = app._hermes_installer_env(log.append)
+
+    assert env == {app.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
+    assert log == []  # a healthy machine has nothing to hear
+
+
+def test_hermes_installer_env_leaves_a_chosen_folder_alone(monkeypatch, tmp_path):
+    """Someone who already set the variable knows where they want it."""
+    _clean_windows(monkeypatch, tmp_path)
+    monkeypatch.setenv(app.UV_PYTHON_DIR_ENV, str(tmp_path / "mine"))
+
+    assert app._hermes_installer_env(lambda _line: None) is None
+
+
+def test_hermes_installer_env_does_nothing_off_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(app.platform, "system", lambda: "Linux")
+    monkeypatch.delenv(app.UV_PYTHON_DIR_ENV, raising=False)
+
+    assert app._hermes_installer_env(lambda _line: None) is None
+
+
+def test_hermes_installer_env_is_remembered_when_roaming_is_synced(monkeypatch, tmp_path):
+    """A terminal-launched `hermes update` bootstraps again with no help from us.
+
+    So when the roaming folder is known to be the problem, the variable is
+    written to the user environment as well as handed to this one installer.
+    """
+    _clean_windows(monkeypatch, tmp_path)
+    remembered: list[tuple[str, str]] = []
+    monkeypatch.setattr(app, "_folder_is_cloud_synced", lambda path: "Roaming" in str(path))
+    monkeypatch.setattr(
+        app, "_remember_windows_env_var", lambda name, value: remembered.append((name, value))
+    )
+    log: list[str] = []
+
+    env = app._hermes_installer_env(log.append)
+
+    local = str(tmp_path / "Local" / "uv" / "python")
+    assert env == {app.UV_PYTHON_DIR_ENV: local}
+    assert remembered == [(app.UV_PYTHON_DIR_ENV, local)]
+    assert any("synced" in line and "local" in line.lower() for line in log)
+
+
+def test_hermes_installer_env_says_so_when_both_folders_are_synced(monkeypatch, tmp_path):
+    """No automatic answer exists, so name the setting to change instead."""
+    _clean_windows(monkeypatch, tmp_path)
+    monkeypatch.setattr(app, "_folder_is_cloud_synced", lambda _path: True)
+    log: list[str] = []
+
+    assert app._hermes_installer_env(log.append) is None
+
+    assert any("UV_PYTHON_INSTALL_DIR" in line for line in log)
+
+
+def test_hermes_bootstrap_failure_names_the_refused_folder_from_the_real_output():
+    """The user's own log, with its Polish sentence left in it.
+
+    The message around the failure is localised and the installer exits 0, so
+    the error number is the only thing here that survives translation.
+    """
+    heard = [
+        "-> Downloading Python 3.14",
+        "error: Failed to create Python minor version link directory",
+        "  Caused by: Nie można przejść do tej ścieżki, ponieważ zawiera ona "
+        "niezaufany punkt instalacji. (os error 448)",
+        "[X] bootstrap Python installation failed",
+    ]
+
+    message = app._hermes_bootstrap_failure(heard)
+
+    assert "cloud-sync" in message
+    assert "UV_PYTHON_INSTALL_DIR" in message
+
+
+def test_hermes_bootstrap_failure_stays_quiet_about_other_output():
+    assert app._hermes_bootstrap_failure(["everything is fine"]) == ""
+
+
+def test_install_hermes_tells_the_user_what_to_do_when_windows_refused_the_folder():
+    """The report this whole path answers to: exit code 0, no hermes, no clue."""
+    log: list[str] = []
+
+    def installer(_argv, log_line, env=None):
+        log_line("error: Failed to create Python minor version link directory (os error 448)")
+        return 0
+
+    with _Patch(
+        _hermes_install_argv=lambda: ["powershell.exe", "-Command", "install"],
+        _run_logged_process=installer,
+        _hermes_installer_env=lambda _log: None,
+        _add_to_process_path=lambda _path: None,
+        _hermes_binary_after_install=lambda: None,
+    ):
+        assert app.install_hermes(log.append) is None
+
+    assert any("UV_PYTHON_INSTALL_DIR" in line for line in log)
+
+
+def test_install_hermes_passes_the_python_folder_to_the_installer(monkeypatch, tmp_path):
+    _clean_windows(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    def installer(_argv, _log, env=None):
+        seen["env"] = env
+        return 0
+
+    with _Patch(
+        _hermes_install_argv=lambda: ["powershell.exe", "-Command", "install"],
+        _run_logged_process=installer,
+        _add_to_process_path=lambda _path: None,
+        _hermes_binary_after_install=lambda: (
+            "C:/Users/u/.hermes/hermes-agent/venv/Scripts/hermes.exe"
+        ),
+    ):
+        app.install_hermes(lambda _line: None)
+
+    assert seen["env"] == {app.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
+
+
+def test_update_backend_updates_hermes_in_the_same_environment(monkeypatch, tmp_path):
+    """An update bootstraps Python the same way an install does, so it needs
+    the same answer or it fails on the machine that already failed once."""
+    _clean_windows(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    def installer(_argv, _log, env=None):
+        seen["env"] = env
+        return 0
+
+    with _Patch(
+        _find_claude=lambda: None,
+        find_backend_cli=lambda _backend: "C:/Users/u/.hermes/hermes-agent/venv/Scripts/hermes.exe",
+        _hermes_install_argv=lambda: ["powershell.exe", "-Command", "install"],
+        _run_logged_process=installer,
+        _add_to_process_path=lambda _path: None,
+        _hermes_binary_after_install=lambda: (
+            "C:/Users/u/.hermes/hermes-agent/venv/Scripts/hermes.exe"
+        ),
+    ):
+        assert app.update_backend(BACKEND_HERMES, lambda _line: None) is True
+
+    assert seen["env"] == {app.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
+
+
 def test_install_backend_installs_hermes_through_its_own_installer(monkeypatch):
     seen: dict = {}
 
