@@ -38,9 +38,16 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from agent_backends import (
+    SUBAGENT_COMPLETED,
+    SUBAGENT_FAILED,
+    SUBAGENT_RUNNING,
     AskQuestions,
     Question,
     QuestionOption,
+    SubagentReport,
+    ignore_subagents,
+    subagent_line,
+    subagent_status,
 )
 from hermes_backend import JsonRpcCalls, StdioTransport, windows_path_to_wsl
 from markdown_rows import release_finished, release_remainder
@@ -142,6 +149,17 @@ def _muse_transport(cwd: str, *, unsandboxed: bool = False) -> StdioTransport:
     return StdioTransport(cwd, argv=[*command, "serve", *flags], peer="Muse Code")
 
 
+def _json_object(raw: object) -> dict:
+    """A tool's args or output, which Muse sends as JSON text, as a dict."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(str(raw or ""))
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 class MuseWorker(JsonRpcCalls, threading.Thread):
     """Run one Muse turn, reporting it through BlindPilot's callbacks.
 
@@ -168,6 +186,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
         on_question: Optional[AskQuestions] = None,
+        on_subagent: Optional[SubagentReport] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -186,6 +205,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
+        self._on_subagent = on_subagent or ignore_subagents
 
         self._transport: Optional[StdioTransport] = None
         self._cancelled = False
@@ -223,6 +243,12 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._answered_stages: set[str] = set()
         self._seen_user_inputs: set[str] = set()
         self._approval_tools: dict[str, str] = {}
+        # Native subagents and workflow runs this turn has seen, by id, with
+        # where each stands, so Stop can end the ones still running: a
+        # turn/interrupt ends the parent turn, not the children it spawned.
+        self._subagents: dict[str, str] = {}
+        self._subagent_control: dict[str, str] = {}
+        self._workflows: dict[str, str] = {}
         # Fired commands awaiting their reply: id -> (method, params, may retry).
         self._fired: dict[object, tuple[str, Optional[dict], bool]] = {}
 
@@ -265,6 +291,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             # prompt-restoring signal to wait for. turnId names the exact
             # turn; omitting it would target the session's foreground turn,
             # which is the same one here.
+            self._stop_children()
             self._fire(
                 "turn/interrupt",
                 {
@@ -779,6 +806,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
     def _item_started(self, item: object) -> None:
         if not isinstance(item, dict):
             return
+        self._track_children(item)
         kind = str(item.get("kind") or "")
         item_id = str(item.get("itemId") or "")
         if kind == "toolCall":
@@ -841,6 +869,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
     def _item_completed(self, item: object) -> None:
         if not isinstance(item, dict):
             return
+        self._track_children(item)
         kind = str(item.get("kind") or "")
         item_id = str(item.get("itemId") or "")
         if kind == "agentMessage":
@@ -973,6 +1002,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         """
         if not isinstance(item, dict):
             return
+        self._track_children(item)
         kind = str(item.get("kind") or "")
         if kind == "toolCall" and item.get("background"):
             name = str(item.get("tool") or "tool")
@@ -981,6 +1011,158 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             status = str(item.get("controlStatus") or item.get("status") or "").strip()
             if status:
                 self._on_activity("tool", f"Subagent {status}")
+
+    def _track_children(self, item: dict) -> None:
+        """Report a native subagent or a workflow's children to the window.
+
+        A `subagent` item is re-emitted whole on every change, so each copy is
+        compared with the last: the objective is said once, a control-state
+        change once, and the result when the item ends. A `workflow` item
+        folds all its children into one `children` list, each keyed by its
+        (childId, attempt) pair.
+        """
+        kind = str(item.get("kind") or "")
+        if kind == "toolCall" and str(item.get("tool") or "").startswith("subagent_"):
+            self._subagent_tool(item)
+        elif kind == "subagent":
+            agent_id = str(item.get("subagentId") or item.get("itemId") or "")
+            if not agent_id:
+                return
+            status = subagent_status(item.get("status"))
+            known = agent_id in self._subagents
+            if not known or status:
+                self._subagents[agent_id] = status or SUBAGENT_RUNNING
+            name = subagent_line(item.get("role") or item.get("objective") or "Subagent", 80)
+            lines: list[str] = []
+            if not known:
+                objective = subagent_line(item.get("objective"))
+                lines.append(f"Task: {objective}" if objective else "Started")
+            control = str(item.get("controlStatus") or "")
+            if control and control != self._subagent_control.get(agent_id):
+                self._subagent_control[agent_id] = control
+                if known:
+                    lines.append(f"State: {control}")
+            if status and status != SUBAGENT_RUNNING:
+                result = item.get("result")
+                summary = ""
+                if isinstance(result, dict):
+                    summary = subagent_line(result.get("summary") or result.get("text"))
+                reason = subagent_line(item.get("failureReason"))
+                lines.append(summary or reason or f"Finished: {status}")
+            if not lines:
+                lines.append("")
+            # The name goes with the first line and the state with the last,
+            # so an agent that finished says so with its result.
+            last = len(lines) - 1
+            for index, line in enumerate(lines):
+                self._on_subagent(
+                    agent_id, name if index == 0 else "", status if index == last else "", line
+                )
+        elif kind == "workflow":
+            run_id = str(item.get("workflowRunId") or item.get("itemId") or "")
+            children = item.get("children")
+            if not run_id or not isinstance(children, list):
+                return
+            running = False
+            for child in children:
+                if not isinstance(child, dict):
+                    continue
+                child_id = str(child.get("childId") or "")
+                if not child_id:
+                    continue
+                agent_id = f"{run_id}:{child_id}"
+                status = subagent_status(child.get("terminal") or child.get("status"))
+                running = running or status in ("", SUBAGENT_RUNNING)
+                phase = subagent_line(child.get("phase"))
+                previous = self._subagents.get(agent_id)
+                current = status or previous or SUBAGENT_RUNNING
+                if previous == current and not phase:
+                    continue
+                self._subagents[agent_id] = current
+                name = subagent_line(child.get("label") or child_id, 80)
+                line = phase if phase and previous is not None else ""
+                if previous is None:
+                    line = f"Started{f': {phase}' if phase else ''}"
+                elif current != previous and current != SUBAGENT_RUNNING:
+                    line = f"Finished: {current}"
+                self._on_subagent(agent_id, name, current, line)
+            self._workflows[run_id] = SUBAGENT_RUNNING if running else "done"
+
+    def _subagent_tool(self, item: dict) -> None:
+        """Follow a native subagent through the parent's own subagent_* tools.
+
+        Measured on 1.4.1: no `subagent` item reached the parent's stream. The
+        model drives its children with tools instead -- subagent_spawn, whose
+        output names the new child's `subagent_id` and whose args carry its
+        objective and role, then subagent_wait, whose output says whether its
+        result is ready and summarises it. Only a finished call carries an
+        output, so the child is known from the spawn's completion on.
+        """
+        if str(item.get("status") or "") == "inProgress":
+            return
+        tool = str(item.get("tool") or "")
+        args = _json_object(item.get("args"))
+        output = _json_object(item.get("visibleOutput") or item.get("output"))
+        agent_id = str(output.get("subagent_id") or args.get("subagent_id") or "")
+        if not agent_id:
+            return
+        state = str(output.get("status") or "")
+        if tool == "subagent_spawn":
+            if agent_id in self._subagents:
+                return
+            if state in ("rejected", "failed", "error"):
+                self._subagents[agent_id] = SUBAGENT_FAILED
+                self._on_subagent(
+                    agent_id, "Subagent", SUBAGENT_FAILED, f"Could not start: {state}"
+                )
+                return
+            self._subagents[agent_id] = SUBAGENT_RUNNING
+            name = subagent_line(args.get("role") or args.get("objective") or "Subagent", 80)
+            objective = subagent_line(args.get("objective"))
+            self._on_subagent(
+                agent_id, name, SUBAGENT_RUNNING, f"Task: {objective}" if objective else "Started"
+            )
+            return
+        summary = subagent_line(output.get("summary"))
+        if not summary and not state:
+            # A call that ended without an answer -- a wait cut short by Stop
+            # -- says nothing about the child.
+            return
+        # "ready" is the wait's word for a child whose result is in.
+        status = SUBAGENT_COMPLETED if state == "ready" else subagent_status(state)
+        if status and status != SUBAGENT_RUNNING:
+            self._subagents[agent_id] = status
+        verb = tool[len("subagent_") :].replace("_", " ")
+        line = summary or (f"{verb}: {state}" if state else verb)
+        self._on_subagent(agent_id, "", status if status != SUBAGENT_RUNNING else "", line)
+
+    def _stop_children(self) -> None:
+        """Stop every native subagent and workflow run still going.
+
+        Stopping the parent turn does not stop what it spawned: the host
+        keeps a child running until its owner closes it (subagent/stop) or
+        the run is cancelled (workflow/cancel). Both are fired, not awaited,
+        like the interrupt that follows them.
+        """
+        for agent_id, status in list(self._subagents.items()):
+            if status != SUBAGENT_RUNNING or ":" in agent_id:
+                continue
+            self._fire(
+                "subagent/stop",
+                {
+                    "commandId": _uuid(),
+                    "sessionId": self._live_session,
+                    "subagentId": agent_id,
+                    "reason": "Stopped from BlindPilot",
+                },
+            )
+        for run_id, status in list(self._workflows.items()):
+            if status != SUBAGENT_RUNNING:
+                continue
+            self._fire(
+                "workflow/cancel",
+                {"commandId": _uuid(), "sessionId": self._live_session, "workflowRunId": run_id},
+            )
 
     def _turn_completed(self, params: dict) -> None:
         self._release_all()
@@ -1015,6 +1197,12 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         if key in self._answered_stages:
             return
         self._answered_stages.add(key)
+        origin = params.get("subagentOrigin")
+        if isinstance(origin, dict) and origin.get("subagentId"):
+            # A child's approval, projected onto this session so it can be
+            # answered here. Its log says what it asked for.
+            tool = str(params.get("toolName") or self._approval_tools.get(approval_id) or "a tool")
+            self._on_subagent(str(origin["subagentId"]), "", "", f"Asked permission for {tool}")
         if params.get("toolName"):
             self._approval_tools[approval_id] = str(params["toolName"])
         if self._cancelled:

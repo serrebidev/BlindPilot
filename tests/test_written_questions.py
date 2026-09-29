@@ -42,6 +42,9 @@ class _Panel:
     def _hide_working(self):
         pass
 
+    def _settle_subagents(self):
+        pass
+
     def _announce(self, text, urgent=False):
         self.announced.append(text)
 

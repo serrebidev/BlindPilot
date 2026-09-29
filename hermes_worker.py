@@ -20,7 +20,18 @@ import threading
 import time
 from typing import Callable, Optional, Sequence
 
-from agent_backends import AskQuestions, Question, QuestionOption, question_summary
+from agent_backends import (
+    SUBAGENT_COMPLETED,
+    SUBAGENT_RUNNING,
+    AskQuestions,
+    Question,
+    QuestionOption,
+    SubagentReport,
+    ignore_subagents,
+    question_summary,
+    subagent_line,
+    subagent_status,
+)
 from hermes_backend import (
     JsonRpcCalls,
     StdioTransport,
@@ -525,6 +536,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         # Answers Hermes' clarify, sudo and secret requests, each of which
         # blocks the agent until a reply arrives.
         on_question: Optional[AskQuestions] = None,
+        on_subagent: Optional[SubagentReport] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -586,6 +598,11 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         self._on_done = on_done
         # Called by the clarify and secret handlers; None means answer empty.
         self._on_question = on_question
+        self._on_subagent = on_subagent or ignore_subagents
+        # delegate_task children this turn has heard of, by subagent id, with
+        # where each stands: interrupting the session does not reach them,
+        # so Stop interrupts each one still running by name.
+        self._subagents: dict[str, str] = {}
         self._transport: Optional[Transport] = None
         self._cancelled = False
         # Set when the turn's end arrives while a reply is still awaited, so
@@ -651,6 +668,11 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             # remote Hermes is not left working on an answer nobody will read.
             # Addressed by the live id -- see steer() for why the stored one
             # cannot be used.
+            for agent_id, status in list(self._subagents.items()):
+                if status == SUBAGENT_RUNNING and not agent_id.startswith("goal:"):
+                    self._request(
+                        "subagent.interrupt", {"session_id": target, "subagent_id": agent_id}
+                    )
             self._request("session.interrupt", {"session_id": target})
         # A cancelled turn leaves the connection mid-conversation: the interrupt
         # is answered by frames this worker will not read. Reusing it would hand
@@ -1316,6 +1338,45 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
 
     # -- events into accessible rows --------------------------------------
 
+    def _subagent_event(self, kind: str, payload: dict) -> None:
+        """One delegate_task child's news, relayed on the parent session.
+
+        The gateway relays each child's lifecycle as subagent.start, .tool,
+        .thinking, .progress and .complete on the parent's session id, each
+        naming the child by `subagent_id`. An older gateway leaves the id out,
+        so the child is then known by its goal and place in the batch -- and
+        cannot be interrupted by name, only with the session.
+        """
+        goal = subagent_line(payload.get("goal"), 80)
+        agent_id = str(payload.get("subagent_id") or "")
+        if not agent_id:
+            if not goal:
+                return
+            agent_id = f"goal:{payload.get('task_index') or 0}:{goal}"
+        text = subagent_line(payload.get("text"))
+        if kind in ("start", "spawn_requested"):
+            first = agent_id not in self._subagents
+            self._subagents[agent_id] = SUBAGENT_RUNNING
+            if first:
+                self._on_subagent(
+                    agent_id, goal or "Subagent", SUBAGENT_RUNNING, f"Task: {goal}" if goal else ""
+                )
+        elif kind == "tool":
+            tool = str(payload.get("tool_name") or "tool")
+            line = f"{tool}: {text}" if text and text != tool else tool
+            self._on_subagent(agent_id, goal, "", line)
+        elif kind == "thinking":
+            if text:
+                self._on_subagent(agent_id, goal, "", f"Thinking: {text}")
+        elif kind == "progress":
+            if text:
+                self._on_subagent(agent_id, goal, "", text)
+        elif kind == "complete":
+            status = subagent_status(payload.get("status")) or SUBAGENT_COMPLETED
+            self._subagents[agent_id] = status
+            summary = subagent_line(payload.get("summary") or payload.get("text"))
+            self._on_subagent(agent_id, goal, status, summary or f"Finished: {status}")
+
     @staticmethod
     def _event_type(frame: dict) -> str:
         params = frame.get("params")
@@ -1348,6 +1409,10 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         event = str(params.get("type") or "")
         payload = params.get("payload")
         payload = payload if isinstance(payload, dict) else {}
+
+        if event.startswith("subagent."):
+            self._subagent_event(event[len("subagent.") :], payload)
+            return None
 
         if event == "message.delta":
             text = str(payload.get("text") or "")

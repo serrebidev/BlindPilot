@@ -165,7 +165,17 @@ def wx_app():
         application = wx.GetApp() or wx.App(False)
     except Exception as exc:  # pragma: no cover - depends on the machine
         pytest.skip(f"no display for wxPython: {exc}")
-    return application
+    yield application
+    # `Destroy` only queues a top-level window for deletion; the queue is
+    # emptied when the event loop next idles, which a test run never lets it
+    # do. Left queued at exit, wxMSW tears the app down around windows that
+    # still exist and prints "UnregisterClass failed ... Class still has open
+    # windows". Closing what is left and letting a main loop idle once --
+    # it quits itself as soon as it starts -- frees them.
+    for window in wx.GetTopLevelWindows():
+        window.Destroy()
+    wx.CallAfter(application.ExitMainLoop)
+    application.MainLoop()
 
 
 @pytest.fixture

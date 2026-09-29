@@ -40,6 +40,10 @@ _popen = subprocess.Popen
 _INTERRUPT_SECONDS = 5.0
 # How long a model or permission mode change waits for the CLI's answer.
 _CONTROL_SECONDS = 10.0
+# Stop asks the CLI to end each running agent before it interrupts the turn.
+# Bounded per agent: a CLI too old to know `stop_task` answers an error at
+# once, and one that ignores it must not hold the stop for long.
+_STOP_TASK_SECONDS = 2.0
 # stderr lines kept. The tail is the part that says how a process ended.
 _STDERR_KEEP = 4000
 _STDERR_TRIM = 2000
@@ -113,6 +117,16 @@ class ClaudeSession:
         self._stderr_dropped = 0
         self._stopped = False
         self._ended = threading.Event()
+        # The agents this process has running: task id -> the Agent tool
+        # call that started it, which is how the window names the agent.
+        # Kept on the process rather than the turn because agents outlive
+        # the turn that started them, and Stop in a later turn still has to
+        # reach them.
+        self.agent_tasks: dict[str, str] = {}
+        # Every Agent tool call seen, and those of them running in the
+        # background, whose tool result is the launch, not the answer.
+        self.agent_calls: set[str] = set()
+        self.background_agents: set[str] = set()
         # Called on every event the CLI sends, so the pool's idle clock
         # measures silence from the CLI rather than time since the last prompt.
         self.on_event: Optional[Callable[[], None]] = None
@@ -304,6 +318,17 @@ class ClaudeSession:
     @staticmethod
     def _confirmed(response: Optional[dict]) -> bool:
         return response is not None and response.get("subtype") == "success"
+
+    def stop_agents(self) -> None:
+        """Ask the CLI to stop every agent it has running.
+
+        An interrupt ends the turn and leaves its agents working; a Stop
+        that left them editing files and spending tokens would be no stop.
+        `stop_task` ends one by its task id, and the CLI reports each one's
+        end as a task_notification.
+        """
+        for task_id in list(self.agent_tasks):
+            self.send_control("stop_task", timeout=_STOP_TASK_SECONDS, task_id=task_id)
 
     def interrupt(self, timeout: Optional[float] = None) -> bool:
         """Whether the CLI confirmed the running turn was stopped."""

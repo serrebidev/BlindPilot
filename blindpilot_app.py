@@ -90,8 +90,13 @@ from agent_backends import (
     BACKEND_OPENCODE,
     BACKENDS,
     FREEBUFF_PREFERRED_MODEL,
+    SUBAGENT_COMPLETED,
+    SUBAGENT_FAILED,
+    SUBAGENT_RUNNING,
+    SUBAGENT_STOPPED,
     AgentWorker,
     AskQuestions,
+    SubagentReport,
     Question,
     QuestionOption,
     _questions,
@@ -111,6 +116,9 @@ from agent_backends import (
     end_process_group,
     find_backend_cli,
     freebuff_model_options,
+    ignore_subagents,
+    subagent_line,
+    subagent_status,
     invalidate_backend_cache,
     normalize_backend,
     opencode_auth_methods,
@@ -302,7 +310,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.30"
+APP_VERSION = "0.30.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2550,6 +2558,10 @@ def _tab_label(title: str, cwd: str) -> str:
     return _tab_title(title) or (_short_label(cwd) if cwd else "New session")
 
 
+# The tools Claude Code starts an agent with: Agent now, Task before it.
+_CLAUDE_AGENT_TOOLS = ("Agent", "Task")
+
+
 def _tool_result_text(content: object) -> str:
     """Plain text of a tool's result, whatever shape the CLI delivers it in.
 
@@ -3535,6 +3547,9 @@ class ClaudeWorker(threading.Thread):
     # interrupted turn's result, so the panel must wait longer than both
     # before it says the stop did not land.
     stop_seconds = 12.0
+    # Background agents keep working after the turn that started them
+    # ends, and report their end in whichever turn reads it.
+    subagents_outlive_turn = True
 
     def __init__(
         self,
@@ -3552,6 +3567,7 @@ class ClaudeWorker(threading.Thread):
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
         on_question: Optional[AskQuestions] = None,
+        on_subagent: Optional[SubagentReport] = None,
         held_for: object = None,
         on_unsolicited: Optional[Callable[[], None]] = None,
     ):
@@ -3569,6 +3585,7 @@ class ClaudeWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
+        self._on_subagent = on_subagent or ignore_subagents
         # Which tab's held process this turn borrows, and who to tell when the
         # CLI speaks with no turn attached.
         self._held_for = held_for
@@ -3669,6 +3686,7 @@ class ClaudeWorker(threading.Thread):
         session = self._session
         if session is None:
             return
+        session.stop_agents()
         if not session.interrupt(claude_session._INTERRUPT_SECONDS):
             self._drop_process()
         # The reader may have been parked on the queue with no timeout since
@@ -3677,6 +3695,104 @@ class ClaudeWorker(threading.Thread):
         events = self._events
         if events is not None:
             events.put(_CANCEL_WAKE)
+
+    def _track_subagents(self, event: dict, session: claude_session.ClaudeSession) -> None:
+        """Tell the window about the agents this turn's process is running.
+
+        Claude Code reports each agent through three system events keyed by
+        task id -- task_started, task_progress, task_notification -- and marks
+        every message an agent sends with the id of the Agent tool call that
+        started it (`parent_tool_use_id`). Background shell tasks share the
+        system events; they are not agents, and are left out by `task_type`.
+        """
+        report = self._on_subagent
+        etype = event.get("type")
+        if etype == "system":
+            subtype = event.get("subtype")
+            task_id = str(event.get("task_id") or "")
+            if not task_id:
+                return
+            if subtype == "task_started":
+                if event.get("task_type") not in (None, "local_agent", "remote_agent"):
+                    return
+                agent_id = str(event.get("tool_use_id") or task_id)
+                session.agent_tasks[task_id] = agent_id
+                session.agent_calls.add(agent_id)
+                background = bool(event.get("is_backgrounded"))
+                if background:
+                    session.background_agents.add(agent_id)
+                report(
+                    agent_id,
+                    subagent_line(event.get("description"), 80),
+                    SUBAGENT_RUNNING,
+                    "Started in the background" if background else "Started",
+                )
+            elif subtype == "task_progress":
+                agent_id = session.agent_tasks.get(task_id, "")
+                if not agent_id:
+                    return
+                summary = subagent_line(event.get("summary"))
+                tool = str(event.get("last_tool_name") or "")
+                report(agent_id, "", "", summary or (f"Using {tool}" if tool else ""))
+            elif subtype == "task_notification":
+                agent_id = session.agent_tasks.pop(task_id, "")
+                if not agent_id:
+                    return
+                status = subagent_status(event.get("status")) or SUBAGENT_COMPLETED
+                report(
+                    agent_id,
+                    "",
+                    status,
+                    subagent_line(event.get("summary")) or f"Finished: {status}",
+                )
+            return
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        parent = str(event.get("parent_tool_use_id") or "")
+        if etype == "assistant":
+            for block in blocks:
+                btype = block.get("type")
+                raw_input = block.get("input")
+                params = raw_input if isinstance(raw_input, dict) else {}
+                name = str(block.get("name") or "tool")
+                if btype == "tool_use" and name in _CLAUDE_AGENT_TOOLS:
+                    call_id = str(block.get("id") or "")
+                    if not call_id:
+                        continue
+                    session.agent_calls.add(call_id)
+                    title = params.get("description") or params.get("subagent_type") or "Subagent"
+                    prompt = subagent_line(params.get("prompt"))
+                    report(
+                        call_id,
+                        subagent_line(title, 80),
+                        SUBAGENT_RUNNING,
+                        f"Task: {prompt}" if prompt else "",
+                    )
+                elif parent and btype == "text":
+                    report(parent, "", "", subagent_line(block.get("text")))
+                elif parent and btype == "tool_use":
+                    report(parent, "", "", _tool_use_label(name, params))
+        elif etype == "user":
+            for block in blocks:
+                if block.get("type") != "tool_result":
+                    continue
+                result = _tool_result_text(block.get("content"))
+                call_id = str(block.get("tool_use_id") or "")
+                if parent:
+                    if result:
+                        report(parent, "", "", f"Result: {subagent_line(result, 200)}")
+                    continue
+                if call_id not in session.agent_calls:
+                    continue
+                if call_id in session.background_agents or result.lstrip().casefold().startswith(
+                    "async agent"
+                ):
+                    # The launch of a background agent, not its answer.
+                    session.background_agents.add(call_id)
+                    continue
+                status = SUBAGENT_FAILED if block.get("is_error") else SUBAGENT_COMPLETED
+                report(call_id, "", status, subagent_line(result) or f"Finished: {status}")
 
     def _drop_process(self) -> None:
         """Stop the process this turn borrowed and take it out of the pool.
@@ -3926,6 +4042,9 @@ class ClaudeWorker(threading.Thread):
             if event is claude_session.EOF:
                 died = True
                 break
+            # Before the stopped-turn branch: an agent's end reported during
+            # the drain is exactly what Stop is waiting to hear.
+            self._track_subagents(event, session)
             if self._cancelled:
                 if event.get("type") == "control_request":
                     # A request left unanswered holds the CLI for ever, and a
@@ -4370,6 +4489,85 @@ def _question_choice(option: QuestionOption) -> str:
     if not option.description:
         return option.label
     return f"{option.label}: {option.description}"
+
+
+# What a subagent the list shows is doing: its name, where it stands, and its
+# log. Kept to the newest lines, because a subagent that runs for an hour can
+# say far more than anyone will read back.
+SUBAGENT_LOG_LINES = 2000
+# Said for an agent that was running when its turn ended without the backend
+# reporting how it finished.
+SUBAGENT_ENDED = "ended"
+
+
+@dataclass
+class SubagentEntry:
+    name: str
+    status: str
+    lines: List[str] = field(default_factory=list)
+
+    def label(self) -> str:
+        """The list row: name, state, and the last thing it did."""
+        last = self.lines[-1] if self.lines else ""
+        if len(last) > 120:
+            last = last[:119].rstrip() + "…"
+        return f"{self.name}, {self.status}: {last}" if last else f"{self.name}, {self.status}"
+
+
+class SubagentDialog(wx.Dialog):
+    """One subagent's activity in a read-only edit field that keeps up with it.
+
+    New lines are added while the dialog is open. The caret stays where the
+    reader put it; one left at the end follows the log, which is how a person
+    tracks what the agent is doing without being pulled away from a line they
+    went back to read.
+    """
+
+    def __init__(self, parent: wx.Window, agent_id: str, entry: SubagentEntry):
+        super().__init__(
+            parent,
+            title=self._title_for(entry),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self.agent_id = agent_id
+        self.status_label = wx.StaticText(self, label=f"Status: {entry.status}")
+        activity_label = wx.StaticText(self, label="Activity:")
+        self.log = wx.TextCtrl(
+            self,
+            value="\n".join(entry.lines),
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
+        )
+        self.log.SetName("Subagent activity")
+        close = wx.Button(self, wx.ID_CLOSE, "Close")
+        close.Bind(wx.EVT_BUTTON, lambda _e: self.EndModal(wx.ID_CLOSE))
+        self.SetEscapeId(wx.ID_CLOSE)
+        pad = self.FromDIP(PAD)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.status_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(activity_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.log, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(close, 0, wx.ALIGN_RIGHT | wx.ALL, pad)
+        self.SetSizer(sizer)
+        self.SetSize(self.FromDIP(wx.Size(640, 480)))
+        # The top: the log reads from the start, and End or Ctrl+End reaches
+        # the newest line, which from then on follows the agent.
+        self.log.SetInsertionPoint(0)
+        self.log.SetFocus()
+
+    @staticmethod
+    def _title_for(entry: SubagentEntry) -> str:
+        return f"Subagent: {entry.name}, {entry.status}"
+
+    def update(self, entry: SubagentEntry, line: str) -> None:
+        self.SetTitle(self._title_for(entry))
+        self.status_label.SetLabel(f"Status: {entry.status}")
+        if not line:
+            return
+        caret = self.log.GetInsertionPoint()
+        following = caret >= self.log.GetLastPosition()
+        self.log.AppendText(("\n" if self.log.GetLastPosition() else "") + line)
+        if not following:
+            self.log.SetInsertionPoint(caret)
 
 
 class QuestionDialog(wx.Dialog):
@@ -5737,6 +5935,23 @@ class SessionPanel(wx.Panel):
         cwd_label = wx.StaticText(self, label=f"Working directory: {cwd}")
         cwd_label.SetName("Working directory")
 
+        # The subagents the backend has running. Created ahead of the
+        # responses so native Tab order puts the list between the tab strip and
+        # the conversation, and hidden -- which takes it out of that order --
+        # whenever none is running.
+        self._subagents: dict[str, SubagentEntry] = {}
+        self._subagent_ids: List[str] = []
+        self._subagent_view: Optional[SubagentDialog] = None
+        self._subagents_outlive_turn = False
+        self.subagents_label = wx.StaticText(self, label="Subagents running:")
+        self.subagents = wx.ListBox(self, style=wx.LB_SINGLE)
+        self.subagents.SetName("Subagents running")
+        self.subagents.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._open_subagent())
+        self.subagents.Bind(wx.EVT_KEY_DOWN, self._on_subagents_key)
+        self.subagents.SetMinSize(wx.Size(-1, self.subagents.GetCharHeight() * 5))
+        self.subagents_label.Hide()
+        self.subagents.Hide()
+
         responses_label = wx.StaticText(self, label="Responses:")
         self.responses = make_conversation_list(self)
         self.responses.SetName("Responses")
@@ -5840,6 +6055,8 @@ class SessionPanel(wx.Panel):
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(self.backend_status, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
         sizer.Add(cwd_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.subagents_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.subagents, 0, wx.EXPAND | wx.ALL, pad)
         sizer.Add(responses_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
         sizer.Add(self.responses, 1, wx.EXPAND | wx.ALL, pad)
         sizer.Add(self.responses_text, 1, wx.EXPAND | wx.ALL, pad)
@@ -5930,7 +6147,12 @@ class SessionPanel(wx.Panel):
             return
         self.prompt.SetFocus()
 
-    def focus_first_control(self) -> None:
+    def focus_first_control(self, past_subagents: bool = False) -> None:
+        if not past_subagents and self._subagents_shown():
+            self.subagents.SetFocus()
+            if self.subagents.GetSelection() == wx.NOT_FOUND:
+                self.subagents.SetSelection(0)
+            return
         control = self._responses_ctrl() if self._row_count() else None
         # The view the settings ask for is the one that is shown, but a
         # hidden or disabled control accepts SetFocus by doing nothing at
@@ -5946,6 +6168,13 @@ class SessionPanel(wx.Panel):
             and control.GetSelection() == wx.NOT_FOUND
         ):
             control.SetSelection(0)
+
+    def focus_above_responses(self) -> None:
+        """Shift+Tab out of the conversation: the subagents, or the tab strip."""
+        if self._subagents_shown():
+            self.subagents.SetFocus()
+            return
+        self._focus_before()
 
     def focus_last_control(self) -> None:
         for control in (
@@ -6426,7 +6655,7 @@ class SessionPanel(wx.Panel):
             # children on Windows. There is nothing to visit, so cross the
             # page boundary directly instead of making NVDA announce
             # "Responses, list, unknown" and log accRole failures.
-            self._focus_before()
+            self.focus_above_responses()
             return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             if event.ShiftDown():
@@ -6629,6 +6858,8 @@ class SessionPanel(wx.Panel):
                     self._on_response_complete(str(args[0]))
                 elif name == "failed":
                     self._on_failed(str(args[0]))
+                elif name == "subagent":
+                    self._on_subagent(*(str(arg) for arg in args))
                 elif name == "done":
                     self._on_worker_finished()
                 elif name == "late_turn":
@@ -6648,6 +6879,134 @@ class SessionPanel(wx.Panel):
             # Posting at the back of the native queue lets arrow, Tab, paint,
             # and screen-reader events already waiting run before the next batch.
             wx.CallAfter(self._drain_worker_events)
+
+    # ----- Subagents -----
+    def _subagents_shown(self) -> bool:
+        return self.subagents.IsShown() and self.subagents.GetCount() > 0
+
+    def _on_subagent(self, agent_id: str, name: str, status: str, line: str) -> None:
+        """A worker's report that one of its agents started, changed, or acted."""
+        entry = self._subagents.get(agent_id)
+        before = entry.status if entry is not None else ""
+        if entry is None:
+            entry = SubagentEntry(name=name or "Subagent", status=status or SUBAGENT_RUNNING)
+            self._subagents[agent_id] = entry
+        else:
+            if name:
+                entry.name = name
+            if status:
+                entry.status = status
+        if line and entry.lines and entry.lines[-1] == line:
+            # Providers that re-send a whole item on every change repeat
+            # its last line; the log says each thing once.
+            line = ""
+        if line:
+            entry.lines.append(line)
+            del entry.lines[:-SUBAGENT_LOG_LINES]
+        view = self._subagent_view
+        if view is not None and view.agent_id == agent_id:
+            view.update(entry, line)
+        if entry.status != before:
+            if not before:
+                self._say(f"Subagent started: {entry.name}", "tool")
+            elif entry.status != SUBAGENT_RUNNING:
+                self._say(f"Subagent {entry.status}: {entry.name}", "tool")
+        self._refresh_subagents()
+
+    def _refresh_subagents(self) -> None:
+        """Bring the list up to date, and show it only while an agent runs.
+
+        Rows are changed in place rather than the list rebuilt, so the row a
+        reader is on keeps its place and a screen reader is not handed a new
+        list for every line an agent logs.
+        """
+        ids = list(self._subagents)
+        labels = [self._subagents[agent_id].label() for agent_id in ids]
+        if ids[: len(self._subagent_ids)] != self._subagent_ids:
+            self.subagents.Set(labels)
+        else:
+            count = self.subagents.GetCount()
+            for index, label in enumerate(labels):
+                if index >= count:
+                    self.subagents.Append(label)
+                elif self.subagents.GetString(index) != label:
+                    self.subagents.SetString(index, label)
+        self._subagent_ids = ids
+        if labels and self.subagents.GetSelection() == wx.NOT_FOUND:
+            self.subagents.SetSelection(0)
+        show = any(entry.status == SUBAGENT_RUNNING for entry in self._subagents.values())
+        if show == self.subagents.IsShown():
+            return
+        had_focus = self.subagents.HasFocus()
+        self.subagents_label.Show(show)
+        self.subagents.Show(show)
+        self.Layout()
+        if had_focus and not show:
+            # The list left the Tab order under the reader. The conversation
+            # is the next thing in it.
+            self.focus_first_control(past_subagents=True)
+
+    def _prune_subagents(self) -> None:
+        """Let go of the agents that are finished, keeping the running ones."""
+        finished = [i for i, e in self._subagents.items() if e.status != SUBAGENT_RUNNING]
+        if not finished:
+            return
+        for agent_id in finished:
+            del self._subagents[agent_id]
+        self._refresh_subagents()
+
+    def _forget_subagents(self) -> None:
+        self._subagents.clear()
+        self._refresh_subagents()
+
+    def _settle_subagents(self) -> None:
+        """Close out agents the ended turn never reported finished.
+
+        Their process or connection has gone with the turn, so they are not
+        running whatever the last report said -- except on a backend whose
+        agents outlive the turn that started them, which reports their end
+        when it comes.
+        """
+        if self._subagents_outlive_turn:
+            return
+        ending = SUBAGENT_STOPPED if self._stopping else SUBAGENT_ENDED
+        changed = False
+        for agent_id, entry in self._subagents.items():
+            if entry.status == SUBAGENT_RUNNING:
+                entry.status = ending
+                changed = True
+                view = self._subagent_view
+                if view is not None and view.agent_id == agent_id:
+                    view.update(entry, "")
+        if changed:
+            self._refresh_subagents()
+
+    def _on_subagents_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            self._open_subagent()
+            return
+        event.Skip()
+
+    def _open_subagent(self) -> None:
+        """Show the chosen agent's activity, kept current while it is open."""
+        index = self.subagents.GetSelection()
+        if not 0 <= index < len(self._subagent_ids):
+            return
+        agent_id = self._subagent_ids[index]
+        entry = self._subagents.get(agent_id)
+        if entry is None:
+            return
+        dialog = SubagentDialog(self, agent_id, entry)
+        self._subagent_view = dialog
+        try:
+            dialog.ShowModal()
+        finally:
+            self._subagent_view = None
+            dialog.Destroy()
+        if self._subagents_shown():
+            self.subagents.SetFocus()
+        else:
+            self.focus_first_control(past_subagents=True)
 
     # ----- Send flow -----
     def _run_in_progress(self) -> bool:
@@ -7033,6 +7392,11 @@ class SessionPanel(wx.Panel):
         which has nothing to send and only reads what has already arrived."""
         self._active_send_text = send_text or ""
         worker_type = worker_class(selected_backend, ClaudeWorker)
+        # Agents that finished in an earlier turn have been read or ignored by
+        # now; the ones still running stay, however old the turn that began
+        # them.
+        self._prune_subagents()
+        self._subagents_outlive_turn = bool(getattr(worker_type, "subagents_outlive_turn", False))
         self._worker = worker_type(
             send_text,
             self._session_id,
@@ -7047,6 +7411,7 @@ class SessionPanel(wx.Panel):
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,
+            on_subagent=lambda *report: self._queue_worker_event("subagent", *report),
             **extra,
         )
         try:
@@ -7361,6 +7726,7 @@ class SessionPanel(wx.Panel):
         self._steering_context = ""
         self._queue_paused = False
         self._session_title = ""
+        self._forget_subagents()
         self._turns = []
         self._rows = []
         self._displayed = []
@@ -7514,6 +7880,7 @@ class SessionPanel(wx.Panel):
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,
+            on_subagent=lambda *report: self._queue_worker_event("subagent", *report),
             **extra,
         )
         self._worker.start()
@@ -7846,6 +8213,7 @@ class SessionPanel(wx.Panel):
         self._announce(f"Error: {message}", urgent=True)
 
     def _on_worker_finished(self) -> None:
+        self._settle_subagents()
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()
         self._hide_working()
@@ -7986,7 +8354,7 @@ class SessionPanel(wx.Panel):
         key = event.GetKeyCode()
 
         if key == wx.WXK_TAB and event.ShiftDown():
-            self._focus_before()
+            self.focus_above_responses()
             return
 
         sel = self._selected_row()
@@ -10507,12 +10875,17 @@ class MainFrame(wx.Frame):
         if self._focus_is_within(focus, page.mode_picker) and not shift:
             return self._moved_focus(focus, self.mode_combo.SetFocus)
 
+        if self._focus_is_within(focus, page.subagents):
+            if shift:
+                return self._moved_focus(focus, self.tab_switcher.SetFocus)
+            return self._moved_focus(focus, lambda: page.focus_first_control(past_subagents=True))
+
         responses = page._responses_ctrl()
         if shift and self._focus_is_within(focus, responses):
-            return self._moved_focus(focus, self.tab_switcher.SetFocus)
+            return self._moved_focus(focus, page.focus_above_responses)
 
         if shift and page._row_count() == 0 and self._focus_is_within(focus, page.prompt):
-            return self._moved_focus(focus, self.tab_switcher.SetFocus)
+            return self._moved_focus(focus, page.focus_above_responses)
         if not shift and self._focus_is_within(focus, page.prompt):
             # NVDA schedules a formatting query 50 ms after receiving Tab in
             # an edit field. Keep the Prompt alive and focused until that query

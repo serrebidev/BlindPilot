@@ -37,12 +37,18 @@ from typing import Callable, Optional
 
 from agent_backends import (
     BACKEND_COMMANDCODE,
+    SUBAGENT_COMPLETED,
+    SUBAGENT_FAILED,
+    SUBAGENT_RUNNING,
     AskQuestions,
+    SubagentReport,
     _tool_use_label,
     end_process_group,
     find_backend_cli,
+    ignore_subagents,
     no_window_kwargs,
     own_group_kwargs,
+    subagent_line,
     subprocess_env,
 )
 from hermes_backend import STDERR_KEEP_LINES
@@ -285,6 +291,7 @@ class CommandcodeWorker(threading.Thread):
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
         on_question: Optional[AskQuestions] = None,
+        on_subagent: Optional[SubagentReport] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -304,6 +311,10 @@ class CommandcodeWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
+        self._on_subagent = on_subagent or ignore_subagents
+        # The agent tool calls running a nested agent, so the agent tool's own
+        # failure can be said as the agent's.
+        self._subagent_calls: set[str] = set()
 
         self._proc: Optional[subprocess.Popen] = None
         self._stderr_thread: Optional[threading.Thread] = None
@@ -653,7 +664,14 @@ class CommandcodeWorker(threading.Thread):
             self._tool_completed(event)
         elif etype == "tool_denied":
             self._tool_denied(event)
+        elif etype in ("subagent_start", "subagent_progress", "subagent_stop"):
+            self._subagent_event(etype, event)
         elif etype in ("tool_errored", "tool_hook_blocked"):
+            call_id = str(event.get("toolCallId") or "")
+            if call_id in self._subagent_calls:
+                self._subagent_calls.discard(call_id)
+                reason = subagent_line(event.get("error") or event.get("hookOutput"))
+                self._on_subagent(call_id, "", SUBAGENT_FAILED, reason or "Failed")
             self._tool_refused(event)
         elif etype == "message_end":
             self._end_message(event)
@@ -676,6 +694,40 @@ class CommandcodeWorker(threading.Thread):
             return
         else:
             self._generic_event(etype, event)
+
+    def _subagent_event(self, etype: str, event: dict) -> None:
+        """A nested agent run by the agent tool, keyed by that tool call's id.
+
+        subagent_start and subagent_stop bracket the run, and each tool call
+        the child makes arrives as subagent_progress. The task the child was
+        given is the agent tool's own input, remembered from tool_queued.
+        """
+        call_id = str(event.get("toolCallId") or "")
+        if not call_id:
+            return
+        params = self._tool_inputs.get(call_id, {})
+        kind = str(event.get("subagentType") or "agent")
+        if etype == "subagent_start":
+            self._subagent_calls.add(call_id)
+            name = subagent_line(params.get("description") or kind, 80)
+            task = subagent_line(params.get("prompt") or params.get("task"))
+            self._on_subagent(call_id, name, SUBAGENT_RUNNING, f"Task: {task}" if task else "")
+        elif etype == "subagent_progress":
+            tool = str(event.get("toolName") or "tool")
+            tool_input = event.get("toolInput")
+            self._on_subagent(
+                call_id,
+                "",
+                "",
+                _tool_label(tool, tool_input if isinstance(tool_input, dict) else {}),
+            )
+        else:
+            self._subagent_calls.discard(call_id)
+            tokens = event.get("tokensUsed")
+            line = (
+                f"Finished, {tokens} tokens" if isinstance(tokens, int) and tokens else "Finished"
+            )
+            self._on_subagent(call_id, "", SUBAGENT_COMPLETED, line)
 
     def _remember_session(self, session: str) -> None:
         if session and session != self._session_seen:
