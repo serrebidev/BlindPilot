@@ -653,6 +653,9 @@ BACKENDS = {
         True,
         True,
         supports_compaction=True,
+        # Pictures and text files travel as file parts the model reads, so
+        # the worker takes the files themselves rather than their paths.
+        uploads_attachments=True,
     ),
     BACKEND_HERMES: BackendInfo(
         BACKEND_HERMES,
@@ -3439,6 +3442,7 @@ class _TurnWorker(threading.Thread):
         model: str = "",
         effort: str = "",
         compact: bool = False,
+        attachments: tuple[str, ...] = (),
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -3458,6 +3462,9 @@ class _TurnWorker(threading.Thread):
         # turn summarises the conversation instead of adding to it. Backends
         # that cannot compact are never asked to (see `supports_compaction`).
         self._compact = compact
+        # Files handed to the turn itself rather than written into the prompt.
+        # Only the backends that take them read this; the rest never see one.
+        self._attachments = list(attachments or [])
         self._on_session = on_session
         self._on_started = on_started
         self._on_activity = on_activity
@@ -7028,6 +7035,64 @@ def _opencode_questions(raw: object) -> tuple[Question, ...]:
     return _questions(raw, multi_key="multiple")
 
 
+# Magic bytes to media types for attached pictures. The server has no upload
+# endpoint, so bytes travel inline with the prompt as data: URLs.
+_OPENCODE_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+# Anything past this is named by path rather than sent as bytes: the model
+# gets a file it can open instead of a payload that dwarfs the prompt.
+_OPENCODE_MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+
+
+def _opencode_file_part(path: str) -> Optional[dict]:
+    """One attached file as a prompt file part, or None to name it in text.
+
+    Pictures travel as data: URLs with their media type (measured: a 1x1 PNG
+    round-tripped through prompt_async and was stored back with its filename),
+    and so does anything that reads as text; anything else -- an unreadable
+    file, a picture past the cap, bytes no model would read -- is named by its
+    path in the prompt text instead.
+    """
+    import base64
+
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    if not raw or len(raw) > _OPENCODE_MAX_ATTACHMENT_BYTES:
+        return None
+    mime = ""
+    for magic, kind in _OPENCODE_IMAGE_MAGIC:
+        if raw.startswith(magic):
+            mime = kind
+            break
+    if not mime and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        mime = "image/webp"
+    if not mime:
+        try:
+            raw.decode("utf-8")
+        except ValueError:
+            return None
+        mime = "text/plain"
+    return {
+        "type": "file",
+        "mime": mime,
+        "filename": Path(path).name,
+        "url": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}",
+    }
+
+
+def _opencode_file_name(value: object) -> str:
+    """The bare filename of a path the server wrote, whichever slashes it used."""
+    text = str(value or "")
+    return text.replace("\\", "/").rsplit("/", 1)[-1] if text else ""
+
+
 class OpencodeWorker(_TurnWorker):
     """Run one opencode turn against the shared headless server."""
 
@@ -7074,7 +7139,10 @@ class OpencodeWorker(_TurnWorker):
         """
         if not self.accepting_input() or not self._session_id or self._server is None:
             return False
-        server, session, body = self._server, self._session_id, self._prompt_body(text)
+        server, session = self._server, self._session_id
+        # A steering message is its own message, not the prompt again: the
+        # turn's attachments went out with the prompt and stay there.
+        body = self._prompt_body(text, with_attachments=False)
 
         def deliver() -> None:
             try:
@@ -7279,8 +7347,28 @@ class OpencodeWorker(_TurnWorker):
         self._emitted.clear()
         self._accepting_input.set()
 
-    def _prompt_body(self, text: str) -> dict:
-        body: dict = {"parts": [{"type": "text", "text": text}]}
+    def _prompt_body(self, text: str, with_attachments: bool = True) -> dict:
+        parts: list[dict] = []
+        named: list[str] = []
+        if with_attachments:
+            for path in self._attachments:
+                part = _opencode_file_part(path)
+                if part is not None:
+                    parts.append(part)
+                elif str(path or "").strip():
+                    named.append(str(path).strip())
+        if named:
+            listing = "\n".join(named)
+            text = (
+                f"{text}\n\nAttached files (please read them):\n{listing}"
+                if text
+                else f"Attached files (please read them):\n{listing}"
+            )
+        # Text first, files after, the way the server stores them; a turn of
+        # bare files carries no text part at all.
+        if text or not parts:
+            parts.insert(0, {"type": "text", "text": text})
+        body: dict = {"parts": parts}
         provider_id, model_id = opencode_split_model(self._model)
         if provider_id:
             body["model"] = {"providerID": provider_id, "modelID": model_id}
@@ -7553,6 +7641,69 @@ class OpencodeWorker(_TurnWorker):
                 self._on_activity("assistant", text)
         elif kind == "tool":
             self._tool(part_id, part)
+        elif kind in ("step-start", "step-finish"):
+            # Lifecycle bookkeeping. A step-finish also carries the step's
+            # tokens and cost, which no report reads, so there is nothing
+            # here worth interrupting the transcript for.
+            return
+        elif kind in ("patch", "subtask", "file"):
+            self._artifact_part(part_id, kind, part)
+        elif kind:
+            self._unknown_part(part_id, kind, part)
+
+    def _artifact_part(self, part_id: str, kind: str, part: dict) -> None:
+        """Say a patch, subtask, or file the turn produced, once.
+
+        opencode streams every part whole and then repeats it, so anything
+        said here is said once per part id like the text rows. The user's own
+        file parts are their message going out, not the turn coming back, and
+        are left to the prompt row.
+        """
+        if self._roles.get(str(part.get("messageID") or "")) != "assistant":
+            return
+        if not part_id or part_id in self._emitted:
+            return
+        if kind == "patch":
+            files = part.get("files")
+            names = [
+                _opencode_file_name(entry)
+                for entry in (files if isinstance(files, list) else [])
+                if _opencode_file_name(entry)
+            ]
+            line = f"Changed: {', '.join(names)}" if names else "Changed files"
+        elif kind == "subtask":
+            agent = str(part.get("agent") or "").strip()
+            detail = str(part.get("description") or "").strip().splitlines()
+            first = detail[0][:200] if detail and detail[0] else ""
+            line = (
+                f"Subagent {agent}: {first}"
+                if agent and first
+                else (first or f"Subagent {agent}".rstrip())
+            )
+        else:
+            name = _opencode_file_name(part.get("filename"))
+            line = f"Attached: {name}" if name else "Attached a file"
+        self._emitted.add(part_id)
+        self._on_activity("tool", line)
+
+    def _unknown_part(self, part_id: str, kind: str, part: dict) -> None:
+        """Say something for a part kind this file has never heard of.
+
+        A newer opencode that streams a kind we do not know about should
+        still be visible in the transcript rather than silently swallowed.
+        """
+        if self._roles.get(str(part.get("messageID") or "")) != "assistant":
+            return
+        if not part_id or part_id in self._emitted:
+            return
+        detail = (
+            str(part.get("text") or "")
+            or str(part.get("description") or "")
+            or str(part.get("delta") or "")
+        ).strip()
+        first = detail.splitlines()[0][:120] if detail else ""
+        self._emitted.add(part_id)
+        self._on_activity("tool", f"{kind}: {first}" if first else kind)
 
     def _tool(self, part_id: str, part: dict) -> None:
         state = part.get("state")

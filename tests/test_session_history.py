@@ -1021,6 +1021,39 @@ def test_opencode_history_is_empty_without_a_database(home: Path) -> None:
     assert not (home / ".local" / "share" / "opencode" / "opencode.db").exists()
 
 
+def test_opencode_replayed_prompts_name_their_attached_files(home: Path) -> None:
+    # Files travel as parts now, not paths in the text, so the replay names
+    # them back onto the prompt -- including a message of bare files, which
+    # would otherwise read back as nothing at all.
+    _write_opencode(
+        home,
+        "ses_1",
+        OPENCODE_CWD,
+        "Pictures",
+        [("user", "what is this"), ("assistant", "A red square.")],
+    )
+    database = home / ".local" / "share" / "opencode" / "opencode.db"
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.execute(
+            "INSERT INTO part VALUES (?,?,?,?,?)",
+            (
+                "prt_file_1",
+                "msg_ses_1_0",
+                "ses_1",
+                99,
+                json.dumps({"type": "file", "filename": "shot.png"}),
+            ),
+        )
+    connection.close()
+
+    turns = load_turns(list_history("opencode")[0])
+
+    assert [(turn.prompt, turn.response) for turn in turns] == [
+        ("what is this [Attached: shot.png]", "A red square.")
+    ]
+
+
 def test_opencode_conversations_are_limited_to_one_directory(home: Path) -> None:
     other = str(Path("C:/work/other") if Path("C:/").drive else "/work/other")
     _write_opencode(home, "ses_1", OPENCODE_CWD, "Here", [("user", "here")])

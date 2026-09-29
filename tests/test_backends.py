@@ -1572,6 +1572,147 @@ def test_opencode_steering_adds_to_the_turn_already_running(monkeypatch):
     assert worker.steer("too late") is False
 
 
+def test_opencode_attachments_travel_as_file_parts(monkeypatch, tmp_path):
+    # Measured: the server has no upload endpoint, so bytes travel inline as
+    # data: URLs -- a 1x1 PNG round-tripped through prompt_async and came
+    # back stored with its filename. Anything no model would read is named
+    # by path in the text instead.
+    picture = tmp_path / "shot.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    note = tmp_path / "notes.txt"
+    note.write_text("read me", encoding="utf-8")
+    binary = tmp_path / "blob.bin"
+    binary.write_bytes(bytes(range(256)))
+    seen, server = _opencode_turn(
+        [_opencode_event("session.idle")],
+        monkeypatch,
+        attachments=(str(picture), str(note), str(binary)),
+    )
+
+    body = server.body("prompt_async")
+    assert body is not None
+    kinds = [(part["type"], part.get("mime")) for part in body["parts"]]
+    assert kinds[0] == ("text", None)
+    assert ("file", "image/png") in kinds
+    assert ("file", "text/plain") in kinds
+    assert any(part.get("filename") == "shot.png" for part in body["parts"])
+    assert str(binary) in body["parts"][0]["text"]
+    assert "shot.png" not in body["parts"][0]["text"]
+
+
+def test_opencode_a_turn_of_bare_files_carries_no_text_part(monkeypatch, tmp_path):
+    picture = tmp_path / "shot.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    seen, server = _opencode_turn(
+        [_opencode_event("session.idle")], monkeypatch, prompt="", attachments=(str(picture),)
+    )
+
+    body = server.body("prompt_async")
+    assert body is not None
+    assert [part["type"] for part in body["parts"]] == ["file"]
+
+
+def test_opencode_steering_leaves_the_turns_attachments_behind(monkeypatch, tmp_path):
+    picture = tmp_path / "shot.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    server = _ScriptedOpencodeServer([])
+    monkeypatch.setattr(agent_backends, "opencode_server", lambda: server)
+    worker = OpencodeWorker(
+        "hello", "ses_test", "/work", "default", attachments=(str(picture),), **_callbacks()
+    )
+    worker._server = server
+    worker._session_id = "ses_test"
+    worker._accepting_input.set()
+
+    assert worker.steer("and one more thing") is True
+    _wait_for(lambda: server.body("prompt_async") is not None)
+
+    assert server.body("prompt_async")["parts"] == [{"type": "text", "text": "and one more thing"}]
+
+
+def test_opencode_file_parts_are_sniffed_capped_and_named(tmp_path):
+    from agent_backends import _opencode_file_part
+
+    picture = tmp_path / "shot.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    part = _opencode_file_part(str(picture))
+    assert part is not None
+    assert part["type"] == "file"
+    assert part["mime"] == "image/png"
+    assert part["filename"] == "shot.png"
+    assert part["url"].startswith("data:image/png;base64,")
+
+    note = tmp_path / "notes.txt"
+    note.write_text("read me", encoding="utf-8")
+    assert _opencode_file_part(str(note))["mime"] == "text/plain"
+
+    binary = tmp_path / "blob.bin"
+    binary.write_bytes(bytes(range(256)))
+    assert _opencode_file_part(str(binary)) is None
+    assert _opencode_file_part(str(tmp_path / "missing.png")) is None
+
+
+def test_opencode_says_patches_subtasks_and_files_once_each(monkeypatch):
+    # Patch, subtask, and file parts used to fall through the event reader
+    # in silence; 372 patch parts sit in one ordinary database saying which
+    # files changed. Each is said once however often the stream repeats it,
+    # the user's own file parts are their message going out, and step
+    # lifecycle stays quiet.
+    assistant = {"info": {"id": "msg_a", "role": "assistant"}}
+    user = {"info": {"id": "msg_u", "role": "user"}}
+    patch = {
+        "id": "prt_patch",
+        "messageID": "msg_a",
+        "type": "patch",
+        "files": ["C:/work/demo/a.txt", "C:/work/demo/b.txt"],
+    }
+    subtask = {
+        "id": "prt_sub",
+        "messageID": "msg_a",
+        "type": "subtask",
+        "agent": "review",
+        "description": "review the diff",
+    }
+    events = [
+        _opencode_event("message.updated", **assistant),
+        _opencode_event("message.updated", **user),
+        _opencode_event("message.part.updated", part=patch),
+        _opencode_event("message.part.updated", part=patch),
+        _opencode_event("message.part.updated", part=subtask),
+        _opencode_event(
+            "message.part.updated",
+            part={"id": "prt_file", "messageID": "msg_a", "type": "file", "filename": "out.png"},
+        ),
+        _opencode_event(
+            "message.part.updated",
+            part={"id": "prt_mine", "messageID": "msg_u", "type": "file", "filename": "shot.png"},
+        ),
+        _opencode_event(
+            "message.part.updated",
+            part={"id": "prt_s", "messageID": "msg_a", "type": "step-finish"},
+        ),
+        _opencode_event(
+            "message.part.updated",
+            part={
+                "id": "prt_new",
+                "messageID": "msg_a",
+                "type": "frobnicate",
+                "text": "a newer opencode",
+            },
+        ),
+        _opencode_event("session.idle"),
+    ]
+    seen, _server = _opencode_turn(events, monkeypatch)
+
+    tools = [value for kind, value in seen["activity"] if kind == "tool"]
+    assert tools.count("Changed: a.txt, b.txt") == 1
+    assert "Subagent review: review the diff" in tools
+    assert "Attached: out.png" in tools
+    assert not any("shot.png" in line for line in tools)
+    assert not any("step-finish" in line for line in tools)
+    assert "frobnicate: a newer opencode" in tools
+
+
 def test_opencode_stop_interrupts_the_turn_and_releases_the_reader(monkeypatch):
     server = _ScriptedOpencodeServer([])
     monkeypatch.setattr(agent_backends, "opencode_server", lambda: server)
