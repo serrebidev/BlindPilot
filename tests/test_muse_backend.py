@@ -165,8 +165,14 @@ def test_the_version_is_asked_through_the_bridge(monkeypatch):
         stdout = "muse 1.0.3\n"
         stderr = ""
 
-    monkeypatch.setattr(muse_backend.subprocess, "run", lambda *_a, **_k: _Result())
+    seen: list = []
+    monkeypatch.setattr(
+        muse_backend.subprocess, "run", lambda *a, **_k: seen.append(a[0]) or _Result()
+    )
     assert muse_version() == "muse 1.0.3"
+    # Bare `muse` starts the interactive agent, which is what the status
+    # report showed until the flag was passed: a trust warning, not a version.
+    assert seen and seen[0][-1] == "--version"
 
 
 def test_a_failed_version_probe_answers_empty_rather_than_crashing(monkeypatch):
@@ -252,3 +258,281 @@ def test_status_says_not_installed_when_wsl_has_no_muse(monkeypatch):
         # Only Windows reaches the WSL branch; on the other platforms the
         # real launcher search runs and must not be lied to.
         reset_discovery()
+
+
+# --------------------------------------------------------------------------
+# Image parts
+# --------------------------------------------------------------------------
+
+
+def test_pictures_become_image_parts_by_their_magic_bytes(tmp_path):
+    from muse_backend import muse_image_part
+
+    cases = {
+        "shot.png": (b"\x89PNG\r\n\x1a\nrest", "image/png"),
+        "photo.jpg": (b"\xff\xd8\xffrest", "image/jpeg"),
+        "anim.gif": (b"GIF89arest", "image/gif"),
+        "still.webp": (b"RIFF\x00\x00\x00\x00WEBPrest", "image/webp"),
+    }
+    for name, (raw, media) in cases.items():
+        path = tmp_path / name
+        path.write_bytes(raw)
+
+        part = muse_image_part(str(path))
+
+        assert part is not None, name
+        assert part["type"] == "image", name
+        assert part["mediaType"] == media, name
+        import base64
+
+        assert base64.b64decode(part["base64Data"]) == raw, name
+
+
+def test_anything_that_is_not_a_picture_is_not_a_part(tmp_path, monkeypatch):
+    from muse_backend import muse_image_part
+
+    note = tmp_path / "notes.txt"
+    note.write_text("read me", encoding="utf-8")
+    assert muse_image_part(str(note)) is None
+    assert muse_image_part(str(tmp_path / "missing.png")) is None
+
+    monkeypatch.setattr(muse_backend, "_MAX_IMAGE_BYTES", 4)
+    big = tmp_path / "big.png"
+    big.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    assert muse_image_part(str(big)) is None
+
+
+# --------------------------------------------------------------------------
+# Skills for the slash picker
+# --------------------------------------------------------------------------
+
+
+def _skills_result(payload: str, returncode: int = 0):
+    class _Result:
+        stdout = payload
+        stderr = ""
+
+    _Result.returncode = returncode
+    return _Result()
+
+
+def test_skills_come_from_the_cli_offline(monkeypatch):
+    import json as _json
+
+    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: ["muse"])
+    monkeypatch.setattr(muse_backend, "_skills_cache", {})
+    seen: list = []
+
+    def _run(argv, **_kwargs):
+        seen.append(argv)
+        return _skills_result(
+            _json.dumps(
+                {
+                    "skills": [
+                        {"name": "doctor", "short_description": "Diagnose it."},
+                        {"name": "zz", "description": "Long form.\nSecond line."},
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr(muse_backend.subprocess, "run", _run)
+
+    rows = muse_backend.muse_skills("/work")
+
+    assert rows == [("doctor", "Diagnose it."), ("zz", "Long form.")]
+    assert seen[0][:4] == ["muse", "skills", "list", "--json"]
+
+
+def test_skills_are_cached_per_directory(monkeypatch):
+    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: ["muse"])
+    monkeypatch.setattr(muse_backend, "_skills_cache", {})
+    calls: list = []
+    monkeypatch.setattr(
+        muse_backend.subprocess,
+        "run",
+        lambda *_a, **_k: calls.append(1) or _skills_result('{"skills": []}'),
+    )
+
+    assert muse_backend.muse_skills("/work") == []
+    assert muse_backend.muse_skills("/work") == []
+    assert len(calls) == 1
+
+
+def test_skills_fail_empty_never_loud(monkeypatch):
+    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: None)
+    monkeypatch.setattr(muse_backend, "_skills_cache", {})
+    assert muse_backend.muse_skills("/work") == []
+
+    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: ["muse"])
+    monkeypatch.setattr(muse_backend.subprocess, "run", lambda *_a, **_k: _skills_result("nope", 1))
+    assert muse_backend.muse_skills("/elsewhere") == []
+
+
+# --------------------------------------------------------------------------
+# Last-observed usage
+# --------------------------------------------------------------------------
+
+
+def _usage_payload():
+    return {
+        "tier": "pro",
+        "observedAtMs": 1_800_000_000_000,
+        "window": {
+            "usedPercent": 12,
+            "resetsAtMs": 9_999_999_999_999,
+            "windowDurationMins": 300,
+        },
+        "weekly": {"usedPercent": 3, "resetsAtMs": 9_999_999_999_999},
+    }
+
+
+def test_usage_is_stashed_by_turns_and_read_by_status(monkeypatch):
+    monkeypatch.setattr(muse_backend, "_usage_payload", None)
+    muse_backend.note_muse_usage(_usage_payload())
+
+    assert muse_backend.muse_usage_payload() == _usage_payload()
+
+    lines = agent_backends.backend_usage_lines("muse", "muse")
+    assert any("12% used" in line for line in lines)
+    assert any("Weekly" in line for line in lines)
+
+
+def test_usage_without_windows_is_noted_nowhere(monkeypatch):
+    monkeypatch.setattr(muse_backend, "_usage_payload", None)
+    muse_backend.note_muse_usage({})
+    muse_backend.note_muse_usage({"tier": "pro"})
+    assert muse_backend.muse_usage_payload() is None
+    assert agent_backends.backend_usage_lines("muse", "muse") == []
+
+
+def test_usage_dies_with_its_windows(monkeypatch):
+    monkeypatch.setattr(muse_backend, "_usage_payload", None)
+    stale = _usage_payload()
+    stale["window"]["resetsAtMs"] = 1_000
+    stale["weekly"]["resetsAtMs"] = 1_000
+    muse_backend.note_muse_usage(stale)
+    assert muse_backend.muse_usage_payload() is None
+
+
+# --------------------------------------------------------------------------
+# The history store layout
+# --------------------------------------------------------------------------
+
+
+def test_the_index_is_found_under_the_data_home(monkeypatch, tmp_path):
+    data = tmp_path / "data" / "muse"
+    data.mkdir(parents=True)
+    db = data / "session-index.db"
+    db.write_bytes(b"")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+
+    assert muse_backend.muse_index_db() == db
+
+
+def test_without_a_store_the_index_is_nowhere(monkeypatch, tmp_path):
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    assert muse_backend.muse_index_db() is None
+
+
+def test_a_store_nobody_guessed_is_asked_of_a_live_host(monkeypatch, tmp_path):
+    # The guessed directories miss; initialize.museHome names the real one.
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(muse_backend.platform, "system", lambda: "Linux")
+    real = tmp_path / "custom" / "muse"
+    real.mkdir(parents=True)
+    db = real / "session-index.db"
+    db.write_bytes(b"")
+    monkeypatch.setattr(muse_backend, "_HOME_CACHE", None)
+    monkeypatch.setattr(muse_backend, "_HOME_CHECKED", False)
+
+    class _Host:
+        def __init__(self, *args, **kwargs):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def send(self, message):
+            return True
+
+        def receive(self, timeout):
+            return {"jsonrpc": "2.0", "id": 1, "result": {"museHome": str(real)}}
+
+        def connected(self):
+            return True
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(muse_backend, "StdioTransport", _Host)
+    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd=None: ["muse"])
+
+    assert muse_backend.muse_index_db() == db
+
+
+def test_the_live_home_is_never_asked_on_windows(monkeypatch, tmp_path):
+    # A Windows-side host would answer a WSL path this process cannot open;
+    # the history reader goes through the WSL bridge instead.
+    monkeypatch.setattr(muse_backend.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(muse_backend, "_HOME_CACHE", None)
+    monkeypatch.setattr(muse_backend, "_HOME_CHECKED", False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("no host may be opened")
+
+    monkeypatch.setattr(muse_backend, "StdioTransport", _boom)
+
+    assert muse_backend._muse_home_live() is None
+
+
+def test_a_host_that_never_answers_is_closed_not_kept(monkeypatch):
+    closed: list = []
+
+    class _Silent:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def send(self, message):
+            return True
+
+        def receive(self, timeout):
+            return None
+
+        def connected(self):
+            return False
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(muse_backend, "StdioTransport", _Silent)
+
+    transport, init = muse_backend._open_host(["muse"], None, timeout=0.01)
+
+    assert (transport, init) == (None, None)
+    assert closed == [True]
+
+
+def test_discovery_reset_forgets_the_live_home_too(monkeypatch):
+    muse_backend._HOME_CACHE = "/old/home"
+    muse_backend._HOME_CHECKED = True
+
+    reset_discovery()
+
+    assert muse_backend._HOME_CACHE is None
+    assert muse_backend._HOME_CHECKED is False
+
+
+def test_a_local_log_is_read_and_a_missing_one_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(muse_backend, "wsl_exe", lambda: None)
+    log = tmp_path / "session.jsonl"
+    log.write_text('{"a": 1}\n', encoding="utf-8")
+    assert muse_backend.muse_session_log_text(str(log)) == '{"a": 1}\n'
+    assert muse_backend.muse_session_log_text("") == ""
+    assert muse_backend.muse_session_log_text(str(tmp_path / "missing.jsonl")) == ""

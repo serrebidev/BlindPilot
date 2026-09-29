@@ -13,7 +13,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_backends import BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_FREEBUFF, BACKEND_IDS
+from agent_backends import (
+    BACKEND_CLAUDE,
+    BACKEND_CODEX,
+    BACKEND_FREEBUFF,
+    BACKEND_IDS,
+    BACKEND_MUSE,
+)
 from blindpilot_app import SessionPanel, _slash_commands_for_backend
 
 
@@ -85,6 +91,19 @@ def test_status_says_a_permission_mode_the_backend_does_not_take_is_not_in_use()
     """FreeBuff's picker is disabled, so naming the remembered mode would mislead."""
     lines = SessionPanel._session_status_lines(_tab(BACKEND_FREEBUFF))
     assert "Permission mode: not offered by this backend" in lines
+
+
+def test_muse_lists_the_skills_its_cli_offers(monkeypatch):
+    """The picker shows whatever this directory's Muse has: bundled, user,
+    and project skills, invoked the way the TUI invokes them."""
+    import blindpilot_app
+
+    monkeypatch.setattr(blindpilot_app, "muse_skills", lambda cwd: [("doctor", "Diagnose it.")])
+
+    commands = dict(_slash_commands_for_backend(BACKEND_MUSE, "/work"))
+
+    assert commands["/doctor"] == "Diagnose it."
+    assert "/status" in commands
 
 
 def test_status_says_a_conversation_the_backend_switch_has_already_ended():

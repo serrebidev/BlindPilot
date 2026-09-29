@@ -39,6 +39,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import hermes_backend
 
     monkeypatch.setattr(hermes_backend, "wsl_sqlite_query", lambda _sql, _params=(): [])
+    # Muse answers through WSL the same way, and this machine has a live WSL
+    # Muse with its own conversations.
+    import muse_backend
+
+    monkeypatch.setattr(muse_backend, "wsl_muse_sqlite_query", lambda _sql, _params=(): [])
     # opencode honours these, and a developer machine may well set them.
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("OPENCODE_DATA", raising=False)

@@ -363,7 +363,10 @@ def test_steering_is_refused_before_a_turn_exists():
     assert worker.steer("too early") is False
 
 
-def test_cancelling_sends_the_cancel_with_a_command_id():
+def test_cancelling_sends_the_interrupt_with_a_command_id():
+    # turn/interrupt is the "user pressed stop" gesture on the priority lane;
+    # turn/cancel is the plain lane. Both end the turn as cancelled (measured
+    # 1.4.0, mid-stream and before the first token alike).
     worker = MuseWorker("go", "sess-1", ".", "bypassPermissions", **_Recorder().callbacks())
     transport = _ScriptedMuseTransport(stays_open=True)
     worker._transport = transport
@@ -373,9 +376,10 @@ def test_cancelling_sends_the_cancel_with_a_command_id():
 
     worker.cancel()
 
-    sent = transport.sent_with_method("turn/cancel")
+    sent = transport.sent_with_method("turn/interrupt")
     assert sent and sent[0]["params"]["turnId"] == "turn-1"
     assert sent[0]["params"]["commandId"]
+    assert "retract" not in sent[0]["params"]
     assert worker.accepting_input() is False
 
 
@@ -988,7 +992,10 @@ def test_a_model_picked_for_a_reopened_conversation_is_applied(monkeypatch):
             "result": {"session": {"sessionId": "sess-1", "modelId": "muse-spark-1.3-contributor"}},
         },
         {"jsonrpc": "2.0", "id": 103, "result": {"status": "accepted"}},
-        {"jsonrpc": "2.0", "id": 104, "result": {"turnId": "turn-1"}},
+        # The resume drains whatever the conversation was parked on before the
+        # new turn starts; here nothing is pending.
+        {"jsonrpc": "2.0", "id": 104, "result": {"approvals": [], "userInputs": []}},
+        {"jsonrpc": "2.0", "id": 105, "result": {"turnId": "turn-1"}},
         {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
     ]
     transport = _with_script(monkeypatch, frames)
@@ -1032,3 +1039,674 @@ def test_tool_rows_name_what_search_and_todos_are_about(monkeypatch):
 
     assert recorder.said("tool") == ["search: def _uuid", "write_todos: Audit"]
     assert recorder.said("result") == ["search: a.py:1:def _uuid"]
+
+
+# --------------------------------------------------------------------------
+# Resumed conversations: mode sync and parked prompts
+# --------------------------------------------------------------------------
+
+
+def _resumed_turn(monkeypatch, session_extra: dict, pending: dict) -> _ScriptedMuseTransport:
+    """A turn on a reopened conversation, with the resume-time requests wired."""
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {"session": {"sessionId": "sess-1", **session_extra}},
+        },
+        {"jsonrpc": "2.0", "id": 103, "result": {"status": "accepted"}},
+        {"jsonrpc": "2.0", "id": 104, "result": pending},
+        {"jsonrpc": "2.0", "id": 105, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    return _with_script(monkeypatch, frames)
+
+
+def test_a_mode_picked_mid_conversation_reaches_the_resumed_session(monkeypatch):
+    # The mode used to be sent at session/start only, so a mode picked after
+    # the first turn never reached the host: every later turn ran under the
+    # old one.
+    transport = _resumed_turn(
+        monkeypatch,
+        {"approvalMode": {"mode": "denyUnmatched"}},
+        {"approvals": [], "userInputs": []},
+    )
+    worker = MuseWorker("go", "sess-1", ".", "default", **_Recorder().callbacks())
+
+    _run(worker)
+
+    sent = transport.sent_with_method("session/setApprovalMode")
+    assert sent and sent[0]["params"]["mode"] == "promptUnmatched"
+    assert sent[0]["params"]["sessionId"] == "sess-1"
+
+
+def test_a_session_already_on_the_picked_mode_is_left_alone(monkeypatch):
+    # No switch is sent, so the pending drain is request 103 here rather than
+    # the 104 it is when a switch goes out first.
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {
+                "session": {"sessionId": "sess-1", "approvalMode": {"mode": "promptUnmatched"}}
+            },
+        },
+        {"jsonrpc": "2.0", "id": 103, "result": {"approvals": [], "userInputs": []}},
+        {"jsonrpc": "2.0", "id": 104, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    worker = MuseWorker("go", "sess-1", ".", "default", **_Recorder().callbacks())
+
+    _run(worker)
+
+    assert transport.sent_with_method("session/setApprovalMode") == []
+
+
+def test_a_refused_mode_switch_is_said_not_fatal(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {
+                "session": {"sessionId": "sess-1", "approvalMode": {"mode": "denyUnmatched"}}
+            },
+        },
+        {"jsonrpc": "2.0", "id": 103, "error": {"code": -32000, "message": "sealed"}},
+        {"jsonrpc": "2.0", "id": 104, "result": {"approvals": [], "userInputs": []}},
+        {"jsonrpc": "2.0", "id": 105, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", "sess-1", ".", "default", **recorder.callbacks())
+
+    _run(worker)
+
+    assert recorder.completed == ["Finished with nothing to say."]
+    assert any("kept its approval mode" in line for line in recorder.said("tool"))
+
+
+def test_a_parked_approval_is_answered_when_the_conversation_reopens(monkeypatch):
+    transport = _resumed_turn(
+        monkeypatch,
+        {"approvalMode": {"mode": "denyUnmatched"}},
+        {
+            "approvals": [
+                {
+                    "approvalId": "ap-parked",
+                    "sessionId": "sess-1",
+                    "toolName": "shell",
+                    "subject": {"command": "make all"},
+                    "availableChoices": _approval_choices(),
+                    "currentRequirementId": {"stage": 1},
+                }
+            ],
+            "userInputs": [],
+        },
+    )
+    worker = MuseWorker(
+        "go",
+        "sess-1",
+        ".",
+        "default",
+        on_question=lambda questions: [["Approve"]],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    decide = transport.sent_with_method("approval/decide")
+    assert decide and decide[0]["params"]["approvalId"] == "ap-parked"
+    assert decide[0]["params"]["choiceId"] == "c-approve"
+
+
+def test_a_parked_question_is_answered_when_the_conversation_reopens(monkeypatch):
+    transport = _resumed_turn(
+        monkeypatch,
+        {"approvalMode": {"mode": "denyUnmatched"}},
+        {
+            "approvals": [],
+            "userInputs": [
+                {
+                    "userInputId": "ui-parked",
+                    "sessionId": "sess-1",
+                    "questions": [
+                        {
+                            "id": "q1",
+                            "question": "Which database?",
+                            "options": [{"label": "Postgres"}, {"label": "SQLite"}],
+                            "selection": {"mode": "single"},
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    worker = MuseWorker(
+        "go",
+        "sess-1",
+        ".",
+        "default",
+        on_question=lambda questions: [["SQLite"]],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    answer = transport.sent_with_method("userInput/answer")
+    assert answer and answer[0]["params"]["answers"] == [
+        {"questionId": "q1", "selectedLabel": "SQLite"}
+    ]
+
+
+def test_a_request_and_its_notification_twin_ask_only_once(monkeypatch):
+    # approval/request and approval/requested carry the same full params; so
+    # do the userInput twins. Answering both would ask the person twice.
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "approval/request",
+            "params": {
+                "approvalId": "ap-1",
+                "sessionId": "sess-1",
+                "toolName": "shell",
+                "subject": {"command": "make all"},
+                "availableChoices": _approval_choices(),
+                "currentRequirementId": {"stage": 1},
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "approval/requested",
+            "params": {
+                "approvalId": "ap-1",
+                "sessionId": "sess-1",
+                "toolName": "shell",
+                "subject": {"command": "make all"},
+                "availableChoices": _approval_choices(),
+                "currentRequirementId": {"stage": 1},
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "userInput/request",
+            "params": {
+                "userInputId": "ui-1",
+                "sessionId": "sess-1",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": "Which?",
+                        "options": [{"label": "A"}, {"label": "B"}],
+                    }
+                ],
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "userInput/requested",
+            "params": {
+                "userInputId": "ui-1",
+                "sessionId": "sess-1",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": "Which?",
+                        "options": [{"label": "A"}, {"label": "B"}],
+                    }
+                ],
+            },
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    asked: list = []
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "default",
+        on_question=lambda questions: asked.append(questions) or [[questions[0].options[0].label]],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    assert len(transport.sent_with_method("approval/decide")) == 1
+    assert len(transport.sent_with_method("userInput/answer")) == 1
+    assert len(asked) == 2
+    assert {"jsonrpc": "2.0", "id": 7, "result": {}} in transport.sent
+    assert {"jsonrpc": "2.0", "id": 8, "result": {}} in transport.sent
+
+
+# --------------------------------------------------------------------------
+# Attachments and skills
+# --------------------------------------------------------------------------
+
+
+def test_an_attached_image_travels_as_a_part_the_model_sees(monkeypatch, tmp_path):
+    picture = tmp_path / "shot.png"
+    picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    worker = MuseWorker(
+        "what is this",
+        None,
+        ".",
+        "bypassPermissions",
+        attachments=[str(picture)],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    started = transport.sent_with_method("turn/start")
+    assert started
+    parts = started[0]["params"]["input"]
+    assert parts[0] == {"type": "text", "text": "what is this"}
+    assert parts[1]["type"] == "image"
+    assert parts[1]["mediaType"] == "image/png"
+    assert parts[1]["base64Data"]
+    assert "shot.png" in started[0]["params"]["displayText"]
+
+
+def test_an_attached_document_is_named_in_the_text(monkeypatch, tmp_path):
+    note = tmp_path / "notes.txt"
+    note.write_text("read me", encoding="utf-8")
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    worker = MuseWorker(
+        "summarise",
+        None,
+        ".",
+        "bypassPermissions",
+        attachments=[str(note)],
+        **_Recorder().callbacks(),
+    )
+
+    _run(worker)
+
+    started = transport.sent_with_method("turn/start")
+    assert started
+    parts = started[0]["params"]["input"]
+    assert len(parts) == 1
+    assert "summarise" in parts[0]["text"]
+    # On Windows the host runs inside WSL, where the Windows path names
+    # nothing; the translated path is what the host is given.
+    import platform as _platform
+
+    expected = (
+        str(note) if _platform.system() != "Windows" else muse_worker.windows_path_to_wsl(str(note))
+    )
+    assert expected in parts[0]["text"]
+    assert "notes.txt" in started[0]["params"]["displayText"]
+
+
+def test_a_skill_the_cli_knows_is_invoked_as_a_skill_part(monkeypatch):
+    monkeypatch.setattr(muse_worker, "muse_skills", lambda _cwd: [("doctor", "Diagnose")])
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    worker = MuseWorker(
+        "/doctor what is slow", None, ".", "bypassPermissions", **_Recorder().callbacks()
+    )
+
+    _run(worker)
+
+    started = transport.sent_with_method("turn/start")
+    assert started
+    assert started[0]["params"]["input"] == [
+        {"type": "skill", "selector": "doctor", "arguments": "what is slow"}
+    ]
+    assert started[0]["params"]["displayText"] == "/doctor what is slow"
+
+
+def test_a_slash_that_is_not_a_skill_stays_plain_text(monkeypatch):
+    monkeypatch.setattr(muse_worker, "muse_skills", lambda _cwd: [("doctor", "Diagnose")])
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    worker = MuseWorker(
+        "/tmp/notes say hi", None, ".", "bypassPermissions", **_Recorder().callbacks()
+    )
+
+    _run(worker)
+
+    started = transport.sent_with_method("turn/start")
+    assert started
+    assert started[0]["params"]["input"] == [{"type": "text", "text": "/tmp/notes say hi"}]
+
+
+# --------------------------------------------------------------------------
+# The rest of the view stream
+# --------------------------------------------------------------------------
+
+
+def test_backgrounded_and_delegated_work_is_said(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/updated",
+            "params": {"item": {"kind": "toolCall", "tool": "shell", "background": True}},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/updated",
+            "params": {"item": {"kind": "subagent", "controlStatus": "running"}},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {"item": {"kind": "subagent", "status": "completed", "text": "All green."}},
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    assert "shell: running in the background" in recorder.said("tool")
+    assert "Subagent running" in recorder.said("tool")
+    assert "subagent: All green." in recorder.said("tool")
+
+
+def test_retries_and_mode_changes_are_said(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/retryScheduled", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "method": "session/approvalModeChanged",
+            "params": {"mode": "denyUnmatched"},
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    assert "Muse Code is retrying the turn" in recorder.said("tool")
+    assert "Approval mode is now denyUnmatched" in recorder.said("tool")
+
+
+def test_the_turn_stashes_what_the_host_observed_of_the_subscription(monkeypatch):
+    import muse_backend
+
+    usage = {
+        "tier": "pro",
+        "observedAtMs": 1_800_000_000_000,
+        "window": {"usedPercent": 12, "resetsAtMs": 9_999_999_999_999, "windowDurationMins": 300},
+        "weekly": {"usedPercent": 3, "resetsAtMs": 9_999_999_999_999},
+    }
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+        {"jsonrpc": "2.0", "id": 104, "result": {"usage": usage}},
+    ]
+    _with_script(monkeypatch, frames)
+    monkeypatch.setattr(muse_backend, "_usage_payload", None)
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **_Recorder().callbacks())
+
+    _run(worker)
+
+    assert muse_backend.muse_usage_payload() == usage
+
+
+def test_a_truncated_tool_result_is_fetched_back_whole(monkeypatch):
+    # Measured 1.4.0: a 268KB shell output arrived as 65534 chars with
+    # truncated set and an outputRef; item/readOutput serves the full bytes.
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "itemId": "t1",
+                    "kind": "toolCall",
+                    "tool": "shell",
+                    "visibleOutput": "line one\nline two",
+                    "truncated": True,
+                    "outputRef": {"availability": "available", "byteLen": 28, "id": "out-1"},
+                }
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "result": {
+                "content": "line one\nline two\nline three",
+                "encoding": "utf8",
+                "eof": True,
+                "byteLen": 28,
+            },
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    fetched = transport.sent_with_method("item/readOutput")
+    assert fetched and fetched[0]["params"]["outputRef"] == "out-1"
+    assert fetched[0]["params"]["itemId"] == "t1"
+    assert recorder.said("result") == ["shell: line one\nline two\nline three"]
+
+
+def test_a_binary_tool_result_is_decoded_from_base64(monkeypatch):
+    import base64 as _base64
+
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "itemId": "t1",
+                    "kind": "toolCall",
+                    "tool": "shell",
+                    "visibleOutput": "binary…",
+                    "truncated": True,
+                    "outputRef": {"availability": "available", "byteLen": 4, "id": "out-2"},
+                }
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 104,
+            "result": {
+                "content": _base64.b64encode("café".encode("utf-8")).decode("ascii"),
+                "encoding": "base64",
+                "eof": True,
+                "byteLen": 5,
+            },
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    assert recorder.said("result") == ["shell: café"]
+
+
+def test_an_untruncated_or_unservable_result_keeps_its_text(monkeypatch):
+    # No truncated flag, or bytes the host cannot serve: no second request
+    # goes out, and the visible text stands.
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "itemId": "t1",
+                    "kind": "toolCall",
+                    "tool": "shell",
+                    "visibleOutput": "short",
+                }
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "itemId": "t2",
+                    "kind": "toolCall",
+                    "tool": "shell",
+                    "visibleOutput": "gone",
+                    "truncated": True,
+                    "outputRef": {"availability": "missing", "byteLen": 0, "id": "out-3"},
+                }
+            },
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    transport = _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    assert transport.sent_with_method("item/readOutput") == []
+    assert recorder.said("result") == ["shell: short", "shell: gone"]
+
+
+def test_a_truncated_answer_is_completed_from_the_session_log(monkeypatch):
+    # An agentMessage has no item/readOutput twin; the durable log is the
+    # only place the clipped tail survives.
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {"session": {"sessionId": "sess-1", "path": "/sessions/sess-1.jsonl"}},
+        },
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/delta",
+            "params": {"itemId": "a1", "field": "text", "delta": "Hello there."},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "itemId": "a1",
+                    "kind": "agentMessage",
+                    "text": "Hello there.",
+                    "truncated": True,
+                }
+            },
+        },
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    monkeypatch.setattr(muse_worker, "muse_session_log_text", lambda _path: "log")
+    monkeypatch.setattr(
+        muse_worker,
+        "parse_muse_transcript",
+        lambda _text: [("go", "Hello there. And then some more.")],
+    )
+    recorder = _Recorder()
+    worker = MuseWorker("go", None, ".", "bypassPermissions", **recorder.callbacks())
+
+    _run(worker)
+
+    assert recorder.completed == ["Hello there. And then some more."]
+
+
+def test_a_replay_pages_the_view_when_history_is_not_inline(monkeypatch):
+    # Long or compacted conversations are served as a snapshot or not at
+    # all; without the fallback the replay came back empty.
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {
+                "session": {"sessionId": "sess-9"},
+                "history": {"mode": "none", "items": None, "snapshot": None},
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 103,
+            "result": {
+                "events": [
+                    {
+                        "method": "item/completed",
+                        "params": {"item": {"kind": "userMessage", "text": "paged back"}},
+                    },
+                    {
+                        "method": "item/completed",
+                        "params": {"item": {"kind": "agentMessage", "text": "still here"}},
+                    },
+                ],
+                "nextCursor": None,
+            },
+        },
+    ]
+    transport = _with_script(monkeypatch, frames)
+    recorder = _Recorder()
+    worker = MuseWorker(
+        "", "sess-9", ".", "bypassPermissions", resume_only=True, **recorder.callbacks()
+    )
+
+    _run(worker)
+
+    assert ("you", "paged back") in recorder.activity
+    assert ("assistant", "still here") in recorder.activity
+    assert recorder.completed == [""]
+    assert transport.sent_with_method("view/page")

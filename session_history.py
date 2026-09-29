@@ -26,6 +26,10 @@ Where each backend keeps its history:
   has ever run, opened read-only. It is the odd one out even among these: there
   is no file per conversation, and Hermes titles its own, so nothing has to be
   scanned to build the list.
+* Muse — ``session-index.db`` under its data directory
+  (``~/.local/share/muse``), one row per conversation, plus a ``session.jsonl``
+  event log per session under ``sessions/``. On Windows both live inside the
+  WSL distribution Muse runs in, so they are read through WSL.
 
 Listing is deliberately cheap: it reads only as far into a transcript as it
 takes to find the first real user message, because the newest conversations
@@ -60,6 +64,7 @@ from agent_backends import (
     BACKEND_FREEBUFF,
     BACKEND_HERMES,
     BACKEND_IDS,
+    BACKEND_MUSE,
     BACKEND_OPENCODE,
     normalize_backend,
 )
@@ -684,7 +689,7 @@ def _hermes_query(sql: str, params: Sequence = ()) -> List[dict]:
 
 
 def _hermes_connect(path: Path):
-    """Open Hermes' store read-only, or return None if it cannot be read.
+    """Open one shared SQLite store read-only, or return None if it cannot be read.
 
     Read-only matters: this is the database a running Hermes owns. The URI form
     fails outright rather than creating an empty file when the path is wrong,
@@ -797,6 +802,97 @@ def _hermes_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     entry rather than the path -- the same shape opencode needs.
     """
     return _hermes_turns_for(entry.session_id)
+
+
+# ----- Muse -----
+#
+# Muse keeps both shapes at once: a session-index.db row per conversation for
+# the listing (title, workspace, recency -- no transcript scan), and a
+# session.jsonl event log per session for the replay. The log's run events
+# carry the conversation; the parser lives in muse_backend next to the store
+# layout and the WSL bridge, so this section only folds rows into entries.
+
+_MUSE_LIST_SQL = """
+SELECT session_id, title, first_user_prompt, workspace_root, updated_at_us,
+       session_log_path, prompt_count
+FROM sessions
+WHERE COALESCE(prompt_count, 0) > 0
+ORDER BY COALESCE(updated_at_us, 0) DESC
+LIMIT 500
+"""
+
+
+def _muse_query() -> List[dict]:
+    """Every conversation Muse's index knows, newest first.
+
+    A store on this machine is opened directly, read-only. On Windows the
+    store lives inside WSL, where it may be in WAL mode -- unreadable over
+    the \\\\wsl.localhost share -- so the query runs on WSL's side, the same
+    route Hermes' history takes.
+    """
+    from muse_backend import muse_index_db
+
+    path = muse_index_db()
+    if path is not None:
+        connection = _hermes_connect(path)
+        if connection is None:
+            return []
+        try:
+            return [dict(row) for row in connection.execute(_MUSE_LIST_SQL).fetchall()]
+        except Exception:  # noqa: BLE001 - an older schema is not a crash
+            return []
+        finally:
+            connection.close()
+
+    from muse_backend import wsl_muse_sqlite_query
+
+    return wsl_muse_sqlite_query(_MUSE_LIST_SQL)
+
+
+def _muse_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    entries: List[HistoryEntry] = []
+    for row in _muse_query():
+        session_id = str(row.get("session_id") or "")
+        if not session_id:
+            continue
+        session_cwd = str(row.get("workspace_root") or "")
+        if cwd and not _same_dir_across_wsl(session_cwd, cwd):
+            continue
+        title = make_title(
+            clean_user_text(str(row.get("title") or row.get("first_user_prompt") or ""))
+        )
+        if not title:
+            title = session_id
+        try:
+            # Microsecond stamps; a query answered through WSL arrives as
+            # JSON, where the number can come back as text.
+            stamp = float(row.get("updated_at_us") or 0) / 1_000_000
+        except (TypeError, ValueError):
+            stamp = 0.0
+        entries.append(
+            HistoryEntry(
+                backend=BACKEND_MUSE,
+                session_id=session_id,
+                title=title,
+                path=str(row.get("session_log_path") or ""),
+                modified=stamp,
+                cwd=session_cwd,
+                folder=_folder_name(session_cwd),
+            )
+        )
+    return entries
+
+
+def _muse_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    """One Muse conversation read back as prompt-and-response turns."""
+    from muse_backend import muse_session_log_text, parse_muse_transcript
+
+    if not entry.path:
+        return []
+    return [
+        HistoryTurn(prompt=clean_user_text(prompt), response=response)
+        for prompt, response in parse_muse_transcript(muse_session_log_text(entry.path))
+    ]
 
 
 # ----- FreeBuff -----
@@ -1118,6 +1214,7 @@ _LISTERS: dict[str, Callable[[Optional[str]], List[HistoryEntry]]] = {
     BACKEND_FREEBUFF: _freebuff_entries,
     BACKEND_OPENCODE: _opencode_entries,
     BACKEND_HERMES: _hermes_entries,
+    BACKEND_MUSE: _muse_entries,
     BACKEND_COMMANDCODE: partial(_jsonl_entries, _COMMANDCODE),
 }
 
@@ -1130,6 +1227,7 @@ _READERS: dict[str, Callable[[HistoryEntry], List[HistoryTurn]]] = {
     BACKEND_FREEBUFF: _freebuff_turns,
     BACKEND_OPENCODE: _opencode_turns,
     BACKEND_HERMES: _hermes_turns,
+    BACKEND_MUSE: _muse_turns,
     BACKEND_COMMANDCODE: partial(_jsonl_turns, _COMMANDCODE),
 }
 

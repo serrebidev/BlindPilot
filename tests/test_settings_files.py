@@ -100,6 +100,16 @@ def test_freebuff_points_at_the_file_blindpilot_already_writes(home):
     assert home / ".config" / "manicode" / "settings.json" in paths
 
 
+def test_muse_points_at_its_settings_and_its_project_rules(home):
+    """The credential file used to be listed; it configures nothing and
+    inviting somebody to edit it risks their sign-in."""
+    entries = _for("muse", settings_files(str(home / "project")))
+
+    assert home / ".config" / "muse" / "settings.json" in [e.path for e in entries]
+    assert home / "project" / "AGENTS.md" in [e.path for e in entries]
+    assert all(e.path.name != "auth.json" for e in entries)
+
+
 # ----- with no folder to work from -----
 def test_without_a_folder_only_the_global_files_are_offered(home):
     entries = settings_files(None)
