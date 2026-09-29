@@ -349,6 +349,92 @@ _FREEBUFF_SETTINGS_LOCK = threading.Lock()
 _freebuff_catalog_cache: tuple[tuple[str, float, int], list[str]] | None = None
 
 
+# ----- Subagents -----
+# Every backend can hand work to agents of its own -- Claude Code's Agent tool,
+# Codex's spawnAgent, Hermes' delegate_task, Muse's native subagents, opencode's
+# task tool, Command Code's agent tool, FreeBuff's spawn_agents -- and each one
+# reports them differently. The window lists the ones running and shows what
+# each is doing, so every worker translates its provider's reports into one
+# call: (agent id, name, status, line). An empty name or status leaves that part
+# as it was, and an empty line adds nothing to the agent's log.
+SubagentReport = Callable[[str, str, str, str], None]
+
+SUBAGENT_RUNNING = "running"
+SUBAGENT_COMPLETED = "completed"
+SUBAGENT_FAILED = "failed"
+SUBAGENT_STOPPED = "stopped"
+
+_SUBAGENT_STATUS_WORDS = {
+    SUBAGENT_RUNNING: (
+        "running",
+        "inprogress",
+        "in_progress",
+        "pendinginit",
+        "pending",
+        "starting",
+        "started",
+        "accepted",
+        "active",
+        "queued",
+        "recoverypending",
+    ),
+    SUBAGENT_COMPLETED: (
+        "completed",
+        "complete",
+        "succeeded",
+        "success",
+        "done",
+        "finished",
+        "resultready",
+        "ok",
+    ),
+    SUBAGENT_FAILED: (
+        "failed",
+        "errored",
+        "error",
+        "notfound",
+        "timeout",
+        "timed_out",
+        "timedout",
+        "rejected",
+    ),
+    SUBAGENT_STOPPED: (
+        "stopped",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "shutdown",
+        "killed",
+        "closed",
+        "aborted",
+        "closing",
+    ),
+}
+
+
+def subagent_status(raw: object) -> str:
+    """A provider's word for an agent's state, in the window's four.
+
+    Empty for a word none of them uses, which the window reads as "unchanged":
+    a newer provider's new state should not make a running agent look ended.
+    """
+    word = str(raw or "").strip().casefold().replace("-", "").replace(" ", "")
+    for status, words in _SUBAGENT_STATUS_WORDS.items():
+        if word in words:
+            return status
+    return ""
+
+
+def subagent_line(text: object, limit: int = 300) -> str:
+    """One readable line for an agent's log, from whatever the provider sent."""
+    words = " ".join(str(text or "").split())
+    return words if len(words) <= limit else words[: limit - 1].rstrip() + "…"
+
+
+def ignore_subagents(_agent_id: str, _name: str, _status: str, _line: str) -> None:
+    """The report for a worker created without one, as the tests create them."""
+
+
 # ----- Mid-run questions -----
 #
 # Every backend BlindPilot drives can stop mid-turn to ask the person a
@@ -3450,6 +3536,7 @@ class _TurnWorker(threading.Thread):
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
         on_question: Optional[AskQuestions] = None,
+        on_subagent: Optional[SubagentReport] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -3472,6 +3559,7 @@ class _TurnWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
+        self._on_subagent = on_subagent or ignore_subagents
         self._cancelled = False
         # Set once the turn's ending has been reported, whichever way it
         # ended. The first account of a failure is the one that can be acted
@@ -3547,6 +3635,12 @@ class CodexWorker(_TurnWorker):
         self._borrowed = False
         self._thread_id = self._session_id or ""
         self._turn_id = ""
+        # Agents this turn's thread spawned (spawnAgent), by their own thread
+        # id, with where each stands, and the turn each is running. Their
+        # threads are read on this turn's inbox so what they do reaches the
+        # window and what they ask is answered, not declined unread.
+        self._children: dict[str, str] = {}
+        self._child_turns: dict[str, str] = {}
         # The conversation given up after an unconfirmed interrupt. The next
         # turn resumes it from disk; the server stays, other tabs are on it.
         self.abandoned_thread = ""
@@ -3677,6 +3771,7 @@ class CodexWorker(_TurnWorker):
                 # would read it, so the thread is given up instead.
                 self._abandon(thread_id)
             return
+        self._stop_children(server)
         if not server.interrupt(thread_id, turn_id, _CODEX_INTERRUPT_VERIFY_SECONDS):
             self._abandon(thread_id, turn_id)
 
@@ -4008,6 +4103,10 @@ class CodexWorker(_TurnWorker):
 
             method = str(message.get("method") or "")
             params = message.get("params") or {}
+            child = str(params.get("threadId") or "") if isinstance(params, dict) else ""
+            if child and child in self._children:
+                self._child_message(child, method, params, message)
+                continue
             if not self._is_this_turn(method, params):
                 # The conversation is right but the turn is not: Codex is still
                 # winding up a turn that was interrupted, and its trailing
@@ -4330,27 +4429,99 @@ class CodexWorker(_TurnWorker):
         self._send({"id": request_id, "result": {"answers": payload}})
 
     def _item_started(self, item: dict) -> None:
-        kind = item.get("type")
-        if kind == "commandExecution":
-            command = item.get("command")
-            if isinstance(command, list):
-                command = " ".join(map(str, command))
-            self._on_activity("tool", f"Running: {command or 'command'}")
-        elif kind == "fileChange":
-            changes = item.get("changes") or []
-            paths = [str(c.get("path")) for c in changes if isinstance(c, dict) and c.get("path")]
-            self._on_activity("tool", "Editing " + (", ".join(paths) or "files"))
-        elif kind == "mcpToolCall":
-            self._on_activity(
-                "tool",
-                f"Using {item.get('server') or 'MCP'}: {item.get('tool') or 'tool'}",
+        self._collab(item)
+        label = _codex_item_label(item)
+        if label:
+            self._on_activity("tool", label)
+
+    def _collab(self, item: dict) -> None:
+        """Follow the agents this thread spawns, from its collab tool calls.
+
+        A spawnAgent call names the new agent's thread in
+        `receiverThreadIds`, and every collab call carries the last known
+        state of the agents it touched in `agentsStates`, keyed by thread.
+        """
+        if item.get("type") != "collabAgentToolCall":
+            return
+        receivers = item.get("receiverThreadIds")
+        threads = [str(t) for t in receivers if t] if isinstance(receivers, list) else []
+        states = item.get("agentsStates")
+        states = states if isinstance(states, dict) else {}
+        if item.get("tool") == "spawnAgent":
+            prompt = subagent_line(item.get("prompt"))
+            server, inbox = self._server, self._inbox
+            for thread in threads:
+                if thread in self._children:
+                    continue
+                self._children[thread] = SUBAGENT_RUNNING
+                if server is not None and inbox is not None:
+                    server.attach(thread, inbox)
+                self._on_subagent(
+                    thread,
+                    subagent_line(prompt, 60) or "Subagent",
+                    SUBAGENT_RUNNING,
+                    f"Task: {prompt}" if prompt else "",
+                )
+        for thread, state in states.items():
+            if thread not in self._children or not isinstance(state, dict):
+                continue
+            status = subagent_status(state.get("status"))
+            if status and status != self._children[thread]:
+                self._children[thread] = status
+                message = subagent_line(state.get("message"))
+                self._on_subagent(thread, "", status, message or f"Finished: {status}")
+
+    def _child_message(self, child: str, method: str, params: dict, message: dict) -> None:
+        """Something one of this thread's agents said or asked."""
+        if method and "id" in message:
+            # Answered as this conversation's own would be: the mode the
+            # person chose covers the agents it runs.
+            self._handle_server_request(message)
+            return
+        if method == "turn/started":
+            turn = params.get("turn") or {}
+            self._child_turns[child] = str(turn.get("id") or "")
+            if self._children.get(child) != SUBAGENT_RUNNING:
+                self._children[child] = SUBAGENT_RUNNING
+                self._on_subagent(child, "", SUBAGENT_RUNNING, "Working")
+        elif method == "item/started":
+            item = params.get("item") or {}
+            label = _codex_item_label(item) if isinstance(item, dict) else ""
+            if label:
+                self._on_subagent(child, "", "", label)
+        elif method == "item/completed":
+            item = params.get("item") or {}
+            if isinstance(item, dict) and item.get("type") == "agentMessage":
+                text = subagent_line(item.get("text"))
+                if text:
+                    self._on_subagent(child, "", "", text)
+        elif method == "turn/completed":
+            turn = params.get("turn") or {}
+            status = subagent_status(turn.get("status")) or SUBAGENT_COMPLETED
+            self._children[child] = status
+            self._on_subagent(child, "", status, f"Finished: {status}")
+
+    def _stop_children(self, server: "CodexServer") -> None:
+        """Interrupt each agent still running; the parent's interrupt does not.
+
+        Sent and not waited on: the verify that follows is for the
+        conversation this tab owns, and an agent that ignores the stop is
+        let go with the turn anyway.
+        """
+        for child, status in list(self._children.items()):
+            turn = self._child_turns.get(child, "")
+            if status != SUBAGENT_RUNNING or not turn:
+                continue
+            server.send(
+                {
+                    "method": "turn/interrupt",
+                    "id": server.next_id(),
+                    "params": {"threadId": child, "turnId": turn},
+                }
             )
-        elif kind == "webSearch":
-            self._on_activity("tool", f"Searching the web: {item.get('query') or ''}".strip())
-        elif kind == "imageView":
-            self._on_activity("tool", f"Viewing {item.get('path') or 'image'}")
 
     def _item_completed(self, item: dict) -> None:
+        self._collab(item)
         kind = item.get("type")
         item_id = str(item.get("id") or "")
         if kind == "agentMessage":
@@ -4379,6 +4550,27 @@ class CodexWorker(_TurnWorker):
                     summary.append(f"{change.get('kind') or 'changed'}: {change['path']}")
             if summary:
                 self._on_activity("result", "\n".join(summary))
+
+
+def _codex_item_label(item: dict) -> str:
+    """The line that says what a Codex item is doing as it starts, or nothing."""
+    kind = item.get("type")
+    if kind == "commandExecution":
+        command = item.get("command")
+        if isinstance(command, list):
+            command = " ".join(map(str, command))
+        return f"Running: {command or 'command'}"
+    if kind == "fileChange":
+        changes = item.get("changes") or []
+        paths = [str(c.get("path")) for c in changes if isinstance(c, dict) and c.get("path")]
+        return "Editing " + (", ".join(paths) or "files")
+    if kind == "mcpToolCall":
+        return f"Using {item.get('server') or 'MCP'}: {item.get('tool') or 'tool'}"
+    if kind == "webSearch":
+        return f"Searching the web: {item.get('query') or ''}".strip()
+    if kind == "imageView":
+        return f"Viewing {item.get('path') or 'image'}"
+    return ""
 
 
 def _line_change_counts(old: str, new: str) -> tuple[int, int]:
@@ -4861,8 +5053,11 @@ def _freebuff_answer_id(chat: Optional[Path]) -> str:
 
 def _freebuff_chat_snapshot(
     chat: Optional[Path],
-) -> tuple[str, str, str, list[tuple[str, str, str]]]:
+) -> tuple[str, str, str, list[tuple[str, str, str, tuple[str, ...]]]]:
     """Read the newest answer's id, reasoning, text, and agent states.
+
+    Each agent comes with its log so far: the task it was given, each tool
+    it called, and what it wrote.
 
     The id is what tells one turn's answer from the one before it: FreeBuff
     rewrites the whole file on every save, so text alone cannot distinguish new
@@ -4881,7 +5076,7 @@ def _freebuff_chat_snapshot(
 
     thinking: list[str] = []
     answer: list[str] = []
-    agents: list[tuple[str, str, str]] = []
+    agents: list[tuple[str, str, str, tuple[str, ...]]] = []
     blocks = message.get("blocks")
     if not isinstance(blocks, list):
         blocks = []
@@ -4906,8 +5101,35 @@ def _freebuff_chat_snapshot(
             name = str(block.get("agentName") or block.get("agentType") or "agent").strip()
             status = str(block.get("status") or "running").strip().casefold()
             agent_id = str(block.get("agentId") or f"{index}:{name}")
-            agents.append((agent_id, name, status))
+            agents.append((agent_id, name, status, _freebuff_agent_log(block)))
     return message_id, "\n\n".join(thinking), "\n\n".join(answer), agents
+
+
+def _freebuff_agent_log(block: dict) -> tuple[str, ...]:
+    """One spawned agent's log, from its block in the saved chat."""
+    lines: list[str] = []
+    task = subagent_line(block.get("initialPrompt"))
+    if task:
+        lines.append(f"Task: {task}")
+    inner = block.get("blocks")
+    for step in inner if isinstance(inner, list) else []:
+        if not isinstance(step, dict):
+            continue
+        kind = step.get("type")
+        if kind == "tool":
+            params = step.get("input")
+            lines.append(
+                _tool_use_label(
+                    str(step.get("toolName") or "tool"), params if isinstance(params, dict) else {}
+                )
+            )
+        elif kind == "text":
+            text = subagent_line(step.get("content"))
+            if text:
+                lines.append(text)
+        elif kind == "agent":
+            lines.append(f"Started {step.get('agentName') or step.get('agentType') or 'an agent'}")
+    return tuple(lines)
 
 
 def _freebuff_chat_stamp(chat: Optional[Path]) -> tuple:
@@ -5707,6 +5929,8 @@ class FreebuffWorker(_TurnWorker):
         disconnected_since: Optional[float] = None
         boot_hold_started: Optional[float] = None
         agent_states: dict[str, str] = {}
+        # How much of each agent's log has been handed to the window.
+        agent_logged: dict[str, int] = {}
         screen_dirty = False
         screen_changed_at = time.monotonic()
         accepted_recommended_model = False
@@ -5976,18 +6200,32 @@ class FreebuffWorker(_TurnWorker):
                         structured_answer_id = answer_id
                         baseline_answer_id = ""
                         agent_states.clear()
+                        agent_logged.clear()
                     # The file is written whole, once the reply is finished, so
                     # it is the authoritative text of the answer rather than a
                     # source to read from: the reading happens off the screen.
                     if answer:
                         structured_answer = answer
-                    for agent_id, name, status in agents:
+                    for agent_id, name, status, log in agents:
                         previous_status = agent_states.get(agent_id)
                         if previous_status is None:
                             self._on_activity("tool", f"FreeBuff started {name}")
                         elif previous_status != status and status in ("complete", "completed"):
                             self._on_activity("result", f"FreeBuff finished {name}")
                         agent_states[agent_id] = status
+                        # The window's list: new lines of the log, then the
+                        # state, so an agent that finished says so last.
+                        told = agent_logged.get(agent_id, 0)
+                        for line in log[told:]:
+                            self._on_subagent(
+                                agent_id, name, SUBAGENT_RUNNING if told == 0 else "", line
+                            )
+                            told += 1
+                        agent_logged[agent_id] = told
+                        if previous_status != status:
+                            self._on_subagent(
+                                agent_id, name, subagent_status(status) or SUBAGENT_RUNNING, ""
+                            )
                     run_status = _freebuff_run_status(chat_path, log_offset)
                 if run_status == "cancelled":
                     self._fail("FreeBuff reported that the response was interrupted")
@@ -7113,6 +7351,11 @@ class OpencodeWorker(_TurnWorker):
         self._roles: dict[str, str] = {}
         self._emitted: set[str] = set()
         self._answer: list[str] = []
+        # Child sessions the task tool started for this conversation, with
+        # where each stands, and which task part started each. A child
+        # shares the event stream and asks its permissions there too.
+        self._children: dict[str, str] = {}
+        self._task_children: dict[str, str] = {}
         self._tools_running: set[str] = set()
         # Set when a question was answered this turn. The provider poison that
         # a broken question replay leaves behind is only worth the surgery
@@ -7167,6 +7410,21 @@ class OpencodeWorker(_TurnWorker):
         self._cancelled = True
         self._accepting_input.clear()
         server, session = self._server, self._session_id
+        if server is not None:
+            # Aborting the conversation does not abort the sessions its task
+            # tool opened; each running agent is aborted by its own id.
+            for child, status in list(self._children.items()):
+                if status != SUBAGENT_RUNNING:
+                    continue
+                try:
+                    server.request(
+                        "POST",
+                        f"/session/{child}/abort",
+                        params={"directory": self._cwd},
+                        timeout=10,
+                    )
+                except (OSError, ValueError):
+                    pass
         if server is not None and session:
             try:
                 server.request(
@@ -7561,7 +7819,14 @@ class OpencodeWorker(_TurnWorker):
                 # Every session on the server shares one stream — the title
                 # writer and any subagent included — so anything that names a
                 # different conversation belongs to somebody else's turn.
-                if properties.get("sessionID") not in (None, self._session_id):
+                session = properties.get("sessionID")
+                if session in self._children:
+                    # One of this turn's agents. Its idle or error is its own
+                    # ending, never this turn's; the task part says how it went.
+                    if kind not in ("session.idle", "session.error", "session.status"):
+                        self._handle_event(kind, properties)
+                    continue
+                if session not in (None, self._session_id):
                     continue
                 if kind == "session.error":
                     # The repair path re-sends and keeps reading; only an
@@ -7620,6 +7885,15 @@ class OpencodeWorker(_TurnWorker):
     def _part(self, part: object) -> None:
         if not isinstance(part, dict):
             return
+        owner = part.get("sessionID")
+        if owner in self._children:
+            self._child_part(str(owner), part)
+            return
+        if owner not in (None, self._session_id):
+            # Somebody else's conversation: its words are not this answer.
+            return
+        if part.get("type") == "tool" and part.get("tool") == "task":
+            self._task_part(part)
         part_id = str(part.get("id") or "")
         kind = str(part.get("type") or "")
         if kind in ("text", "reasoning"):
@@ -7650,6 +7924,61 @@ class OpencodeWorker(_TurnWorker):
             self._artifact_part(part_id, kind, part)
         elif kind:
             self._unknown_part(part_id, kind, part)
+
+    def _task_part(self, part: dict) -> None:
+        """Follow the agent a task tool call runs, by its child session.
+
+        The task tool opens a child session (`parentID` is this one) and names
+        it in the running part's `state.metadata.sessionId`; the part's own
+        completion or error is how the agent ended.
+        """
+        state = part.get("state")
+        if not isinstance(state, dict):
+            return
+        part_id = str(part.get("id") or "")
+        metadata = state.get("metadata")
+        child = str(metadata.get("sessionId") or "") if isinstance(metadata, dict) else ""
+        child = child or self._task_children.get(part_id, "")
+        if not child:
+            return
+        status = subagent_status(state.get("status"))
+        if child not in self._children:
+            self._children[child] = SUBAGENT_RUNNING
+            self._task_children[part_id] = child
+            raw_input = state.get("input")
+            params = raw_input if isinstance(raw_input, dict) else {}
+            name = subagent_line(params.get("description") or params.get("subagent_type"), 80)
+            task = subagent_line(params.get("prompt"))
+            self._on_subagent(
+                child, name or "Subagent", SUBAGENT_RUNNING, f"Task: {task}" if task else ""
+            )
+        if status and status != SUBAGENT_RUNNING and self._children.get(child) != status:
+            self._children[child] = status
+            detail = subagent_line(state.get("error") or state.get("title"))
+            self._on_subagent(child, "", status, detail or f"Finished: {status}")
+
+    def _child_part(self, child: str, part: dict) -> None:
+        """What one of this turn's agents wrote or ran, once per part."""
+        part_id = str(part.get("id") or "")
+        kind = str(part.get("type") or "")
+        if kind == "text":
+            if self._roles.get(str(part.get("messageID") or "")) != "assistant":
+                return
+            text = subagent_line(part.get("text"))
+            if text and part_id not in self._emitted:
+                self._emitted.add(part_id)
+                self._on_subagent(child, "", "", text)
+        elif kind == "tool":
+            state = part.get("state")
+            if not isinstance(state, dict):
+                return
+            status = str(state.get("status") or "")
+            if status == "running" and part_id not in self._tools_running:
+                self._tools_running.add(part_id)
+                label = _opencode_tool_label(str(part.get("tool") or "tool"), state.get("input"))
+                self._on_subagent(child, "", "", label)
+            elif status == "error":
+                self._on_subagent(child, "", "", f"Failed: {subagent_line(state.get('error'))}")
 
     def _artifact_part(self, part_id: str, kind: str, part: dict) -> None:
         """Say a patch, subtask, or file the turn produced, once.

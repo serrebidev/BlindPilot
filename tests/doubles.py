@@ -168,6 +168,16 @@ def panel_stub(base=None, **overrides):
     panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
     panel._finish_stopped_turn = lambda: app.SessionPanel._finish_stopped_turn(panel)
     panel._worker_complete = lambda text: app.SessionPanel._worker_complete(panel, text)
+    # ----- the subagents list: the real bookkeeping, no native list -----
+    panel._subagents = {}
+    panel._subagent_ids = []
+    panel._subagent_view = None
+    panel._subagents_outlive_turn = False
+    panel._refresh_subagents = lambda: None
+    panel._on_subagent = lambda *report: app.SessionPanel._on_subagent(panel, *report)
+    panel._settle_subagents = lambda: app.SessionPanel._settle_subagents(panel)
+    panel._prune_subagents = lambda: app.SessionPanel._prune_subagents(panel)
+    panel._forget_subagents = lambda: app.SessionPanel._forget_subagents(panel)
     # Streamed answer text becomes rows a finished Markdown block at a time.
     panel._live_answer = None
     panel._stream_answer_rows = lambda text, n, speaker: app.SessionPanel._stream_answer_rows(

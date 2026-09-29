@@ -19,7 +19,8 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 - Reopens past conversations from any backend and continues them. Compacts a long one in place.
 - Runs several sessions at once, one tab each, with its own folder, model, and permission mode.
 - Answers the multiple-choice questions a backend stops to ask, in one dialog with radio buttons, checkboxes, and an Other box.
-- Lets you steer a running task with a new message, or stop it and keep what it produced.
+- Lets you steer a running task with a new message, or stop it and keep what it produced. Stop also stops the subagents the task started.
+- Lists the subagents a task has running, and shows what each one is doing.
 - Attaches files and pasted images.
 - Searches responses and copies a code block, a response, or the whole conversation.
 - Lists the models and effort levels the installed CLI reports.
@@ -121,6 +122,7 @@ Follow everything, the default, speaks every tool call, result, and subagent lin
 - Ctrl+Tab and Ctrl+Shift+Tab move between tabs, as do Ctrl+Shift+] and Ctrl+Shift+[. Ctrl+1 to Ctrl+9 jump to a tab. On macOS use Cmd+Shift+] and Cmd+Shift+[, because Cmd+Tab belongs to the system.
 - Ctrl+Up (or Alt+Up) from the prompt enters the newest response. Shift+Tab also reaches the responses. Inside the responses, Down on the last row stays there; Tab returns to the prompt.
 - Enter sends the prompt. Shift+Enter inserts a new line.
+- While a task has subagents running, a Subagents running list sits between the tab strip and the responses; Tab from the tab strip lands on it. Each row names an agent, says whether it is running, completed, failed, or stopped, and gives the last thing it did. Enter on a row opens that agent's activity in a read-only edit field that keeps up with it while it is open: leave the caret on the last line and it follows new lines, move it anywhere else and it stays put. The list leaves the tab order when no subagent is running.
 
 On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, so that macOS does not swallow them. Recent Conversations is Ctrl+Shift+H (Cmd+H is Hide), and Model and Effort is Ctrl+Shift+E (Cmd+M is Minimize).
 

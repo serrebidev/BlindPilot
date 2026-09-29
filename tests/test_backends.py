@@ -596,7 +596,7 @@ def test_freebuff_structured_chat_reports_progress_and_authoritative_completion(
     assert answer_id == "ai-1"
     assert thinking == "Inspecting config"
     assert answer == "Configuration updated."
-    assert agents == [("tool-1", "basher", "complete")]
+    assert [agent[:3] for agent in agents] == [("tool-1", "basher", "complete")]
     assert agent_backends._freebuff_run_status(chat, offset) == "complete"
     assert agent_backends._freebuff_run_status(chat, log.stat().st_size) == ""
 
@@ -657,7 +657,7 @@ def test_freebuff_finished_turn_can_still_hold_an_agent_marked_running(
     _answer_id, _thinking, answer, agents = agent_backends._freebuff_chat_snapshot(chat)
 
     assert answer == "Both numbers are 15 and 56."
-    assert ("7ObcAqmVj38-0", "basher", "running") in agents
+    assert ("7ObcAqmVj38-0", "basher", "running") in [agent[:3] for agent in agents]
     # The two coexist. The run is over and an agent still says it is going.
     assert agent_backends._freebuff_run_status(chat) == "complete"
     assert [agent for agent in agents if agent[2] not in ("complete", "completed")]
