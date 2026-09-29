@@ -37,10 +37,13 @@ from typing import Optional
 import agent_backends
 from agent_backends import BACKEND_COMMANDCODE
 
-# The reasoning levels the catalog advertises. Which of them a given model
-# accepts depends on the model (/effort says so), so this is the vocabulary
-# rather than a per-model list; Command Code ignores a level it cannot use.
-COMMANDCODE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# The reasoning levels the catalog advertises. Measured at 1.69.0: the CLI
+# answers `--effort bogus` with "Supported: low, medium, xhigh", and both
+# `high` and `max` are refused as unknown, on the default model and on a named
+# one alike. Whether a model takes any effort at all is still per-model --
+# Kimi K2.7 Code answers that it has no adjustable reasoning effort -- and a
+# level sent to such a model ends the run, so the worker retries without it.
+COMMANDCODE_EFFORTS = ("low", "medium", "xhigh")
 
 # How long a short CLI probe may take. Command Code is a Node program, so
 # every check pays a start-up; it is quick once running, and the wizard's

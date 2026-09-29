@@ -302,7 +302,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.29"
+APP_VERSION = "0.29.30"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7007,6 +7007,8 @@ class SessionPanel(wx.Panel):
             extra.update(self._hermes_worker_extra(outgoing_files))
         elif selected_backend == BACKEND_MUSE:
             extra.update(self._muse_worker_extra(outgoing_files))
+        elif selected_backend == BACKEND_OPENCODE:
+            extra.update(self._opencode_worker_extra(outgoing_files))
         elif selected_backend == BACKEND_CLAUDE:
             extra.update(self._claude_worker_extra())
         elif selected_backend == BACKEND_COMMANDCODE:
@@ -7251,6 +7253,18 @@ class SessionPanel(wx.Panel):
         session_title = str(getattr(self, "_session_title", "") or "")
         if session_title and not self._session_id:
             extra["session_title"] = session_title
+        if attachments:
+            extra["attachments"] = list(attachments)
+        return extra
+
+    def _opencode_worker_extra(self, attachments: list[str]) -> dict:
+        """The extra arguments an opencode turn needs: the attached files.
+
+        The worker sends pictures and text files as file parts and names the
+        rest by path, so files are handed over rather than written into the
+        prompt -- the uploading-backend shape Hermes established.
+        """
+        extra: dict = {}
         if attachments:
             extra["attachments"] = list(attachments)
         return extra

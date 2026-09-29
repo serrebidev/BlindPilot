@@ -15,9 +15,9 @@ The prompt goes in over stdin rather than as an argument: the documented form
 is a piped query, and it avoids every quoting question an argument would
 raise (a prompt beginning with ``-`` would otherwise be read as a flag).
 
-The event names below are the ones measured at Command Code 1.53.1. An event
-this file has never heard of is rendered generically rather than dropped, so a
-newer release still says something.
+The event names below are the ones measured at Command Code 1.53.1 and
+re-verified at 1.69.0. An event this file has never heard of is rendered
+generically rather than dropped, so a newer release still says something.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 Based on the original Claude Code Reader application by doubletaponair:
@@ -108,13 +108,14 @@ _CLAUDE_TOOL_NAMES = {
 
 # The tools ``-p`` withholds, and the two BlindPilot asks back.
 #
-# A headless Command Code run hides nine tools from the model --
+# A headless Command Code run hides ten tools from the model --
 # ask_user_question, enter_plan_mode, exit_plan_mode, plan_review, todo_write,
-# cron_create, cron_list, cron_delete and taste (measured at 1.54.0). A call to
-# one of them is not a permission question: the name is absent from the
-# schema, so it comes back refused with `No tool named "..." exists`, and no
-# permission mode lifts it -- bypass included. ``--tools-enable`` is the only
-# way back, and it only accepts names from that list.
+# cron_create, cron_list, cron_delete, schedule_wakeup and taste (measured at
+# 1.69.0; schedule_wakeup joined after 1.54.0). A call to one of them is not a
+# permission question: the name is absent from the schema, so it comes back
+# refused with `No tool named "..." exists`, and no permission mode lifts it --
+# bypass included. ``--tools-enable`` is the only way back, and it only accepts
+# names from that list.
 #
 # These two are bookkeeping. todo_write is the checklist the model keeps for
 # itself and reaches for constantly; taste is the note Command Code learns the
@@ -126,9 +127,9 @@ _RESTORED_HEADLESS_TOOLS = ("todo_write", "taste")
 # by taking the first option, so ask_user_question would silently settle a
 # question nobody heard, and enter_plan_mode, exit_plan_mode and plan_review
 # would let a turn approve its own plan and leave plan mode -- the one mode
-# whose whole point is that it does not. The cron trio schedules work that
-# outlives the window. Their refusals are named rather than granted, which is
-# what _tool_denied below does.
+# whose whole point is that it does not. The cron trio and schedule_wakeup
+# schedule work that outlives the window. Their refusals are named rather than
+# granted, which is what _tool_denied below does.
 _WITHHELD_HEADLESS_TOOLS = (
     "ask_user_question",
     "enter_plan_mode",
@@ -137,6 +138,7 @@ _WITHHELD_HEADLESS_TOOLS = (
     "cron_create",
     "cron_list",
     "cron_delete",
+    "schedule_wakeup",
 )
 
 # How many turns one print-mode run may take, passed as --max-turns.
@@ -304,11 +306,19 @@ class CommandcodeWorker(threading.Thread):
         self._on_question = on_question
 
         self._proc: Optional[subprocess.Popen] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._cancelled = False
         self._failed = False
         self._clean_end = False
         self._completed = False
         self._started_notified = False
+        # The effort this run was started with, and whether the run died on
+        # it. A level sent to a model that takes none ends the run before it
+        # starts, so the turn is retried once without it rather than failed.
+        self._run_effort = ""
+        self._effort_refused = False
+        self._effort_retried = False
+        self._effort_note = ""
 
         # Named for what it holds, not `_stderr`: threading.Thread keeps its
         # own attribute under that name.
@@ -439,11 +449,24 @@ class CommandcodeWorker(threading.Thread):
         if not binary:
             self._fail("Command Code is not installed. Run: npm install -g command-code")
             return
+        self._run_turn(binary, self._effort)
+        if self._effort_refused and not self._cancelled and not self._failed:
+            # The level died on this model before the turn started; nothing
+            # was persisted server-side, so the same prompt runs again bare.
+            self._on_activity("tool", f"{self._effort_note} Running the turn without one.")
+            self._close_process()
+            self._reset_run_state()
+            self._run_turn(binary, "")
+        self._clean_end = True
+
+    def _run_turn(self, binary: str, effort: str) -> None:
+        """One process for the prompt: started, streamed, and finished."""
+        self._run_effort = effort
         command = build_command(
             binary,
             self._permission_mode,
             self._model,
-            self._effort,
+            effort,
             self._session_id,
             self._additional_dirs,
         )
@@ -472,11 +495,27 @@ class CommandcodeWorker(threading.Thread):
         if self._cancelled:
             end_process_group(proc)
             return
-        threading.Thread(target=self._read_stderr, args=(proc,), daemon=True).start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr, args=(proc,), daemon=True)
+        self._stderr_thread.start()
         self._send_prompt(proc)
         self._read_stdout(proc)
         self._finish(proc)
-        self._clean_end = True
+
+    def _reset_run_state(self) -> None:
+        """Forget the refused run before the bare retry, keeping the session."""
+        self._effort_refused = False
+        self._effort_retried = True
+        with self._error_lock:
+            self._error_lines = []
+        self._assistant_parts = []
+        self._message_streamed = False
+        self._thinking_parts = []
+        self._streamed = 0
+        self._tool_names = {}
+        self._tool_subjects = {}
+        self._tool_inputs = {}
+        self._last_refusal = ""
+        self._gap_note_said = False
 
     def _warn_about_bypass_limits(self) -> None:
         """Say up front what this bypass turn will still be refused.
@@ -524,6 +563,29 @@ class CommandcodeWorker(threading.Thread):
     def _error_tail(self) -> str:
         with self._error_lock:
             return "\n".join(self._error_lines[-6:]).strip()
+
+    def _effort_refusal_line(self) -> str:
+        """The stderr line refusing this run's effort, or "" when it did not.
+
+        A level sent to a model that takes none -- or one the CLI no longer
+        knows -- ends the run before it starts: exit 1, empty stdout, and
+        either "X has no adjustable reasoning effort." or 'Unknown effort "y"'
+        on stderr (measured at 1.69.0). The line is kept as the announcement
+        for the bare retry, and only a run that produced nothing qualifies,
+        so a mid-turn mention of effort can never trigger a second run.
+        """
+        if not self._run_effort or self._session_seen or self._assistant_parts:
+            return ""
+        with self._error_lock:
+            lines = list(self._error_lines)
+        for line in lines:
+            lowered = line.casefold()
+            if "has no adjustable reasoning effort" in lowered or lowered.startswith(
+                "unknown effort"
+            ):
+                self._effort_note = line.strip().rstrip(".")
+                return self._effort_note
+        return ""
 
     def _read_stdout(self, proc: subprocess.Popen) -> None:
         stdout = proc.stdout
@@ -812,6 +874,20 @@ class CommandcodeWorker(threading.Thread):
                 self._on_complete(text or "Stopped")
             return
         if self._completed or self._failed:
+            return
+        # Whatever is decided next reads stderr, so the reader is joined
+        # first: stdout can hit end-of-file while the refusal line is still
+        # in the other pipe.
+        reader = self._stderr_thread
+        self._stderr_thread = None
+        if reader is not None:
+            reader.join(timeout=5)
+        if self._effort_refusal_line() and not self._effort_retried:
+            # The level died on this model before the turn started -- exit 1,
+            # empty stdout, the reason on stderr -- so the turn is retried
+            # bare rather than failed. Handled here, not in _do_run, because
+            # only a run that produced nothing may be rerun silently.
+            self._effort_refused = True
             return
         message = _EXIT_MESSAGES.get(code) if code is not None else None
         if message is None:

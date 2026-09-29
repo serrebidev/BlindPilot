@@ -275,6 +275,14 @@ def _iter_jsonl(path: Path, limit: Optional[int] = None) -> Iterator[dict]:
         return
 
 
+def _with_attached(prompt: str, names: list[str]) -> str:
+    """A replayed prompt with its file attachments named, if it had any."""
+    if not names:
+        return prompt
+    suffix = f"[Attached: {', '.join(names)}]"
+    return f"{prompt} {suffix}" if prompt else suffix
+
+
 def _append(existing: str, addition: str) -> str:
     if not existing:
         return addition
@@ -1173,6 +1181,12 @@ def _opencode_turns(entry: HistoryEntry) -> List[HistoryTurn]:
                 continue
             if isinstance(record, dict):
                 roles[str(message_id)] = str(record.get("role") or "")
+        # File names per user message, in first-seen order. A file part can
+        # arrive before or after its message's text, so the names are gathered
+        # first and the turns folded second; a message of bare files still
+        # reads back as a turn, the way a paths-in-text backend replays one.
+        names: dict[str, list[str]] = {}
+        texts: list[tuple[str, str, str]] = []
         for message_id, data in connection.execute(
             "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created LIMIT ?",
             (entry.session_id, _MAX_TRANSCRIPT_PARTS),
@@ -1184,21 +1198,35 @@ def _opencode_turns(entry: HistoryEntry) -> List[HistoryTurn]:
                 part = json.loads(data)
             except ValueError:
                 continue
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "file" and role == "user":
+                name = str(part.get("filename") or "").strip()
+                if name:
+                    names.setdefault(str(message_id), []).append(name)
+                continue
             # Reasoning is opencode thinking aloud, and tool calls are its
             # working; neither is part of the conversation being replayed.
-            if not isinstance(part, dict) or part.get("type") != "text":
+            if part.get("type") != "text":
                 continue
             text = str(part.get("text") or "").strip()
-            if not text:
-                continue
+            if text:
+                texts.append((str(message_id), role, text))
+        mentioned: set[str] = set()
+        for message_id, role, text in texts:
             if role == "user":
                 cleaned = clean_user_text(text)
+                cleaned = _with_attached(cleaned, names.get(message_id, []))
+                mentioned.add(message_id)
                 if cleaned:
                     turns.append(HistoryTurn(prompt=cleaned))
                 continue
             if not turns:
                 turns.append(HistoryTurn())
             turns[-1].response = _append(turns[-1].response, text)
+        for message_id, files in names.items():
+            if message_id not in mentioned and files:
+                turns.append(HistoryTurn(prompt=_with_attached("", files)))
     except sqlite3.Error:
         return turns
     finally:

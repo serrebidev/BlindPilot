@@ -144,7 +144,7 @@ FreeBuff has no JSON or headless API, so BlindPilot runs its terminal interface 
 
 Codex runs as one app server shared by every tab. It starts with the first message, stays running between messages, and is closed after fifteen minutes with no turn. BlindPilot announces the close and the restart.
 
-opencode runs as one server shared by every tab, on loopback, behind a password generated for the run. Past conversations are read from opencode's own database, read-only.
+opencode runs as one server shared by every tab, on loopback, behind a password generated for the run. Past conversations are read from opencode's own database, read-only. Attached pictures and text files travel as file parts the model reads; anything else is named by path in the prompt. Turns that change files or delegate to a subagent say so, naming what changed.
 
 Hermes answers stream a sentence at a time. One connection is kept for the whole conversation. Hermes' reasoning channel carries a terminal spinner rather than reasoning, so that is filtered out.
 

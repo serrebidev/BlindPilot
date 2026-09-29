@@ -95,7 +95,7 @@ def _run(session_id=None):
         "C:\\work",
         "plan",
         model="gpt-5.5",
-        effort="high",
+        effort="xhigh",
         on_session=rec.callback("session"),
         on_started=rec.callback("started"),
         on_activity=rec.callback("activity"),
@@ -174,9 +174,9 @@ def test_the_turn_budget_is_raised_past_print_modes_own_default(mode):
 
 
 def test_model_effort_and_resume_are_passed_through():
-    argv = build_command("command-code", "plan", "gpt-5.5", "high", "abc-123")
+    argv = build_command("command-code", "plan", "gpt-5.5", "xhigh", "abc-123")
     assert argv[argv.index("--model") + 1] == "gpt-5.5"
-    assert argv[argv.index("--effort") + 1] == "high"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
     assert argv[argv.index("--resume") + 1] == "abc-123"
 
 
@@ -808,3 +808,116 @@ def test_a_stop_at_the_live_edge_waits_for_the_next_delta(worker_env):
     _worker, rec = _run()
 
     assert rec.activity("assistant") == ["## Globbing *.txt"]
+
+
+# --------------------------------------------------------------------------
+# A level the model does not take
+# --------------------------------------------------------------------------
+
+
+def _two_runs(monkeypatch, first, second, argv_log):
+    """Two processes in order: the refused run, then the bare retry."""
+
+    def _launch(*args, **kwargs):
+        argv_log.append(args[0])
+        return first if len(argv_log) == 1 else second
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", _launch)
+
+
+def test_a_level_the_model_does_not_take_runs_again_bare(worker_env, monkeypatch):
+    # Measured at 1.69.0: a level sent to a model that takes none ends the
+    # run before it starts -- exit 1, empty stdout, the reason on stderr.
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(
+            lines=[],
+            stderr=["Kimi K2.7 Code has no adjustable reasoning effort."],
+            returncode=1,
+        ),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done bare")]),
+        argv_log,
+    )
+
+    _worker, rec = _run()
+
+    assert "--effort" in argv_log[0]
+    assert "--effort" not in argv_log[1]
+    assert rec.texts("complete") == ["done bare"]
+    assert any("no adjustable reasoning effort" in line for line in rec.activity("tool"))
+
+
+def test_an_effort_the_cli_no_longer_knows_runs_again_bare(worker_env, monkeypatch):
+    # A stale level from an older vocabulary -- `high` went away at 1.69.0 --
+    # is the same shape: exit 1, empty stdout, 'Unknown effort' on stderr.
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(
+            lines=[],
+            stderr=['Unknown effort "high". Supported: low, medium, xhigh.'],
+            returncode=1,
+        ),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done bare")]),
+        argv_log,
+    )
+
+    _worker, rec = _run()
+
+    assert rec.texts("complete") == ["done bare"]
+    assert any("Unknown effort" in line for line in rec.activity("tool"))
+
+
+def test_a_turn_that_produced_something_is_never_rerun(worker_env):
+    # Only a run that produced nothing qualifies: a mid-turn mention of
+    # effort on stderr must not spend the prompt twice.
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event({"type": "text_delta", "delta": "half an answer. "}),
+        ],
+        stderr=["Kimi K2.7 Code has no adjustable reasoning effort."],
+        returncode=1,
+    )
+
+    _worker, rec = _run()
+
+    assert rec.texts("complete") == []
+    assert any("exit code 1" in line for line in rec.texts("failed"))
+
+
+def test_a_failed_retry_fails_like_any_other_run(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(
+            lines=[],
+            stderr=["Kimi K2.7 Code has no adjustable reasoning effort."],
+            returncode=1,
+        ),
+        _FakeProcess(lines=[], stderr=["boom"], returncode=1),
+        argv_log,
+    )
+
+    _worker, rec = _run()
+
+    assert len(argv_log) == 2
+    assert rec.texts("complete") == []
+    assert any("boom" in line for line in rec.texts("failed"))
+
+
+def test_the_newest_withheld_tool_is_named_as_withheld(worker_env):
+    # schedule_wakeup joined the headless denylist after 1.54.0; its refusal
+    # says why no mode can grant it like the other nine.
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event({"type": "tool_denied", "toolCallId": "c9", "toolName": "schedule_wakeup"}),
+            _result(subtype="success", sessionId="s1", finalText="Done."),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert any("withholds this tool from a headless run" in t for t in rec.activity("tool"))
