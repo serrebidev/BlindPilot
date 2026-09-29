@@ -6565,6 +6565,19 @@ class SessionPanel(wx.Panel):
             dlg.EndModal(wx.ID_CANCEL)
 
     # ----- Worker-to-GUI event mailbox -----
+    def _worker_complete(self, text: str) -> None:
+        """Queue a finished answer, unless it is the reply to Stop.
+
+        Muse, Command Code and FreeBuff end a stopped turn through the same
+        callback as a finished one. Taken as "the turn beat the cancellation",
+        it un-muted narration and read the partial answer aloud, which sounds
+        exactly like a Stop that did nothing. Decided here, on the worker's
+        thread as the answer lands, so an answer that really did arrive
+        before Stop is still delivered; the stopped turn keeps what streamed.
+        """
+        if not self._stopping:
+            self._queue_worker_event("complete", text)
+
     def _queue_worker_event(self, name: str, *args: object) -> None:
         """Queue one worker callback without flooding wx's event loop.
 
@@ -7030,7 +7043,7 @@ class SessionPanel(wx.Panel):
             on_session=lambda sid: self._queue_worker_event("session", sid),
             on_started=lambda: self._queue_worker_event("started"),
             on_activity=lambda kind, text: self._queue_worker_event("activity", kind, text),
-            on_complete=lambda txt: self._queue_worker_event("complete", txt),
+            on_complete=self._worker_complete,
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,
@@ -7497,7 +7510,7 @@ class SessionPanel(wx.Panel):
             on_session=lambda sid: self._queue_worker_event("session", sid),
             on_started=lambda: self._queue_worker_event("started"),
             on_activity=lambda kind, text: self._queue_worker_event("activity", kind, text),
-            on_complete=lambda txt: self._queue_worker_event("complete", txt),
+            on_complete=self._worker_complete,
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,

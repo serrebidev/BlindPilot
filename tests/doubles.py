@@ -167,6 +167,7 @@ def panel_stub(base=None, **overrides):
     # window about whether a turn is running or how one ends -----
     panel._run_in_progress = lambda: app.SessionPanel._run_in_progress(panel)
     panel._finish_stopped_turn = lambda: app.SessionPanel._finish_stopped_turn(panel)
+    panel._worker_complete = lambda text: app.SessionPanel._worker_complete(panel, text)
     # Streamed answer text becomes rows a finished Markdown block at a time.
     panel._live_answer = None
     panel._stream_answer_rows = lambda text, n, speaker: app.SessionPanel._stream_answer_rows(

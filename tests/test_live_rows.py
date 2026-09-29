@@ -425,6 +425,24 @@ def test_stopping_keeps_the_partial_answer_and_is_not_reported_as_an_error():
     assert panel.stop_btn.enabled is False
 
 
+def test_the_answer_a_stopped_turn_ends_with_is_not_taken_as_a_finished_one():
+    # Muse, Command Code and FreeBuff end a stopped turn through on_complete.
+    # Delivered, it un-muted narration and read the answer aloud: a Stop that
+    # sounded like it did nothing.
+    import blindpilot_app as app
+
+    queued = []
+    panel = _stub_panel(app, _queue_worker_event=lambda *event: queued.append(event))
+    panel._stopping = True
+    app.SessionPanel._worker_complete(panel, "Got partway.")
+    assert queued == []
+
+    # An answer that landed before Stop is still the answer.
+    panel._stopping = False
+    app.SessionPanel._worker_complete(panel, "All done.")
+    assert queued == [("complete", "All done.")]
+
+
 def test_stop_without_a_running_task_says_so_and_does_nothing():
     import blindpilot_app as app
 
