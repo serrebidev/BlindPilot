@@ -337,3 +337,34 @@ def test_on_windows_the_log_is_fetched_through_wsl(monkeypatch):
     turns = load_turns(entry)
 
     assert [(turn.prompt, turn.response) for turn in turns] == [("from wsl", "answered")]
+
+
+def test_a_log_this_user_cannot_stat_is_still_read_by_its_own_reader(monkeypatch):
+    # The Linux runner is not root, so looking at /root/... raises
+    # PermissionError where Windows just says "not a file". The size guard
+    # took that for a reason to drop the conversation; the log is fetched
+    # through its own reader, which caps itself.
+    import pathlib
+
+    real_is_file = pathlib.Path.is_file
+
+    def denied(self, *args, **kwargs):
+        if "root" in self.parts[:2]:
+            raise PermissionError(13, "Permission denied")
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "is_file", denied)
+    monkeypatch.setattr(
+        muse_backend,
+        "muse_session_log_text",
+        lambda _path: "\n".join([json.dumps(_started("asked")), json.dumps(_said("told"))]),
+    )
+    entry = HistoryEntry(
+        backend="muse",
+        session_id="wsl-2",
+        title="t",
+        path="/root/.local/share/muse/sessions/wsl-2/session.jsonl",
+        modified=0.0,
+    )
+
+    assert [(turn.prompt, turn.response) for turn in load_turns(entry)] == [("asked", "told")]

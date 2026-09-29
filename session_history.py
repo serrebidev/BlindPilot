@@ -1310,7 +1310,12 @@ def load_turns(entry: HistoryEntry) -> List[HistoryTurn]:
             if path.is_file() and path.stat().st_size > _MAX_TRANSCRIPT_BYTES:
                 return []
         except OSError:
-            return []
+            # A path this process cannot look at is not a conversation too big
+            # to read: Muse's log lives inside WSL, under a /root this user
+            # may not be allowed to stat, and is fetched by its own reader
+            # with its own cap. A reader that cannot open its file says so
+            # below.
+            pass
     try:
         turns = reader(entry)
     except OSError:
