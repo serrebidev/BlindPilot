@@ -1,3 +1,13 @@
+# BlindPilot 0.30.1
+
+Small fix release.
+
+- Muse history that could not be inspected is read again: the transcript size guard treated any
+   log path it could not stat (for example a PermissionError on Muse's WSL log under /root) as
+   empty, so the conversation came back with no turns. The guard now steps aside for paths it
+   cannot inspect and lets the backend reader, which caps itself and reports its own failures,
+   decide.
+
 # BlindPilot 0.30.0
 
 This release is about Stop, and about the agents a task starts behind your back. Stop used to sound broken on three backends even when it worked, and on every backend it left the task's subagents running. Now Stop is quiet when it lands and reaches every agent the task started, and a new list shows you what those agents are doing while they run.
