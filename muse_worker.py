@@ -11,7 +11,7 @@ What the protocol gives BlindPilot that a screen-reader front end needs:
     turn/start      a prompt, streamed back as items
     item/*          user and assistant messages, tool calls, reasoning
     turn/steer      guidance into the turn already running
-    turn/cancel     stop without ending the session
+    turn/interrupt  stop without ending the session
     session/compact summarise the conversation in place
     approval/*      a tool that needs permission, asked mid-run
     userInput/*     a clarifying question with choices, asked mid-run
@@ -28,6 +28,7 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+import base64
 import json
 import platform
 import threading
@@ -44,7 +45,15 @@ from agent_backends import (
 from hermes_backend import JsonRpcCalls, StdioTransport, windows_path_to_wsl
 from markdown_rows import release_finished, release_remainder
 
-from muse_backend import muse_command, muse_session_access_error
+from muse_backend import (
+    muse_command,
+    muse_image_part,
+    muse_session_access_error,
+    muse_session_log_text,
+    muse_skills,
+    note_muse_usage,
+    parse_muse_transcript,
+)
 
 
 # Permission-mode mapping. MSP approval modes are fixed enum values, and the
@@ -81,6 +90,15 @@ _MUSE_DEFAULT_MODE = "promptUnmatched"
 # these name the two the worker picks by itself (bypass, and refusals).
 _MUSE_APPROVE_ONCE = "approved"
 _MUSE_REFUSALS = ("denied", "abort")
+
+# How much of a truncated tool output is fetched back. The view budget is
+# ~64KB (measured: a 268KB shell output arrived as 65534 chars with
+# truncated set); past a megabyte the transcript row is the runaway one.
+_MAX_OUTPUT_FETCH_BYTES = 1024 * 1024
+
+# How many view pages a resume-only replay reads before stopping. Two hundred
+# events a page, twenty pages: past that the transcript is a runaway one.
+_REPLAY_MAX_PAGES = 20
 
 
 def _uuid() -> str:
@@ -142,6 +160,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         effort: str = "",
         compact: bool = False,
         resume_only: bool = False,
+        attachments: Optional[Sequence[str]] = None,
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -159,6 +178,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._effort = effort
         self._compact = compact
         self._resume_only = resume_only
+        self._attachments = list(attachments or [])
         self._on_session = on_session
         self._on_started = on_started
         self._on_activity = on_activity
@@ -197,8 +217,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         # Answer text seen so far per agentMessage item.
         self._answer_items: dict[str, str] = {}
         # Approval stages already answered, and each approval's tool name
-        # (approval/updated does not repeat it).
+        # (approval/updated does not repeat it). A prompt can arrive three
+        # ways at once -- the server request, its notification twin, and the
+        # pending list after a resume -- so both sets below are the dedup.
         self._answered_stages: set[str] = set()
+        self._seen_user_inputs: set[str] = set()
         self._approval_tools: dict[str, str] = {}
         # Fired commands awaiting their reply: id -> (method, params, may retry).
         self._fired: dict[object, tuple[str, Optional[dict], bool]] = {}
@@ -230,13 +253,20 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._cancelled = True
         self._accepting_input.clear()
         if self._live_session:
-            # A cancel is asked, not forced: the server answers it, and the
+            # A stop is asked, not forced: the server answers it, and the
             # turn/completed with terminal "cancelled" ends the loop. If the
             # process has already gone, there is nothing left to ask.
-            # turnId names the exact turn; omitting it would target the
-            # session's foreground turn, which is the same one here.
+            # turn/interrupt is the "user pressed stop" gesture on the
+            # runtime's priority lane; turn/cancel is the plain lane. Both
+            # end the turn as cancelled (measured 1.4.0, mid-stream and
+            # before the first token alike); the priority lane is what a
+            # stop button is for. No retract is paired with it: none was
+            # ever observed to come back as turn/retracted, so there is no
+            # prompt-restoring signal to wait for. turnId names the exact
+            # turn; omitting it would target the session's foreground turn,
+            # which is the same one here.
             self._fire(
-                "turn/cancel",
+                "turn/interrupt",
                 {
                     "commandId": _uuid(),
                     "sessionId": self._live_session,
@@ -265,7 +295,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         Steering, cancelling, and answering questions all write from a thread
         that is not the turn loop's; none of them can afford the wait, and
         MSP answers them on the view stream, which the turn loop reads. They
-        still carry an id: measured on 1.3.0, an id-less turn/cancel or
+        still carry an id: measured on 1.3.0, an id-less turn/interrupt or
         approval/decide is dropped without a word and the turn hangs.
 
         Each one is remembered until answered so an internal failure can be
@@ -373,6 +403,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         if not self._start_turn():
             return
         self._consume_turn()
+        self._stash_usage()
         self._clean_end = True
 
     def _handshake(self) -> bool:
@@ -414,6 +445,8 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                     # without this a picker change on a reopened
                     # conversation was silently ignored.
                     self._set_model()
+                self._sync_approval_mode(session)
+                self._drain_pending()
                 return True
             # The stored conversation no longer exists on this host. The
             # window keeps its session id either way; saying so beats
@@ -456,6 +489,54 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             reason = self._error_text(reply["error"]) if reply else "no answer"
             self._on_activity("tool", f"Muse Code kept its model ({reason})")
 
+    def _sync_approval_mode(self, session: dict) -> None:
+        """Bring a resumed session onto the window's permission mode.
+
+        The mode is otherwise only sent at session/start, so a mode picked
+        mid-conversation never reached the host: the next turn ran under the
+        old one. A refusal is said rather than fatal -- bypass still
+        auto-answers client-side, and anything else keeps asking as before.
+        """
+        live = session.get("approvalMode")
+        current = live.get("mode") if isinstance(live, dict) else ""
+        desired = _MUSE_APPROVAL_MODES.get(self._permission_mode, _MUSE_DEFAULT_MODE)
+        if not current or current == desired:
+            return
+        reply = self._request(
+            "session/setApprovalMode",
+            {
+                "commandId": _uuid(),
+                "sessionId": self._live_session,
+                "mode": desired,
+            },
+        )
+        if reply is not None and "error" not in reply:
+            return
+        reason = self._error_text(reply["error"]) if reply else "no answer"
+        self._on_activity("tool", f"Muse Code kept its approval mode ({reason})")
+
+    def _drain_pending(self) -> None:
+        """Answer whatever the conversation was parked on when it was reopened.
+
+        A resume re-issues the unsettled prompts, but only to a host that is
+        still subscribed when they fire; the pending list is the pull dual
+        that cannot be missed, and it names approvals and questions alike.
+        """
+        reply = self._request(
+            "approval/listPending", {"sessionId": self._live_session}, timeout=20.0
+        )
+        if reply is None or "result" not in reply:
+            return
+        result = reply["result"] or {}
+        pending = result.get("approvals") or []
+        for params in pending:
+            if isinstance(params, dict):
+                self._approval_requested(params)
+        pending = result.get("userInputs") or []
+        for params in pending:
+            if isinstance(params, dict):
+                self._user_input_requested(params)
+
     def _workspace_root(self) -> str:
         """The workspace root as the host sees it, always absolute.
 
@@ -471,7 +552,8 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
 
     def _start_turn(self) -> bool:
         text = (self._prompt or "").strip()
-        if not text:
+        parts, display = self._turn_parts(text)
+        if not parts:
             # An empty prompt would be rejected, and the turn loop would sit
             # waiting for an end that never comes.
             self._fail("Muse was given an empty prompt.")
@@ -479,8 +561,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         params: dict = {
             "commandId": _uuid(),
             "sessionId": self._live_session,
-            "input": [{"type": "text", "text": text}],
+            "input": parts,
         }
+        if display:
+            params["displayText"] = display
         if self._effort:
             params["reasoningEffort"] = self._effort
         reply = self._request("turn/start", params, timeout=60.0)
@@ -498,6 +582,51 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         # A "steered" disposition means the input joined a turn that was
         # already running; the transcript is streaming either way.
         return True
+
+    def _turn_parts(self, text: str) -> tuple[list[dict], str]:
+        """The turn/start input parts, plus the transcript display text.
+
+        Images travel as base64 parts the model actually sees; anything else
+        attached is named in the text by its path, translated for the WSL
+        distribution Muse runs in on Windows. A leading /skill the CLI knows
+        becomes a skill part -- the wire twin of what the TUI accepts after
+        the shortcut token -- with the typed line kept as the display text so
+        the transcript still shows what was asked.
+        """
+        images: list[dict] = []
+        named: list[str] = []
+        for path in self._attachments:
+            part = muse_image_part(path)
+            if part is not None:
+                images.append(part)
+            elif str(path or "").strip():
+                named.append(_host_path(str(path).strip()))
+        if text.startswith("/"):
+            invocation = _skill_invocation(text, self._cwd)
+            if invocation is not None:
+                selector, arguments = invocation
+                skill: dict = {"type": "skill", "selector": selector}
+                if arguments:
+                    skill["arguments"] = arguments
+                return [skill, *images], text
+        if named:
+            listing = "\n".join(named)
+            text = (
+                f"{text}\n\nAttached files (please read them):\n{listing}"
+                if text
+                else f"Attached files (please read them):\n{listing}"
+            )
+        parts: list[dict] = [{"type": "text", "text": text}] if text else []
+        parts.extend(images)
+        display = ""
+        if self._attachments:
+            names = ", ".join(
+                _file_name(path) for path in self._attachments if str(path or "").strip()
+            )
+            suffix = f"[Attached: {names}]" if names else "[Attached files]"
+            original = (self._prompt or "").strip()
+            display = f"{original}\n{suffix}" if original else suffix
+        return parts, display
 
     def _error_text(self, error: object) -> str:
         if isinstance(error, dict):
@@ -585,14 +714,47 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             self._item_delta(params)
         elif method == "item/completed":
             self._item_completed(params.get("item"))
-        elif method in ("approval/requested", "approval/updated"):
+        elif method == "item/updated":
+            self._item_updated(params.get("item"))
+        elif method in ("approval/requested", "approval/updated", "approval/request"):
+            # The request and its notification twin carry the same full
+            # params; the answered-stages set keeps the twin from asking
+            # twice, and the request twin is the one a resume re-issues.
             self._approval_requested(params)
-        elif method == "userInput/requested":
+        elif method in ("userInput/requested", "userInput/request"):
             self._user_input_requested(params)
         elif method == "turn/completed":
             self._turn_completed(params)
             return True
+        elif method == "turn/retryScheduled":
+            self._on_activity("tool", "Muse Code is retrying the turn")
+        elif method == "turn/retracted":
+            self._on_activity("tool", "The turn was retracted before anything was sent")
+        elif method == "turn/unqueued":
+            self._on_activity("tool", "The queued turn was removed")
+        elif method == "session/approvalModeChanged":
+            mode = str(params.get("mode") or "")
+            self._on_activity(
+                "tool", f"Approval mode is now {mode}" if mode else "Approval mode changed"
+            )
+        elif method == "usage/changed":
+            note_muse_usage(params.get("usage"))
+        # Turn, session, skill, and view bookkeeping (turn/started, token and
+        # context usage, name and branch changes, todo lists, gaps) carries
+        # no words for the transcript and is ignored on purpose.
         return False
+
+    def _stash_usage(self) -> None:
+        """Remember what this host observed of the subscription, for /status.
+
+        Asked on the live connection before it closes: a fresh host observes
+        nothing, which is why the status report cannot ask for itself.
+        """
+        if self._cancelled or self._failed:
+            return
+        reply = self._request("usage/read", None, timeout=10.0)
+        if reply is not None and "result" in reply:
+            note_muse_usage((reply["result"] or {}).get("usage"))
 
     def _receipt(self, request_id: object, method: str) -> None:
         """Answer a request the host sent us, as MSP requires of a client.
@@ -689,6 +851,8 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             # dropped any earlier message of the same turn.
             if text.startswith(streamed) and text[len(streamed) :].strip():
                 self._answer_part(item_id, text[len(streamed) :])
+            if item.get("truncated"):
+                self._recover_truncated_answer()
             self._release_all()
         elif kind == "toolCall":
             name = self._tool_names.get(item_id, str(item.get("tool") or "tool"))
@@ -697,6 +861,9 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                 or str(item.get("visibleOutput") or "")
                 or "".join(self._tool_output_parts.get(item_id, []))
             )
+            full = self._full_output(item)
+            if full:
+                result_text = full
             # write_todos answers bookkeeping JSON; its row already lists the todos.
             if result_text.strip() and name != "write_todos":
                 self._on_activity("result", f"{name}: {result_text.strip()}")
@@ -707,6 +874,113 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                 self._on_activity("thinking", text.strip())
         elif kind == "compaction":
             self._on_activity("tool", "Conversation compacted")
+        elif kind == "userShell":
+            text = _item_text(item).strip() or str(item.get("visibleOutput") or "").strip()
+            full = self._full_output(item)
+            if full:
+                text = full.strip()
+            first = text.splitlines()[0][:200] if text else ""
+            if first:
+                self._on_activity("tool", f"userShell: {first}")
+            else:
+                self._on_activity("tool", str(item.get("status") or "userShell"))
+        elif kind in ("subagent", "workflow"):
+            # A delegated run finished: its first line is the outcome, and a
+            # bare kind is still better than a turn that went quiet.
+            text = _item_text(item).strip()
+            first = text.splitlines()[0][:200] if text else ""
+            status = str(item.get("status") or "").strip()
+            if first:
+                self._on_activity("tool", f"{kind}: {first}")
+            elif status:
+                self._on_activity("tool", f"{kind}: {status}")
+            else:
+                self._on_activity("tool", kind)
+
+    def _full_output(self, item: dict) -> str:
+        """The complete result of a truncated tool call, or "" to keep the text.
+
+        Only attempted when the item says it was truncated and names servable
+        bytes; anything else -- and any fetch that fails -- keeps its visible
+        text instead of stalling the turn on a second request.
+        """
+        if not item.get("truncated"):
+            return ""
+        ref = item.get("outputRef")
+        if not isinstance(ref, dict) or ref.get("availability") != "available":
+            return ""
+        ref_id = str(ref.get("id") or "")
+        item_id = str(item.get("itemId") or "")
+        if not ref_id or not item_id or not self._live_session:
+            return ""
+        reply = self._request(
+            "item/readOutput",
+            {
+                "sessionId": self._live_session,
+                "itemId": item_id,
+                "outputRef": ref_id,
+                "lengthBytes": _MAX_OUTPUT_FETCH_BYTES,
+            },
+            timeout=30.0,
+        )
+        if reply is None or "result" not in reply:
+            return ""
+        result = reply["result"] or {}
+        content = result.get("content")
+        if not isinstance(content, str) or not content:
+            return ""
+        if result.get("encoding") == "base64":
+            # Binary media arrives base64; text media arrives utf8. The enum
+            # is closed, so anything else is a future value to keep verbatim.
+            try:
+                text = base64.b64decode(content).decode("utf-8", "replace")
+            except ValueError:
+                return ""
+        else:
+            text = content
+        if not result.get("eof", True):
+            served = result.get("byteLen")
+            total = ref.get("byteLen")
+            if isinstance(served, int) and isinstance(total, int):
+                text += f"\n[showing the first {served} of {total} bytes]"
+            else:
+                text += "\n[the rest of the output was not fetched]"
+        return text
+
+    def _recover_truncated_answer(self) -> None:
+        """Append what the view budget clipped off the answer, from the log.
+
+        A truncated agentMessage has no item/readOutput twin: the durable
+        session log is the only place the full text survives. Read only when
+        the flag says the streamed text is short, and merged only when the
+        log extends it -- never duplicated, never guessed.
+        """
+        if not self._session_log_path:
+            return
+        turns = parse_muse_transcript(muse_session_log_text(self._session_log_path))
+        if not turns:
+            return
+        full = turns[-1][1]
+        current = "".join(self._assistant_parts)
+        if full.startswith(current) and full[len(current) :].strip():
+            self._assistant_parts.append(full[len(current) :])
+
+    def _item_updated(self, item: object) -> None:
+        """A non-terminal change to an open item: backgrounding, subagent news.
+
+        Deltas cannot express these, so the host re-emits the whole item;
+        only the changes worth interrupting the transcript for are said.
+        """
+        if not isinstance(item, dict):
+            return
+        kind = str(item.get("kind") or "")
+        if kind == "toolCall" and item.get("background"):
+            name = str(item.get("tool") or "tool")
+            self._on_activity("tool", f"{name}: running in the background")
+        elif kind == "subagent":
+            status = str(item.get("controlStatus") or item.get("status") or "").strip()
+            if status:
+                self._on_activity("tool", f"Subagent {status}")
 
     def _turn_completed(self, params: dict) -> None:
         self._release_all()
@@ -733,11 +1007,14 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         # A piped command is approved one stage at a time: the decide for
         # stage 0 is answered "terminal": false and stage 1 arrives as
         # approval/updated with a new currentRequirementId (measured 1.3.0).
-        # Each stage is answered once; other updates repeat a stage.
+        # Each stage is answered once; other updates repeat a stage. Scoped to
+        # the approval because the request twin, its notification, and the
+        # pending list all carry the same stage for the same approval.
         stage = json.dumps(params.get("currentRequirementId"), sort_keys=True)
-        if stage in self._answered_stages:
+        key = f"{approval_id}:{stage}"
+        if key in self._answered_stages:
             return
-        self._answered_stages.add(stage)
+        self._answered_stages.add(key)
         if params.get("toolName"):
             self._approval_tools[approval_id] = str(params["toolName"])
         if self._cancelled:
@@ -807,6 +1084,16 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         )
 
     def _user_input_requested(self, params: dict) -> None:
+        prompt_id = str(params.get("userInputId") or "")
+        if prompt_id:
+            if prompt_id in self._seen_user_inputs:
+                return
+            self._seen_user_inputs.add(prompt_id)
+        elif not params.get("questions"):
+            # A prompt with neither an id nor questions is a frame the host
+            # never meant as one; cancelling it would answer a prompt nobody
+            # asked with an id nobody holds.
+            return
         if self._on_question is None:
             self._cancel_input(params)
             return
@@ -955,20 +1242,50 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         items = history.get("items")
         if items is None and isinstance(history.get("snapshot"), dict):
             items = history["snapshot"].get("items")
-        for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict):
-                continue
-            kind = str(item.get("kind") or "")
-            text = _item_text(item)
-            if kind == "userMessage" and text.strip():
-                self._on_activity("you", text)
-            elif kind == "agentMessage" and text.strip():
-                self._on_activity("assistant", text)
-            elif kind == "toolCall":
-                name = str(item.get("tool") or "tool")
-                summary = text.strip()
-                self._on_activity("tool", f"{name}: {summary}" if summary else name)
+        if isinstance(items, list):
+            for item in items:
+                self._replay_item(item)
+        else:
+            # A long or compacted conversation is served as a snapshot or not
+            # at all; the view is paged instead, which is what the protocol
+            # tells a client to do when inline history is not what it got.
+            self._page_replay()
         self._on_complete("")
+
+    def _replay_item(self, item: object) -> None:
+        if not isinstance(item, dict):
+            return
+        kind = str(item.get("kind") or "")
+        text = _item_text(item)
+        if kind == "userMessage" and text.strip():
+            self._on_activity("you", text)
+        elif kind == "agentMessage" and text.strip():
+            self._on_activity("assistant", text)
+        elif kind == "toolCall":
+            name = str(item.get("tool") or "tool")
+            summary = text.strip()
+            self._on_activity("tool", f"{name}: {summary}" if summary else name)
+
+    def _page_replay(self) -> None:
+        """Read the transcript back a page at a time, oldest first."""
+        cursor: Optional[str] = None
+        for _ in range(_REPLAY_MAX_PAGES):
+            params: dict = {"sessionId": self._live_session, "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            reply = self._request("view/page", params, timeout=30.0)
+            if reply is None or "result" not in reply:
+                return
+            result = reply["result"] or {}
+            for event in result.get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                if event.get("method") == "item/completed":
+                    item = (event.get("params") or {}).get("item")
+                    self._replay_item(item)
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return
 
     # -- streaming helpers --------------------------------------------------
 
@@ -982,6 +1299,41 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
     def _release_all(self) -> None:
         text = "".join(self._assistant_parts)
         self._streamed = release_remainder(text, self._streamed, self._emit_answer)
+
+
+def _skill_invocation(text: str, cwd: str) -> Optional[tuple[str, str]]:
+    """(selector, arguments) when the prompt calls a Muse skill, else None.
+
+    Only the first token counts, and only when the CLI lists it: a path that
+    happens to start with a slash is text, not a call.
+    """
+    first, _, rest = text.strip().partition(" ")
+    token = first[1:]
+    if not token:
+        return None
+    selectors = {name for name, _description in muse_skills(cwd)}
+    if token not in selectors:
+        return None
+    return token, rest.strip()
+
+
+def _host_path(path: str) -> str:
+    """An attached file's path as the Muse host sees it.
+
+    On Windows the host runs inside WSL, where a Windows path names nothing;
+    everywhere else the path is already what the host expects.
+    """
+    if platform.system() != "Windows":
+        return path
+    return windows_path_to_wsl(path)
+
+
+def _file_name(path: str) -> str:
+    """The bare filename, whichever platform wrote the path."""
+    text = str(path or "").strip().strip('"').rstrip("\\/")
+    for sep in ("\\", "/"):
+        text = text.rsplit(sep, 1)[-1]
+    return text or str(path or "").strip()
 
 
 def _choices(params: dict) -> list[dict]:

@@ -690,6 +690,11 @@ BACKENDS = {
         True,
         True,
         supports_compaction=True,
+        # Images travel as base64 parts the model sees, and the rest are
+        # named in the prompt by paths translated for the host -- on Windows
+        # it runs inside WSL, where a path from here names nothing. Either
+        # way the worker takes the files themselves, like Hermes' does.
+        uploads_attachments=True,
     ),
     BACKEND_COMMANDCODE: BackendInfo(
         BACKEND_COMMANDCODE,
@@ -1773,6 +1778,8 @@ def backend_usage_lines(backend: str, binary: str, timeout: int = 20) -> list[st
         windows = _freebuff_usage_windows(_freebuff_usage_payload(timeout))
     elif backend == BACKEND_HERMES:
         windows = _hermes_usage_windows(_hermes_pool_payload())
+    elif backend == BACKEND_MUSE:
+        windows = _muse_usage_windows(_muse_usage_payload())
     else:
         return []
     return [line for line in map(_usage_window_line, _ordered_windows(windows)) if line]
@@ -1801,6 +1808,44 @@ def _hermes_account_lines() -> list[str]:
     if active:
         lines.insert(1, f"Provider in use: {active}")
     return lines
+
+
+def _muse_usage_payload() -> object:
+    """The usage one of this app's Muse turns last observed, behind the same
+    indirection the other Muse answers use so the suite can patch it."""
+    from muse_backend import muse_usage_payload
+
+    return muse_usage_payload()
+
+
+def _muse_usage_windows(payload: object) -> list[UsageWindow]:
+    """Read ``usage/read``: a current window and a rolling weekly block.
+
+    Both carry the provider's verbatim used percent with the reset stamp in
+    epoch milliseconds; the weekly block has no duration of its own.
+    """
+    if not isinstance(payload, dict):
+        return []
+    windows: list[UsageWindow] = []
+    for field, fallback in (("window", "Session"), ("weekly", "Weekly")):
+        entry = payload.get(field)
+        if not isinstance(entry, dict):
+            continue
+        percent = _as_number(entry.get("usedPercent"))
+        if percent is None:
+            continue
+        resets_at = _as_number(entry.get("resetsAtMs"))
+        minutes = _as_number(entry.get("windowDurationMins"))
+        base = _codex_window_name(minutes, field) if minutes is not None else fallback
+        windows.append(
+            UsageWindow(
+                f"{base} limit",
+                percent,
+                resets_at / 1000 if resets_at is not None else None,
+                minutes,
+            )
+        )
+    return windows
 
 
 def _muse_account_lines() -> list[str]:
@@ -1998,9 +2043,10 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
         SettingsFile(
             BACKEND_MUSE,
             "global",
-            home / ".config" / "muse" / "auth.json",
-            "Muse's stored sign-in and provider credentials. On Windows this file "
-            "lives inside the WSL distribution the CLI runs in, not on this side.",
+            home / ".config" / "muse" / "settings.json",
+            "Muse's global settings: MCP servers and workspace trust. On Windows "
+            "this file lives inside the WSL distribution the CLI runs in, not on "
+            "this side.",
         ),
         SettingsFile(
             BACKEND_COMMANDCODE,
@@ -2028,6 +2074,13 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
                 "this folder",
                 project / "opencode.json",
                 "Applies in this folder, and can pin a model or turn providers off.",
+            ),
+            SettingsFile(
+                BACKEND_MUSE,
+                "this folder",
+                project / "AGENTS.md",
+                "Shared: the project rules Muse reads in this folder, written by "
+                "`muse init` and committed to this repository.",
             ),
             SettingsFile(
                 BACKEND_COMMANDCODE,

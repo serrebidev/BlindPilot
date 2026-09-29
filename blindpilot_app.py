@@ -143,6 +143,7 @@ from muse_backend import (
     muse_cli_path,
     muse_command,
     muse_installed,
+    muse_skills,
     wsl_exe as muse_wsl_exe,
     reset_discovery as reset_muse_discovery,
 )
@@ -301,7 +302,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.29.28"
+APP_VERSION = "0.29.29"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2445,6 +2446,15 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
         )
     elif backend == BACKEND_COMMANDCODE:
         commands.extend(_COMMANDCODE_SLASH_COMMANDS)
+    elif backend == BACKEND_MUSE:
+        # Whatever this directory's Muse offers: its bundled, user, and
+        # project skills, invoked the way the TUI invokes them. A skill the
+        # CLI does not list can still be typed, but the worker only treats a
+        # leading /token as a call when it is one of these.
+        commands.extend(
+            (f"/{name}", description or f"Run Muse's {name} skill")
+            for name, description in muse_skills(cwd)
+        )
     return commands
 
 
@@ -6995,6 +7005,8 @@ class SessionPanel(wx.Panel):
             # the uploading backend. Guarding it twice would be a line no test
             # could ever hold to account.
             extra.update(self._hermes_worker_extra(outgoing_files))
+        elif selected_backend == BACKEND_MUSE:
+            extra.update(self._muse_worker_extra(outgoing_files))
         elif selected_backend == BACKEND_CLAUDE:
             extra.update(self._claude_worker_extra())
         elif selected_backend == BACKEND_COMMANDCODE:
@@ -7239,6 +7251,18 @@ class SessionPanel(wx.Panel):
         session_title = str(getattr(self, "_session_title", "") or "")
         if session_title and not self._session_id:
             extra["session_title"] = session_title
+        if attachments:
+            extra["attachments"] = list(attachments)
+        return extra
+
+    def _muse_worker_extra(self, attachments: list[str]) -> dict:
+        """The extra arguments a Muse turn needs: the attached files.
+
+        The worker sends images as base64 parts and names the rest by paths
+        translated for its host, so files are handed over rather than written
+        into the prompt -- the uploading-backend shape Hermes established.
+        """
+        extra: dict = {}
         if attachments:
             extra["attachments"] = list(attachments)
         return extra
