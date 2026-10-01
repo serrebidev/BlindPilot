@@ -16,7 +16,7 @@ httpx>=0.28.1,<0.29
 # anybody else's computer, and this is what stands in. The bound is a year
 # rather than a major - certifi versions by date, and a stale root list is
 # the one dependency whose age is itself the defect.
-certifi>=2025.1.31,<2028
+certifi>=2026.7.22,<2028
 markdown-it-py>=3,<5
 pyobjc-framework-Cocoa>=10,<12; sys_platform == "darwin"
 accessible-output2>=0.17,<1; sys_platform == "win32"
