@@ -777,7 +777,9 @@ def test_a_program_holding_one_of_our_libraries_counts_as_a_blocker(tmp_path):
 
     holder = subprocess.Popen(
         [
-            sys.executable,
+            # A Windows venv's python.exe redirects to a child interpreter;
+            # the returned PID must belong to the process loading the DLL.
+            getattr(sys, "_base_executable", sys.executable),
             "-c",
             "import ctypes, sys, time; ctypes.WinDLL(sys.argv[1]); time.sleep(60)",
             str(library),
