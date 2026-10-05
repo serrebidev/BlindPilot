@@ -35,6 +35,29 @@ class CredentialStore:
             self._fallback_write(self._username(account_id), legacy)
         return legacy
 
+    # A key that belongs to a feature rather than a chat account -- the Gemini
+    # API key the agent backends share -- lives beside the account keys under a
+    # name of its own, so it can never collide with an account's.
+    def get_secret(self, name: str) -> str:
+        username = f"secret:{name}"
+        if os.name == "nt":
+            return self._windows_read(f"{SERVICE_NAME}:{username}")
+        return self._fallback_read(username, SERVICE_NAME)
+
+    def set_secret(self, name: str, value: str) -> None:
+        username = f"secret:{name}"
+        if os.name == "nt":
+            self._windows_write(f"{SERVICE_NAME}:{username}", value)
+            return
+        self._fallback_write(username, value)
+
+    def delete_secret(self, name: str) -> None:
+        username = f"secret:{name}"
+        if os.name == "nt":
+            self._windows_delete(f"{SERVICE_NAME}:{username}")
+            return
+        self._fallback_delete(username)
+
     def set_api_key(self, account_id: int, api_key: str) -> None:
         if os.name == "nt":
             self._windows_write(self._target(account_id), api_key)

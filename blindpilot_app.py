@@ -79,10 +79,12 @@ from app_updater import (
 )
 from agent_backends import (
     _tool_use_label,
+    BACKEND_ANTIGRAVITY,
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
     BACKEND_FREEBUFF,
+    BACKEND_GEMINI,
     BACKEND_HERMES,
     BACKEND_IDS,
     BACKEND_LABELS,
@@ -310,7 +312,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.30.2"
+APP_VERSION = "0.31.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1177,6 +1179,44 @@ def install_hermes(log: Callable[[str], None]) -> Optional[str]:
 
 MUSE_INSTALL_SH_URL = "https://dev.meta.ai/install.sh"
 
+# Antigravity CLI ships Google's own per-platform script installers (not npm):
+# a native agy binary in ~/.local/bin, or %LOCALAPPDATA%\agy\bin on Windows,
+# that updates itself from then on.
+ANTIGRAVITY_INSTALL_PS1_URL = "https://antigravity.google/cli/install.ps1"
+ANTIGRAVITY_INSTALL_SH_URL = "https://antigravity.google/cli/install.sh"
+
+
+def install_antigravity(log: Callable[[str], None]) -> Optional[str]:
+    """Run Google's Antigravity CLI installer and report the result.
+
+    As with the other script installers, a working `agy` afterwards is the
+    fact that counts, not the installer's exit code.
+    """
+    argv = _script_installer_argv(
+        f"irm {ANTIGRAVITY_INSTALL_PS1_URL} | iex", ANTIGRAVITY_INSTALL_SH_URL
+    )
+    if argv is None:
+        log(_missing_prereq_message("Antigravity's installer"))
+        return None
+    log(
+        "Downloading and running the official Antigravity CLI installer. This usually takes under a minute."
+    )
+    rc = _run_logged_process(argv, log)
+    if rc is None:
+        return None
+    binary = find_backend_cli(BACKEND_ANTIGRAVITY)
+    if binary is None:
+        log(f"The installer finished with exit code {rc} but `agy` was not found afterwards.")
+        return None
+    log(f"Installed: {binary}")
+    try:
+        changed = ensure_on_path(Path(binary).parent)
+        if changed:
+            log(f"Added {Path(binary).parent} to {changed}.")
+    except OSError as exc:
+        log(f"Installed, but adding it to PATH failed: {exc}")
+    return binary
+
 
 def _muse_install_argv() -> Optional[List[str]]:
     """Muse's official installer, run wherever Muse can actually live.
@@ -1296,7 +1336,13 @@ _NPM_BACKEND_PACKAGES = {
     BACKEND_FREEBUFF: "freebuff",
     BACKEND_OPENCODE: "opencode-ai",
     BACKEND_COMMANDCODE: "command-code",
+    BACKEND_GEMINI: "@google/gemini-cli",
 }
+
+# Backends whose turn is one process per message. A message typed while one
+# runs cannot join it, so it is queued and sent when the turn ends, and Steer
+# stops the turn and resumes with the instruction.
+_QUEUEING_BACKENDS = frozenset({BACKEND_COMMANDCODE, BACKEND_GEMINI, BACKEND_ANTIGRAVITY})
 
 
 def _backend_installs_with_npm(backend: str) -> bool:
@@ -1614,6 +1660,8 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
         return install_hermes(log)
     if backend == BACKEND_MUSE:
         return install_muse(log)
+    if backend == BACKEND_ANTIGRAVITY:
+        return install_antigravity(log)
     label = backend_label(backend)
     npm = _find_npm()
     if npm is None:
@@ -2154,6 +2202,19 @@ def probe_model_options(
         from muse_backend import muse_model_options
 
         models, efforts, current_model, current_effort, error = muse_model_options(cwd)
+        options = ModelOptions(models, efforts, current_model, current_effort, error)
+        if models and binary is not None:
+            _remember_model_options(backend, cwd, binary, options)
+        return options
+
+    if backend in (BACKEND_GEMINI, BACKEND_ANTIGRAVITY):
+        # Gemini CLI has no model-list command, so its aliases are offered
+        # with whatever the Gemini API lists for the key; agy answers
+        # `agy models` itself, signed in or on a key.
+        from google_backend import antigravity_model_options, gemini_model_options
+
+        probe = gemini_model_options if backend == BACKEND_GEMINI else antigravity_model_options
+        models, efforts, current_model, current_effort, error = probe()
         options = ModelOptions(models, efforts, current_model, current_effort, error)
         if models and binary is not None:
             _remember_model_options(backend, cwd, binary, options)
@@ -7293,7 +7354,7 @@ class SessionPanel(wx.Panel):
             self.open_status_dialog()
             return
 
-        if self._run_in_progress() and self._session_backend == BACKEND_COMMANDCODE:
+        if self._run_in_progress() and self._session_backend in _QUEUEING_BACKENDS:
             self._queue_message()
             return
 
@@ -7428,7 +7489,7 @@ class SessionPanel(wx.Panel):
             return
         self.steer_btn.Enable()
         self.stop_btn.Enable()
-        if selected_backend == BACKEND_COMMANDCODE:
+        if selected_backend in _QUEUEING_BACKENDS:
             self.send_btn.Enable()
 
     def _claude_worker_extra(self) -> dict:
@@ -7506,7 +7567,7 @@ class SessionPanel(wx.Panel):
     def _on_steer(self) -> None:
         """Send what is typed into the run that is already going."""
         if (
-            getattr(self, "_session_backend", None) == BACKEND_COMMANDCODE
+            getattr(self, "_session_backend", None) in _QUEUEING_BACKENDS
             and self._run_in_progress()
         ):
             self._queue_message(steering=True)
@@ -9101,6 +9162,12 @@ class SetupWizard(wx.Dialog):
         # provider's page itself; there is no CLI address for this button to
         # reopen, so it is not offered.
         self._open_page_btn.Show(self.backend != BACKEND_OPENCODE)
+        # A backend signed in to with a key has no sign-in page; the button
+        # opens the page that hands out the key instead.
+        self._open_page_btn.SetLabel(
+            "Get an API Key" if info.login_with_api_key else "Open Sign-in Page"
+        )
+        self._open_page_btn.Enable(info.login_with_api_key)
         self._welcome_text.SetLabel(
             "Welcome to BlindPilot.\n\n"
             "Choose a backend. This wizard checks that it is installed and signed "
@@ -9115,6 +9182,24 @@ class SetupWizard(wx.Dialog):
                 "Choose Connect a Provider to pick one and give it an API key, or to "
                 "sign in through your browser. If you have already connected one, or "
                 f"already ran '{login}' in a terminal, choose Already Signed In."
+            )
+        elif info.login_with_api_key:
+            google_sign_in = (
+                "To use your Google account instead, run agy in a terminal, sign in "
+                "in the browser it opens, then choose Already Signed In.\n\n"
+                if self.backend == BACKEND_ANTIGRAVITY
+                else "Gemini CLI no longer accepts personal Google accounts. A Gemini "
+                "Code Assist Standard or Enterprise sign-in made in Gemini CLI still "
+                "works: choose Already Signed In.\n\n"
+            )
+            self._signin_intro.SetLabel(
+                f"{label} runs on a Gemini API key from Google AI Studio.\n\n"
+                "Choose Sign In to paste your key. BlindPilot keeps it in your "
+                "system's credential store and uses it for both Gemini CLI and "
+                "Antigravity CLI. A key set in the GEMINI_API_KEY environment "
+                "variable, or the key of a Gemini account in Chat mode, is used "
+                "without asking. Get an API Key opens the page that creates one.\n\n"
+                + google_sign_in
             )
         elif info.login_terminal_hidden:
             # Nothing opens for the user to read or answer, so what this says
@@ -9588,7 +9673,10 @@ class SetupWizard(wx.Dialog):
             # iteration after the wizard was closed.
             return
         label = backend_label(self.backend)
-        self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
+        self._open_page_btn.Enable(
+            BACKENDS[self.backend].login_with_api_key
+            or (self._login is not None and bool(self._login.url))
+        )
         self._backend_path = self._find_selected_cli()
         if not self._backend_path:
             self._show_signin_status(
@@ -9626,6 +9714,9 @@ class SetupWizard(wx.Dialog):
         # A previous attempt whose terminal is still open on the browser is
         # stopped first, so asking again cannot leave two sign-ins running.
         self._stop_hidden_login()
+        if BACKENDS[self.backend].login_with_api_key:
+            self._sign_in_with_api_key()
+            return
         if self.backend == BACKEND_OPENCODE:
             # opencode signs in by picking a provider and giving it a key or a
             # browser round-trip, which is exactly what /connect does. Shelling
@@ -9830,6 +9921,14 @@ class SetupWizard(wx.Dialog):
 
     def _open_sign_in_page(self) -> None:
         """The browser did not arrive, or it was closed. Open it again."""
+        if BACKENDS[self.backend].login_with_api_key:
+            from google_backend import GEMINI_KEY_PAGE
+
+            if _open_web_page(GEMINI_KEY_PAGE):
+                announce("Opened Google AI Studio's API key page in your browser.")
+            else:
+                announce(f"Could not open a browser. Create a key at {GEMINI_KEY_PAGE}")
+            return
         login = self._login
         if login is None or not login.url:
             announce("There is no sign-in page yet. Choose Sign In first.")
@@ -9874,6 +9973,59 @@ class SetupWizard(wx.Dialog):
             dlg.EndModal(wx.ID_CANCEL)
         except Exception:
             pass
+
+    def _sign_in_with_api_key(self) -> None:
+        """Ask for the Gemini API key both Google backends run on, and keep it.
+
+        Gemini CLI has no sign-in command line, and agy's is a browser round
+        trip that a key makes unnecessary, so the key is asked for here and
+        stored in the system credential store rather than in a settings file.
+        """
+        from google_backend import (
+            GEMINI_KEY_PAGE,
+            key_source,
+            save_gemini_key,
+            use_api_key_for_antigravity,
+        )
+
+        found = key_source()
+        message = (
+            "Paste your Gemini API key from Google AI Studio "
+            f"({GEMINI_KEY_PAGE}).\n\n"
+            "BlindPilot stores it in your system's credential store and uses it "
+            "for both Gemini CLI and Antigravity CLI."
+        )
+        if found:
+            message += f"\n\nA key was already found in {found}. Leave this empty to keep using it."
+        with wx.TextEntryDialog(
+            self,
+            message,
+            "Gemini API Key",
+            style=wx.TE_PASSWORD | wx.OK | wx.CANCEL,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                announce("Sign-in cancelled.")
+                return
+            key = dlg.GetValue().strip()
+        if not key and not found:
+            self._on_login_done(False, "No API key was entered.")
+            return
+        notes = []
+        try:
+            if key:
+                save_gemini_key(key)
+            if self.backend == BACKEND_ANTIGRAVITY:
+                use_api_key_for_antigravity()
+                notes.append(
+                    'Antigravity CLI is now set to use the key ("modelProvider": "gemini" '
+                    "in its settings file), in a terminal too."
+                )
+        except Exception as exc:  # noqa: BLE001 - the reason IS the report
+            self._on_login_done(False, f"The key could not be saved: {exc}")
+            return
+        self._on_login_done(True, "")
+        if notes:
+            announce(" ".join(notes))
 
     def _on_login_done(self, ok: bool, failure: str) -> None:
         if not self:

@@ -2550,6 +2550,12 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path, fa
     monkeypatch.setattr(agent_backends, "_muse_signed_in_checked", lambda: True)
     monkeypatch.setattr(agent_backends, "_muse_version_probe", lambda: "9.9.9")
     monkeypatch.setattr(agent_backends, "_muse_account_lines", lambda: ["Signed in: yes"])
+    # Gemini CLI and Antigravity both run on a Gemini API key; agy is told to
+    # by its own settings file.
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    agy_settings = tmp_path / ".gemini" / "antigravity-cli" / "settings.json"
+    agy_settings.parent.mkdir(parents=True)
+    agy_settings.write_text(json.dumps({"modelProvider": "gemini"}), encoding="utf-8")
 
     for backend in agent_backends.BACKEND_IDS:
         fields = _status_lines(backend_status(backend))

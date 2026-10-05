@@ -1,6 +1,6 @@
 # BlindPilot
 
-A screen-reader-first desktop front end for AI coding CLIs. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, and Command Code in native wxPython windows, so NVDA, JAWS, and VoiceOver read controls instead of a terminal. It runs on Windows, macOS, and Linux. Linux is the least tested of the three.
+A screen-reader-first desktop front end for AI coding CLIs. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, Command Code, Gemini CLI, and Antigravity CLI in native wxPython windows, so NVDA, JAWS, and VoiceOver read controls instead of a terminal. It runs on Windows, macOS, and Linux. Linux is the least tested of the three.
 
 [![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -11,7 +11,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 
 ## What it does
 
-- Runs seven coding agents, picked per tab from Model, Backend. New tabs start on the backend of the tab you are in, and the choice is remembered. Once your tabs use more than one backend, each tab's name, its prompt, the announcement when you switch to it, and the pitch of its send sound all say which backend it sends to.
+- Runs nine coding agents, picked per tab from Model, Backend. New tabs start on the backend of the tab you are in, and the choice is remembered. Once your tabs use more than one backend, each tab's name, its prompt, the announcement when you switch to it, and the pitch of its send sound all say which backend it sends to.
 - Runs every backend in Bypass permissions mode by default, so a task does not stop to ask for approval. Change this under Model, Permission Mode.
 - Splits every answer into rows you can arrow through, one per heading, paragraph, list item, quote, code block, thought, tool call, and tool result.
 - Reads answers aloud as they stream, or stays silent until the whole answer is in.
@@ -47,7 +47,7 @@ Settings live in `%APPDATA%\BlindPilot\config.json` on Windows, `~/Library/Appli
 
 ## Set up a backend
 
-The first-run wizard and Model, Manage Backends find, install, update, and sign in to any of the seven backends. Claude Code, Hermes, and Muse Code use their own installers; on Windows, Muse Code is installed and run inside WSL. Codex, FreeBuff, opencode, and Command Code come from npm; BlindPilot installs Node.js LTS if npm is missing, installs the CLI into a per-user folder, adds it to PATH, and checks that it starts. No administrator rights are needed.
+The first-run wizard and Model, Manage Backends find, install, update, and sign in to any of the nine backends. Claude Code, Hermes, Muse Code, and Antigravity CLI use their own installers; on Windows, Muse Code is installed and run inside WSL. Codex, FreeBuff, opencode, Command Code, and Gemini CLI come from npm; BlindPilot installs Node.js LTS if npm is missing, installs the CLI into a per-user folder, adds it to PATH, and checks that it starts. No administrator rights are needed.
 
 To do it by hand:
 
@@ -72,6 +72,14 @@ opencode providers login
 npm install -g command-code
 command-code login
 
+# Gemini CLI: runs on a Gemini API key from https://aistudio.google.com/apikey
+npm install -g @google/gemini-cli
+setx GEMINI_API_KEY "your-key"   # or paste it into Sign In in the wizard
+
+# Antigravity CLI, see https://antigravity.google/docs/cli/install/
+irm https://antigravity.google/cli/install.ps1 | iex
+agy               # signs in with your Google account, or use a Gemini API key
+
 # Muse Code, see https://developer.meta.com/ai/products/muse-code/
 # On Windows, run these inside WSL.
 curl -fsSL https://dev.meta.ai/install.sh | bash
@@ -83,6 +91,8 @@ hermes model      # pick one, if none is set yet
 ```
 
 Sign In in the wizard runs the backend's own login, reads the sign-in address from its output, speaks it, and opens your browser. Open Sign-in Page opens it again. If the provider hands back a code, BlindPilot asks for it and passes it to the CLI. Hermes is different. Its setup asks questions interactively, so Sign In opens a real terminal window for it. Answer the questions there, then choose Already Signed In.
+
+Gemini CLI and Antigravity CLI run on a Gemini API key. Sign In asks for the key, keeps it in your system's credential store, and uses it for both; Get an API Key opens Google AI Studio's key page. A key in the `GEMINI_API_KEY` environment variable, or the key of a Gemini account you already use in Chat mode, is picked up without asking. For Antigravity, Sign In also sets `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, which is the only switch agy has for running on a key; to keep using your Google account instead, run `agy` in a terminal to sign in and choose Already Signed In. Google stopped serving Gemini CLI to personal Google accounts on 18 June 2026; Gemini Code Assist Standard and Enterprise sign-ins made in Gemini CLI still work.
 
 opencode needs a provider connected to it. Use Model, Connect a Provider, or type `/connect`, or use the wizard. Pick a provider, then paste a key or sign in through the browser.
 
@@ -137,6 +147,8 @@ On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, 
 | Hermes | Gateway JSON-RPC over a local pipe or the network | Yes | Yes | Yes | Yes |
 | Muse Code | MSP JSON-RPC over the stdio of `muse serve`, inside WSL on Windows | Yes, with reasoning effort | Yes | Yes | Yes |
 | Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | Yes | In writing only |
+| Gemini CLI | Headless stream-json CLI, one process per message | Model yes (its auto, pro, flash and flash-lite aliases plus the Gemini API's models), effort no | Yes | No | In writing only |
+| Antigravity CLI | Print mode with stream-json in and out, one process per message | Yes, with reasoning effort up to max | Yes | No | In writing only |
 
 Every backend marked Yes in that column stops its turn and opens a question dialog through a question tool of its own. A model does not always use it: asked to interview you, or told to ask one question at a time, it will often write the question into its answer instead, and Command Code has its question tool withheld from headless runs altogether. A question written into an answer sends no event, so nothing used to announce it and no dialog opened - the turn simply ended, with no sign that anything was waiting on you. BlindPilot now reads the end of each answer, and a turn that ends by asking you something opens the same dialog, on every backend. What you type is sent as your next message. A turn that finished its work and signed off by offering the next step - "Want me to run the tests too?", "Anything else?" - is left to end quietly, because nothing is waiting on that answer and it is how most turns end; an offer that names a fork ("tabs or spaces?") is a decision, so it still asks. Turn the whole thing off under Options if you would rather a turn just end.
 
