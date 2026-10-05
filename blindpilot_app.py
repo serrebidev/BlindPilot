@@ -8701,6 +8701,12 @@ _LOOPBACK_PROGRESS = "Waiting for the sign-in page to open…"
 # sign-in landed either way.
 _HIDDEN_LOGIN_TIMEOUT = 300.0
 
+# How long, and how often, the wizard asks a terminal sign-in whether it has
+# landed (see SetupWizard._watch_for_sign_in). Ten minutes covers a browser
+# sign-in with two-factor; five seconds keeps agy's `models` check infrequent.
+_SIGN_IN_WATCH_SECONDS = 600.0
+_SIGN_IN_WATCH_INTERVAL = 5.0
+
 _LOGIN_NOISE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[()][A-Z0-9])")
 
 
@@ -9161,13 +9167,11 @@ class SetupWizard(wx.Dialog):
         # opencode's sign-in runs through the Connect dialog, which opens the
         # provider's page itself; there is no CLI address for this button to
         # reopen, so it is not offered.
-        self._open_page_btn.Show(self.backend != BACKEND_OPENCODE)
-        # A backend signed in to with a key has no sign-in page; the button
-        # opens the page that hands out the key instead.
-        self._open_page_btn.SetLabel(
-            "Get an API Key" if info.login_with_api_key else "Open Sign-in Page"
+        # Gemini CLI and agy open the browser themselves from their terminal,
+        # so there is no address here to reopen and no button to tab past.
+        self._open_page_btn.Show(
+            self.backend != BACKEND_OPENCODE and not info.login_watch_until_signed_in
         )
-        self._open_page_btn.Enable(info.login_with_api_key)
         self._welcome_text.SetLabel(
             "Welcome to BlindPilot.\n\n"
             "Choose a backend. This wizard checks that it is installed and signed "
@@ -9183,23 +9187,19 @@ class SetupWizard(wx.Dialog):
                 "sign in through your browser. If you have already connected one, or "
                 f"already ran '{login}' in a terminal, choose Already Signed In."
             )
-        elif info.login_with_api_key:
-            google_sign_in = (
-                "To use your Google account instead, run agy in a terminal, sign in "
-                "in the browser it opens, then choose Already Signed In.\n\n"
-                if self.backend == BACKEND_ANTIGRAVITY
-                else "Gemini CLI no longer accepts personal Google accounts. A Gemini "
-                "Code Assist Standard or Enterprise sign-in made in Gemini CLI still "
-                "works: choose Already Signed In.\n\n"
-            )
+        elif info.login_watch_until_signed_in:
             self._signin_intro.SetLabel(
-                f"{label} runs on a Gemini API key from Google AI Studio.\n\n"
-                "Choose Sign In to paste your key. BlindPilot keeps it in your "
-                "system's credential store and uses it for both Gemini CLI and "
-                "Antigravity CLI. A key set in the GEMINI_API_KEY environment "
-                "variable, or the key of a Gemini account in Chat mode, is used "
-                "without asking. Get an API Key opens the page that creates one.\n\n"
-                + google_sign_in
+                f"Sign in to {label} with your Google account.\n\n"
+                f"If you have already signed in to {label} in a terminal, choose "
+                f"Already Signed In. Otherwise choose Sign In: {label} opens in a "
+                "terminal window and starts its Google sign-in in your browser"
+                + (
+                    " (if it asks how to sign in, choose Sign in with Google)"
+                    if self.backend == BACKEND_GEMINI
+                    else ""
+                )
+                + ". When the browser says you are signed in, the wizard notices "
+                "and moves on by itself; you can then close the terminal window."
             )
         elif info.login_terminal_hidden:
             # Nothing opens for the user to read or answer, so what this says
@@ -9334,8 +9334,48 @@ class SetupWizard(wx.Dialog):
         self._stop_login()
         event.Skip()
 
+    def _watch_for_sign_in(self, backend: str, step: int) -> None:
+        """Wait, off the GUI thread, for a terminal sign-in to land.
+
+        Gemini CLI and agy sign in from inside their interactive UI and keep
+        running afterwards, so the terminal closing says nothing. The CLI's own
+        signed-in check is asked every few seconds instead, and the wizard moves
+        on once it answers yes -- while it is still on the sign-in step, for the
+        backend the sign-in was started for.
+        """
+        ticket = getattr(self, "_sign_in_watch", 0) + 1
+        self._sign_in_watch = ticket
+        deadline = time.monotonic() + _SIGN_IN_WATCH_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(_SIGN_IN_WATCH_INTERVAL)
+            try:
+                if not self or self._sign_in_watch != ticket or self.backend != backend:
+                    return
+                if self._step != step:
+                    return
+            except RuntimeError:
+                # The wizard was destroyed while this slept.
+                return
+            try:
+                signed_in = backend_auth_ok(backend)
+            except Exception:  # noqa: BLE001 - a failed check is "not yet"
+                signed_in = False
+            if signed_in:
+                wx.CallAfter(self._on_watched_sign_in, ticket, backend, step)
+                return
+
+    def _on_watched_sign_in(self, ticket: int, backend: str, step: int) -> None:
+        if not self or getattr(self, "_sign_in_watch", 0) != ticket:
+            return
+        if self.backend != backend or self._step != step:
+            return
+        self._on_login_done(True, "")
+        announce(f"{backend_label(backend)} is signed in. You can close its terminal window.")
+
     def _stop_login(self) -> None:
         """Leave no half-finished sign-in running behind a closed wizard."""
+        # A watched terminal sign-in stops being watched too.
+        self._sign_in_watch = getattr(self, "_sign_in_watch", 0) + 1
         self._close_code_dialog()
         login, self._login = self._login, None
         if login is not None:
@@ -9673,10 +9713,7 @@ class SetupWizard(wx.Dialog):
             # iteration after the wizard was closed.
             return
         label = backend_label(self.backend)
-        self._open_page_btn.Enable(
-            BACKENDS[self.backend].login_with_api_key
-            or (self._login is not None and bool(self._login.url))
-        )
+        self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
         self._backend_path = self._find_selected_cli()
         if not self._backend_path:
             self._show_signin_status(
@@ -9714,9 +9751,6 @@ class SetupWizard(wx.Dialog):
         # A previous attempt whose terminal is still open on the browser is
         # stopped first, so asking again cannot leave two sign-ins running.
         self._stop_hidden_login()
-        if BACKENDS[self.backend].login_with_api_key:
-            self._sign_in_with_api_key()
-            return
         if self.backend == BACKEND_OPENCODE:
             # opencode signs in by picking a provider and giving it a key or a
             # browser round-trip, which is exactly what /connect does. Shelling
@@ -9790,6 +9824,8 @@ class SetupWizard(wx.Dialog):
             # Its questions are the user's to answer, so give it a real
             # console and let them read it.
             self._launch_login_terminal([binary, *BACKENDS[self.backend].login_args])
+            if BACKENDS[self.backend].login_watch_until_signed_in:
+                self._watch_for_sign_in(self.backend, self._step)
             return
         login = self._login
         assert login is not None
@@ -9877,7 +9913,13 @@ class SetupWizard(wx.Dialog):
         self._signin_btn.Enable()
         self._already_btn.Enable()
         self._next_btn.Enable()
-        if opened:
+        if opened and BACKENDS[self.backend].login_watch_until_signed_in:
+            self._signin_status.SetLabel(
+                f"{backend_label(self.backend)} has opened in a terminal window. "
+                "Finish the Google sign-in in your browser; the wizard moves on by "
+                "itself once you are signed in."
+            )
+        elif opened:
             self._signin_status.SetLabel(
                 f"{backend_label(self.backend)} setup has opened in a terminal "
                 "window. Answer its questions there, then come back and choose "
@@ -9921,14 +9963,6 @@ class SetupWizard(wx.Dialog):
 
     def _open_sign_in_page(self) -> None:
         """The browser did not arrive, or it was closed. Open it again."""
-        if BACKENDS[self.backend].login_with_api_key:
-            from google_backend import GEMINI_KEY_PAGE
-
-            if _open_web_page(GEMINI_KEY_PAGE):
-                announce("Opened Google AI Studio's API key page in your browser.")
-            else:
-                announce(f"Could not open a browser. Create a key at {GEMINI_KEY_PAGE}")
-            return
         login = self._login
         if login is None or not login.url:
             announce("There is no sign-in page yet. Choose Sign In first.")
@@ -9973,59 +10007,6 @@ class SetupWizard(wx.Dialog):
             dlg.EndModal(wx.ID_CANCEL)
         except Exception:
             pass
-
-    def _sign_in_with_api_key(self) -> None:
-        """Ask for the Gemini API key both Google backends run on, and keep it.
-
-        Gemini CLI has no sign-in command line, and agy's is a browser round
-        trip that a key makes unnecessary, so the key is asked for here and
-        stored in the system credential store rather than in a settings file.
-        """
-        from google_backend import (
-            GEMINI_KEY_PAGE,
-            key_source,
-            save_gemini_key,
-            use_api_key_for_antigravity,
-        )
-
-        found = key_source()
-        message = (
-            "Paste your Gemini API key from Google AI Studio "
-            f"({GEMINI_KEY_PAGE}).\n\n"
-            "BlindPilot stores it in your system's credential store and uses it "
-            "for both Gemini CLI and Antigravity CLI."
-        )
-        if found:
-            message += f"\n\nA key was already found in {found}. Leave this empty to keep using it."
-        with wx.TextEntryDialog(
-            self,
-            message,
-            "Gemini API Key",
-            style=wx.TE_PASSWORD | wx.OK | wx.CANCEL,
-        ) as dlg:
-            if dlg.ShowModal() != wx.ID_OK:
-                announce("Sign-in cancelled.")
-                return
-            key = dlg.GetValue().strip()
-        if not key and not found:
-            self._on_login_done(False, "No API key was entered.")
-            return
-        notes = []
-        try:
-            if key:
-                save_gemini_key(key)
-            if self.backend == BACKEND_ANTIGRAVITY:
-                use_api_key_for_antigravity()
-                notes.append(
-                    'Antigravity CLI is now set to use the key ("modelProvider": "gemini" '
-                    "in its settings file), in a terminal too."
-                )
-        except Exception as exc:  # noqa: BLE001 - the reason IS the report
-            self._on_login_done(False, f"The key could not be saved: {exc}")
-            return
-        self._on_login_done(True, "")
-        if notes:
-            announce(" ".join(notes))
 
     def _on_login_done(self, ok: bool, failure: str) -> None:
         if not self:

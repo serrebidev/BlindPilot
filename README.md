@@ -72,13 +72,13 @@ opencode providers login
 npm install -g command-code
 command-code login
 
-# Gemini CLI: runs on a Gemini API key from https://aistudio.google.com/apikey
+# Gemini CLI
 npm install -g @google/gemini-cli
-setx GEMINI_API_KEY "your-key"   # or paste it into Sign In in the wizard
+gemini --screen-reader   # choose Sign in with Google, finish in the browser, then /quit
 
 # Antigravity CLI, see https://antigravity.google/docs/cli/install/
 irm https://antigravity.google/cli/install.ps1 | iex
-agy               # signs in with your Google account, or use a Gemini API key
+agy                      # signs in with your Google account in the browser
 
 # Muse Code, see https://developer.meta.com/ai/products/muse-code/
 # On Windows, run these inside WSL.
@@ -92,7 +92,7 @@ hermes model      # pick one, if none is set yet
 
 Sign In in the wizard runs the backend's own login, reads the sign-in address from its output, speaks it, and opens your browser. Open Sign-in Page opens it again. If the provider hands back a code, BlindPilot asks for it and passes it to the CLI. Hermes is different. Its setup asks questions interactively, so Sign In opens a real terminal window for it. Answer the questions there, then choose Already Signed In.
 
-Gemini CLI and Antigravity CLI run on a Gemini API key. Sign In asks for the key, keeps it in your system's credential store, and uses it for both; Get an API Key opens Google AI Studio's key page. A key in the `GEMINI_API_KEY` environment variable, or the key of a Gemini account you already use in Chat mode, is picked up without asking. For Antigravity, Sign In also sets `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, which is the only switch agy has for running on a key; to keep using your Google account instead, run `agy` in a terminal to sign in and choose Already Signed In. Google stopped serving Gemini CLI to personal Google accounts on 18 June 2026; Gemini Code Assist Standard and Enterprise sign-ins made in Gemini CLI still work.
+Gemini CLI and Antigravity CLI sign in with your Google account. Sign In opens the CLI in a terminal window (Gemini CLI in its screen-reader mode), and the CLI starts Google's sign-in in your browser; in Gemini CLI, choose Sign in with Google if it asks how to sign in. The wizard checks every few seconds and moves on by itself once the CLI reports you signed in, after which you can close the terminal. API keys are only for Chat mode: agent mode never hands either CLI a key. Google stopped serving Gemini CLI to personal Google accounts on 18 June 2026, so a personal account may be refused there; Gemini Code Assist Standard and Enterprise accounts, and any sign-in you set up in Gemini CLI yourself, keep working.
 
 opencode needs a provider connected to it. Use Model, Connect a Provider, or type `/connect`, or use the wizard. Pick a provider, then paste a key or sign in through the browser.
 
@@ -147,7 +147,7 @@ On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, 
 | Hermes | Gateway JSON-RPC over a local pipe or the network | Yes | Yes | Yes | Yes |
 | Muse Code | MSP JSON-RPC over the stdio of `muse serve`, inside WSL on Windows | Yes, with reasoning effort | Yes | Yes | Yes |
 | Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | Yes | In writing only |
-| Gemini CLI | Headless stream-json CLI, one process per message | Model yes (its auto, pro, flash and flash-lite aliases plus the Gemini API's models), effort no | Yes | No | In writing only |
+| Gemini CLI | Headless stream-json CLI, one process per message | Model yes (its auto, pro, flash and flash-lite choices), effort no | Yes | No | In writing only |
 | Antigravity CLI | Print mode with stream-json in and out, one process per message | Yes, with reasoning effort up to max | Yes | No | In writing only |
 
 Every backend marked Yes in that column stops its turn and opens a question dialog through a question tool of its own. A model does not always use it: asked to interview you, or told to ask one question at a time, it will often write the question into its answer instead, and Command Code has its question tool withheld from headless runs altogether. A question written into an answer sends no event, so nothing used to announce it and no dialog opened - the turn simply ended, with no sign that anything was waiting on you. BlindPilot now reads the end of each answer, and a turn that ends by asking you something opens the same dialog, on every backend. What you type is sent as your next message. A turn that finished its work and signed off by offering the next step - "Want me to run the tests too?", "Anything else?" - is left to end quietly, because nothing is waiting on that answer and it is how most turns end; an offer that names a fork ("tabs or spaces?") is a decision, so it still asks. Turn the whole thing off under Options if you would rather a turn just end.

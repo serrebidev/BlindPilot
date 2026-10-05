@@ -69,9 +69,20 @@ def _worker(cls, recorder: Recorder, *, mode="bypassPermissions", session=None, 
 def home(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setattr(google_backend, "saved_gemini_key", lambda: "")
-    monkeypatch.setattr(google_backend, "chat_account_gemini_key", lambda: "")
     return tmp_path
+
+
+def _gemini_signed_in(home: Path, account: str = "") -> None:
+    gemini = home / ".gemini"
+    gemini.mkdir(exist_ok=True)
+    (gemini / "settings.json").write_text(
+        json.dumps({"security": {"auth": {"selectedType": "oauth-personal"}}}), encoding="utf-8"
+    )
+    (gemini / "oauth_creds.json").write_text(json.dumps({"refresh_token": "r"}), encoding="utf-8")
+    if account:
+        (gemini / "google_accounts.json").write_text(
+            json.dumps({"active": account}), encoding="utf-8"
+        )
 
 
 # -- registration ------------------------------------------------------------
@@ -385,7 +396,7 @@ def test_antigravity_signed_out_says_how_to_sign_in():
             },
         }
     )
-    assert recorder.failed and "Sign in by running agy" in recorder.failed[0]
+    assert recorder.failed and "Sign in with your Google account" in recorder.failed[0]
 
 
 # -- whole turns against stand-in CLIs ----------------------------------------
@@ -414,7 +425,7 @@ def _fake_cli(tmp_path: Path, name: str, lines: list[dict], exit_code: int = 0) 
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shebang script")
-def test_a_whole_gemini_turn_runs_on_the_saved_key(monkeypatch, tmp_path, home):
+def test_a_whole_gemini_turn_runs_on_its_own_sign_in(monkeypatch, tmp_path, home):
     cli = _fake_cli(
         tmp_path,
         "gemini",
@@ -425,18 +436,10 @@ def test_a_whole_gemini_turn_runs_on_the_saved_key(monkeypatch, tmp_path, home):
         ],
     )
     monkeypatch.setattr(google_worker, "find_backend_cli", lambda _backend: cli)
-    monkeypatch.setattr(google_backend, "saved_gemini_key", lambda: "saved-key")
-    seen_env = {}
-    real_turn_env = google_backend.turn_env
-
-    def spy(binary, use_key):
-        env = real_turn_env(binary, use_key)
-        seen_env.update(env)
-        return env
-
-    monkeypatch.setattr(google_backend, "turn_env", spy)
     recorder = Recorder()
     worker = GeminiWorker("Say hi", None, str(tmp_path), "default", **recorder.callbacks())
+    # An agent turn never carries a key BlindPilot chose; the CLI signs itself in.
+    assert "GEMINI_API_KEY" not in worker._env(cli)
     worker.start()
     worker.join(timeout=30)
     assert recorder.completed == ["Hello there."]
@@ -444,7 +447,17 @@ def test_a_whole_gemini_turn_runs_on_the_saved_key(monkeypatch, tmp_path, home):
     assert recorder.sessions == ["s-9"]
     assert recorder.done == 1
     assert (tmp_path / "gemini.stdin").read_text() == "Say hi\n"
-    assert seen_env.get("GEMINI_API_KEY") == "saved-key"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shebang script")
+def test_a_signed_out_gemini_turn_says_how_to_sign_in(monkeypatch, tmp_path, home):
+    cli = _fake_cli(tmp_path, "gemini", [], exit_code=41)
+    monkeypatch.setattr(google_worker, "find_backend_cli", lambda _backend: cli)
+    recorder = Recorder()
+    worker = GeminiWorker("Say hi", None, str(tmp_path), "default", **recorder.callbacks())
+    worker.start()
+    worker.join(timeout=30)
+    assert recorder.failed and "Sign in with your Google account" in recorder.failed[0]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shebang script")
@@ -506,72 +519,63 @@ def test_a_missing_cli_says_how_to_install_it(monkeypatch):
         assert recorder.failed and words in recorder.failed[0]
 
 
-# -- keys, sign-in and settings ------------------------------------------------
+# -- sign-in and settings ------------------------------------------------------
 
 
-def test_the_environment_key_wins_then_ours_then_chat_modes(monkeypatch, home):
-    monkeypatch.setattr(google_backend, "chat_account_gemini_key", lambda: "chat")
-    assert google_backend.gemini_api_key() == "chat"
-    monkeypatch.setattr(google_backend, "saved_gemini_key", lambda: "saved")
-    assert google_backend.gemini_api_key() == "saved"
-    monkeypatch.setenv("GEMINI_API_KEY", "env")
-    assert google_backend.gemini_api_key() == "env"
-
-
-def test_turn_env_adds_the_key_only_when_asked(monkeypatch, home):
-    monkeypatch.setattr(google_backend, "saved_gemini_key", lambda: "saved")
-    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _binary: {"PATH": "/bin"})
-    assert google_backend.turn_env("gemini", use_key=True)["GEMINI_API_KEY"] == "saved"
-    assert "GEMINI_API_KEY" not in google_backend.turn_env("gemini", use_key=False)
-
-
-def test_gemini_signs_in_with_a_key_or_its_own_configured_method(home):
+def test_gemini_is_signed_in_once_its_google_sign_in_is_cached(home):
     assert not backend_auth_ok(BACKEND_GEMINI)
-    settings = home / ".gemini" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text(
-        json.dumps({"security": {"auth": {"selectedType": "vertex-ai"}}}), encoding="utf-8"
-    )
-    assert google_backend.gemini_configured_auth() == "vertex-ai"
-    assert backend_auth_ok(BACKEND_GEMINI)
-
-
-def test_gemini_does_not_override_its_own_configured_sign_in(monkeypatch, home):
-    monkeypatch.setattr(google_backend, "saved_gemini_key", lambda: "saved")
-    worker = _worker(GeminiWorker, Recorder())
-    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _binary: {})
-    assert worker._env("gemini")["GEMINI_API_KEY"] == "saved"
     settings = home / ".gemini" / "settings.json"
     settings.parent.mkdir()
     settings.write_text(
         json.dumps({"security": {"auth": {"selectedType": "oauth-personal"}}}), encoding="utf-8"
     )
-    assert "GEMINI_API_KEY" not in worker._env("gemini")
+    # Chosen but not finished: no cached credentials yet.
+    assert not backend_auth_ok(BACKEND_GEMINI)
+    _gemini_signed_in(home, "someone@example.com")
+    assert backend_auth_ok(BACKEND_GEMINI)
+    assert google_backend.gemini_account_lines() == [
+        "Signed in: yes",
+        "Sign-in method: Google account",
+        "Account: someone@example.com",
+    ]
 
 
-def test_switching_agy_to_the_key_keeps_its_other_settings(home):
-    path = google_backend.antigravity_settings_path()
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        json.dumps({"colorScheme": "dark", "permissions": {"allow": ["command(git)"]}}),
-        encoding="utf-8",
+def test_a_sign_in_somebody_set_up_in_gemini_cli_themselves_counts(home):
+    settings = home / ".gemini" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        json.dumps({"security": {"auth": {"selectedType": "vertex-ai"}}}), encoding="utf-8"
     )
-    assert not google_backend.antigravity_uses_api_key()
-    google_backend.use_api_key_for_antigravity()
-    saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved == {
-        "colorScheme": "dark",
-        "permissions": {"allow": ["command(git)"]},
-        "modelProvider": "gemini",
-    }
-    assert google_backend.antigravity_uses_api_key()
+    assert backend_auth_ok(BACKEND_GEMINI)
 
 
-def test_agy_on_a_key_is_signed_in_only_with_a_key(monkeypatch, home):
-    google_backend.use_api_key_for_antigravity()
-    assert not backend_auth_ok(BACKEND_ANTIGRAVITY)
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+def test_an_api_key_in_the_environment_does_not_sign_in_agent_mode(monkeypatch, home):
+    monkeypatch.setenv("GEMINI_API_KEY", "chat-key")
+    assert not backend_auth_ok(BACKEND_GEMINI)
+
+
+def test_both_backends_sign_in_in_a_terminal_and_are_watched():
+    for backend in (BACKEND_GEMINI, BACKEND_ANTIGRAVITY):
+        info = agent_backends.BACKENDS[backend]
+        assert info.login_needs_terminal
+        assert not info.login_terminal_hidden
+        assert info.login_watch_until_signed_in
+    assert agent_backends.BACKENDS[BACKEND_GEMINI].login_args == ("--screen-reader",)
+    assert agent_backends.BACKENDS[BACKEND_ANTIGRAVITY].login_args == ()
+
+
+def test_agy_is_signed_in_when_it_lists_models(monkeypatch, home):
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "agy")
+    monkeypatch.setattr(
+        agent_backends,
+        "_probe_backend",
+        lambda *_a: (0, "Fetching available models...\nm-1\tModel One\n"),
+    )
     assert backend_auth_ok(BACKEND_ANTIGRAVITY)
+    assert google_backend.antigravity_account_lines() == [
+        "Signed in: yes",
+        "Sign-in method: Google account",
+    ]
 
 
 def test_agy_model_list_is_read_from_its_output(monkeypatch, home):
@@ -595,7 +599,7 @@ def test_agy_model_list_is_read_from_its_output(monkeypatch, home):
     assert not google_backend.antigravity_auth_ok()
 
 
-def test_gemini_models_offer_the_cli_aliases_without_a_key(monkeypatch, home):
+def test_gemini_models_offer_the_cli_aliases(monkeypatch, home):
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "gemini")
     models, efforts, current, _effort, error = google_backend.gemini_model_options()
     assert models == ["auto", "pro", "flash", "flash-lite"]
@@ -629,3 +633,47 @@ def test_settings_files_name_both_google_clis(tmp_path, home):
         BACKEND_ANTIGRAVITY,
         str(home / ".gemini" / "antigravity-cli" / "settings.json"),
     ) in files
+
+
+# -- the wizard watching a terminal sign-in -----------------------------------
+
+
+class _WizardStub:
+    def __init__(self, backend: str, step: int) -> None:
+        self.backend = backend
+        self._step = step
+        self.landed: list[tuple] = []
+
+    def __bool__(self) -> bool:
+        return True
+
+    def _on_watched_sign_in(self, ticket, backend, step) -> None:
+        self.landed.append((ticket, backend, step))
+
+
+def test_the_wizard_moves_on_when_the_terminal_sign_in_lands(monkeypatch):
+    import blindpilot_app
+
+    answers = iter([False, False, True])
+    monkeypatch.setattr(blindpilot_app, "backend_auth_ok", lambda _backend: next(answers))
+    monkeypatch.setattr(blindpilot_app, "_SIGN_IN_WATCH_INTERVAL", 0.0)
+    monkeypatch.setattr(blindpilot_app.wx, "CallAfter", lambda fn, *args: fn(*args))
+    wizard = _WizardStub(BACKEND_ANTIGRAVITY, 2)
+    blindpilot_app.SetupWizard._watch_for_sign_in(wizard, BACKEND_ANTIGRAVITY, 2)
+    assert wizard.landed == [(1, BACKEND_ANTIGRAVITY, 2)]
+
+
+def test_the_watch_stops_when_the_wizard_leaves_the_step(monkeypatch):
+    import blindpilot_app
+
+    wizard = _WizardStub(BACKEND_GEMINI, 2)
+
+    def check(_backend):
+        wizard._step = 3  # the person chose Already Signed In meanwhile
+        return False
+
+    monkeypatch.setattr(blindpilot_app, "backend_auth_ok", check)
+    monkeypatch.setattr(blindpilot_app, "_SIGN_IN_WATCH_INTERVAL", 0.0)
+    monkeypatch.setattr(blindpilot_app.wx, "CallAfter", lambda fn, *args: fn(*args))
+    blindpilot_app.SetupWizard._watch_for_sign_in(wizard, BACKEND_GEMINI, 2)
+    assert wizard.landed == []
