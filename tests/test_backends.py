@@ -2530,6 +2530,8 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path, fa
         lambda _binary, args, _timeout: (
             (0, "9.9.9")
             if args == ["--version"]
+            else (0, "gemini-3.8-flash-high\tGemini 3.8 Flash (High)")
+            if args == ["models"]
             else (0, '{"loggedIn": true}' if args[0] == "auth" else "Logged in using ChatGPT")
         ),
     )
@@ -2550,12 +2552,14 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path, fa
     monkeypatch.setattr(agent_backends, "_muse_signed_in_checked", lambda: True)
     monkeypatch.setattr(agent_backends, "_muse_version_probe", lambda: "9.9.9")
     monkeypatch.setattr(agent_backends, "_muse_account_lines", lambda: ["Signed in: yes"])
-    # Gemini CLI and Antigravity both run on a Gemini API key; agy is told to
-    # by its own settings file.
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    agy_settings = tmp_path / ".gemini" / "antigravity-cli" / "settings.json"
-    agy_settings.parent.mkdir(parents=True)
-    agy_settings.write_text(json.dumps({"modelProvider": "gemini"}), encoding="utf-8")
+    # Gemini CLI's Google sign-in is the credentials it cached; agy answers
+    # `agy models` only when it is signed in.
+    gemini = tmp_path / ".gemini"
+    gemini.mkdir()
+    (gemini / "settings.json").write_text(
+        json.dumps({"security": {"auth": {"selectedType": "oauth-personal"}}}), encoding="utf-8"
+    )
+    (gemini / "oauth_creds.json").write_text("{}", encoding="utf-8")
 
     for backend in agent_backends.BACKEND_IDS:
         fields = _status_lines(backend_status(backend))

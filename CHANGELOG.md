@@ -5,8 +5,8 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 ## v0.31.0 - 2026-10-05
 
 - Gemini CLI and Antigravity CLI are agent backends. Both are driven headless, one process per message: Gemini CLI with its prompt on stdin and `--output-format stream-json`, resumed with `--resume <session id>` (measured at 0.62.0); agy with `--input-format stream-json --output-format stream-json`, resumed with `--conversation <id>` (measured at 1.2.17). agy's plain `-p` waits on a sign-in a windowed run cannot give, where stream-json input fails at once with a result naming the problem, so that form is used. Tool steps are phrased the way Claude Code's are, from each CLI's tool names, and failures are reduced to the API's own message.
-- Both sign in with one Gemini API key, kept in the system credential store and shared; the environment's GEMINI_API_KEY and a Gemini Chat-mode account's key are used without asking. Gemini CLI's own configured sign-in (Vertex AI, Code Assist) is left alone, since the CLI prefers it over the environment. agy runs on the key only once its settings say `"modelProvider": "gemini"`; it has no flag or environment variable for that, so Sign In sets it and says so.
-- Gemini models that cannot hold a conversation (speech, image, video, embedding, live) are left out of Chat mode's model list and the Gemini CLI picker.
+- Both sign in with a Google account, through each CLI's own sign-in: the wizard opens the CLI in a visible terminal (`gemini --screen-reader`, `agy`), the CLI opens the browser, and the credentials it caches are what headless turns run on. Neither CLI exits after signing in, so instead of waiting for the terminal to close the wizard polls the CLI's signed-in check -- Gemini CLI's chosen `oauth-personal` method plus its cached `oauth_creds.json`, agy's `models` list -- and moves on when it says yes. Agent mode hands neither CLI an API key; keys are Chat mode's.
+- Gemini models that cannot hold a conversation (speech, image, video, embedding, live) are left out of Chat mode's model list.
 
 ## v0.30.0 - 2026-09-29
 

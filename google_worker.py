@@ -62,6 +62,7 @@ from agent_backends import (
     find_backend_cli,
     no_window_kwargs,
     own_group_kwargs,
+    subprocess_env,
 )
 from markdown_rows import release_finished, release_remainder
 
@@ -158,6 +159,20 @@ def tool_label(name: str, params: object) -> str:
     return _tool_use_label(_CLAUDE_TOOL_NAMES.get(name, name), renamed)
 
 
+_SIGN_IN_HINT = (
+    " Sign in with your Google account: choose Model, Manage Backends, pick "
+    "{label}, and choose Sign In."
+)
+
+
+def _signed_out(reason: str) -> bool:
+    lowered = reason.casefold()
+    return any(
+        words in lowered
+        for words in ("authentication", "authorization", "not logged in", "log in", "sign in")
+    )
+
+
 def _output_text(value: object) -> str:
     if isinstance(value, str):
         return value
@@ -210,7 +225,9 @@ class _GoogleTurnWorker(_TurnWorker):
         raise NotImplementedError
 
     def _env(self, binary: str) -> dict[str, str]:
-        raise NotImplementedError
+        # The CLI signs itself in from the Google credentials it cached; no
+        # key is handed to an agent turn.
+        return subprocess_env(binary)
 
     def _handle(self, frame: dict) -> None:
         raise NotImplementedError
@@ -334,6 +351,9 @@ class _GoogleTurnWorker(_TurnWorker):
         message += f" (exit code {code})." if code else "."
         if detail:
             message = f"{message} {detail}"
+        # Gemini CLI exits 41 when it has no sign-in it can use headless.
+        if _signed_out(detail) or (self._backend == BACKEND_GEMINI and code == 41):
+            message += _SIGN_IN_HINT.format(label=self._label())
         self._fail(message[:600])
 
     def _teardown(self) -> None:
@@ -432,13 +452,6 @@ class GeminiWorker(_GoogleTurnWorker):
         # stdin is the prompt, so a message beginning with "-" is never a flag.
         return self._prompt.rstrip("\n") + "\n"
 
-    def _env(self, binary: str) -> dict[str, str]:
-        from google_backend import gemini_configured_auth, turn_env
-
-        # Gemini CLI prefers its own configured sign-in over the environment,
-        # so the key is only supplied when its settings choose none.
-        return turn_env(binary, use_key=not gemini_configured_auth())
-
     def _handle(self, frame: dict) -> None:
         kind = str(frame.get("type") or "")
         if kind == "init":
@@ -502,6 +515,8 @@ class GeminiWorker(_GoogleTurnWorker):
         error = frame.get("error")
         message = error.get("message") if isinstance(error, dict) else error
         reason = readable_error(message) or "Gemini CLI reported an error."
+        if _signed_out(reason):
+            reason += _SIGN_IN_HINT.format(label="Gemini CLI")
         self._release_all()
         self._fail(f"Gemini CLI: {reason}"[:600])
 
@@ -551,11 +566,6 @@ class AntigravityWorker(_GoogleTurnWorker):
     def _stdin_text(self) -> str:
         message = {"event": "user", "message": {"content": self._prompt}}
         return json.dumps(message, ensure_ascii=False) + "\n"
-
-    def _env(self, binary: str) -> dict[str, str]:
-        from google_backend import antigravity_uses_api_key, turn_env
-
-        return turn_env(binary, use_key=antigravity_uses_api_key())
 
     def _handle(self, frame: dict) -> None:
         kind = str(frame.get("event") or "")
@@ -639,10 +649,7 @@ class AntigravityWorker(_GoogleTurnWorker):
             readable_error(result.get("error"))
             or f"the turn ended with status {status or 'unknown'}"
         )
-        if "authentication" in reason.casefold():
-            reason += (
-                " Sign in by running agy in a terminal, or choose Sign In in "
-                "BlindPilot's setup to use a Gemini API key."
-            )
+        if _signed_out(reason):
+            reason += _SIGN_IN_HINT.format(label="Antigravity CLI")
         self._release_all()
         self._fail(f"Antigravity CLI: {reason}"[:600])

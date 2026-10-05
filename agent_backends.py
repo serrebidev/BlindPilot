@@ -685,11 +685,11 @@ class BackendInfo:
     # or, worse, means a different file that happens to share the name. Those
     # backends are handed the file itself.
     uploads_attachments: bool = False
-    # Whether signing in means handing over an API key rather than going
-    # through a browser. Gemini CLI and Antigravity CLI both run on a Gemini
-    # API key, and Gemini CLI no longer serves personal Google accounts at all,
-    # so the wizard asks for the key itself instead of opening a sign-in page.
-    login_with_api_key: bool = False
+    # Whether the sign-in terminal stays open after the sign-in lands. Gemini
+    # CLI and Antigravity CLI sign in from inside their own interactive UI,
+    # which keeps running afterwards, so the wizard watches for the CLI to
+    # report itself signed in rather than for the terminal to close.
+    login_watch_until_signed_in: bool = False
 
 
 BACKENDS = {
@@ -825,16 +825,18 @@ BACKENDS = {
         "Gemini CLI",
         "gemini",
         "npm install -g @google/gemini-cli",
-        # Gemini CLI has no sign-in command line; its /auth is a dialog inside
-        # the interactive UI. BlindPilot asks for the Gemini API key instead.
-        (),
+        # Gemini CLI has no sign-in command line: its first run asks how to
+        # sign in, and "Sign in with Google" opens the browser. Started in its
+        # screen-reader mode, so that question reads as plain text.
+        ("--screen-reader",),
         True,
         # No reasoning-level flag: the model choice is the only lever.
         False,
         True,
         # Its /compress is interactive-only; headless turns cannot ask for it.
         supports_compaction=False,
-        login_with_api_key=True,
+        login_needs_terminal=True,
+        login_watch_until_signed_in=True,
     ),
     BACKEND_ANTIGRAVITY: BackendInfo(
         BACKEND_ANTIGRAVITY,
@@ -843,13 +845,15 @@ BACKENDS = {
         "See https://antigravity.google/docs/cli/install/ -- macOS and Linux: "
         "curl -fsSL https://antigravity.google/cli/install.sh | bash -- Windows "
         "PowerShell: irm https://antigravity.google/cli/install.ps1 | iex",
-        # Running `agy` with no arguments is its Google sign-in.
+        # Running `agy` with no arguments is its Google sign-in: on this
+        # machine it opens the browser itself (Antigravity CLI docs).
         (),
         True,
         True,
         True,
         supports_compaction=False,
-        login_with_api_key=True,
+        login_needs_terminal=True,
+        login_watch_until_signed_in=True,
     ),
 }
 
@@ -2216,8 +2220,8 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             BACKEND_ANTIGRAVITY,
             "global",
             home / ".gemini" / "antigravity-cli" / "settings.json",
-            'Applies to every project. "modelProvider": "gemini" makes agy run on your '
-            "Gemini API key; permissions.allow lists the commands it may run unasked.",
+            "Applies to every project. permissions.allow lists the commands agy may run "
+            "unasked in a turn that is not bypassing permissions.",
         ),
     ]
     if project is not None:
