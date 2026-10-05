@@ -337,6 +337,8 @@ BACKEND_OPENCODE = "opencode"
 BACKEND_HERMES = "hermes"
 BACKEND_MUSE = "muse"
 BACKEND_COMMANDCODE = "commandcode"
+BACKEND_GEMINI = "gemini"
+BACKEND_ANTIGRAVITY = "antigravity"
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
 # package and downloaded executable do contain the live picker catalog, so the
 # adapter discovers that catalog at runtime and writes the same setting the
@@ -683,6 +685,11 @@ class BackendInfo:
     # or, worse, means a different file that happens to share the name. Those
     # backends are handed the file itself.
     uploads_attachments: bool = False
+    # Whether signing in means handing over an API key rather than going
+    # through a browser. Gemini CLI and Antigravity CLI both run on a Gemini
+    # API key, and Gemini CLI no longer serves personal Google accounts at all,
+    # so the wizard asks for the key itself instead of opening a sign-in page.
+    login_with_api_key: bool = False
 
 
 BACKENDS = {
@@ -813,6 +820,37 @@ BACKENDS = {
         login_needs_terminal=True,
         login_terminal_hidden=True,
     ),
+    BACKEND_GEMINI: BackendInfo(
+        BACKEND_GEMINI,
+        "Gemini CLI",
+        "gemini",
+        "npm install -g @google/gemini-cli",
+        # Gemini CLI has no sign-in command line; its /auth is a dialog inside
+        # the interactive UI. BlindPilot asks for the Gemini API key instead.
+        (),
+        True,
+        # No reasoning-level flag: the model choice is the only lever.
+        False,
+        True,
+        # Its /compress is interactive-only; headless turns cannot ask for it.
+        supports_compaction=False,
+        login_with_api_key=True,
+    ),
+    BACKEND_ANTIGRAVITY: BackendInfo(
+        BACKEND_ANTIGRAVITY,
+        "Antigravity CLI",
+        "agy",
+        "See https://antigravity.google/docs/cli/install/ -- macOS and Linux: "
+        "curl -fsSL https://antigravity.google/cli/install.sh | bash -- Windows "
+        "PowerShell: irm https://antigravity.google/cli/install.ps1 | iex",
+        # Running `agy` with no arguments is its Google sign-in.
+        (),
+        True,
+        True,
+        True,
+        supports_compaction=False,
+        login_with_api_key=True,
+    ),
 }
 
 BACKEND_IDS = tuple(BACKENDS)
@@ -868,6 +906,13 @@ def normalize_backend(value: object) -> str:
         # value using it should resolve here rather than fall back to Claude.
         "commandcode": BACKEND_COMMANDCODE,
         "cmd": BACKEND_COMMANDCODE,
+        "gemini": BACKEND_GEMINI,
+        "geminicli": BACKEND_GEMINI,
+        "googlegemini": BACKEND_GEMINI,
+        "antigravity": BACKEND_ANTIGRAVITY,
+        "antigravitycli": BACKEND_ANTIGRAVITY,
+        "googleantigravity": BACKEND_ANTIGRAVITY,
+        "agy": BACKEND_ANTIGRAVITY,
     }
     return aliases.get(compact, BACKEND_CLAUDE)
 
@@ -896,6 +941,8 @@ def _fallback_cli_paths(name: str) -> tuple[Path, ...]:
                     home / ".volta" / "bin" / filename,
                     local / "Microsoft" / "WinGet" / "Links" / filename,
                     local / "Programs" / name / filename,
+                    # Antigravity's installer puts agy.exe here.
+                    local / name / "bin" / filename,
                 ]
             )
         return tuple(candidates)
@@ -1003,6 +1050,14 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
         from commandcode_backend import commandcode_auth_ok
 
         return commandcode_auth_ok(timeout=max(timeout, 25))
+    if backend == BACKEND_GEMINI:
+        from google_backend import gemini_auth_ok
+
+        return gemini_auth_ok(timeout)
+    if backend == BACKEND_ANTIGRAVITY:
+        from google_backend import antigravity_auth_ok
+
+        return antigravity_auth_ok(timeout=max(timeout, 30))
     binary = find_backend_cli(backend)
     if not binary:
         return False
@@ -1993,6 +2048,14 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         from commandcode_backend import commandcode_account_lines
 
         lines.extend(commandcode_account_lines())
+    elif backend == BACKEND_GEMINI:
+        from google_backend import gemini_account_lines
+
+        lines.extend(gemini_account_lines())
+    elif backend == BACKEND_ANTIGRAVITY:
+        from google_backend import antigravity_account_lines
+
+        lines.extend(antigravity_account_lines())
     else:
         lines.extend(_opencode_account_lines())
     lines.extend(backend_usage_lines(backend, binary, timeout))
@@ -2143,6 +2206,19 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             home / ".commandcode" / "config.json",
             "Applies to every project. Holds the chosen model, provider, and reasoning effort.",
         ),
+        SettingsFile(
+            BACKEND_GEMINI,
+            "global",
+            home / ".gemini" / "settings.json",
+            "Applies to every project. Holds Gemini CLI's model, sign-in method, and tool rules.",
+        ),
+        SettingsFile(
+            BACKEND_ANTIGRAVITY,
+            "global",
+            home / ".gemini" / "antigravity-cli" / "settings.json",
+            'Applies to every project. "modelProvider": "gemini" makes agy run on your '
+            "Gemini API key; permissions.allow lists the commands it may run unasked.",
+        ),
     ]
     if project is not None:
         entries += [
@@ -2183,6 +2259,12 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
                 "this folder, personal",
                 project / ".commandcode" / "settings.local.json",
                 "Yours alone: normally ignored by git, so it stays on this machine.",
+            ),
+            SettingsFile(
+                BACKEND_GEMINI,
+                "this folder",
+                project / ".gemini" / "settings.json",
+                "Shared: committed to this repository, and overrides your own settings here.",
             ),
         ]
     return entries
@@ -8205,4 +8287,14 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         from commandcode_worker import CommandcodeWorker
 
         return CommandcodeWorker
+    if backend == BACKEND_GEMINI:
+        # Imported on demand, like the rest: a machine without Google's CLIs
+        # pays nothing for them.
+        from google_worker import GeminiWorker
+
+        return GeminiWorker
+    if backend == BACKEND_ANTIGRAVITY:
+        from google_worker import AntigravityWorker
+
+        return AntigravityWorker
     return claude_worker

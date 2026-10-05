@@ -1,3 +1,15 @@
+# BlindPilot 0.31.0
+
+Two new agent backends from Google, and a tidier Gemini model list in Chat mode.
+
+- Gemini CLI is a backend. BlindPilot runs it headless, one process per message, reads its streamed answer, tool steps and results, and carries the conversation to the next message. Permission modes map onto its approval modes (bypass is yolo, accept edits is auto edit, plan is plan). The model picker offers its auto, pro, flash and flash-lite choices plus the models the Gemini API lists for your key. Install it from the setup wizard or Model, Manage Backends; it comes from npm.
+- Antigravity CLI (agy), Google's newer terminal agent, is a backend. It runs in print mode with streamed input and output, one process per message, and resumes the conversation by id. The model picker reads agy's own model list, and reasoning effort goes from low to max. Bypass permissions skips its permission prompts; accept edits and plan use its own modes. The wizard installs it with Google's official installer.
+- Both run on a Gemini API key from Google AI Studio. Sign In in the wizard asks for the key once, keeps it in your system's credential store, and uses it for both; Get an API Key opens the page that creates one. A key in the GEMINI_API_KEY environment variable, or the key of a Gemini account you already use in Chat mode, is picked up without asking. For Antigravity, Sign In also sets "modelProvider": "gemini" in agy's settings file, its only switch for running on a key; to keep your Google account sign-in instead, run agy in a terminal once and choose Already Signed In.
+- Gemini CLI no longer serves personal Google accounts (Google ended that on 18 June 2026), so the API key is the way in for most people. A Gemini Code Assist Standard or Enterprise sign-in made in Gemini CLI is still used as it is.
+- Messages typed while a Gemini CLI or Antigravity turn runs are queued and sent when it finishes, as with Command Code; Steer stops the turn and resumes with your instruction.
+- Errors from either CLI are read as the one sentence that matters, such as "API key not valid. Please pass a valid API key.", instead of several lines of nested JSON.
+- Chat mode's Gemini model list leaves out models that cannot chat, such as speech, image, video, embedding and live-audio models, which failed when picked.
+
 # BlindPilot 0.30.1
 
 Small fix release.

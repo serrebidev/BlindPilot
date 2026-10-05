@@ -17,6 +17,7 @@ from __future__ import annotations
 import agent_backends
 import blindpilot_app
 from commandcode_worker import CommandcodeWorker
+from google_worker import AntigravityWorker, GeminiWorker
 from hermes_worker import HermesWorker
 from muse_worker import MuseWorker
 
@@ -28,6 +29,8 @@ WORKERS = [
     HermesWorker,
     MuseWorker,
     CommandcodeWorker,
+    GeminiWorker,
+    AntigravityWorker,
 ]
 
 

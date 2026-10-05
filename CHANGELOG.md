@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.31.0 - 2026-10-05
+
+- Gemini CLI and Antigravity CLI are agent backends. Both are driven headless, one process per message: Gemini CLI with its prompt on stdin and `--output-format stream-json`, resumed with `--resume <session id>` (measured at 0.62.0); agy with `--input-format stream-json --output-format stream-json`, resumed with `--conversation <id>` (measured at 1.2.17). agy's plain `-p` waits on a sign-in a windowed run cannot give, where stream-json input fails at once with a result naming the problem, so that form is used. Tool steps are phrased the way Claude Code's are, from each CLI's tool names, and failures are reduced to the API's own message.
+- Both sign in with one Gemini API key, kept in the system credential store and shared; the environment's GEMINI_API_KEY and a Gemini Chat-mode account's key are used without asking. Gemini CLI's own configured sign-in (Vertex AI, Code Assist) is left alone, since the CLI prefers it over the environment. agy runs on the key only once its settings say `"modelProvider": "gemini"`; it has no flag or environment variable for that, so Sign In sets it and says so.
+- Gemini models that cannot hold a conversation (speech, image, video, embedding, live) are left out of Chat mode's model list and the Gemini CLI picker.
+
 ## v0.30.0 - 2026-09-29
 
 - Pressing Stop no longer sounds like it did nothing on Muse Code, Command Code and FreeBuff. Each of them reports a stopped turn through the same callback as a finished one, and the window read that as "the turn beat the cancellation": it switched narration back on, played the received cue and read the partial answer aloud, which is exactly what a Stop that failed sounds like. The turn had in fact stopped -- measured live against Muse 1.4.1, mid-tool and before the first token, with the tool cancelled and its file never written. A completion that arrives after Stop is now dropped, decided on the worker's thread as it lands, so an answer that really did finish first is still delivered, and what streamed stays in the transcript. Claude Code, Codex, Hermes and opencode already ignored their own completion after Stop.

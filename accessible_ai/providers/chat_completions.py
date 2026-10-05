@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from threading import Event
 
@@ -42,10 +43,28 @@ def normalize_gemini_model(model_id: str) -> str:
     return model_id.strip().removeprefix(GEMINI_MODEL_PREFIX)
 
 
+# Model families the Gemini API lists that cannot hold a conversation: speech,
+# images, video, embeddings, live audio and the like. Offered in the picker, a
+# chat sent to one fails, so they are left out.
+_NON_CHAT_GEMINI_MODEL = re.compile(
+    r"(embedding|embed|tts|image|imagen|veo|omni|live|transcribe|aqa|learnlm|robotics|computer-use)",
+    re.IGNORECASE,
+)
+
+
+def is_gemini_chat_model(model_id: str) -> bool:
+    """Whether a Gemini API model id can take a conversation turn."""
+    name = normalize_gemini_model(model_id)
+    return name.startswith(("gemini", "gemma")) and not _NON_CHAT_GEMINI_MODEL.search(name)
+
+
 class GeminiProvider(ChatCompletionsProvider):
     def list_models(self) -> list[str]:
         models = {normalize_gemini_model(model) for model in super().list_models()}
-        return sorted(models, key=str.casefold)
+        chat = {model for model in models if is_gemini_chat_model(model)}
+        # Never leave the picker empty because Google renamed a family: an
+        # account whose list holds nothing recognisable still gets it all.
+        return sorted(chat or models, key=str.casefold)
 
     def generate(self, settings: GenerationSettings, cancel: Event) -> Iterator[StreamEvent]:
         effective = GenerationSettings(
