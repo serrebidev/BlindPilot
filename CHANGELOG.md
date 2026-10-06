@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.32.0 - 2026-10-06
+
+- A research and integration design document for "Continue with ChatGPT" sign-in is added to the repository's docs, covering OpenAI's Sign-in with ChatGPT protocol, OAuth 2.0 with PKCE, ID-token validation against OpenAI JWKS, and how a ChatGPT-plan account would share its lifecycle between the chat subsystem and the pooled Codex process. No product code changed; the design awaits review.
+
 ## v0.31.0 - 2026-10-05
 
 - Gemini CLI and Antigravity CLI are agent backends. Both are driven headless, one process per message: Gemini CLI with its prompt on stdin and `--output-format stream-json`, resumed with `--resume <session id>` (measured at 0.62.0); agy with `--input-format stream-json --output-format stream-json`, resumed with `--conversation <id>` (measured at 1.2.17). agy's plain `-p` waits on a sign-in a windowed run cannot give, where stream-json input fails at once with a result naming the problem, so that form is used. Tool steps are phrased the way Claude Code's are, from each CLI's tool names, and failures are reduced to the API's own message.
