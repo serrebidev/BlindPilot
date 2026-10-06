@@ -249,6 +249,16 @@ def test_a_table_cell_holding_markup_reads_as_words():
     assert [row.label for row in rows[1:]] == ["Row: Bold, code", "Row: link, 1"]
 
 
+def test_release_remainder_skips_whitespace_only_tail():
+    from markdown_rows import release_remainder
+
+    said: list[str] = []
+    assert release_remainder("Hello.\n\n", 6, said.append) == 8
+    assert said == []
+    assert release_remainder("Hello. Bye", 6, said.append) == 10
+    assert said == [" Bye"]
+
+
 if __name__ == "__main__":
     import traceback
 
