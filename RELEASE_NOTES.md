@@ -1,3 +1,9 @@
+# BlindPilot 0.32.0
+
+A research and integration design document for ChatGPT sign-in is added to the repository.
+
+- A design document for "Continue with ChatGPT" is added to docs. It researches OpenAI's Sign-in with ChatGPT (SIWC) protocol and proposes how a ChatGPT-plan account would let users reach the public Responses API and the existing Codex CLI backend without an API key, keeping the account lifecycle shared between the chat subsystem and the pooled agent process. The document covers registration, persistent host identity, loopback callback, fresh state/nonce/PKCE per attempt, ID-token validation against OpenAI JWKS, scope checks, protected credential storage outside SQLite, and the responses that surface failures. Status: researched; design awaiting review; product code unchanged.
+
 # BlindPilot 0.31.0
 
 Two new agent backends from Google, and a tidier Gemini model list in Chat mode.
