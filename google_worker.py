@@ -16,7 +16,7 @@ Gemini CLI (measured at 0.62.0)::
     {"type":"error","severity":"error","message":"..."}
     {"type":"result","status":"success"|"error","error":{...},"stats":{...}}
 
-Antigravity CLI (measured at 1.2.17)::
+Antigravity CLI (measured at 1.2.17, rechecked live at 1.3.0)::
 
     agy --input-format stream-json --output-format stream-json
         --disable-slash-commands [--dangerously-skip-permissions | --mode m]
@@ -162,6 +162,18 @@ def tool_label(name: str, params: object) -> str:
 _SIGN_IN_HINT = (
     " Sign in with your Google account: choose Model, Manage Backends, pick "
     "{label}, and choose Sign In."
+)
+
+
+# Google's answer, since June 2026, to Gemini CLI signed in with a personal
+# Google account (IneligibleTierError, UNSUPPORTED_CLIENT). Only an API key or
+# Vertex AI set up in Gemini CLI itself still works.
+_GEMINI_SHUT_OFF = "no longer supported for Gemini Code Assist for individuals"
+_GEMINI_SHUT_OFF_MESSAGE = (
+    "Google no longer lets Gemini CLI sign in with a personal Google account, "
+    "and points people to Antigravity CLI instead. Switch the Backend to "
+    "Antigravity CLI, which signs in with the same Google account. Gemini CLI "
+    "still works with a Gemini API key or Vertex AI set up in Gemini CLI itself."
 )
 
 
@@ -344,9 +356,13 @@ class _GoogleTurnWorker(_TurnWorker):
             tail = list(self._error_lines)
         detail = ""
         for line in reversed(tail):
-            if "error" in line.casefold():
+            # Node stack frames name functions like throwIneligibleError.
+            if "error" in line.casefold() and not line.startswith("at "):
                 detail = readable_error(line)
                 break
+        if _GEMINI_SHUT_OFF in detail:
+            self._fail(_GEMINI_SHUT_OFF_MESSAGE)
+            return
         message = f"{self._label()} stopped before the turn completed"
         message += f" (exit code {code})." if code else "."
         if detail:
@@ -515,6 +531,10 @@ class GeminiWorker(_GoogleTurnWorker):
         error = frame.get("error")
         message = error.get("message") if isinstance(error, dict) else error
         reason = readable_error(message) or "Gemini CLI reported an error."
+        if _GEMINI_SHUT_OFF in reason:
+            self._release_all()
+            self._fail(_GEMINI_SHUT_OFF_MESSAGE)
+            return
         if _signed_out(reason):
             reason += _SIGN_IN_HINT.format(label="Gemini CLI")
         self._release_all()
