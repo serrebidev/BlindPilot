@@ -639,6 +639,7 @@ def test_only_conversation_models_are_offered():
         "gemini-3.8-live",
         "gemini-3.5-transcribe",
         "gemini-omni-1.1-flash",
+        "gemini-2.5-flash-native-audio-latest",
     ):
         assert not is_gemini_chat_model(name), name
 

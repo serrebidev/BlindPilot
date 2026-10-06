@@ -47,7 +47,7 @@ def normalize_gemini_model(model_id: str) -> str:
 # images, video, embeddings, live audio and the like. Offered in the picker, a
 # chat sent to one fails, so they are left out.
 _NON_CHAT_GEMINI_MODEL = re.compile(
-    r"(embedding|embed|tts|image|imagen|veo|omni|live|transcribe|aqa|learnlm|robotics|computer-use)",
+    r"(embedding|embed|tts|audio|image|imagen|veo|omni|live|transcribe|aqa|learnlm|robotics|computer-use)",
     re.IGNORECASE,
 )
 

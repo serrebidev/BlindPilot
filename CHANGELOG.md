@@ -6,6 +6,7 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 
 - A Gemini CLI turn refused because Google no longer serves personal Google accounts there (IneligibleTierError, since June 2026) now says so and points to Antigravity CLI, instead of reading a Node stack-frame line. The setup wizard's Gemini sign-in page warns about it up front. Stack frames are never taken as a turn's error detail.
 - Streamed answers no longer end with a blank row: a whitespace-only tail is not emitted. Shared by Antigravity, Gemini CLI, Command Code and Muse.
+- Chat mode's Gemini model list leaves out native-audio models (gemini-2.5-flash-native-audio-*), which Google's model list returns but which cannot chat. Found live with a real AI Studio key.
 - Antigravity CLI rechecked live at 1.3.0: a tool-using turn and a resumed turn run end to end through the worker.
 
 ## v0.32.0 - 2026-10-06
