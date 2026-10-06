@@ -1,3 +1,12 @@
+# BlindPilot 0.32.1
+
+Clearer Gemini messages, a tidier Gemini model list in Chat mode, and no more blank row after answers.
+
+- When Google refuses a Gemini CLI turn because you signed in with a personal Google account, BlindPilot now says so in plain words and tells you to switch the Backend to Antigravity CLI, which signs in with the same Google account. Before, it read out a line of Node.js error output. Google stopped serving personal accounts in Gemini CLI in June 2026; Gemini CLI still works with a Gemini API key or Vertex AI set up in Gemini CLI itself. The setup wizard's Gemini sign-in page now warns about this before you start.
+- Chat mode's Gemini model list no longer offers native-audio models, which Google lists but which cannot chat.
+- Streamed answers no longer end with an empty row. This affected Antigravity CLI, Gemini CLI, Command Code and Muse.
+- Antigravity CLI 1.3.0 was checked live: tool use and resuming a conversation both work.
+
 # BlindPilot 0.32.0
 
 A research and integration design document for ChatGPT sign-in is added to the repository.

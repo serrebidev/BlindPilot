@@ -2,7 +2,7 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## Unreleased
+## v0.32.1 - 2026-10-06
 
 - A Gemini CLI turn refused because Google no longer serves personal Google accounts there (IneligibleTierError, since June 2026) now says so and points to Antigravity CLI, instead of reading a Node stack-frame line. The setup wizard's Gemini sign-in page warns about it up front. Stack frames are never taken as a turn's error detail.
 - Streamed answers no longer end with a blank row: a whitespace-only tail is not emitted. Shared by Antigravity, Gemini CLI, Command Code and Muse.
