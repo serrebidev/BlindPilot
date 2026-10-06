@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## Unreleased
+
+- A Gemini CLI turn refused because Google no longer serves personal Google accounts there (IneligibleTierError, since June 2026) now says so and points to Antigravity CLI, instead of reading a Node stack-frame line. The setup wizard's Gemini sign-in page warns about it up front. Stack frames are never taken as a turn's error detail.
+- Streamed answers no longer end with a blank row: a whitespace-only tail is not emitted. Shared by Antigravity, Gemini CLI, Command Code and Muse.
+- Antigravity CLI rechecked live at 1.3.0: a tool-using turn and a resumed turn run end to end through the worker.
+
 ## v0.32.0 - 2026-10-06
 
 - A research and integration design document for "Continue with ChatGPT" sign-in is added to the repository's docs, covering OpenAI's Sign-in with ChatGPT protocol, OAuth 2.0 with PKCE, ID-token validation against OpenAI JWKS, and how a ChatGPT-plan account would share its lifecycle between the chat subsystem and the pooled Codex process. No product code changed; the design awaits review.

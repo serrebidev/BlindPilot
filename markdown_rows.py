@@ -470,6 +470,7 @@ def release_remainder(text: str, streamed: int, emit: Callable[[str], None]) -> 
     What the end of a turn calls: nothing more is coming, so the half-written
     edge ``release_finished`` held back is all there will ever be of it.
     """
-    if len(text) > streamed:
+    # A trailing newline is nothing to say; emitting it reads as a blank row.
+    if text[streamed:].strip():
         emit(text[streamed:])
     return len(text)

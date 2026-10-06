@@ -9200,6 +9200,14 @@ class SetupWizard(wx.Dialog):
                 )
                 + ". When the browser says you are signed in, the wizard notices "
                 "and moves on by itself; you can then close the terminal window."
+                + (
+                    "\n\nNote: since June 2026 Google refuses Gemini CLI turns from "
+                    "a personal Google account (free or Google AI Pro) and points to "
+                    "Antigravity CLI. If yours is one, choose Antigravity CLI instead, "
+                    "or set up a Gemini API key in Gemini CLI itself."
+                    if self.backend == BACKEND_GEMINI
+                    else ""
+                )
             )
         elif info.login_terminal_hidden:
             # Nothing opens for the user to read or answer, so what this says

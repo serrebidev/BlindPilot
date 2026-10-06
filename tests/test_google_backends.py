@@ -472,6 +472,25 @@ def test_a_gemini_crash_is_reported_with_its_reason(monkeypatch, tmp_path, home)
     assert recorder.failed == ["Gemini CLI stopped before the turn completed (exit code 1)."]
 
 
+def test_gemini_shut_off_for_personal_accounts_points_to_antigravity():
+    # Real stderr at 0.62.0, June 2026 on: the last "error" line is a stack frame.
+    class Exited:
+        def wait(self, timeout=None):
+            return 1
+
+    recorder = Recorder()
+    worker = _worker(GeminiWorker, recorder)
+    worker._error_lines = [
+        "An unexpected critical error occurred:IneligibleTierError: This client is no "
+        "longer supported for Gemini Code Assist for individuals. To continue using "
+        "Gemini, please migrate to the Antigravity suite of products",
+        "at throwIneligibleOrProjectIdError (file:///gemini-cli/bundle/chunk.js:1:1)",
+    ]
+    worker._finish(Exited())
+    assert recorder.failed and "Antigravity CLI" in recorder.failed[0]
+    assert "throwIneligible" not in recorder.failed[0]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shebang script")
 def test_a_whole_antigravity_turn_sends_the_prompt_as_ndjson(monkeypatch, tmp_path, home):
     cli = _fake_cli(
