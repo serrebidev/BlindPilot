@@ -12484,6 +12484,28 @@ def _bring_to_front() -> None:
         pass
 
 
+def _raise_running_copy() -> bool:
+    """Bring the BlindPilot that is already running to the front (Windows).
+
+    Found by its window class and title, so a folder window that happens to be
+    called BlindPilot is not the one raised. A copy just launched by the user
+    holds the foreground right, which is what lets it hand the focus over.
+    """
+    if platform.system() != "Windows":
+        return False
+    import ctypes
+
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    for window_class in ("wxWindowNR", "wxWindow"):
+        hwnd = user32.FindWindowW(window_class, APP_NAME)
+        if hwnd:
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            return True
+    return False
+
+
 # True for the length of a packaged startup check. Nothing a check does may
 # take the focus of whoever is running it: they are working in another window,
 # and on this application's users that means moving their screen reader too.
@@ -12562,6 +12584,18 @@ def main() -> int:
     # says "Python" when BlindPilot is run from source.
     app.SetAppName(APP_NAME)
     app.SetAppDisplayName(APP_NAME)
+    # One copy per user. A second one shares the config, the history and
+    # Codex's app server with the first and fights it over all three; starting
+    # it again is almost always somebody looking for the window they lost.
+    # Startup checks run beside a working copy and are exempt.
+    instance = (
+        None if gui_startup_smoke else wx.SingleInstanceChecker(f"{APP_NAME}-{wx.GetUserId()}")
+    )
+    if instance is not None and instance.IsAnotherRunning():
+        logging.getLogger("blindpilot").info("another BlindPilot is running; raising it")
+        if not _raise_running_copy():
+            wx.MessageBox("BlindPilot is already running.", APP_NAME, wx.OK | wx.ICON_INFORMATION)
+        return 0
 
     cfg = _load_config()
     # Chosen here, before the first window, because wxWidgets cannot change
