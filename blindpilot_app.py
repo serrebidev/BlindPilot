@@ -4173,6 +4173,8 @@ class ClaudeWorker(threading.Thread):
                         if used:
                             window = getattr(self, "context_tokens", (0, 0))[1]
                             self.context_tokens = (used, window)
+                            # The window is this model's, not a subagent's.
+                            self._context_model = str(message.get("model") or "")
                 for block in message.get("content") or []:
                     if not isinstance(block, dict):
                         continue
@@ -4253,13 +4255,12 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
-                windows = [
-                    int(entry.get("contextWindow") or 0)
-                    for entry in (event.get("modelUsage") or {}).values()
-                    if isinstance(entry, dict)
-                ]
-                if max(windows, default=0) and getattr(self, "context_tokens", None):
-                    self.context_tokens = (self.context_tokens[0], max(windows))
+                usage_by_model = event.get("modelUsage") or {}
+                main = usage_by_model.get(getattr(self, "_context_model", ""))
+                if isinstance(main, dict) and getattr(self, "context_tokens", None):
+                    window = int(main.get("contextWindow") or 0)
+                    if window:
+                        self.context_tokens = (self.context_tokens[0], window)
                 queued = self._count(event.get("queued_turn_count"))
                 if not event.get("is_error") and queued:
                     # A resumed CLI can have a turn of its own to run first.
@@ -6511,7 +6512,7 @@ class SessionPanel(wx.Panel):
         before = SessionPanel._known_context(self)
         window = window or before[1]
         self._context = (used, window)
-        self._context_session = getattr(self, "_session_id", None)
+        self._context_session = SessionPanel._context_owner(self)
         if window and used >= 0.8 * window and not (before[1] and before[0] >= 0.8 * before[1]):
             self._announce(
                 f"{_context_line(used, window)}. Compact Conversation, Ctrl+Shift+K, makes room."
@@ -6524,9 +6525,17 @@ class SessionPanel(wx.Panel):
         is replaced (new conversation, a reopened one, a backend switch), so no
         such place can be missed.
         """
-        if getattr(self, "_context_session", None) != getattr(self, "_session_id", None):
+        if getattr(self, "_context_session", None) != SessionPanel._context_owner(self):
             return (0, 0)
         return getattr(self, "_context", (0, 0))
+
+    def _context_owner(self) -> tuple:
+        """The conversation a reading belongs to. A backend picked since the
+        last message starts a new one on the next, whatever the id says."""
+        session = getattr(self, "_session_id", None)
+        backend = getattr(self, "_session_backend", None)
+        selected = self.selected_backend() if hasattr(self, "selected_backend") else backend
+        return (backend, session) if selected == backend else (selected, None)
 
     def _session_status_lines(self) -> list[str]:
         """What this tab will do with the next message, as the report says it."""
