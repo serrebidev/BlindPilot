@@ -70,6 +70,7 @@ import diagnostics
 from certificates import open_url
 from conversation_list import make_conversation_list
 from app_updater import (
+    GITHUB_REPOSITORY,
     ReleaseInfo,
     UpdateError,
     clear_pending_failure,
@@ -4675,6 +4676,123 @@ class FormattedView(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
             return
         event.Skip()
+
+
+def _speech_route() -> str:
+    """How announcements reach a screen reader here, for a bug report."""
+    if platform.system() == "Darwin":
+        return "VoiceOver announcements" if _MAC_ANNOUNCE else "none (AppKit missing)"
+    if platform.system() == "Linux":
+        return "ATK announcements to Orca"
+    return "accessible_output2" if _SPEAKER is not None else "none found"
+
+
+def bug_report_facts(backend: str, app_mode: str) -> str:
+    """What a bug report carries besides your words. Never a prompt, an
+    answer, a folder or a file name: only versions and settings."""
+    return "\n".join(
+        [
+            f"BlindPilot: {APP_VERSION}",
+            f"System: {platform.platform()}",
+            f"Python: {platform.python_version()}",
+            f"wxPython: {wx.version()}",
+            f"Mode: {app_mode}",
+            # Chat mode talks to a provider API; no agent backend is in use.
+            "Backend: none, Chat mode"
+            if app_mode == APP_MODE_CHAT
+            else f"Backend: {backend_label(backend)}",
+            f"Narration: {SETTINGS.narration}",
+            f"Live activity: {SETTINGS.live_rows}, spoken: {SETTINGS.speak_live}",
+            f"Responses as text field: {SETTINGS.text_view}",
+            f"Screen reader output: {_speech_route()}",
+        ]
+    )
+
+
+def bug_report_body(summary: str, happened: str, expected: str, steps: str, facts: str) -> str:
+    """The issue text, in the order a maintainer reads it."""
+    return "\n\n".join(
+        [
+            f"## What happened\n\n{happened or summary}",
+            f"## What I expected\n\n{expected or 'Not given.'}",
+            f"## Steps\n\n{steps or 'Not given.'}",
+            f"## Versions and settings\n\n```\n{facts}\n```",
+        ]
+    )
+
+
+class BugReportDialog(wx.Dialog):
+    """Help, Report a Bug: describe it, see exactly what else goes, file it.
+
+    Open on GitHub copies the report and opens GitHub's new-issue page with it
+    filled in; Copy Report only copies it, for anyone without a GitHub account
+    to paste into the Telegram group or an email instead.
+    """
+
+    def __init__(self, parent: wx.Window, facts: str):
+        super().__init__(
+            parent, title="Report a Bug", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
+        )
+        self._facts = facts
+        pad = self.FromDIP(PAD_DIALOG)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        def field(label: str, lines: int, extra: int = 0) -> wx.TextCtrl:
+            sizer.Add(wx.StaticText(self, label=label), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            # Windows cannot make a text box read-only after it is made.
+            style = (wx.TE_MULTILINE if lines > 1 else 0) | extra
+            box = wx.TextCtrl(self, style=style)
+            box.SetName(label.replace("&", "").rstrip(":"))
+            box.SetMinSize(self.FromDIP(wx.Size(560, 22 * lines)))
+            sizer.Add(box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+            return box
+
+        self.summary = field("&Summary:", 1)
+        self.happened = field("&What happened:", 4)
+        self.expected = field("What you e&xpected:", 3)
+        self.steps = field("S&teps to make it happen:", 4)
+        included = field("&Also included (nothing from your conversations):", 6, wx.TE_READONLY)
+        included.SetValue(facts)
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        for label, action in (
+            ("&Open on GitHub", self._open_github),
+            ("&Copy Report", self._copy),
+        ):
+            button = wx.Button(self, label=label)
+            button.Bind(wx.EVT_BUTTON, lambda _e, act=action: act())
+            buttons.Add(button, 0, wx.RIGHT, self.FromDIP(PAD))
+        buttons.Add(wx.Button(self, wx.ID_CANCEL, "Close"))
+        sizer.Add(buttons, 0, wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+        self.summary.SetFocus()
+
+    def _body(self) -> str:
+        return bug_report_body(
+            self.summary.GetValue().strip(),
+            self.happened.GetValue().strip(),
+            self.expected.GetValue().strip(),
+            self.steps.GetValue().strip(),
+            self._facts,
+        )
+
+    def _copy(self) -> bool:
+        text = f"{self.summary.GetValue().strip()}\n\n{self._body()}"
+        if not _copy_to_clipboard(text):
+            announce("Error: Could not access clipboard")
+            return False
+        announce("Report copied")
+        return True
+
+    def _open_github(self) -> None:
+        title = self.summary.GetValue().strip()
+        if not title:
+            announce("Type a summary first")
+            self.summary.SetFocus()
+            return
+        self._copy()
+        query = urllib.parse.urlencode({"title": title, "body": self._body()[:6000]})
+        wx.LaunchDefaultBrowser(f"https://github.com/{GITHUB_REPOSITORY}/issues/new?{query}")
+        self.EndModal(wx.ID_OK)
 
 
 class ReadView(wx.Dialog):
@@ -11483,6 +11601,12 @@ class MainFrame(wx.Frame):
             "Open &Log Folder",
             "Show the folder BlindPilot writes its diagnostics to",
         )
+        self._menu_item(
+            help_menu,
+            "&Report a Bug…",
+            "Describe a problem and file it on GitHub, with the versions BlindPilot runs on",
+            self._report_bug,
+        )
         help_menu.AppendSeparator()
         about_item = help_menu.Append(
             wx.ID_ABOUT,
@@ -12122,6 +12246,12 @@ class MainFrame(wx.Frame):
             # Nothing on screen changes yet, so without this the new choice
             # would seem to have done nothing.
             announce(APPEARANCE_RESTART_NOTE)
+
+    def _report_bug(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        backend = page.selected_backend() if isinstance(page, SessionPanel) else self._backend
+        with BugReportDialog(self, bug_report_facts(backend, self._app_mode)) as dlg:
+            dlg.ShowModal()
 
     def _show_about(self) -> None:
         description = about_description()
