@@ -22,6 +22,7 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 from typing import Callable, List, Optional
@@ -372,7 +373,13 @@ _TRANSCRIPT_CUES = {
 def _transcript_block(row: Row) -> str:
     """One row rendered for the clipboard, cue included, code in a fence."""
     if row.kind == "code":
-        return f"```{row.lang_token or ''}\n{row.payload}\n```"
+        # Longer than any run of the fence character inside, or a ``` line in
+        # the code would close the fence early. Tildes when the language token
+        # holds a backtick, which CommonMark forbids after a backtick fence.
+        mark = "~" if "`" in (row.lang_token or "") else "`"
+        runs = re.findall(re.escape(mark) + "+", row.payload)
+        fence = mark * max(3, max((len(run) for run in runs), default=0) + 1)
+        return f"{fence}{row.lang_token or ''}\n{row.payload}\n{fence}"
     cue = _TRANSCRIPT_CUES.get(row.kind)
     if cue:
         return f"{cue} {row.payload}" if row.payload else cue
@@ -407,17 +414,30 @@ def reassemble(rows: List[Row], response_number: int) -> str:
     return "\n\n".join(blocks)
 
 
-def reassemble_all(rows: List[Row]) -> str:
+# For a page somebody reads: raw HTML in an answer is shown as text, never run.
+_MD_PAGE = MarkdownIt("commonmark", {"html": False}).enable("table")
+
+
+def markdown_page(text: str, title: str) -> str:
+    """A whole HTML page of `text` rendered as Markdown, for browse mode."""
+    return (
+        '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+        f"<title>{html.escape(title)}</title></head>\n<body>\n"
+        f"<h1>{html.escape(title)}</h1>\n{_MD_PAGE.render(text)}</body></html>\n"
+    )
+
+
+def reassemble_all(rows: List[Row], header: str = "Response {}") -> str:
     """Every row in the list, start to finish, for 'copy whole conversation'.
 
     Same rendering as :func:`reassemble`, in one run over the whole list, with
     each response header kept as a ``Response N`` line so the responses stay
-    told apart.
+    told apart. An export passes ``"## Response {}"`` to make those headings.
     """
     blocks: List[str] = []
     for row in rows:
         if row.kind == "header":
-            blocks.append(f"Response {row.response_number}")
+            blocks.append(header.format(row.response_number))
             continue
         block = _transcript_block(row)
         if block:

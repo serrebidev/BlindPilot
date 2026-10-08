@@ -163,6 +163,7 @@ from markdown_rows import (
     _strip_noise,
     parse_response,
     reassemble,
+    markdown_page,
     reassemble_all,
 )
 from session_history import (
@@ -8606,6 +8607,65 @@ class SessionPanel(wx.Panel):
         n = len(self._rows)
         self._announce(f"Copied whole conversation, {n} {'row' if n == 1 else 'rows'}")
 
+    def export_conversation(self) -> None:
+        """Save every row to a file (Conversation menu, Ctrl+E).
+
+        The same text Copy Whole Conversation puts on the clipboard, so a long
+        conversation can be kept, read in an editor or shared without pasting
+        it somewhere first. Markdown and the web page give each response a
+        heading, so browse mode moves between them with H. Offered in
+        Documents rather than the project folder, where a stray transcript
+        would end up in somebody's commit.
+        """
+        if not self._rows:
+            self._announce("Error: Nothing to export yet")
+            return
+        name = _tab_label(getattr(self, "tab_title", ""), self.cwd)
+        name = " ".join(re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", name).split()).strip(".")
+        name = name or "Conversation"
+        documents = os.path.join(os.path.expanduser("~"), "Documents")
+        with wx.FileDialog(
+            self,
+            "Export Conversation",
+            defaultDir=documents if os.path.isdir(documents) else os.path.expanduser("~"),
+            defaultFile=f"{name} {time.strftime('%Y-%m-%d')}.md",
+            wildcard="Markdown (*.md)|*.md|Web page (*.html)|*.html|Text (*.txt)|*.txt",
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            path = dlg.GetPath()
+            chosen = (".md", ".html", ".txt")[max(0, min(dlg.GetFilterIndex(), 2))]
+        kind = os.path.splitext(path)[1].lower()
+        if kind not in (".md", ".html", ".htm", ".txt"):
+            # GTK and macOS can hand back the name as typed, with no extension
+            # from the type chosen; the type is then what says the format.
+            path, kind = path + chosen, chosen
+            # The dialog only asked about the name as typed, not this one.
+            if os.path.exists(path) and (
+                wx.MessageBox(
+                    f"{os.path.basename(path)} already exists. Replace it?",
+                    "Export Conversation",
+                    wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+                    self,
+                )
+                != wx.YES
+            ):
+                return
+        if kind == ".txt":
+            text = reassemble_all(self._rows)
+        else:
+            text = reassemble_all(self._rows, header="## Response {}")
+        if kind in (".html", ".htm"):
+            text = markdown_page(text, name)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text.rstrip("\n") + "\n")
+        except OSError as exc:
+            self._announce(f"Error: Could not export the conversation: {exc}")
+            return
+        self._announce(f"Exported conversation to {os.path.basename(path)}")
+
     # ----- Response navigation -----
     def jump_to_latest_response(self) -> None:
         """Cycle through response headers on each Cmd+R press.
@@ -11761,6 +11821,12 @@ class MainFrame(wx.Frame):
             "Say again the last thing BlindPilot announced",
             repeat_last_announcement,
         )
+        add(
+            menu,
+            "E&xport Conversation…\tCtrl+E",
+            "Save this conversation to a Markdown or text file",
+            self._export_active,
+        )
         return menu
 
     def _side_chat_active(self) -> None:
@@ -12409,6 +12475,11 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_find()
+
+    def _export_active(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.export_conversation()
 
     def _create_desktop_shortcut(self) -> None:
         try:

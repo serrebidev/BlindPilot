@@ -22,7 +22,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 - Lets you steer a running task with a new message, or stop it and keep what it produced. Stop also stops the subagents the task started.
 - Lists the subagents a task has running, and shows what each one is doing.
 - Attaches files and pasted images.
-- Searches responses and copies a code block, a response, or the whole conversation.
+- Searches responses and copies a code block, a response, or the whole conversation, or exports the conversation as Markdown, a web page, or plain text.
 - Lists the models and effort levels the installed CLI reports.
 - Plays optional sounds for sent, working, received, and failed.
 - Installs, updates, adds to PATH, and signs in to any backend from a wizard.
@@ -104,7 +104,7 @@ Every action is in the menu bar except three chords. Ctrl+L focuses the prompt, 
 
 File. New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, shown only when Hermes is the backend), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
 
-Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R).
+Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
 
 Model. Backend (one radio item per CLI), Model and Effort (Ctrl+Shift+E), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Session Status, Backend Settings, Manage Backends, Connect a Provider.
 
@@ -127,6 +127,7 @@ Follow everything, the default, speaks every tool call, result, and subagent lin
 - Ctrl+Shift+K compact this conversation. Ctrl+Shift+N start a fresh one.
 - Ctrl+F search responses. Ctrl+R jump to the latest.
 - Ctrl+Shift+R say the last announcement again, after a keystroke cut it off.
+- Ctrl+E export the conversation as Markdown, a web page, or plain text, offered in Documents.
 - Ctrl+Shift+E choose model and reasoning effort.
 - Ctrl+/ slash commands. Ctrl+. stop the running task.
 - Ctrl+Shift+A attach files. Ctrl+Shift+M cycle permission modes.
