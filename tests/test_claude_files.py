@@ -82,3 +82,130 @@ def test_a_nested_folder_finds_the_repository_roots_skills_and_agents_md(tmp_pat
     assert str(repo / ".claude" / "settings.json") not in [
         path for path, _label in found["Settings"]
     ]
+
+
+def test_a_memory_added_here_is_one_claude_code_can_read_and_is_indexed(tmp_path):
+    """Same front matter Claude Code writes, and a line in MEMORY.md."""
+    folder = tmp_path / "memory"
+
+    path = app.add_memory(folder, "Ship All", 'Build "every" platform', "feedback", "Body.\n")
+
+    assert path == folder / "ship-all.md"
+    assert app._front_matter(path) == {
+        "name": "ship-all",
+        "description": 'Build "every" platform',
+    }
+    assert "\n  type: feedback\n" in path.read_text(encoding="utf-8")
+    assert path.read_text(encoding="utf-8").endswith("---\n\nBody.\n")
+    assert (folder / "MEMORY.md").read_text(encoding="utf-8").splitlines()[-1] == (
+        '- [ship-all](ship-all.md) — Build "every" platform'
+    )
+
+
+def test_adding_never_replaces_an_existing_memory(tmp_path):
+    app.add_memory(tmp_path, "a", "one", "user", "first")
+
+    try:
+        app.add_memory(tmp_path, "A", "two", "user", "second")
+    except FileExistsError:
+        pass
+    else:
+        raise AssertionError("an existing memory was replaced")
+    assert "first" in (tmp_path / "a.md").read_text(encoding="utf-8")
+
+
+def test_deleting_a_memory_drops_its_index_lines_and_nothing_else(tmp_path):
+    _write(tmp_path / "old.md", "x")
+    _write(
+        tmp_path / "MEMORY.md",
+        "# Memory index\n- [Old](old.md) — gone\n- old: also gone\n- [Keep](keep.md) — stays\n",
+    )
+
+    app.delete_memory(tmp_path / "old.md")
+
+    assert not (tmp_path / "old.md").exists()
+    assert (tmp_path / "MEMORY.md").read_text(encoding="utf-8") == (
+        "# Memory index\n- [Keep](keep.md) — stays\n"
+    )
+
+
+def test_the_tabs_own_memory_folder_is_offered_first_even_before_it_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    _write(tmp_path / "projects" / "other" / "memory" / "a.md")
+
+    folders = app.memory_folders(r"C:\work\app")
+
+    assert folders == [
+        tmp_path / "projects" / "C--work-app" / "memory",
+        tmp_path / "projects" / "other" / "memory",
+    ]
+    assert app.memory_folders(None) == [tmp_path / "projects" / "other" / "memory"]
+
+
+def test_command_code_tastes_are_listed_added_and_deleted_one_line_at_a_time(tmp_path):
+    """A taste is one bullet of taste/<category>/taste.md, so it is handled as one."""
+    _write(
+        tmp_path / "taste" / "debugging" / "taste.md",
+        "# Debugging taste\n\n- Probe first.\n- Read logs.\n",
+    )
+
+    app.add_taste(tmp_path, "debugging", "Bound every curl.")
+    app.add_taste(tmp_path, "", "Be  brief.")
+    listed = app.tastes(tmp_path)
+
+    assert [label for _key, label in listed] == [
+        "debugging: Bound every curl.",
+        "debugging: Probe first.",
+        "debugging: Read logs.",
+        "general: Be brief.",
+    ]
+    assert app.entry_text(listed[1][0], "taste")[1] == "Probe first."
+    app.delete_entry(listed[1][0], "taste")
+    assert (tmp_path / "taste" / "debugging" / "taste.md").read_text(encoding="utf-8") == (
+        "# Debugging taste\n\n- Read logs.\n- Bound every curl.\n"
+    )
+    assert (tmp_path / "taste" / "taste.md").read_text(
+        encoding="utf-8"
+    ) == "# General taste\n\n- Be brief.\n"
+
+
+def test_hermes_memory_entries_are_split_on_the_section_sign(tmp_path):
+    memory = tmp_path / "memories" / "MEMORY.md"
+    _write(memory, "first\nline two\n§\nsecond")
+
+    app.add_hermes_memory(memory, "third")
+    listed = app.hermes_memories(tmp_path)
+
+    assert [label for _key, label in listed] == [
+        "MEMORY: first line two",
+        "MEMORY: second",
+        "MEMORY: third",
+    ]
+    app.delete_entry(listed[1][0], "hermes")
+    assert memory.read_text(encoding="utf-8") == "first\nline two\n§\nthird"
+
+
+def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path, monkeypatch):
+    monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    _write(tmp_path / ".commandcode" / "AGENTS.md")
+    (tmp_path / "hermes").mkdir()
+    _write(tmp_path / ".gemini" / "GEMINI.md")
+
+    names = [f"{g.backend} {g.kind}" for g in app.agent_files(None)]
+
+    claude, cc, hermes, gemini = (
+        app.BACKEND_LABELS[b] for b in ("claude", "commandcode", "hermes", "gemini")
+    )
+    # Claude Code memories, Command Code tastes and Hermes memories are offered
+    # empty, so the first can be added; nothing else is listed when empty.
+    # In the backends' own order: Hermes is listed before Command Code.
+    assert names == [
+        f"{claude} Memories",
+        f"{hermes} Memories",
+        f"{cc} Tastes",
+        f"{cc} Instructions",
+        f"{gemini} Instructions",
+    ]

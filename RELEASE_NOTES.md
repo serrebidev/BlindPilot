@@ -1,3 +1,13 @@
+# BlindPilot 0.35.0
+
+What Claude Knows becomes What Agents Know, and you can now add and remove what your agents remember.
+
+- Every backend, not just Claude Code. Ctrl+Shift+I, in the Model menu, now lists what each of your coding agents keeps about you, grouped by backend: Claude Code's memories, instructions, skills, agents, commands and settings; Command Code's tastes, instructions, skills and agents; Hermes's memories and skills; Codex's instructions, memories and skills; Gemini CLI's GEMINI.md and skills; opencode's instructions and agents; and the settings files of all of them. Each line says how many there are, and only what exists is listed.
+- Add and delete memories. In Claude Code memories, Add Memory asks for a name, a one-line description, a type, the folder, and the memory itself, and writes it the way Claude Code does, with a line in MEMORY.md. Delete removes a memory and its MEMORY.md line, after asking. Press Delete in the list, or Alt+A to add.
+- Command Code tastes, one at a time. Command Code learns your preferences as tastes, one line each in a file per category. The list shows each taste with its category, Delete removes just that one, and Add Taste puts a new one in a category you pick or type.
+- Hermes memories, one entry at a time. Hermes keeps notes about your work in MEMORY.md and about you in USER.md. Each entry is listed on its own, and can be deleted or added the same way.
+- Everything else is read only here. Enter reads it, and Edit in Your Editor opens its file.
+
 # BlindPilot 0.34.1
 
 What Claude Knows sees more of your project.

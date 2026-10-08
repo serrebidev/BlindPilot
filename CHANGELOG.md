@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.35.0 - 2026-10-08
+
+- What Claude Knows is now What Agents Know (Ctrl+Shift+I): every backend's memories, tastes, instructions, skills, agents and settings, grouped by backend and kind with counts (Claude Code, Codex, Hermes, Command Code, Gemini CLI, opencode, and the settings of the rest).
+- Add and delete, after asking: Claude Code memories (front-matter file plus its MEMORY.md line, which deleting also removes), Command Code tastes (one bullet of taste/<category>/taste.md, new categories allowed), and Hermes memories (one §-separated entry of MEMORY.md or USER.md). Delete key and Alt+A in the list.
+- Front-matter descriptions in double quotes are decoded, so quotes read as quotes.
+
 ## v0.34.1 - 2026-10-08
 
 - What Claude Knows lists the skills, agents, commands and rules in the .claude folders above a nested tab folder, up to the repository root, and lists AGENTS.md with the CLAUDE.md files. Settings still come from the working folder only (#74, from Codex review of #73).
