@@ -245,6 +245,7 @@ def _model_menu(frame):
     """
     frame._build_backend_menu = lambda: wx.Menu()
     frame._build_permission_mode_menu = lambda: wx.Menu()
+    frame._build_museai_menu = lambda: wx.Menu()
     for name in (
         "_model_active",
         "_connect_active",

@@ -1,6 +1,7 @@
 """One muse.ai turn: send the message to the agent and wait for its reply.
 
-The conversation is a muse.ai side chat. A tab's first message opens one
+The conversation is the main chat or a side chat. Selecting the backend opens
+the main chat; a new conversation's first message opens a side chat
 (``muse-cli session-start``) and reports its id as the session, so later
 messages and a reopened conversation land in the same chat. The message goes
 out with ``muse-cli send --thread <id> --wait <seconds>``, which watches the
@@ -88,6 +89,66 @@ class MuseAiWorker(_TurnWorker):
         # The newest event seen in the chat, for the tab to watch past.
         self.last_seq = 0
         self._step_said = ""
+        self._approval_seen: set[str] = set()
+        self._approval_error_said = False
+
+    def _check_approvals(self, binary: str) -> None:
+        from museai_backend import (
+            museai_result,
+            museai_pending,
+            museai_item_text,
+            museai_decision_args,
+            museai_allowed_decisions,
+        )
+
+        code, out, _err = self._run(binary, ["raw", "egress.approvals"], 60)
+        try:
+            pending = museai_pending(museai_result(_json_from(out) if code == 0 else None))
+        except ValueError:
+            if not self._approval_error_said:
+                self._on_activity(
+                    "tool",
+                    "muse.ai approvals could not be checked. Open Model, muse.ai, Approvals to retry.",
+                )
+                self._approval_error_said = True
+            return
+        for approval in pending:
+            approval_id = str(approval["approval_id"])
+            if approval_id in self._approval_seen or self._cancelled:
+                continue
+            self._approval_seen.add(approval_id)
+            try:
+                allowed = museai_allowed_decisions(approval)
+                request = museai_item_text("approvals", dict(approval, _pending=True))
+            except ValueError:
+                self._on_activity(
+                    "tool",
+                    "muse.ai returned unreadable approval details. Review the request in the muse.ai app.",
+                )
+                continue
+            if self._on_permission is None or not {"allow_once", "deny"}.issubset(allowed):
+                self._on_activity(
+                    "tool",
+                    "muse.ai needs an approval. Open Model, muse.ai, Approvals to review it.",
+                )
+                continue
+            answer = self._on_permission(
+                "Perform an action",
+                {"Request": request},
+                [],
+            )
+            if self._cancelled:
+                return
+            decision = "allow_once" if answer.get("behavior") == "allow" else "deny"
+            args = museai_decision_args(approval_id, decision, str(answer.get("message") or ""))
+            code, out, _err = self._run(binary, args, 60)
+            try:
+                museai_result(_json_from(out) if code == 0 else None)
+            except ValueError:
+                self._on_activity(
+                    "tool",
+                    "The muse.ai approval decision could not be sent. Open Model, muse.ai, Approvals to retry.",
+                )
 
     def steer(self, text: str) -> bool:
         # The message is already with the agent; a second one waits its turn.
@@ -136,6 +197,7 @@ class MuseAiWorker(_TurnWorker):
         """The chat's finished agent messages, oldest first, as (seq, message
         id, text, direct). Direct means an answer to a message, rather than an
         update the agent posted on its own (those carry a reply-to id)."""
+        self._check_approvals(binary)
         code, out, _err = self._run(
             binary, ["history", "--thread", session, "--limit", "40", "--raw"], 60
         )
@@ -219,6 +281,8 @@ class MuseAiWorker(_TurnWorker):
         # Everything the agent says in this chat from here on is part of the
         # turn: its status updates while it works as well as the answer.
         baseline = max((m[0] for m in self._messages(binary, session)), default=0)
+        if self._cancelled:
+            return
         relayed: set[str] = set()
 
         def relay(skip: str = "", wait: bool = True) -> None:

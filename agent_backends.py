@@ -1189,7 +1189,7 @@ def _probe_backend(binary: str, args: list[str], timeout: int) -> tuple[Optional
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
-            env=subprocess_env(binary),
+            env={**subprocess_env(binary), "PYTHONIOENCODING": "utf-8"},
             **no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -2330,6 +2330,10 @@ def subprocess_env(binary: str) -> dict[str, str]:
     runtime BlindPilot manages itself.
     """
     env = os.environ.copy()
+    if Path(binary).stem.casefold() == "muse-cli":
+        root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        patch = str(root / "museai_cli_patch")
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, (patch, env.get("PYTHONPATH", ""))))
     # Even --version/--list-models can start Command Code's detached updater.
     # Keep updates in BlindPilot's logged, hidden npm installer, including
     # when a backend launches Command Code as a child of its own.

@@ -26,7 +26,7 @@ def _event(seq, text, message_id=None, status="completed"):
     }
 
 
-def _worker(monkeypatch, send, histories=(), start=None, session_id=None):
+def _worker(monkeypatch, send, histories=(), start=None, session_id=None, approvals=()):
     """`histories` are successive answers to `history`; the last one repeats."""
     calls, events = [], []
     pending = list(histories) or [[]]
@@ -41,6 +41,10 @@ def _worker(monkeypatch, send, histories=(), start=None, session_id=None):
         if args[0] == "history":
             batch = pending.pop(0) if len(pending) > 1 else pending[0]
             return 0, json.dumps({"chat_events": batch}), ""
+        if args[:2] == ["raw", "egress.approvals"]:
+            return 0, json.dumps({"ok": True, "result": {"pending_approvals": list(approvals)}}), ""
+        if args[:2] == ["raw", "egress.approval.decide"]:
+            return 0, json.dumps({"ok": True, "result": {"status": "resolved"}}), ""
         return send
 
     monkeypatch.setattr(MuseAiWorker, "_run", fake_run)
@@ -57,6 +61,42 @@ def _worker(monkeypatch, send, histories=(), start=None, session_id=None):
         on_done=lambda: events.append(("done",)),
     )
     return worker, calls, events
+
+
+def test_sentinel_approvals_ask_even_in_bypass_mode_and_are_answered_only_once(monkeypatch):
+    approval = {
+        "approval_id": "a1",
+        "display": {"summary_title": "Send mail", "purpose_summary": "Reply to Sam"},
+    }
+    worker, calls, _events = _worker(
+        monkeypatch,
+        send=(0, json.dumps({"sent": True, "reply": {"text": "Done"}}), ""),
+        session_id="main",
+        approvals=[approval],
+    )
+    asked = []
+    worker._permission_mode = "bypassPermissions"
+    worker._on_permission = lambda tool, payload, rules: (
+        asked.append(payload) or {"behavior": "allow"}
+    )
+    worker.run()
+    assert len(asked) == 1 and "Reply to Sam" in asked[0]["Request"]
+    decisions = [c for c in calls if c[:2] == ["raw", "egress.approval.decide"]]
+    assert len(decisions) == 1
+    assert json.loads(decisions[0][-1]) == {"approval_id": "a1", "decision": "allow_once"}
+
+
+def test_stopping_at_an_approval_does_not_send_a_decision(monkeypatch):
+    worker, calls, _events = _worker(
+        monkeypatch,
+        send=(0, json.dumps({"sent": True, "reply": {"text": "Done"}}), ""),
+        session_id="main",
+        approvals=[{"approval_id": "a1"}],
+    )
+    worker._on_permission = lambda *_args: worker.cancel() or {"behavior": "deny"}
+    worker.run()
+    assert not [c for c in calls if c[:2] == ["raw", "egress.approval.decide"]]
+    assert worker._cancelled
 
 
 def _said(events):

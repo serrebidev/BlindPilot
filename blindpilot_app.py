@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.38.0"
+APP_VERSION = "0.39.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -5354,6 +5354,143 @@ class ReadView(wx.Dialog):
         event.Skip()
 
 
+class MuseAiDialog(wx.Dialog):
+    """Native readers for Muse.ai account data and explicit one-action approvals."""
+
+    def __init__(self, parent: wx.Window, view: str):
+        super().__init__(
+            parent,
+            title=f"muse.ai {view.title()}",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )
+        self.view = view
+        self.items: list[dict] = []
+        pad = self.FromDIP(PAD_DIALOG)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(wx.StaticText(self, label=f"&{view.title()}:"), 0, wx.ALL, pad)
+        self.list = wx.ListBox(self)
+        self.list.SetName(f"muse.ai {view}")
+        self.list.SetMinSize(self.FromDIP(wx.Size(620, 340)))
+        self.list.Bind(wx.EVT_LISTBOX, lambda _e: self._selection_changed())
+        self.list.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._read())
+        sizer.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        self.status = wx.StaticText(self, label="")
+        sizer.Add(self.status, 0, wx.ALL, pad)
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        self.read = wx.Button(self, label="&Read")
+        self.read.Bind(wx.EVT_BUTTON, lambda _e: self._read())
+        self.read.SetDefault()
+        buttons.Add(self.read, 0, wx.RIGHT, pad)
+        self.decide = wx.Button(self, label="&Decide approval…") if view == "approvals" else None
+        if self.decide:
+            self.decide.Bind(wx.EVT_BUTTON, lambda _e: self._decide())
+            buttons.Add(self.decide, 0, wx.RIGHT, pad)
+        refresh = wx.Button(self, label="Re&fresh")
+        refresh.Bind(wx.EVT_BUTTON, lambda _e: self._refresh())
+        buttons.Add(refresh, 0, wx.RIGHT, pad)
+        buttons.Add(wx.Button(self, wx.ID_CANCEL, "Close"))
+        sizer.Add(buttons, 0, wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self._refresh()
+        (self.list if self.items else refresh).SetFocus()
+        self.CentreOnParent()
+
+    def _refresh(self) -> None:
+        from museai_backend import museai_items, museai_item_title
+
+        self.items = []
+        self.list.Clear()
+        try:
+            with wx.BusyCursor():
+                self.items = museai_items(self.view)
+            self.list.Set([museai_item_title(self.view, item) for item in self.items])
+            if self.items:
+                self.list.SetSelection(0)
+            message = (
+                f"{len(self.items)} {self.view}. Enter reads one."
+                if self.items
+                else f"No {self.view}."
+            )
+        except ValueError as exc:
+            message = f"Could not read muse.ai {self.view}: {exc}"
+        self.status.SetLabel(message)
+        self._selection_changed()
+        announce(message)
+
+    def _selection_changed(self) -> None:
+        selected = self.list.GetSelection()
+        valid = 0 <= selected < len(self.items)
+        self.read.Enable(valid)
+        if self.decide:
+            self.decide.Enable(valid and bool(self.items[selected].get("_pending")))
+
+    def _read(self) -> None:
+        from museai_backend import museai_read_item, museai_item_text, museai_item_title
+
+        selected = self.list.GetSelection()
+        if not 0 <= selected < len(self.items):
+            return
+        try:
+            with wx.BusyCursor():
+                item = museai_read_item(self.view, self.items[selected])
+            with ReadView(
+                self, museai_item_text(self.view, item), museai_item_title(self.view, item)
+            ) as dialog:
+                dialog.ShowModal()
+        except ValueError as exc:
+            announce(f"Could not read this item: {exc}")
+
+    def _decide(self) -> None:
+        from museai_backend import museai_decide, museai_item_text, museai_allowed_decisions
+
+        selected = self.list.GetSelection()
+        if not 0 <= selected < len(self.items) or not self.items[selected].get("_pending"):
+            return
+        item = self.items[selected]
+        try:
+            allowed = museai_allowed_decisions(item)
+            request = museai_item_text(self.view, item)
+        except ValueError as exc:
+            announce(str(exc))
+            return
+        dialog = PermissionDialog(
+            self,
+            BACKEND_MUSEAI,
+            "Perform an action",
+            {"Request": request},
+            False,
+        )
+        dialog.FindWindow(PermissionDialog.ALLOW).SetLabel("&Allow once")
+        dialog.FindWindow(PermissionDialog.ALLOW).Enable("allow_once" in allowed)
+        dialog.FindWindow(PermissionDialog.DENY).Enable("deny" in allowed)
+        try:
+            choice = dialog.ShowModal()
+            reason = dialog.reason()
+        finally:
+            dialog.Destroy()
+        decision = "allow_once" if choice == PermissionDialog.ALLOW else "deny"
+        if decision not in allowed:
+            announce("This approval needs a different choice in the muse.ai app.")
+            return
+        try:
+            with wx.BusyCursor():
+                museai_decide(str(item["approval_id"]), decision, reason)
+            announce("Allowed once" if decision == "allow_once" else "Denied")
+            self._refresh()
+        except ValueError as exc:
+            announce(f"Could not send the approval decision: {exc}")
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        if (
+            event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
+            and self.FindFocus() is self.list
+        ):
+            self._read()
+            return
+        event.Skip()
+
+
 class AgentFileList(wx.Dialog):
     """One kind of file one backend keeps, for What Agents Know.
 
@@ -7596,6 +7733,29 @@ class SessionPanel(wx.Panel):
         """Point this tab's next turn at ``backend``; other tabs keep theirs."""
         self._backend = normalize_backend(backend)
         self.backend_changed()
+        if self._backend == BACKEND_MUSEAI:
+            self.open_museai_main()
+
+    def open_museai_main(self) -> None:
+        """Selecting muse.ai resumes its main conversation, without sending anything."""
+        from museai_backend import museai_config_path, museai_main_session_id
+
+        self._museai_main_required = True
+        if self._run_in_progress():
+            self._announce("Stop the running task before opening muse.ai's main chat")
+            return
+        with wx.BusyCursor():
+            session = museai_main_session_id() if museai_config_path().is_file() else None
+            if not session:
+                self._announce(
+                    "Error: muse.ai's main chat could not be opened. Check your sign-in."
+                )
+                return
+            entry = HistoryEntry(BACKEND_MUSEAI, session, "Main chat", "", 0, folder="muse.ai")
+            turns = load_turns(entry)
+        self._museai_main_required = False
+        self.model = self.effort = self._cli_model = self._cli_effort = ""
+        self.restore_history(entry, turns)
 
     def show_backend_in_prompt(self, shown: bool) -> None:
         """Name the prompt after the backend it sends to, while tabs are mixed.
@@ -7638,7 +7798,9 @@ class SessionPanel(wx.Panel):
             )
         else:
             self.mode_picker.SetToolTip(
-                f"{backend_label(selected)} has no permission modes. It never stops to ask."
+                "muse.ai uses Sentinel approvals. Review them in Model, muse.ai, Approvals."
+                if selected == BACKEND_MUSEAI
+                else f"{backend_label(selected)} has no permission modes. It never stops to ask."
             )
         self.Layout()
 
@@ -8921,6 +9083,10 @@ class SessionPanel(wx.Panel):
             return
 
         selected_backend = self.selected_backend()
+        if selected_backend == BACKEND_MUSEAI and getattr(self, "_museai_main_required", False):
+            self.open_museai_main()
+            if self._museai_main_required:
+                return
         if selected_backend != self._session_backend:
             if self._session_id:
                 # A conversation existed here and is being left behind, so the
@@ -9336,6 +9502,7 @@ class SessionPanel(wx.Panel):
             self._announce("Error: Stop the running task before starting a new conversation")
             return
         self._session_id = None
+        self._museai_main_required = False
         self._drop_held_backends()
         # The name from the New Session dialog belonged to the conversation
         # just abandoned. Keeping it would hand that name to the NEXT
@@ -9397,6 +9564,10 @@ class SessionPanel(wx.Panel):
         continuation of it rather than the start of something new.
         """
         self._session_id = entry.session_id
+        self._museai_main_required = False
+        self._pending_messages = []
+        self._steering_context = ""
+        self._queue_paused = False
         # The tab is now a different conversation, so any connection held for
         # the previous one must not carry the next message.
         self._drop_held_backends()
@@ -9445,7 +9616,7 @@ class SessionPanel(wx.Panel):
             and turns[-1].prompt.strip()
             and not turns[-1].response.strip()
         ):
-            wx.CallAfter(self._follow_museai)
+            wx.CallAfter(self._follow_museai, entry.session_id)
         elif self._session_backend == BACKEND_MUSEAI:
             # Answered, but it may not be done: watch for more.
             self._museai_seen: Optional[int] = None
@@ -9492,9 +9663,16 @@ class SessionPanel(wx.Panel):
             self._museai_seen = latest
         self._watch_museai_later()
 
-    def _follow_museai(self) -> None:
+    def _follow_museai(self, session: Optional[str] = None) -> None:
         """A turn with nothing to send that reads what muse.ai posts next."""
-        if not self or self._run_in_progress():
+        if (
+            not self
+            or self._run_in_progress()
+            or self.selected_backend() != BACKEND_MUSEAI
+            or self._session_backend != BACKEND_MUSEAI
+            or not self._session_id
+            or (session is not None and session != self._session_id)
+        ):
             return
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
@@ -13004,6 +13182,7 @@ class MainFrame(wx.Frame):
         # goes with it rather than sitting in File doing nothing.
         self._refresh_hermes_sessions_item()
         self._root.Layout()
+        self._refresh_museai_menu()
 
         cfg = _load_config()
         cfg["app_mode"] = mode
@@ -13077,6 +13256,10 @@ class MainFrame(wx.Frame):
         backend = normalize_backend(backend)
         if backend == self._backend:
             return
+        page = self.notebook.GetCurrentPage()
+        if backend == BACKEND_MUSEAI and isinstance(page, SessionPanel) and page._run_in_progress():
+            self._announce_setting("Stop the running task before opening muse.ai's main chat")
+            return
         self._backend = backend
         cfg = _load_config()
         cfg["backend"] = backend
@@ -13105,6 +13288,7 @@ class MainFrame(wx.Frame):
         self._refresh_compact_item()
         self._refresh_connect_item()
         self._refresh_hermes_sessions_item()
+        self._refresh_museai_menu()
 
     def _follow_tab_backend(self) -> None:
         """Make the visible tab's backend the one the menu shows.
@@ -13388,7 +13572,11 @@ class MainFrame(wx.Frame):
         return [page for page in pages if isinstance(page, SessionPanel)]
 
     def _add_session(
-        self, cwd: str, initial_prompt: str = "", session_title: str = ""
+        self,
+        cwd: str,
+        initial_prompt: str = "",
+        session_title: str = "",
+        open_main_chat: bool = True,
     ) -> "SessionPanel":
         panel = SessionPanel(
             self.notebook,
@@ -13407,6 +13595,13 @@ class MainFrame(wx.Frame):
         # and an unnamed tab is the one thing a screen reader cannot tell from
         # its neighbour.
         self.notebook.AddPage(panel, _tab_label(session_title, cwd), select=True)
+        if (
+            open_main_chat
+            and self._backend == BACKEND_MUSEAI
+            and not initial_prompt
+            and not session_title
+        ):
+            panel.open_museai_main()
         self._relabel_tabs()
         if initial_prompt:
             panel.prompt.SetValue(initial_prompt)
@@ -13502,13 +13697,12 @@ class MainFrame(wx.Frame):
             "Choose the model and effort level this conversation runs at",
             self._model_active,
         )
-        self._agent_menu_items.append(
-            menu.AppendSubMenu(
-                self._build_permission_mode_menu(),
-                "&Permission Mode",
-                "Choose what the backend may do without asking, for this conversation",
-            )
+        self._permission_menu_item = menu.AppendSubMenu(
+            self._build_permission_mode_menu(),
+            "&Permission Mode",
+            "Choose what the backend may do without asking, for this conversation",
         )
+        self._agent_menu_items.append(self._permission_menu_item)
         add(
             menu,
             "Session &Status…",
@@ -13552,7 +13746,44 @@ class MainFrame(wx.Frame):
             "Connect a provider to opencode, or disconnect one",
             self._connect_active,
         )
+        self._museai_menu_item = wx.MenuItem(
+            menu,
+            wx.ID_ANY,
+            "muse.ai",
+            "Read approvals, schedules, feed, and ideas",
+            subMenu=self._build_museai_menu(),
+        )
+        self._agent_menu_items.append(self._museai_menu_item)
+        self._model_menu = menu
         return menu
+
+    def _refresh_museai_menu(self) -> None:
+        menu = getattr(self, "_model_menu", None)
+        if menu is None:
+            return
+        museai = self._app_mode == APP_MODE_AGENT and self._backend == BACKEND_MUSEAI
+        wanted = self._museai_menu_item if museai else self._permission_menu_item
+        other = self._permission_menu_item if museai else self._museai_menu_item
+        items = list(menu.GetMenuItems())
+        if other in items:
+            position = items.index(other)
+            menu.Remove(other)
+            menu.Insert(position, wanted)
+
+    def _build_museai_menu(self) -> wx.Menu:
+        menu = wx.Menu()
+        for view in ("approvals", "schedules", "feed", "ideas"):
+            self._menu_item(
+                menu,
+                f"&{view.title()}…",
+                f"Read muse.ai {view}",
+                lambda chosen=view: self._museai_active(chosen),
+            )
+        return menu
+
+    def _museai_active(self, view: str) -> None:
+        with MuseAiDialog(self, view) as dialog:
+            dialog.ShowModal()
 
     def _build_file_menu(self) -> wx.Menu:
         """Sessions, tabs, and the application itself.
@@ -14320,7 +14551,7 @@ class MainFrame(wx.Frame):
             announce("Error: that conversation has no id to reopen")
             return
         title = str(entry.get("title") or "").strip() or str(entry.get("preview") or "").strip()
-        panel = self._add_session(self._history_cwd())
+        panel = self._add_session(self._history_cwd(), open_main_chat=False)
         panel.open_hermes_session(session_id, title, attaching)
         self._follow_tab_backend()
         if attaching:
@@ -14351,7 +14582,7 @@ class MainFrame(wx.Frame):
                 candidate = translated if os.path.isdir(translated) else ""
             if candidate:
                 cwd = candidate
-        panel = self._add_session(cwd)
+        panel = self._add_session(cwd, open_main_chat=False)
         # restore_history reports the conversation's name, which is what
         # renames the tab: that title is what tells this conversation apart
         # from the others open in the same folder.
