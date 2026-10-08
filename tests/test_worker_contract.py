@@ -20,6 +20,7 @@ from commandcode_worker import CommandcodeWorker
 from google_worker import AntigravityWorker, GeminiWorker
 from hermes_worker import HermesWorker
 from muse_worker import MuseWorker
+from museai_worker import MuseAiWorker
 
 WORKERS = [
     blindpilot_app.ClaudeWorker,
@@ -28,6 +29,7 @@ WORKERS = [
     agent_backends.OpencodeWorker,
     HermesWorker,
     MuseWorker,
+    MuseAiWorker,
     CommandcodeWorker,
     GeminiWorker,
     AntigravityWorker,

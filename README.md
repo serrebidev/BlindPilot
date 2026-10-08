@@ -1,6 +1,6 @@
 # BlindPilot
 
-A screen-reader-first desktop front end for AI coding CLIs. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, Command Code, Gemini CLI, and Antigravity CLI in native wxPython windows, so NVDA, JAWS, and VoiceOver read controls instead of a terminal. It runs on Windows, macOS, and Linux. Linux is the least tested of the three.
+A screen-reader-first desktop front end for AI coding CLIs. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, muse.ai, Command Code, Gemini CLI, and Antigravity CLI in native wxPython windows, so NVDA, JAWS, and VoiceOver read controls instead of a terminal. It runs on Windows, macOS, and Linux. Linux is the least tested of the three.
 
 [![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -11,7 +11,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 
 ## What it does
 
-- Runs nine coding agents, picked per tab from Model, Backend. New tabs start on the backend of the tab you are in, and the choice is remembered. Once your tabs use more than one backend, each tab's name, its prompt, the announcement when you switch to it, and the pitch of its send sound all say which backend it sends to.
+- Runs ten coding agents, picked per tab from Model, Backend, which lists them alphabetically. New tabs start on the backend of the tab you are in, and the choice is remembered. Once your tabs use more than one backend, each tab's name, its prompt, the announcement when you switch to it, and the pitch of its send sound all say which backend it sends to.
 - Runs every backend in Bypass permissions mode by default, so a task does not stop to ask for approval. Change this under Model, Permission Mode.
 - Splits every answer into rows you can arrow through, one per heading, paragraph, list item, quote, code block, thought, tool call, and tool result.
 - Reads answers aloud as they stream, or stays silent until the whole answer is in.
@@ -51,7 +51,7 @@ Settings live in `%APPDATA%\BlindPilot\config.json` on Windows, `~/Library/Appli
 
 ## Set up a backend
 
-The first-run wizard and Model, Manage Backends find, install, update, and sign in to any of the nine backends. Claude Code, Hermes, Muse Code, and Antigravity CLI use their own installers; on Windows, Muse Code is installed and run inside WSL. Codex, FreeBuff, opencode, Command Code, and Gemini CLI come from npm; BlindPilot installs Node.js LTS if npm is missing, installs the CLI into a per-user folder, adds it to PATH, and checks that it starts. No administrator rights are needed.
+The first-run wizard and Model, Manage Backends find, install, update, and sign in to any of the ten backends. Claude Code, Hermes, Muse Code, and Antigravity CLI use their own installers; on Windows, Muse Code is installed and run inside WSL. muse.ai's client, muse-cli, is a Python package installed with uv, or with pip when uv is missing. Codex, FreeBuff, opencode, Command Code, and Gemini CLI come from npm; BlindPilot installs Node.js LTS if npm is missing, installs the CLI into a per-user folder, adds it to PATH, and checks that it starts. No administrator rights are needed.
 
 To do it by hand:
 
@@ -88,6 +88,10 @@ agy                      # signs in with your Google account in the browser
 # On Windows, run these inside WSL.
 curl -fsSL https://dev.meta.ai/install.sh | bash
 muse login
+
+# muse.ai, Meta's personal agent, see https://muse.ai/
+uv tool install muse-cli
+muse-cli auth export     # copies your muse.ai sign-in out of Chrome
 
 # Hermes Agent, see https://hermes-agent.nousresearch.com/docs
 hermes status     # shows the provider and model it will use
@@ -163,6 +167,7 @@ On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, 
 | opencode | Its headless HTTP server, one shared process | Yes, with per-model reasoning variants | Yes | Yes | Yes |
 | Hermes | Gateway JSON-RPC over a local pipe or the network | Yes | Yes | Yes | Yes |
 | Muse Code | MSP JSON-RPC over the stdio of `muse serve`, inside WSL on Windows | Yes, with reasoning effort | Yes | Yes | Yes |
+| muse.ai | `muse-cli send` to a muse.ai side chat, one process per message | No, muse.ai picks its own | No, it runs on its own machine | No | In writing only |
 | Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | Yes | In writing only |
 | Gemini CLI | Headless stream-json CLI, one process per message | Model yes (its auto, pro, flash and flash-lite choices), effort no | Yes | No | In writing only |
 | Antigravity CLI | Print mode with stream-json in and out, one process per message | Yes, with reasoning effort up to max | Yes | No | In writing only |
@@ -184,6 +189,8 @@ Hermes answers stream a sentence at a time. One connection is kept for the whole
 A current Hermes keeps its blocking prompts on that same connection. A question, a dangerous-command approval and a password or secret request arrive as requests this window answers, which is the capability BlindPilot announces when it connects — a client that has not announced it is one the agent will not ask at all, and it waits out its full deadline instead. Reopening a conversation that is parked on a question hands that question back, so it is answered rather than left waiting. The few prompts with no window here to serve them — reading Hermes' in-app terminal or its browser preview, a password-manager entry — are declined rather than left unanswered, which is the same thing to the agent.
 
 Muse Code is Meta's terminal coding agent. Its CLI ships for macOS and Linux, so on Windows BlindPilot reaches it inside WSL through the same bridge Hermes uses, translating the working directory on the way over. Turns run over Muse's own host protocol, MSP, with the answer streamed a fragment at a time and spoken in whole sentences. Tool approvals and the agent's own questions are put in front of you, including ones a reopened conversation was parked on, and a permission mode picked mid-conversation reaches the session it belongs to. Past conversations list in Recent Conversations and reopen by session id. Attached images travel as pictures the model sees, the slash picker lists Muse's own skills for the folder, and the status report carries the subscription window the last turn observed. When Meta refuses a request for want of Muse Spark access, BlindPilot says so instead of leaving the turn hanging.
+
+muse.ai is Meta's personal agent, a different product from Muse Code: it runs on its own cloud machine with its own connectors, memory and browser, and BlindPilot reaches it through muse-cli. Each BlindPilot conversation is one muse.ai side chat, so nothing lands in your main muse.ai chat, and a reopened conversation goes back to the same side chat. A message waits up to an hour for the reply, since real work there can take minutes. muse.ai cannot see this computer, so the working folder and attachments do not reach it; paste what it needs into the message. Stop ends the wait, not the work: muse.ai finishes on its own machine, and its reply appears in the muse.ai chat. Messages sent while one is running are queued, as with Command Code. Sign in with `muse-cli auth export`, which copies your muse.ai sign-in out of a Chrome that is signed in to muse.ai.
 
 Command Code runs one process per message. `-p` answers a single query and exits, so a running turn cannot be steered by the CLI itself and the next message resumes the conversation by the session id the CLI reports. BlindPilot supplies the missing pieces: a message sent while a turn is running is queued and goes out the moment that turn finishes, in order and with its attachments; Steer stops the running turn and resumes the conversation with your new instruction; Stop pauses the queue, and `/queue list`, `/queue clear` and `/queue resume` manage it. `/compact` summarizes the conversation into a new saved session and leaves the original in Recent Conversations. Its built-in commands cannot run headlessly — a slash string sent that way is treated as text — so the picker lists the ones BlindPilot provides equivalents for, explains the rest when typed, and never sends one to the model by accident. Mid-run questions are not offered.
 
