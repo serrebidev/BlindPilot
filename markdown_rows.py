@@ -421,17 +421,17 @@ def markdown_page(text: str, title: str) -> str:
     )
 
 
-def reassemble_all(rows: List[Row]) -> str:
+def reassemble_all(rows: List[Row], header: str = "Response {}") -> str:
     """Every row in the list, start to finish, for 'copy whole conversation'.
 
     Same rendering as :func:`reassemble`, in one run over the whole list, with
     each response header kept as a ``Response N`` line so the responses stay
-    told apart.
+    told apart. An export passes ``"## Response {}"`` to make those headings.
     """
     blocks: List[str] = []
     for row in rows:
         if row.kind == "header":
-            blocks.append(f"Response {row.response_number}")
+            blocks.append(header.format(row.response_number))
             continue
         block = _transcript_block(row)
         if block:
