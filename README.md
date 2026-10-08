@@ -118,7 +118,7 @@ Options. Show live activity in the list, Speak activity aloud, Include the backe
 
 Chat. Accounts, Conversation profiles, Refresh models, History view (List, Read-only text), Diagnostics. Enabled only when the Mode combo box is set to Chat.
 
-Help. Check for Updates, Check for updates at startup, Open Log Folder, Report a Bug, About BlindPilot. Report a Bug asks what happened, what you expected and the steps, shows exactly what else goes with it (versions and settings, never anything from a conversation), and either opens GitHub's new-issue page filled in or copies the report.
+Help. Keyboard Shortcuts (F1), Check for Updates, Check for updates at startup, Open Log Folder, Report a Bug, About BlindPilot. Report a Bug asks what happened, what you expected and the steps, shows exactly what else goes with it (versions and settings, never anything from a conversation), and either opens GitHub's new-issue page filled in or copies the report.
 
 Backend, Permission Mode, Narration, and Working sound are radio items, so a screen reader reports them as exclusive choices. Compact Conversation and Connect a Provider are greyed out for backends that have no equivalent.
 
@@ -127,6 +127,8 @@ Backend, Permission Mode, Narration, and Working sound are radio items, so a scr
 Follow everything, the default, speaks every tool call, result, and subagent line in order. Keep up speaks your message, the answer, and BlindPilot's own status lines, such as why a run is waiting or how it ended. The tool steps still appear in the list; they are not spoken. Use Keep up when a run fans out into many parallel steps and the speech queue falls behind. BlindPilot cannot shorten the screen reader's own queue, so this is the control it offers instead.
 
 ## Keyboard
+
+Help, Keyboard Shortcuts (F1) shows this list in the app, grouped by where each chord works.
 
 - Ctrl+L focus the prompt. Ctrl+T open a session. Ctrl+W close it.
 - F6 and Shift+F6 move between the tab strip, the responses, and the prompt, and read the status bar on the way round.
