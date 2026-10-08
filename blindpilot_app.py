@@ -4391,6 +4391,15 @@ def _monospace_font(window: wx.Window) -> wx.Font:
     return wx.Font(wx.FontInfo(window.GetFont().GetPointSize()).Family(wx.FONTFAMILY_TELETYPE))
 
 
+def _speech_route() -> str:
+    """How announcements reach a screen reader here, for a bug report."""
+    if platform.system() == "Darwin":
+        return "VoiceOver announcements" if _MAC_ANNOUNCE else "none (AppKit missing)"
+    if platform.system() == "Linux":
+        return "ATK announcements to Orca"
+    return "accessible_output2" if _SPEAKER is not None else "none found"
+
+
 def bug_report_facts(backend: str, app_mode: str) -> str:
     """What a bug report carries besides your words. Never a prompt, an
     answer, a folder or a file name: only versions and settings."""
@@ -4401,11 +4410,14 @@ def bug_report_facts(backend: str, app_mode: str) -> str:
             f"Python: {platform.python_version()}",
             f"wxPython: {wx.version()}",
             f"Mode: {app_mode}",
-            f"Backend: {backend_label(backend)}",
+            # Chat mode talks to a provider API; no agent backend is in use.
+            "Backend: none, Chat mode"
+            if app_mode == APP_MODE_CHAT
+            else f"Backend: {backend_label(backend)}",
             f"Narration: {SETTINGS.narration}",
             f"Live activity: {SETTINGS.live_rows}, spoken: {SETTINGS.speak_live}",
             f"Responses as text field: {SETTINGS.text_view}",
-            f"Screen reader output: {'found' if _SPEAKER is not None else 'none'}",
+            f"Screen reader output: {_speech_route()}",
         ]
     )
 
@@ -4438,9 +4450,10 @@ class BugReportDialog(wx.Dialog):
         pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        def field(label: str, lines: int) -> wx.TextCtrl:
+        def field(label: str, lines: int, extra: int = 0) -> wx.TextCtrl:
             sizer.Add(wx.StaticText(self, label=label), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
-            style = wx.TE_MULTILINE if lines > 1 else 0
+            # Windows cannot make a text box read-only after it is made.
+            style = (wx.TE_MULTILINE if lines > 1 else 0) | extra
             box = wx.TextCtrl(self, style=style)
             box.SetName(label.replace("&", "").rstrip(":"))
             box.SetMinSize(self.FromDIP(wx.Size(560, 22 * lines)))
@@ -4451,8 +4464,7 @@ class BugReportDialog(wx.Dialog):
         self.happened = field("&What happened:", 4)
         self.expected = field("What you e&xpected:", 3)
         self.steps = field("S&teps to make it happen:", 4)
-        included = field("&Also included (nothing from your conversations):", 6)
-        included.SetWindowStyle(wx.TE_MULTILINE | wx.TE_READONLY)
+        included = field("&Also included (nothing from your conversations):", 6, wx.TE_READONLY)
         included.SetValue(facts)
         buttons = wx.BoxSizer(wx.HORIZONTAL)
         for label, action in (
