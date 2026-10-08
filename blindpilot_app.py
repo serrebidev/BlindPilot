@@ -8631,6 +8631,17 @@ class SessionPanel(wx.Panel):
             # GTK and macOS can hand back the name as typed, with no extension
             # from the type chosen; the type is then what says the format.
             path, kind = path + chosen, chosen
+            # The dialog only asked about the name as typed, not this one.
+            if os.path.exists(path) and (
+                wx.MessageBox(
+                    f"{os.path.basename(path)} already exists. Replace it?",
+                    "Export Conversation",
+                    wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+                    self,
+                )
+                != wx.YES
+            ):
+                return
         if kind == ".txt":
             text = reassemble_all(self._rows)
         else:

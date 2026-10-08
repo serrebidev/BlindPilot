@@ -114,6 +114,25 @@ def test_a_name_without_an_extension_takes_the_chosen_type(panel, monkeypatch, t
     assert "<h2>Response 1</h2>" in (tmp_path / "notes.html").read_text(encoding="utf-8")
 
 
+def test_an_appended_name_that_exists_is_not_replaced_unasked(panel, monkeypatch, tmp_path):
+    """The dialog's overwrite check only saw the name as typed."""
+    (tmp_path / "notes.md").write_text("keep me", encoding="utf-8")
+    monkeypatch.setattr(app.wx, "MessageBox", lambda *a, **k: app.wx.NO)
+
+    _export(panel, monkeypatch, tmp_path / "notes", kind=0)
+
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "keep me"
+
+
+def test_code_holding_a_fence_gets_a_longer_one(panel, monkeypatch, tmp_path):
+    panel._rows.append(Row(kind="code", label="code", payload="```\ninner\n```", response_number=1))
+    target = tmp_path / "out.md"
+
+    _export(panel, monkeypatch, target)
+
+    assert "````\n```\ninner\n```\n````" in target.read_text(encoding="utf-8")
+
+
 def test_only_real_response_headers_become_headings(panel, monkeypatch, tmp_path):
     panel._rows.append(
         Row(kind="code", label="code", payload="Response 7", response_number=1, language="text")
