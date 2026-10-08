@@ -4520,12 +4520,13 @@ class CodexWorker(_TurnWorker):
             params = {}
         tool = str(params.get("command") or params.get("tool") or kind)
         payload = {
-            key: params[key]
-            for key in ("command", "cwd", "reason", "explanation")
-            if key in params
+            key: params[key] for key in ("command", "cwd", "reason", "explanation") if key in params
         }
+        ask = self._on_permission
+        if ask is None:
+            return "decline"
         try:
-            answer = self._on_permission(tool, payload, [])
+            answer = ask(tool, payload, [])
         except Exception:
             return "decline"
         if isinstance(answer, dict) and answer.get("behavior") == "allow":
