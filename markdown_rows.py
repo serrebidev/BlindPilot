@@ -373,7 +373,11 @@ _TRANSCRIPT_CUES = {
 def _transcript_block(row: Row) -> str:
     """One row rendered for the clipboard, cue included, code in a fence."""
     if row.kind == "code":
-        return f"```{row.lang_token or ''}\n{row.payload}\n```"
+        # Longer than any run of backticks inside, or a ``` line in the code
+        # would close the fence early.
+        longest = max((len(run) for run in re.findall(r"`+", row.payload)), default=0)
+        fence = "`" * max(3, longest + 1)
+        return f"{fence}{row.lang_token or ''}\n{row.payload}\n{fence}"
     cue = _TRANSCRIPT_CUES.get(row.kind)
     if cue:
         return f"{cue} {row.payload}" if row.payload else cue
