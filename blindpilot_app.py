@@ -6508,13 +6508,25 @@ class SessionPanel(wx.Panel):
         if not seen:
             return
         used, window = seen
-        window = window or getattr(self, "_context", (0, 0))[1]
-        before = getattr(self, "_context", (0, 0))
+        before = SessionPanel._known_context(self)
+        window = window or before[1]
         self._context = (used, window)
+        self._context_session = getattr(self, "_session_id", None)
         if window and used >= 0.8 * window and not (before[1] and before[0] >= 0.8 * before[1]):
             self._announce(
                 f"{_context_line(used, window)}. Compact Conversation, Ctrl+Shift+K, makes room."
             )
+
+    def _known_context(self) -> tuple[int, int]:
+        """The context reading, if it belongs to the conversation in the tab now.
+
+        Tied to the session id rather than cleared at each place a conversation
+        is replaced (new conversation, a reopened one, a backend switch), so no
+        such place can be missed.
+        """
+        if getattr(self, "_context_session", None) != getattr(self, "_session_id", None):
+            return (0, 0)
+        return getattr(self, "_context", (0, 0))
 
     def _session_status_lines(self) -> list[str]:
         """What this tab will do with the next message, as the report says it."""
@@ -6537,7 +6549,7 @@ class SessionPanel(wx.Panel):
             # than as a deliberate one.
             f"Folder: {self.cwd or 'chosen by the Hermes running this session'}",
             f"Conversation: {conversation}",
-            _context_line(*getattr(self, "_context", (0, 0))),
+            _context_line(*self._known_context()),
         ]
 
     def _show_status(self, backend: str, report: str) -> None:
