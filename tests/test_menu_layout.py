@@ -94,6 +94,7 @@ CONVERSATION_ITEMS = [
     "Start New Conversation",
     "Find in Responses",
     "Jump to Latest Response",
+    "Repeat Last Announcement",
 ]
 
 
@@ -131,6 +132,7 @@ def test_nothing_is_offered_in_both_menus(frame):
         ("Attach Files", "Ctrl+Shift+A"),
         ("Slash Command", "Ctrl+/"),
         ("Jump to Latest Response", "Ctrl+R"),
+        ("Repeat Last Announcement", "Ctrl+Shift+R"),
     ],
 )
 def test_a_shortcut_only_command_says_its_chord_in_the_accelerator_column(frame, item, chord):
