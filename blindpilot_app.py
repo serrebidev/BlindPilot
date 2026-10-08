@@ -6509,7 +6509,10 @@ class SessionPanel(wx.Panel):
         if started is None:
             last = getattr(self, "_last_turn_seconds", None)
             said = "No turn is running."
-            if last is not None:
+            if last is not None and getattr(self, "_turn_attached", False):
+                # Attached part way through: only the end of it was seen.
+                said += f" The last one was followed for {_spoken_duration(last)} after attaching."
+            elif last is not None:
                 said += f" The last one took {_spoken_duration(last)}."
         else:
             took = _spoken_duration(time.monotonic() - started)
@@ -8066,9 +8069,15 @@ class SessionPanel(wx.Panel):
         exception: its rows are the transcript, not live activity, and without
         them a reopened conversation would show nothing at all.
         """
-        if kind == "tool" and text.strip() and not self._replaying:
-            # A replayed history row is an old step, not what this turn did last.
-            self._last_step = text.strip()
+        if kind == "replay_end":
+            # The transcript a reopened Hermes conversation replays is over;
+            # whatever follows is the attached turn itself.
+            self._replay_done = True
+            return
+        if kind == "tool" and text.strip():
+            if not self._replaying or getattr(self, "_replay_done", False):
+                # A replayed history row is an old step, not what this turn did.
+                self._last_step = text.strip()
         if not SETTINGS.live_rows and not self._replaying:
             return
         if not text.strip():
@@ -8326,6 +8335,7 @@ class SessionPanel(wx.Panel):
         if started is not None:
             self._last_turn_seconds = time.monotonic() - started
             self._turn_started_at = None
+        self._replay_done = False
         self._settle_subagents()
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()

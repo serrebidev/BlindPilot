@@ -593,6 +593,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             on_complete(text)
 
         self._on_activity = counted_activity
+        # Uncounted: a marker between rows, not something a listener hears.
+        self._mark = on_activity
         self._on_complete = counted_complete
         self._on_failed = on_failed
         self._on_done = on_done
@@ -967,6 +969,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         self._on_started()
         for kind, text in _replay_rows(result.get("messages") or []):
             self._on_activity(kind, text)
+        # Where history ends, so the window can tell an old step from a live one.
+        self._mark("replay_end", "")
         # The transcript first, then whatever it is still waiting on: the rows
         # are the context the question is being asked about.
         self._answer_open_requests(result)
