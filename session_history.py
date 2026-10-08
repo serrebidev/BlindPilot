@@ -123,6 +123,7 @@ class HistoryTurn:
 
     prompt: str = ""
     response: str = ""
+    sequence: Optional[int] = None
 
 
 # Every CLI stuffs context of its own into the user side of the transcript —
@@ -1071,11 +1072,12 @@ def _museai_entries(cwd: Optional[str]) -> List[HistoryEntry]:
 
 
 def _museai_turns(entry: HistoryEntry) -> List[HistoryTurn]:
-    from museai_backend import museai_chat_turns
+    from museai_backend import museai_chat_snapshot
 
+    turns, sequence = museai_chat_snapshot(entry.session_id)
     return [
-        HistoryTurn(prompt=prompt, response=response)
-        for prompt, response in museai_chat_turns(entry.session_id)
+        HistoryTurn(prompt=prompt, response=response, sequence=sequence or None)
+        for prompt, response in turns
     ]
 
 

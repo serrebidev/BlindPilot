@@ -1,12 +1,13 @@
-# BlindPilot 0.39.0
+# BlindPilot 0.40.0
 
-Your main muse.ai conversation, its approvals, and the things it works on are all available in BlindPilot.
+Muse.ai's Feed, Ideas, Schedules, and Goals now offer actions alongside their readers. Open them from Model, muse.ai.
 
-- Recent Conversations, Ctrl+Shift+H, now lists your main muse.ai conversation as Main chat, alongside your side chats. Previously BlindPilot deliberately left it out, so there was no way to reopen it.
-- Selecting the muse.ai backend opens the main chat and reads its history into the conversation, ready for your next message. An unnamed tab opened with muse.ai already selected does the same, including when BlindPilot starts with that backend selected. Opening the chat sends nothing to muse.ai.
-- New Conversation, Ctrl+Shift+N, still starts a separate side chat. Reopening a side chat continues that same chat. If BlindPilot cannot find the main chat, it tells you and keeps your prompt unsent; it does not quietly send it to a new side chat.
-- Chat history containing arrows or other Unicode characters now loads on Windows. muse-cli could fail while printing those characters, leaving the conversation empty even though its messages were there.
-- With muse.ai selected, Model replaces the unavailable Permission Mode submenu with muse.ai: Approvals, Schedules, Feed, and Ideas. Each opens a native list; Enter or Read opens the full text, and Refresh asks for the current contents. Schedules show whether a task is enabled, its cadence, timezone, and next run. Feed keeps the full article text and links. Ideas include their descriptions and details; reading one does not start it.
-- Approvals lists pending requests and recent decisions. Decide Approval opens the exact request for you to allow once or deny. Requests also appear in a permission dialog while a muse.ai turn is running. BlindPilot's bypass mode does not bypass Muse.ai's Sentinel, and Stop sends no approval decision. Persistent permissions remain in the muse.ai app.
-- Larger gateway replies now work with muse-cli 0.3.2. That client tried to decode each piece of a multipart reply separately, causing approval lists and other large responses to fail. BlindPilot supplies a compatibility fix only to the muse-cli processes it launches; it does not change your installed client or other Python programs.
-- These account views use the gateway that muse-cli supports. They show the current page of feed and ideas returned by Muse.ai. The schedules, feed, and ideas views are read-only.
+- Feed: Enter or Read opens the full post. Open link offers its article and social links in your browser. Discuss in chat prepares the post's details in an editable prompt. Posts linked to an executable idea also offer Run now.
+- Ideas: Run now starts the whole idea, or lets you choose its selectable parts. Canceling either picker starts nothing. The returned execution conversation opens in a tab so you can read its progress and continue the chat. Completed or building ideas are not offered as new executions.
+- Schedules: Run now starts an enabled task without waiting for its next scheduled time. Run history reads past runs with their times, statuses, result summaries, and errors. Tasks explicitly targeting main chat open that chat after starting. Running a task does not alter its schedule.
+- Goals: this new menu entry lists goals, child goals, and their statuses. Read includes details and updates. Manage goal can edit its title and description, make it active, pause it, mark it completed, retire it, or delete it after confirmation. Suggestions reads the goal's proposals; Accept and run starts a suggestion's work, while Dismiss leaves it unexecuted.
+- Discuss in chat works for all four views. It opens main chat with the selected item's readable details and a place to write your question. Nothing is sent until you press Send, and another tab's prompt is preserved.
+- The installed client remains upstream muse-cli. BlindPilot adds the current web client's scheduled-task Run now route to its existing compatibility hook for muse-cli 0.3.2; your installed client files are unchanged.
+- Quick action replies are no longer missed by the chat watcher. The loaded history's sequence number now follows into the next check, including answers that arrived before the follow-up worker started.
+
+Actions use the same internal gateway as Muse.ai's web client. They run only when you select them; opening or reading a view executes nothing. Sentinel approvals remain explicit. Feed and Ideas still show the current gateway page. Schedule editing can be requested through Discuss in chat.

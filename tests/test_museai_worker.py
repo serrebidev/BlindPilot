@@ -63,6 +63,21 @@ def _worker(monkeypatch, send, histories=(), start=None, session_id=None, approv
     return worker, calls, events
 
 
+def test_action_answer_already_arrived_when_follow_starts_is_still_read(monkeypatch):
+    monkeypatch.setattr(museai_worker, "REPLY_WAIT_SECONDS", 1)
+    worker, calls, events = _worker(
+        monkeypatch,
+        send=None,
+        histories=[[_event(10, "Earlier reply"), _event(11, "Action finished")]],
+        session_id="main",
+    )
+    worker._prompt = None
+    worker.follow_after = 10
+    worker.run()
+    assert ("complete", "Action finished") in events
+    assert not any(call[0] in {"send", "session-start"} for call in calls)
+
+
 def test_sentinel_approvals_ask_even_in_bypass_mode_and_are_answered_only_once(monkeypatch):
     approval = {
         "approval_id": "a1",

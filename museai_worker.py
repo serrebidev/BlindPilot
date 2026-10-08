@@ -88,6 +88,7 @@ class MuseAiWorker(_TurnWorker):
         self._steps: list[tuple[int, int]] = []
         # The newest event seen in the chat, for the tab to watch past.
         self.last_seq = 0
+        self.follow_after: Optional[int] = None
         self._step_said = ""
         self._approval_seen: set[str] = set()
         self._approval_error_said = False
@@ -351,7 +352,12 @@ class MuseAiWorker(_TurnWorker):
         """
         self._on_started()
         self._on_activity("tool", "muse.ai is still working on this. Following it.")
-        baseline = max((m[0] for m in self._messages(binary, session)), default=0)
+        messages = self._messages(binary, session)
+        baseline = (
+            self.follow_after
+            if self.follow_after is not None
+            else max((m[0] for m in messages), default=0)
+        )
         relayed: set[str] = set()
         answer = self._watch(binary, session, baseline, relayed)
         if self._cancelled:

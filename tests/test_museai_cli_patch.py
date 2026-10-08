@@ -46,3 +46,18 @@ def test_conflicting_duplicate_fragments_are_rejected():
     assert assemble(groups, _chunk("a", 0, 2, b"one")) is None
     with pytest.raises(ValueError):
         assemble(groups, _chunk("a", 0, 2, b"different"))
+
+
+def test_current_web_schedule_run_route_is_available_to_upstream_cli(monkeypatch):
+    import sys
+    from museai_cli_patch import sitecustomize
+
+    gateway = SimpleNamespace(ROUTES={}, Gateway=type("Gateway", (), {}))
+    monkeypatch.setattr(sitecustomize, "version", lambda _name: "0.3.2")
+    monkeypatch.setitem(sys.modules, "muse_cli", SimpleNamespace(gateway=gateway))
+    sitecustomize.install()
+    assert gateway.ROUTES["tasks.run"] == {
+        "method": "tasks.run",
+        "http": "POST",
+        "path": "/tasks/{job_id}/run",
+    }

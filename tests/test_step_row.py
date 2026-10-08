@@ -102,4 +102,5 @@ def test_an_idle_muse_ai_tab_follows_the_chat_again_when_it_moves():
     assert not followed
 
     app.SessionPanel._museai_checked(panel, "chat-9", 44)  # muse.ai moved on
-    assert followed == [True] and panel._museai_seen == 44
+    # Following starts after the last displayed event, so 41–44 are still read.
+    assert followed == [True] and panel._museai_seen == 40

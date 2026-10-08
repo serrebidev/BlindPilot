@@ -21,4 +21,27 @@ The [official web client](https://muse.ai/_next/static/chunks/290qftk9d6y1e.js) 
 
 The [muse-cli receiver](https://github.com/nikships/muse-cli/blob/ebcb6310432ad2d39927bcb59e686330b0538310/src/muse_cli/gateway.py) in 0.3.2 parses each decrypted Noise payload as a complete protobuf response, ignoring multipart metadata. Live approval replies exceeded one frame and failed with `DecodeError: Wire format was corrupt`. Joining fragments by chunk ID and index fixed the reads. BlindPilot supplies a version-gated `sitecustomize.py` through the child process's `PYTHONPATH`, and packages that file as data. Other client versions and other backend processes are unchanged. Tests cover interleaved fragments, ordering, conflicting duplicates, invalid metadata, and receive limits.
 
-These internal endpoints are unversioned. Unsupported or unreadable responses are reported as errors rather than empty lists. Views show the current gateway page; paging through older feed and idea results is deferred. Schedule editing, idea execution, persistent grants, and outgoing large-message fragmentation are outside this change.
+## Item actions
+
+Actions were checked against the current [Feed UI](https://muse.ai/_next/static/chunks/3ep074oas981g.js), [Ideas helper](https://muse.ai/_next/static/chunks/06hglssbbp-ui.js), [Schedules UI](https://muse.ai/_next/static/chunks/3msqhly_4tqp0.js), [Goals helper](https://muse.ai/_next/static/chunks/2ctf3jfcf-jgs.js), and [route resolver](https://muse.ai/_next/static/chunks/3tq33mfknv4ah.js). IDs consumed by path templates are removed from wire bodies, except the idea execute helper and Sentinel decision contract which explicitly repeat their IDs in the body.
+
+| Action | Method and path parameter | Body |
+| --- | --- | --- |
+| Run idea | `api.idea-cards.execute`, `ideaCardId` | `ideaCardId`, `mode: "full"` or `mode: "selectedItems"` and `itemIds` |
+| Run feed idea | Same idea execute method; `idea_action.idea_id` supplies the ID | Same as above |
+| Run schedule now | `tasks.run`, `job_id` | `{}` |
+| Read schedule runs | `tasks.runs` | GET query `job_id`, `limit: 100`, supplied using raw `--body` |
+| Read goal | `goals.get`, `id` | None |
+| Edit or change goal status | `goals.update`, `id` | `title`, `description`, or `status` |
+| Delete goal | `goals.delete`, `id` | None |
+| Accept/dismiss goal suggestion | `goals.suggestions.decide`, `goal_id`, `suggestion_id` | `decision: "accepted"` or `"dismissed"` |
+
+Idea execution is successful only for `queued` or `accepted`; its optional `chat.session_id`/`sessionId` identifies the chat to open. Goal IDs use `goal_id` or `id`; suggestion IDs use `suggestion_id`, `suggestionId`, or `id`, with title and summary in nested `idea`. Accepting a suggestion executes it. Goal status values are `active`, `paused`, `completed`, and `retired`. Child goals are included recursively in the list.
+
+Schedule runs contain time, status, result summary, and errors, not a chat ID. Only schedules explicitly targeting `main` open the main conversation after Run now. The child-process compatibility hook registers the current `tasks.run` route because upstream 0.3.2 predates it. It never retries an execution automatically; on an uncertain response, check history/status before running again.
+
+Feed article links come from `body_md`; social links use `attachment.social_embed_url`. The official Discuss action quotes a feed item and focuses the composer without sending. Upstream CLI `send` does not expose the quote target, so BlindPilot prepares an editable prompt with the item's full readable details in main chat. Sending remains the user's choice. Native Run selections default omitted `selectable`, `isSelected`, and schedule `enabled` flags as the web client does.
+
+Read-only account calls verified goal details, article links, and schedule run history. Execution and mutation tests use mocked gateway replies; no real idea, schedule, or suggestion was started and no goal was changed during verification.
+
+These internal endpoints are unversioned. Unsupported or unreadable responses are reported as errors rather than empty lists. Views show the current gateway page; paging through older feed and idea results is deferred. Schedule editing through a dedicated form, persistent grants, and outgoing large-message fragmentation are outside this change.

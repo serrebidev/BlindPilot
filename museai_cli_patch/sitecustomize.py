@@ -36,6 +36,11 @@ def install():
     except (ImportError, PackageNotFoundError):
         return
 
+    # Current Muse web client adds Run now; 0.3.2's bundled route table predates it.
+    gateway.ROUTES.setdefault(
+        "tasks.run", {"method": "tasks.run", "http": "POST", "path": "/tasks/{job_id}/run"}
+    )
+
     # 0.3.2 decodes partial protobuf messages; remove when upstream reassembles chunks.
     def read_frame(self):
         if not hasattr(self, "_blindpilot_chunks"):

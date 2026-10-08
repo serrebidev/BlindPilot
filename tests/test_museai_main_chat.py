@@ -19,6 +19,25 @@ def test_python_cli_probes_can_print_unicode_chat_history(monkeypatch):
     assert (code, text.strip()) == (0, "\u2192")
 
 
+def test_restored_main_chat_follows_changes_from_its_loaded_sequence(monkeypatch, tmp_path):
+    with _running_app():
+        frame = _frame(monkeypatch, tmp_path)
+        try:
+            _gateway(monkeypatch, tmp_path)
+            panel = frame.notebook.GetCurrentPage()
+            entry = session_history.HistoryEntry("museai", "main", "Main chat", "", 0)
+            panel.restore_history(
+                entry, [session_history.HistoryTurn("Old question", "Old reply", sequence=10)]
+            )
+            assert panel._museai_seen == 10
+            launches = []
+            monkeypatch.setattr(panel, "_launch_turn", lambda *args: launches.append(args))
+            panel._museai_checked("main", 11)
+            assert launches and panel._museai_follow_after == 10
+        finally:
+            frame.Destroy()
+
+
 def _gateway(monkeypatch, tmp_path):
     config = tmp_path / ".config" / "muse-cli" / "config.json"
     config.parent.mkdir(parents=True)
@@ -47,6 +66,40 @@ def _gateway(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "muse-cli")
     monkeypatch.setattr(agent_backends, "_probe_backend", probe)
     return chats, calls
+
+
+def test_discuss_prepares_main_chat_draft_and_preserves_another_tabs_prompt(monkeypatch, tmp_path):
+    with _running_app():
+        frame = _frame(monkeypatch, tmp_path)
+        try:
+            _chats, calls = _gateway(monkeypatch, tmp_path)
+            previous = frame.notebook.GetCurrentPage()
+            previous.prompt.SetValue("Keep this draft")
+
+            class Discussion:
+                chat_request = ("draft", "Article context\nMy question: ", "Article")
+
+                def __init__(self, *_args):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    pass
+
+                def ShowModal(self):
+                    return wx.ID_OK
+
+            monkeypatch.setattr(blindpilot_app, "MuseAiDialog", Discussion)
+            frame._museai_active("feed")
+            panel = frame.notebook.GetCurrentPage()
+            assert panel is not previous and panel._session_id == "main"
+            assert panel.prompt.GetValue() == "Article context\nMy question: "
+            assert previous.prompt.GetValue() == "Keep this draft"
+            assert not any(call[0] in {"send", "session-start"} for call in calls)
+        finally:
+            frame.Destroy()
 
 
 def test_main_chat_is_in_recent_conversations_with_a_recognizable_name(monkeypatch, tmp_path):
