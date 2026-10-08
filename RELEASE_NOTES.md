@@ -1,3 +1,10 @@
+# BlindPilot 0.34.1
+
+What Claude Knows sees more of your project.
+
+- When a tab is open in a folder inside a repository, What Claude Knows (Ctrl+Shift+I) now also lists the skills, agents, slash commands and rules kept in the repository root's .claude folder, and in any folder between, just as Claude Code finds them. It stops at the repository root and never treats your home folder as part of the project.
+- AGENTS.md files are listed with the instructions, next to CLAUDE.md, because Claude Code reads them too.
+
 # BlindPilot 0.34.0
 
 Read what Claude Code knows about you, and Claude Code sends work again.
