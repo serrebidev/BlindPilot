@@ -230,3 +230,25 @@ def test_usage_is_not_invented(home, monkeypatch):
     # billing site; the headless surface reports none, so nothing is said.
     _wire(monkeypatch)
     assert agent_backends.backend_usage_lines(BACKEND_COMMANDCODE, "command-code") == []
+
+
+def test_console_output_keeps_the_answer_and_drops_the_consoles_own_painting():
+    """What a console-only command shows, without the banner, input box,
+    hints and footers the console paints around it (measured at 1.79.1)."""
+    import commandcode_backend
+
+    screen = [
+        "███████ ███████ ███████",
+        "# Command Code v1.79.1",
+        "# models: laguna-s-2.1 (free) · taste-1",
+        r"# ~\git\project",
+        "────────────────────────",
+        "CONTEXT  · Laguna S 2.1",
+        "46.7k / 256k · 209.3k remaining",
+        "❯ Ask your question...",
+        "? for shortcuts",
+        "Press Esc to return to conversation",
+    ]
+    assert commandcode_backend._console_text(screen) == (
+        "CONTEXT  · Laguna S 2.1\n46.7k / 256k · 209.3k remaining"
+    )

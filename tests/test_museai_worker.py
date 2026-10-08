@@ -32,6 +32,7 @@ def _worker(monkeypatch, send, histories=(), start=None, session_id=None):
     pending = list(histories) or [[]]
     monkeypatch.setattr(museai_worker, "find_backend_cli", lambda _backend: "muse-cli")
     monkeypatch.setattr(museai_worker, "STATUS_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(museai_worker, "QUIET_SECONDS", 0)
 
     def fake_run(self, binary, args, timeout, track=False):
         calls.append(args)

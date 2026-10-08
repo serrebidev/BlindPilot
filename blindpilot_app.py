@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.37.3"
+APP_VERSION = "0.38.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2565,6 +2565,21 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
         )
     elif backend == BACKEND_COMMANDCODE:
         commands.extend(_COMMANDCODE_SLASH_COMMANDS)
+        # Then whatever Command Code itself offers: its agent's commands
+        # (skills, mods, /loop), sent as typed, and its console's built-ins,
+        # run in its console off screen. Cached; the first look in a folder
+        # fills the agent's list in the background.
+        from commandcode_backend import commandcode_agent_commands, commandcode_console_commands
+
+        have = {name.split()[0].lower() for name, _ in commands}
+        for name, description in commandcode_agent_commands(cwd):
+            if name.lower() not in have:
+                have.add(name.lower())
+                commands.append((name, description or f"Run Command Code's {name[1:]}"))
+        for name, description in commandcode_console_commands():
+            if name.lower() not in have:
+                have.add(name.lower())
+                commands.append((name, f"{description} [Command Code console]"))
     elif backend == BACKEND_MUSE:
         # Whatever this directory's Muse offers: its bundled, user, and
         # project skills, invoked the way the TUI invokes them. A skill the
@@ -8762,16 +8777,66 @@ class SessionPanel(wx.Panel):
                 f"{command}: {description}"
                 for command, description in _slash_commands_for_backend(BACKEND_COMMANDCODE)
             )
-            text += "\n\nCommands requiring Command Code's terminal UI are explained when typed and are never sent as ordinary prompts."
+            text += (
+                "\n\nAny other slash command works too. Command Code's skills and mod commands "
+                "go to Command Code as typed. Its console commands run in Command Code's own "
+                "console, off screen, on this conversation, and what they show is added here. "
+                "A command that opens a menu lists the choices; pick one with BlindPilot's own "
+                "control for it, or in Command Code's console."
+            )
             with ReadView(self, text, "Command Code commands") as dialog:
                 dialog.ShowModal()
         else:
-            self._announce(
-                f"{name} has no headless command in BlindPilot. Use /help for supported equivalents, or run it in Command Code's interactive terminal."
-            )
+            from commandcode_backend import commandcode_agent_commands
+
+            # Cached per folder after the first look (a couple of seconds).
+            offered = {n.lower() for n, _ in commandcode_agent_commands(self.cwd, wait=True)}
+            if name in offered:
+                # A skill, a mod's command, /loop, /peek: Command Code's agent
+                # runs these itself, so they go out as typed.
+                return False
+            # Everything else lives in Command Code's console: run it there.
+            self.prompt.SetValue("")
+            self._run_commandcode_console(raw)
             return True
         self.prompt.SetValue("")
         return True
+
+    def _run_commandcode_console(self, command: str) -> None:
+        """Run a console-only Command Code command off screen on this
+        conversation and put what it showed into the conversation."""
+        if self._run_in_progress():
+            self._announce(f"Error: Wait for this turn to finish, then run {command}")
+            return
+        self._announce(f"Running {command} in Command Code's console")
+        self._earcons.start_progress()
+        cwd, session = self.cwd, self._session_id or ""
+
+        def run() -> None:
+            from commandcode_backend import commandcode_console_command
+
+            try:
+                text = commandcode_console_command(command, cwd, session)
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                text = f"Error: {command} could not be run in Command Code's console: {exc}"
+            wx.CallAfter(self._commandcode_console_done, command, text)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _commandcode_console_done(self, command: str, text: str) -> None:
+        if not self:
+            return
+        self._earcons.stop_progress()
+        self._response_count += 1
+        number = self._response_count
+        self._turns.append(Turn(prompt=command, response=text))
+        self._rows.append(
+            Row(kind="you", label=f"You: {command}", payload=command, response_number=number)
+        )
+        self._rows.extend(parse_response(text, number))
+        self._refresh_list()
+        first = next((line for line in text.splitlines() if line.strip()), "")
+        self._announce(f"{command}: {first}" if first else f"{command} finished")
 
     def _on_send(self, worker_extra: Optional[dict] = None) -> None:
         # ``worker_extra`` carries per-turn arguments only some backends take —
@@ -9381,6 +9446,51 @@ class SessionPanel(wx.Panel):
             and not turns[-1].response.strip()
         ):
             wx.CallAfter(self._follow_museai)
+        elif self._session_backend == BACKEND_MUSEAI:
+            # Answered, but it may not be done: watch for more.
+            self._museai_seen: Optional[int] = None
+            self._watch_museai_later()
+
+    # ----- muse.ai keeps working after it answers -----
+    # Its answer often says "still on it" and background workers post later,
+    # so an open muse.ai tab looks at the chat every so often while no turn is
+    # running, and follows it again when anything new has happened.
+    _MUSEAI_IDLE_CHECK_MS = 30_000
+
+    def _watch_museai_later(self, seen: Optional[int] = None) -> None:
+        if seen is not None:
+            self._museai_seen = seen
+        if getattr(self, "_museai_watch", None) is None:
+            self._museai_watch = wx.CallLater(self._MUSEAI_IDLE_CHECK_MS, self._check_museai)
+
+    def _check_museai(self) -> None:
+        self._museai_watch = None
+        if not self or self._session_backend != BACKEND_MUSEAI or not self._session_id:
+            return
+        if self._run_in_progress():
+            self._watch_museai_later()
+            return
+        session = self._session_id
+
+        def look() -> None:
+            from museai_backend import museai_latest_seq
+
+            latest = museai_latest_seq(session)
+            wx.CallAfter(self._museai_checked, session, latest)
+
+        threading.Thread(target=look, daemon=True).start()
+
+    def _museai_checked(self, session: str, latest: int) -> None:
+        if not self or session != self._session_id or self._session_backend != BACKEND_MUSEAI:
+            return
+        seen = getattr(self, "_museai_seen", None)
+        if seen and latest > seen and not self._run_in_progress():
+            self._museai_seen = latest
+            self._follow_museai()
+            return
+        if latest and not seen:
+            self._museai_seen = latest
+        self._watch_museai_later()
 
     def _follow_museai(self) -> None:
         """A turn with nothing to send that reads what muse.ai posts next."""
@@ -9552,11 +9662,13 @@ class SessionPanel(wx.Panel):
             self._replay_done = True
             return
         if kind == "step":
-            # Where a long turn has got to (muse.ai's step count), kept on the
-            # status line and in the progress report: no row, nothing spoken,
-            # since it changes every few seconds.
+            # Where a long turn has got to (muse.ai's step count): the last row
+            # of the conversation, changed in place as it moves on, plus the
+            # status line and the progress report. Nothing is spoken, since it
+            # changes every few seconds; arrow to the bottom to read it.
             self._last_step = text.strip()
             self._set_status(text.strip())
+            self._show_step_row(text.strip())
             return
         if kind == "tool" and text.strip():
             if not getattr(self, "_replaying", False) or getattr(self, "_replay_done", False):
@@ -9823,6 +9935,11 @@ class SessionPanel(wx.Panel):
             self._turn_started_at = None
         self._replay_done = False
         SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
+        SessionPanel._drop_step_rows(self)
+        if getattr(self, "_session_backend", "") == BACKEND_MUSEAI:
+            # muse.ai may keep working after its answer: watch past the
+            # newest thing this turn saw.
+            SessionPanel._watch_museai_later(self, getattr(self._worker, "last_seq", 0) or None)
         self._settle_subagents()
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()
@@ -9873,6 +9990,40 @@ class SessionPanel(wx.Panel):
             self._start_late_turn(waiting)
 
     # ----- List + find -----
+    def _show_step_row(self, text: str) -> None:
+        """Keep one live status row at the bottom of the conversation."""
+        row = Row(kind="step", label=text, payload=text, response_number=self._response_count or 1)
+        last_is_step = bool(self._rows) and self._rows[-1].kind == "step"
+        shown_last = bool(self._displayed) and self._displayed[-1] is (
+            self._rows[-1] if self._rows else None
+        )
+        if last_is_step and shown_last and not self._search_term:
+            self._rows[-1] = row
+            self._displayed[-1] = row
+            if SETTINGS.text_view:
+                if self._row_starts:
+                    start = self._row_starts[-1]
+                    was_at = self.responses_text.GetInsertionPoint()
+                    self.responses_text.Replace(
+                        start, self.responses_text.GetLastPosition(), _one_line(text)
+                    )
+                    self.responses_text.SetInsertionPoint(
+                        min(was_at, self.responses_text.GetLastPosition())
+                    )
+            else:
+                self.responses.ReplaceLast(row)
+            return
+        # Anything said since the last update sits above it now; the old
+        # status row is dropped at the end of the turn.
+        self._rows.append(row)
+        self._refresh_list()
+
+    def _drop_step_rows(self) -> None:
+        """The turn is over, so its live status rows have nothing left to say."""
+        if any(row.kind == "step" for row in getattr(self, "_rows", [])):
+            self._rows = [row for row in self._rows if row.kind != "step"]
+            self._refresh_list()
+
     def _refresh_list(self) -> None:
         # Rebuilding a control loses the selection, and putting it back is
         # what speaks (a list selection or a caret move is what NVDA reads).

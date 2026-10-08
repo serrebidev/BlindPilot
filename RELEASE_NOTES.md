@@ -1,3 +1,12 @@
+# BlindPilot 0.38.0
+
+Every Command Code slash command, and muse.ai you can follow to the end.
+
+- Command Code's slash commands all work now, just as they do in its own console. The command picker lists BlindPilot's own commands, then everything Command Code's agent offers in your folder (your skills, commands added by mods, /loop and the rest), then the console's built-in commands. Skills and mod commands go to Command Code as you type them. A command that only Command Code's console knows, such as /context, /usage, /status, /export or /todos, is run in that console, out of sight, on the same conversation, and what it shows is added to your conversation to read like any answer. A command that opens a menu lists its choices; pick one with BlindPilot's own control for it where there is one, or in Command Code's console. Thanks to the BlindPilot user on Telegram who asked for this.
+- muse.ai's progress is now the last row of the conversation. While muse.ai works, that row says how many steps it has taken and when the latest was, and it updates in place: it is not spoken and does not move you, so arrow to the bottom whenever you want to check. It goes away when the turn ends.
+- A muse.ai turn no longer ends just because muse.ai answered. It often answers "still on it" and keeps going, so BlindPilot keeps watching until the chat has been quiet for 45 seconds, adding each further update as it comes.
+- An open muse.ai tab keeps an eye on the chat. If muse.ai posts or starts working again after a turn has ended, BlindPilot picks it up and follows it, so you see what its background work finishes without reopening the conversation.
+
 # BlindPilot 0.37.3
 
 See how far muse.ai has got.

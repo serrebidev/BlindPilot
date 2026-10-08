@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -280,3 +282,226 @@ def commandcode_model_options(
     if not models:
         return [], [], current, current_effort, "Could not read the model list from Command Code."
     return models, list(COMMANDCODE_EFFORTS), current, current_effort, ""
+
+
+# --------------------------------------------------------------------------
+# Slash commands: the agent's own, and the console's
+# --------------------------------------------------------------------------
+#
+# Command Code's console has two kinds of slash command. Skills, mod commands
+# and a few built-ins (/compact, /loop, /peek) are the agent's: `command-code
+# acp` advertises them (`available_commands_update`, measured at 1.79.1) and a
+# headless `-p` run carries them out, so BlindPilot sends them as they are.
+# The rest (/context, /usage, /status, /export, /todos, /changelog, ...) exist
+# only in the console's own interface. BlindPilot runs those in that console,
+# off screen, on the same conversation, and reads the screen back.
+
+_AGENT_COMMANDS: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+_AGENT_COMMANDS_TTL = 600.0
+_AGENT_COMMANDS_LOCK = threading.Lock()
+
+
+def commandcode_agent_commands(cwd: Optional[str], wait: bool = False) -> list[tuple[str, str]]:
+    """The slash commands Command Code's agent offers in `cwd`, as (/name, description).
+
+    Asking costs a Command Code start-up, so the answer is cached per folder
+    for ten minutes. Without `wait` an uncached folder is asked in the
+    background and the cached (possibly empty) list comes back at once.
+    """
+    key = str(cwd or "")
+    with _AGENT_COMMANDS_LOCK:
+        hit = _AGENT_COMMANDS.get(key)
+    if hit and time.monotonic() - hit[0] < _AGENT_COMMANDS_TTL:
+        return hit[1]
+    if wait:
+        return _fetch_agent_commands(key)
+    threading.Thread(target=_fetch_agent_commands, args=(key,), daemon=True).start()
+    return hit[1] if hit else []
+
+
+def _fetch_agent_commands(cwd: str) -> list[tuple[str, str]]:
+    import queue
+    import subprocess
+
+    binary = agent_backends.find_backend_cli(BACKEND_COMMANDCODE)
+    if not binary:
+        return []
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            [binary, "acp"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd or None,
+            env=agent_backends.subprocess_env(binary),
+            **agent_backends.no_window_kwargs(),
+        )
+    except (OSError, ValueError):
+        return []
+    lines: "queue.Queue[str]" = queue.Queue()
+
+    def pump() -> None:
+        for line in proc.stdout or []:
+            lines.put(line)
+
+    threading.Thread(target=pump, daemon=True).start()
+
+    def send(request_id: int, method: str, params: dict) -> None:
+        message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(json.dumps(message) + "\n")
+            proc.stdin.flush()
+        except (OSError, ValueError, AssertionError):
+            pass
+
+    commands: Optional[list[tuple[str, str]]] = None
+    session = ""
+    send(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+    send(2, "session/new", {"cwd": cwd or str(Path.home()), "mcpServers": []})
+    deadline = time.monotonic() + 45
+    while commands is None and time.monotonic() < deadline:
+        try:
+            line = lines.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("id") == 2:
+            session = str((message.get("result") or {}).get("sessionId") or "")
+        update = (message.get("params") or {}).get("update") or {}
+        if update.get("sessionUpdate") == "available_commands_update":
+            commands = [
+                ("/" + str(c.get("name")), str(c.get("description") or "").strip())
+                for c in update.get("availableCommands") or []
+                if isinstance(c, dict) and c.get("name")
+            ]
+    if session:
+        send(3, "session/close", {"sessionId": session})
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    found = commands or []
+    if commands is not None:
+        with _AGENT_COMMANDS_LOCK:
+            _AGENT_COMMANDS[cwd] = (time.monotonic(), found)
+    return found
+
+
+# What the console paints around every command's output: its banner, the
+# input box, hints and footers. None of it is the command's answer.
+_CONSOLE_CHROME = re.compile(
+    r"^(# Command Code v|# models:|# [~A-Za-z].*[\\/]|Press Esc to return|❯ Ask your question|"
+    r"\? for shortcuts|"
+    r"» permission|◼ Ran \d+ session start hook|◼ .* is free and uses shared capacity)"
+)
+_MENU_HINT = re.compile(r"↑/↓|Enter (to )?(confirm|select)|esc to (cancel|close|go back)", re.I)
+
+
+def _console_text(lines: list[str]) -> str:
+    kept: list[str] = []
+    for raw in lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or "███" in stripped or set(stripped) <= set("─━│┃╭╮╰╯┌┐└┘ "):
+            continue
+        if _CONSOLE_CHROME.match(stripped):
+            continue
+        if not kept or kept[-1] != stripped:
+            kept.append(stripped)
+    return "\n".join(kept)
+
+
+def commandcode_console_command(
+    command: str, cwd: str, session_id: str = "", quiet_seconds: float = 4.0, limit: float = 45.0
+) -> str:
+    """Run one console slash command in Command Code's own interface, off
+    screen, on the tab's conversation, and return what it showed.
+
+    The console is started with the command as its first message (it runs a
+    leading slash command the same way as one typed into it) and closed once
+    the screen has been still for `quiet_seconds`. A command that opens a
+    menu shows the menu's text; choosing from it needs the console itself.
+    """
+    import pyte
+
+    from freebuff_screen import repaired_history_screen
+
+    binary = agent_backends.find_backend_cli(BACKEND_COMMANDCODE)
+    if not binary:
+        return "Command Code is not installed."
+    args = [binary, "-t", "--skip-onboarding"]
+    if session_id:
+        args += ["--resume", session_id]
+    args.append(command)
+    ended = threading.Event()
+    terminal, read = agent_backends._spawn_freebuff_pty(args, cwd, ended)
+    screen = repaired_history_screen(180, 60, history=4000)
+    stream = pyte.Stream(screen)
+    started = time.monotonic()
+    last_change = started
+    answered_language = False
+    try:
+        while time.monotonic() - started < limit and not ended.is_set():
+            data = read(0.25)
+            now = time.monotonic()
+            if data:
+                stream.feed(data)
+                last_change = now
+                if not answered_language and "Choose a language" in data:
+                    # First-run language question: keep English.
+                    terminal.write("\r")
+                    answered_language = True
+            elif now - last_change >= quiet_seconds and now - started > quiet_seconds + 2:
+                break
+    finally:
+        ended.set()
+        try:
+            terminal.terminate(force=True)
+        except Exception:  # noqa: BLE001 - already gone
+            pass
+    history = [
+        "".join(cell.data for _, cell in sorted(line.items())) for line in screen.history.top
+    ]
+    text = _console_text(history + list(screen.display))
+    if _MENU_HINT.search(text):
+        text += (
+            "\n\nThis command opens a menu in Command Code's console. The choices are listed "
+            "above; to pick one, use BlindPilot's own control for it or run the command in "
+            "Command Code's console."
+        )
+    return text or f"Command Code showed nothing for {command}."
+
+
+_CONSOLE_COMMANDS: list[tuple[str, str]] = []
+
+
+def commandcode_console_commands() -> list[tuple[str, str]]:
+    """The console's built-in slash commands, from `command-code --help`."""
+    if _CONSOLE_COMMANDS:
+        return _CONSOLE_COMMANDS
+    binary = agent_backends.find_backend_cli(BACKEND_COMMANDCODE)
+    if not binary:
+        return []
+    code, text = _probe(binary, ["--help"], CLI_PROBE_TIMEOUT)
+    if code != 0:
+        return []
+    found: list[tuple[str, str]] = []
+    in_section = False
+    for line in text.splitlines():
+        if line.strip() == "Slash Commands":
+            in_section = True
+            continue
+        if in_section and line.strip() and not line.startswith(" "):
+            break
+        match = re.match(r"^\s+(/[\w:-]+)(.*?)\s{2,}(\S.*)$", line) if in_section else None
+        if match:
+            found.append((match.group(1), match.group(3).strip()))
+    _CONSOLE_COMMANDS.extend(found)
+    return found

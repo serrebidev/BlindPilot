@@ -126,6 +126,22 @@ def museai_chat_turns(session_id: str, limit: int = 300) -> list[tuple[str, str]
     return [(prompt, "\n\n".join(said)) for prompt, said in turns]
 
 
+def museai_latest_seq(session_id: str) -> int:
+    """The newest agent event in a chat, text or not; 0 if it cannot be read.
+
+    What an open muse.ai tab compares against to notice muse.ai working again
+    (or still) after a turn has ended.
+    """
+    found = _cli_json(["history", "--thread", session_id, "--limit", "5", "--raw"], 30)
+    events = found.get("chat_events") if isinstance(found, dict) else None
+    seqs = [
+        int((e.get("payload") or {}).get("seq") or e.get("seq") or 0)
+        for e in (events if isinstance(events, list) else [])
+        if isinstance(e, dict) and e.get("event_name") == "message.assistant"
+    ]
+    return max(seqs, default=0)
+
+
 def museai_install_argv(upgrade: bool = False) -> Optional[list[str]]:
     """How to install (or upgrade) muse-cli: uv first, then pip for this user."""
     uv = shutil.which("uv")
