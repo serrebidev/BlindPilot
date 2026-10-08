@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.37.2"
+APP_VERSION = "0.37.3"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -9550,6 +9550,13 @@ class SessionPanel(wx.Panel):
             # The transcript a reopened Hermes conversation replays is over;
             # whatever follows is the attached turn itself.
             self._replay_done = True
+            return
+        if kind == "step":
+            # Where a long turn has got to (muse.ai's step count), kept on the
+            # status line and in the progress report: no row, nothing spoken,
+            # since it changes every few seconds.
+            self._last_step = text.strip()
+            self._set_status(text.strip())
             return
         if kind == "tool" and text.strip():
             if not getattr(self, "_replaying", False) or getattr(self, "_replay_done", False):

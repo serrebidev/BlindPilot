@@ -147,3 +147,19 @@ def test_a_reopened_chat_still_running_is_followed_until_its_answer(monkeypatch)
     assert not [c for c in calls if c[0] == "send"]
     assert _said(events) == ["## Status\n\nTests running.", "## Done\n\nReleased v1.2."]
     assert ("complete", "## Done\n\nReleased v1.2.") in events
+
+
+def test_progress_goes_to_the_status_line_not_the_conversation(monkeypatch):
+    """Working steps carry no text; their count is reported as a quiet step."""
+    old = [_event(5, "Earlier answer")]
+    working = old + [_event(6, ""), _event(7, "")]
+    done = working + [_event(8, "All done.")]
+    worker, _calls, events = _worker(
+        monkeypatch, send=None, histories=[old, working, working, done], session_id="chat-9"
+    )
+    worker._prompt = None
+    worker.run()
+
+    steps = [e[2] for e in events if e[0] == "activity" and e[1] == "step"]
+    assert steps and steps[0].startswith("muse.ai is working: 2 steps so far")
+    assert _said(events) == ["All done."]
