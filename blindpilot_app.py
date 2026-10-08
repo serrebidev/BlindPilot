@@ -3631,8 +3631,12 @@ class ClaudeWorker(threading.Thread):
         on_subagent: Optional[SubagentReport] = None,
         held_for: object = None,
         on_unsolicited: Optional[Callable[[], None]] = None,
+        on_permission: Optional[Callable[[str, dict, list], dict]] = None,
     ):
         super().__init__(daemon=True)
+        # Asked about a tool the permission mode leaves to a person; returns
+        # the control response's own body (allow or deny).
+        self._on_permission = on_permission
         self._prompt = prompt
         self._session_id = session_id
         self._cwd = cwd
@@ -3925,10 +3929,27 @@ class ClaudeWorker(threading.Thread):
         if tool == ASK_USER_QUESTION_TOOL and self._on_question is not None:
             self._answer_ask_user_question(request_id, payload)
             return
-        # Any other tool: the permission mode decided this before the prompt
-        # tool existed, and it still does. Headless Claude Code denies whatever
-        # its mode leaves to a prompt, so denying here keeps every mode behaving
-        # exactly as it did.
+        # Any other tool is one the permission mode leaves to a person: put it
+        # in front of them, as the interactive CLI would. With nobody to ask,
+        # it is denied, which is what headless Claude Code did on its own.
+        if self._on_permission is not None:
+            suggestions = request.get("permission_suggestions")
+            suggestions = suggestions if isinstance(suggestions, list) else []
+            reason = str(request.get("decision_reason") or "")
+            answer = self._on_permission(tool, {**payload, "_reason": reason}, suggestions)
+            if answer.get("behavior") == "allow":
+                answer = {**answer, "updatedInput": payload}
+            self._write_json(
+                {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": answer,
+                    },
+                }
+            )
+            return
         self._deny(request_id, tool)
 
     def _deny(self, request_id: str, tool: str = "") -> None:
@@ -4629,6 +4650,80 @@ class SubagentDialog(wx.Dialog):
         self.log.AppendText(("\n" if self.log.GetLastPosition() else "") + line)
         if not following:
             self.log.SetInsertionPoint(caret)
+
+
+def _permission_text(tool: str, payload: dict) -> str:
+    """A tool request as lines a screen reader reads top to bottom."""
+    if tool == "ExitPlanMode":
+        return str(payload.get("plan") or "Claude gave no plan text.")
+    lines = [f"Tool: {tool}"]
+    reason = payload.get("_reason")
+    if reason:
+        lines.append(f"Why it is asking: {reason}")
+    for key, value in payload.items():
+        if key == "_reason":
+            continue
+        shown = value if isinstance(value, str) else json.dumps(value, indent=2)
+        lines.append(f"{key}:\n{shown}" if "\n" in shown else f"{key}: {shown}")
+    return "\n".join(lines)
+
+
+class PermissionDialog(wx.Dialog):
+    """Claude asks to use a tool, or to leave plan mode with a plan.
+
+    Deny (or Keep Planning) is the default button, and Escape is the same as
+    choosing it: nothing is allowed by closing a dialog.
+    """
+
+    ALLOW, ALLOW_SESSION, DENY = wx.ID_HIGHEST + 1, wx.ID_HIGHEST + 2, wx.ID_HIGHEST + 3
+    APPROVE_EDITS, APPROVE_ASK = wx.ID_HIGHEST + 4, wx.ID_HIGHEST + 5
+
+    def __init__(self, parent: wx.Window, tool: str, payload: dict, offer_session: bool):
+        plan = tool == "ExitPlanMode"
+        title = "Approve Claude's Plan" if plan else f"Claude Wants to Use {tool}"
+        super().__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        pad = self.FromDIP(PAD_DIALOG)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        label = "&Plan:" if plan else "&Request:"
+        sizer.Add(wx.StaticText(self, label=label), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self._details = wx.TextCtrl(
+            self,
+            value=_permission_text(tool, payload),
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2,
+        )
+        self._details.SetName(label.replace("&", "").rstrip(":"))
+        self._details.SetMinSize(self.FromDIP(wx.Size(620, 300)))
+        sizer.Add(self._details, 1, wx.EXPAND | wx.ALL, pad)
+        reason_label = "What to &change (optional):" if plan else "Reason, if you &deny (optional):"
+        sizer.Add(wx.StaticText(self, label=reason_label), 0, wx.LEFT | wx.RIGHT, pad)
+        self._reason = wx.TextCtrl(self)
+        self._reason.SetName(reason_label.replace("&", "").rstrip(":"))
+        sizer.Add(self._reason, 0, wx.EXPAND | wx.ALL, pad)
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        if plan:
+            choices = [
+                (self.APPROVE_EDITS, "&Approve, accept edits"),
+                (self.APPROVE_ASK, "Approve, as&k before edits"),
+                (self.DENY, "&Keep planning"),
+            ]
+        else:
+            choices = [(self.ALLOW, "&Allow")]
+            if offer_session:
+                choices.append((self.ALLOW_SESSION, "Allow for this &session"))
+            choices.append((self.DENY, "De&ny"))
+        for button_id, text in choices:
+            button = wx.Button(self, button_id, text)
+            button.Bind(wx.EVT_BUTTON, lambda _e, i=button_id: self.EndModal(i))
+            buttons.Add(button, 0, wx.RIGHT, self.FromDIP(PAD))
+            if button_id == self.DENY:
+                button.SetDefault()
+        sizer.Add(buttons, 0, wx.ALL, pad)
+        self.SetEscapeId(self.DENY)
+        self.SetSizerAndFit(sizer)
+        self._details.SetFocus()
+
+    def reason(self) -> str:
+        return self._reason.GetValue().strip()
 
 
 class QuestionDialog(wx.Dialog):
@@ -6787,6 +6882,69 @@ class SessionPanel(wx.Panel):
                 return None
         return held["answers"]
 
+    def _ask_permission(self, tool: str, payload: dict, suggestions: list) -> dict:
+        """Ask whether Claude may use `tool`; the worker thread waits for it.
+
+        Returns the body Claude Code takes back: allow (with the rules it
+        suggested when the answer was "for this session") or deny with a
+        reason Claude reads. Stopped, or the tab gone, it is a denial.
+        """
+        answered = threading.Event()
+        held: dict[str, dict] = {"answer": {"behavior": "deny", "message": "Nobody answered."}}
+
+        def show() -> None:
+            try:
+                if self:
+                    held["answer"] = self._show_permission_dialog(tool, payload, suggestions)
+            finally:
+                answered.set()
+
+        wx.CallAfter(show)
+        while not answered.wait(0.2):
+            if self._stopping or not self:
+                return {"behavior": "deny", "message": "The turn was stopped.", "interrupt": True}
+        return held["answer"]
+
+    def _show_permission_dialog(self, tool: str, payload: dict, suggestions: list) -> dict:
+        """Open the permission or plan dialog. GUI thread only."""
+        plan = tool == "ExitPlanMode"
+        self._announce(
+            "Claude has a plan for you to approve" if plan else f"Claude wants to use {tool}",
+            urgent=True,
+        )
+        self._earcons.stop_progress()
+        self._hide_working()
+        dlg = PermissionDialog(self, tool, payload, bool(suggestions))
+        try:
+            choice = dlg.ShowModal()
+            reason = dlg.reason()
+        finally:
+            dlg.Destroy()
+            if self._worker is not None:
+                self._earcons.start_progress()
+                self._show_working()
+        if plan and choice in (PermissionDialog.APPROVE_EDITS, PermissionDialog.APPROVE_ASK):
+            mode = "acceptEdits" if choice == PermissionDialog.APPROVE_EDITS else "default"
+            # Later turns run in the mode chosen, not back in plan mode.
+            wx.CallAfter(self._set_mode, mode)
+            update = {"type": "setMode", "mode": mode, "destination": "session"}
+            return {"behavior": "allow", "updatedPermissions": [update]}
+        if choice == PermissionDialog.ALLOW:
+            self._announce("Allowed")
+            return {"behavior": "allow"}
+        if choice == PermissionDialog.ALLOW_SESSION:
+            self._announce("Allowed for this session")
+            return {"behavior": "allow", "updatedPermissions": suggestions}
+        if plan:
+            self._announce("Kept planning")
+            message = "The user wants to keep planning."
+        else:
+            self._announce("Denied")
+            message = f"The user denied {tool}."
+        if reason:
+            message += f" They said: {reason}"
+        return {"behavior": "deny", "message": message}
+
     def _show_question_dialog(
         self, questions: Sequence[Question], *, ended_turn: bool = False
     ) -> Optional[list[list[str]]]:
@@ -7511,7 +7669,7 @@ class SessionPanel(wx.Panel):
             if panel is not None:
                 panel._queue_worker_event("late_turn", generation)
 
-        return {"held_for": self, "on_unsolicited": wake}
+        return {"held_for": self, "on_unsolicited": wake, "on_permission": self._ask_permission}
 
     def _start_late_turn(self, generation: int) -> None:
         """Receive what the CLI says with no turn of ours running.
