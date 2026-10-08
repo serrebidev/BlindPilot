@@ -112,7 +112,7 @@ Options. Show live activity in the list, Speak activity aloud, Include the backe
 
 Chat. Accounts, Conversation profiles, Refresh models, History view (List, Read-only text), Diagnostics. Enabled only when the Mode combo box is set to Chat.
 
-Help. Check for Updates, Check for updates at startup, Open Log Folder, About BlindPilot.
+Help. Check for Updates, Check for updates at startup, Open Log Folder, Report a Bug, About BlindPilot. Report a Bug asks what happened, what you expected and the steps, shows exactly what else goes with it (versions and settings, never anything from a conversation), and either opens GitHub's new-issue page filled in or copies the report.
 
 Backend, Permission Mode, Narration, and Working sound are radio items, so a screen reader reports them as exclusive choices. Compact Conversation and Connect a Provider are greyed out for backends that have no equivalent.
 
