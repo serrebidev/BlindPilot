@@ -34,6 +34,16 @@ def test_a_running_turn_says_how_long_and_its_last_step(panel, monkeypatch):
     ]
 
 
+def test_an_attached_turn_says_it_counts_from_the_attach(panel, monkeypatch):
+    monkeypatch.setattr(app.time, "monotonic", lambda: 70.0)
+    panel._turn_started_at = 10.0
+    panel._turn_attached = True
+
+    app.SessionPanel.turn_status(panel)
+
+    assert panel.spoken == ["Attached to a running turn 1 minute ago. No tool used yet."]
+
+
 def test_with_no_turn_running_it_says_how_long_the_last_one_took(panel):
     panel._turn_started_at = None
     panel._last_turn_seconds = 3661
