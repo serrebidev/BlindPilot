@@ -186,6 +186,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
         on_question: Optional[AskQuestions] = None,
+        on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         on_subagent: Optional[SubagentReport] = None,
     ) -> None:
         super().__init__(daemon=True)
@@ -205,6 +206,9 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
+        # Accepted for parity with upstream workers; not yet wired to a
+        # Muse approval request.
+        self._on_permission = on_permission
         self._on_subagent = on_subagent or ignore_subagents
 
         self._transport: Optional[StdioTransport] = None
