@@ -2628,17 +2628,23 @@ def changed_files(cwd: str) -> Optional[tuple[str, list[tuple[str, str, bool]]]]
         return None
     root = top.stdout.strip()
     files: list[tuple[str, str]] = []
-    for line in _git(root, "diff", "--numstat", "HEAD").stdout.splitlines():
-        parts = line.split("\t", 2)
+    # -z: paths exactly as they are, not C-quoted, and a rename as old and new.
+    fields = iter(_git(root, "diff", "--numstat", "-z", "HEAD").stdout.split("\0"))
+    for field in fields:
+        parts = field.split("\t", 2)
         if len(parts) != 3:
             continue
         added, removed, path = parts
+        if not path:
+            next(fields, "")  # the old name
+            path = next(fields, "")
         if added == "-":
             files.append((path, "binary file changed"))
         else:
             lines = "line" if added == "1" else "lines"
             files.append((path, f"{added} {lines} added, {removed} removed"))
-    new = _git(root, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
+    listed = _git(root, "ls-files", "-z", "--others", "--exclude-standard").stdout
+    new = [path for path in listed.split("\0") if path]
     files += [(path, "new file") for path in new]
     described = []
     for path, what in files:
@@ -2678,6 +2684,8 @@ def readable_diff(diff: str) -> str:
             out.append(f"Added: {line[1:]}")
         elif line.startswith("-"):
             out.append(f"Removed: {line[1:]}")
+        elif line.startswith("Binary files "):
+            out.append("Binary file changed; its contents cannot be read as text.")
         else:
             out.append(f"Unchanged: {line[1:]}")
     return "\n".join(out)
