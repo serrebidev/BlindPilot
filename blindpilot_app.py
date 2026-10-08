@@ -5404,6 +5404,27 @@ class NewSessionDialog(wx.Dialog):
 _HISTORY_SCOPES = ("folder", "all")
 _HISTORY_SCOPE_LABELS = ("This folder", "All folders")
 
+# Orders Recent Conversations can be listed in; the first is the default.
+_HISTORY_SORTS = ("Newest first", "Oldest first", "By title", "By folder")
+
+
+def _history_key(entry: HistoryEntry) -> str:
+    """How a conversation is known in BlindPilot's own names and hidden list."""
+    return f"{entry.backend}:{entry.session_id}"
+
+
+def sort_history(entries: List[HistoryEntry], order: str, title) -> List[HistoryEntry]:
+    """`entries` in one of `_HISTORY_SORTS`, newest first within a tie."""
+    newest = sorted(entries, key=lambda e: e.modified, reverse=True)
+    if order == "Oldest first":
+        return newest[::-1]
+    if order == "By title":
+        return sorted(newest, key=lambda e: title(e).casefold())
+    if order == "By folder":
+        return sorted(newest, key=lambda e: (e.folder or e.cwd).casefold())
+    return newest
+
+
 # "All backends" sits first in the backend list; the rest follow BACKEND_IDS.
 _HISTORY_ANY_BACKEND = "All backends"
 
@@ -5446,6 +5467,17 @@ class HistoryDialog(wx.Dialog):
         self.scope_picker.SetSelection(0)
         self.scope_picker.Bind(wx.EVT_CHOICE, lambda _e: self._reload())
 
+        sort_label = wx.StaticText(self, label="So&rt:")
+        self.sort_picker = wx.Choice(self, choices=list(_HISTORY_SORTS))
+        self.sort_picker.SetName("Sort")
+        saved_sort = _load_config().get("history_sort")
+        self.sort_picker.SetSelection(
+            _HISTORY_SORTS.index(saved_sort) if saved_sort in _HISTORY_SORTS else 0
+        )
+        self.sort_picker.Bind(wx.EVT_CHOICE, lambda _e: self._on_sort())
+        self.show_hidden = wx.CheckBox(self, label="Show &hidden conversations")
+        self.show_hidden.Bind(wx.EVT_CHECKBOX, lambda _e: self._refresh())
+
         filter_label = wx.StaticText(self, label="&Filter:")
         self.filter_box = wx.TextCtrl(self)
         self.filter_box.SetName("Filter conversations")
@@ -5463,6 +5495,13 @@ class HistoryDialog(wx.Dialog):
         open_button = self.FindWindowById(wx.ID_OK)
         if open_button is not None:
             open_button.SetLabel("&Open")
+        # Names and hiding are BlindPilot's own: no backend's files change.
+        rename_button = wx.Button(self, label="Rena&me…")
+        rename_button.Bind(wx.EVT_BUTTON, lambda _e: self._rename())
+        self.hide_button = wx.Button(self, label="Hi&de")
+        self.hide_button.Bind(wx.EVT_BUTTON, lambda _e: self._toggle_hidden())
+        buttons.Insert(0, rename_button, 0, wx.RIGHT, self.FromDIP(PAD))
+        buttons.Insert(1, self.hide_button, 0, wx.RIGHT, self.FromDIP(PAD))
 
         pad = self.FromDIP(PAD_DIALOG)
         pickers = wx.FlexGridSizer(2, 2, self.FromDIP(PAD), self.FromDIP(PAD))
@@ -5471,11 +5510,14 @@ class HistoryDialog(wx.Dialog):
         pickers.Add(self.backend_picker, 1, wx.EXPAND)
         pickers.Add(scope_label, 0, wx.ALIGN_CENTER_VERTICAL)
         pickers.Add(self.scope_picker, 1, wx.EXPAND)
+        pickers.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        pickers.Add(self.sort_picker, 1, wx.EXPAND)
         # The list is what gives the dialog its size; Fit then follows it.
         self.list_box.SetMinSize(self.FromDIP(wx.Size(560, 220)))
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(pickers, 0, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.show_hidden, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         sizer.Add(filter_label, 0, wx.LEFT | wx.RIGHT, pad)
         sizer.Add(self.filter_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
         sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
@@ -5506,20 +5548,50 @@ class HistoryDialog(wx.Dialog):
             self._entries = list_history(self._selected_backend(), self._selected_cwd())
         self._refresh()
 
+    def _read_own_names(self) -> None:
+        """Names and hidden list from config, once per refresh, not per row."""
+        cfg = _load_config()
+        names = cfg.get("conversation_names")
+        hidden = cfg.get("hidden_conversations")
+        self._names = dict(names) if isinstance(names, dict) else {}
+        self._hidden_keys = set(hidden) if isinstance(hidden, list) else set()
+
+    def _title(self, entry: HistoryEntry) -> str:
+        """The name you gave it here, or the one the backend has."""
+        if not hasattr(self, "_names"):
+            self._read_own_names()
+        return str(self._names.get(_history_key(entry)) or entry.title)
+
+    def _hidden(self) -> set:
+        if not hasattr(self, "_hidden_keys"):
+            self._read_own_names()
+        return self._hidden_keys
+
     def _label_for(self, entry: HistoryEntry) -> str:
-        parts = [entry.title or "(untitled)", describe_age(entry.modified)]
+        parts = [self._title(entry) or "(untitled)", describe_age(entry.modified)]
+        if _history_key(entry) in self._hidden():
+            parts.append("hidden")
         if self._selected_cwd() is None and entry.folder:
             parts.append(entry.folder)
         if self._selected_backend() is None:
             parts.append(backend_label(entry.backend))
         return " — ".join(parts)
 
-    def _refresh(self) -> None:
+    def _refresh(self, keep: Optional[HistoryEntry] = None) -> None:
+        self._read_own_names()
         term = self.filter_box.GetValue().strip().lower()
-        self._shown = [entry for entry in self._entries if not term or term in entry.title.lower()]
+        hidden = self._hidden() if not self.show_hidden.GetValue() else set()
+        matching = [
+            entry
+            for entry in self._entries
+            if (not term or term in self._title(entry).lower())
+            and _history_key(entry) not in hidden
+        ]
+        order = _HISTORY_SORTS[max(0, self.sort_picker.GetSelection())]
+        self._shown = sort_history(matching, order, self._title)
         self.list_box.Set([self._label_for(entry) for entry in self._shown])
         if self._shown:
-            self.list_box.SetSelection(0)
+            self.list_box.SetSelection(self._shown.index(keep) if keep in self._shown else 0)
         count = len(self._shown)
         if not self._entries:
             message = "No past conversations found here"
@@ -5541,8 +5613,70 @@ class HistoryDialog(wx.Dialog):
         if selection == wx.NOT_FOUND or selection >= len(self._shown):
             announce("Error: Choose a conversation first")
             return
-        self.entry = self._shown[selection]
+        chosen = self._shown[selection]
+        # Opened under the name given here, so the tab says it too.
+        self.entry = replace(chosen, title=self._title(chosen))
         self.EndModal(wx.ID_OK)
+
+    def _current(self) -> Optional[HistoryEntry]:
+        selection = self.list_box.GetSelection()
+        if selection == wx.NOT_FOUND or selection >= len(self._shown):
+            announce("Error: Choose a conversation first")
+            return None
+        return self._shown[selection]
+
+    def _on_sort(self) -> None:
+        cfg = _load_config()
+        cfg["history_sort"] = _HISTORY_SORTS[max(0, self.sort_picker.GetSelection())]
+        _save_config(cfg)
+        self._refresh(self._current() if self._shown else None)
+
+    def _rename(self) -> None:
+        """F2: a name for this conversation in BlindPilot. Blank goes back."""
+        entry = self._current()
+        if entry is None:
+            return
+        with wx.TextEntryDialog(
+            self, "Name (leave blank for the original):", "Rename", self._title(entry)
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            name = dlg.GetValue().strip()
+        cfg = _load_config()
+        names = cfg.get("conversation_names")
+        names = dict(names) if isinstance(names, dict) else {}
+        if name and name != entry.title:
+            names[_history_key(entry)] = name
+        else:
+            names.pop(_history_key(entry), None)
+        cfg["conversation_names"] = names
+        _save_config(cfg)
+        self._refresh(entry)
+        announce(f"Renamed to {self._title(entry)}")
+        self.list_box.SetFocus()
+
+    def _toggle_hidden(self) -> None:
+        """Delete: hide this conversation from the list, or bring it back."""
+        entry = self._current()
+        if entry is None:
+            return
+        hidden = self._hidden()
+        key = _history_key(entry)
+        cfg = _load_config()
+        if key in hidden:
+            hidden.discard(key)
+            said = "Brought back"
+        else:
+            hidden.add(key)
+            said = "Hidden. Show hidden conversations lists it again"
+        cfg["hidden_conversations"] = sorted(hidden)
+        _save_config(cfg)
+        selection = self.list_box.GetSelection()
+        self._refresh(entry)
+        if entry not in self._shown and self._shown:
+            self.list_box.SetSelection(min(selection, len(self._shown) - 1))
+        announce(said)
+        self.list_box.SetFocus()
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         key = event.GetKeyCode()
@@ -5560,6 +5694,12 @@ class HistoryDialog(wx.Dialog):
                 event.Skip()
                 return
             self._accept()
+            return
+        if self.list_box.HasFocus() and key == wx.WXK_F2:
+            self._rename()
+            return
+        if self.list_box.HasFocus() and key == wx.WXK_DELETE:
+            self._toggle_hidden()
             return
         # Down from the filter box drops straight into the list, so a filter
         # can be typed and its first result reached without hunting for Tab.
