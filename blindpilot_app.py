@@ -6934,7 +6934,15 @@ class SessionPanel(wx.Panel):
             return {"behavior": "allow"}
         if choice == PermissionDialog.ALLOW_SESSION:
             self._announce("Allowed for this session")
-            return {"behavior": "allow", "updatedPermissions": suggestions}
+            # Claude Code often suggests saving the rule to settings.local.json.
+            # "For this session" means this session: every update is kept in
+            # memory only, never written to a settings file.
+            for_session = [
+                {**update, "destination": "session"}
+                for update in suggestions
+                if isinstance(update, dict)
+            ]
+            return {"behavior": "allow", "updatedPermissions": for_session}
         if plan:
             self._announce("Kept planning")
             message = "The user wants to keep planning."
