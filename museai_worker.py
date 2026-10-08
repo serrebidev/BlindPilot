@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from typing import Optional
 
 from agent_backends import (
@@ -119,8 +120,10 @@ class MuseAiWorker(_TurnWorker):
                 self._proc = None
         return proc.returncode, out or "", err or ""
 
-    def _messages(self, binary: str, session: str) -> list[tuple[int, str, str]]:
-        """The chat's finished agent messages as (seq, message id, text), oldest first."""
+    def _messages(self, binary: str, session: str) -> list[tuple[int, str, str, bool]]:
+        """The chat's finished agent messages, oldest first, as (seq, message
+        id, text, direct). Direct means an answer to a message, rather than an
+        update the agent posted on its own (those carry a reply-to id)."""
         code, out, _err = self._run(
             binary, ["history", "--thread", session, "--limit", "40", "--raw"], 60
         )
@@ -138,7 +141,8 @@ class MuseAiWorker(_TurnWorker):
                 continue
             seq = body.get("seq") or event.get("seq") or 0
             message_id = str(body.get("message_id") or event.get("message_id") or "")
-            found.append((int(seq), message_id, text))
+            direct = not (body.get("reply_to_message_id") or event.get("reply_to_message_id"))
+            found.append((int(seq), message_id, text, direct))
         return sorted(found)
 
     def _do_run(self) -> None:
@@ -150,7 +154,7 @@ class MuseAiWorker(_TurnWorker):
             return
         session = self._session_id or ""
         if not session:
-            title = " ".join(self._prompt.split())[:_TITLE_CHARS] or "BlindPilot"
+            title = " ".join((self._prompt or "").split())[:_TITLE_CHARS] or "BlindPilot"
             code, out, err = self._run(binary, ["session-start", "--title", title], 120)
             started = _json_from(out) if code == 0 else None
             session = str((started or {}).get("session_id") or "")
@@ -161,15 +165,18 @@ class MuseAiWorker(_TurnWorker):
             self._on_session(session)
         if self._cancelled:
             return
+        if not (self._prompt or "").strip():
+            self._follow(binary, session)
+            return
         self._on_started()
         self._on_activity("tool", "Sent to muse.ai. Waiting for its reply.")
         # Everything the agent says in this chat from here on is part of the
         # turn: its status updates while it works as well as the answer.
-        baseline = max((seq for seq, _id, _text in self._messages(binary, session)), default=0)
+        baseline = max((m[0] for m in self._messages(binary, session)), default=0)
         relayed: set[str] = set()
 
         def relay(skip: str = "") -> None:
-            for seq, message_id, text in self._messages(binary, session):
+            for seq, message_id, text, _direct in self._messages(binary, session):
                 if seq <= baseline or message_id in relayed or message_id == skip:
                     continue
                 relayed.add(message_id)
@@ -219,6 +226,40 @@ class MuseAiWorker(_TurnWorker):
         if not final_id or final_id not in relayed:
             self._on_activity("assistant", text)
         self._on_complete(text)
+
+    def _follow(self, binary: str, session: str) -> None:
+        """Sit in on a chat whose last message has no answer yet.
+
+        A reopened conversation can still be running on muse.ai's machine.
+        Nothing is sent: every update it posts from here is relayed, and its
+        next direct answer ends the turn.
+        """
+        self._on_started()
+        self._on_activity("tool", "muse.ai is still working on this. Following it.")
+        baseline = max((m[0] for m in self._messages(binary, session)), default=0)
+        relayed: set[str] = set()
+        deadline = time.monotonic() + REPLY_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            for _ in range(int(STATUS_POLL_SECONDS * 10) or 1):
+                if self._cancelled:
+                    break
+                time.sleep(0.1)
+            if self._cancelled:
+                self._settled.set()
+                self._on_complete("Stopped following. muse.ai keeps working on its own machine.")
+                return
+            for seq, message_id, text, direct in self._messages(binary, session):
+                if seq <= baseline or message_id in relayed:
+                    continue
+                relayed.add(message_id)
+                self._on_activity("assistant", text)
+                if direct:
+                    self._settled.set()
+                    self._on_complete(text)
+                    return
+        self._fail(
+            "muse.ai is still working after an hour. Reopen the chat later to read its answer."
+        )
 
     def _teardown(self) -> None:
         proc = self._proc
