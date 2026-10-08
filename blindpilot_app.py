@@ -12423,6 +12423,11 @@ class MainFrame(wx.Frame):
             current = 2
         else:
             current = 3 if step > 0 else 0
+        if focused is not None and focused is getattr(self, "_status_stop_from", None):
+            # The status bar takes no focus, so focus never left the part it
+            # was read from; this press moves on from the status bar instead.
+            current = 3
+        self._status_stop_from = None
         target = (current + step) % 4
         if target == 0:
             self.tab_switcher.SetFocus()
@@ -12432,6 +12437,7 @@ class MainFrame(wx.Frame):
             page.focus_prompt()
         else:
             announce(f"Status: {self.statusbar.GetStatusText() or 'empty'}")
+            self._status_stop_from = focused
 
     def _find_active(self) -> None:
         page = self.notebook.GetCurrentPage()
