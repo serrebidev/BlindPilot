@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.40.0 - 2026-10-08
+
+- muse.ai: Feed can open article and social links, prepare a discussion in chat, and run linked ideas. Ideas can run the whole idea or selected parts, then open the execution chat. Discussion drafts include the item's details and stay unsent until you press Send.
+- muse.ai: Schedules can run enabled tasks immediately and read run history, including summaries and errors. The compatibility hook adds the current web client's Run now route missing from upstream muse-cli 0.3.2.
+- muse.ai: Goals is now in the Model menu. Read goals, child goals, and updates, discuss them, edit title and description, change status, delete with confirmation, and accept or dismiss suggestions. Accepting a suggestion starts its work.
+- muse.ai: restored chat history carries its sequence into the watcher so an action's quick reply is not lost before the first follow-up check.
+
 ## v0.39.0 - 2026-10-08
 
 - muse.ai: the main conversation now appears as Main chat in Recent Conversations (Ctrl+Shift+H), alongside your side chats. Selecting the muse.ai backend or opening an unnamed tab with it selected loads the main chat and its history, ready to continue. New Conversation still starts a separate side chat, and reopening an existing chat continues that chat. If the main chat cannot be found, your prompt stays unsent rather than going to a new side chat.
