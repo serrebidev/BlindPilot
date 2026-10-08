@@ -8395,6 +8395,9 @@ class SessionPanel(wx.Panel):
             if dlg.ShowModal() != wx.ID_OK:
                 return
             self._search_term = dlg.GetValue().strip()
+            if self._search_term:
+                # Kept after the filter is cleared, for F3 and Shift+F3.
+                self._find_term = self._search_term
         self._refresh_list()
         # Spoken, not just written to the status bar. No screen reader reads a
         # status bar it was not asked to, and a search that matched nothing
@@ -8408,6 +8411,32 @@ class SessionPanel(wx.Panel):
                 self._focus_row(0)
         else:
             self._announce("Search cleared")
+
+    def find_next(self, step: int) -> None:
+        """Move to the next (1) or previous (-1) row holding the last search.
+
+        Searches each row's whole text, not just the line shown, and goes round
+        from the other end when it reaches one, saying so.
+        """
+        term = getattr(self, "_find_term", "").casefold()
+        if not term:
+            self._announce("Nothing to find yet. Ctrl+F searches the responses.")
+            return
+        rows = self._displayed
+        start = self._selected_row()
+        if start == wx.NOT_FOUND:
+            start = -1 if step > 0 else len(rows)
+        for offset in range(1, len(rows) + 1):
+            index = (start + step * offset) % len(rows)
+            if term in f"{rows[index].label}\n{rows[index].payload}".casefold():
+                wrapped = (index <= start) if step > 0 else (index >= start)
+                if wrapped and index != start:
+                    self._announce("Wrapped to the top" if step > 0 else "Wrapped to the bottom")
+                elif index == start:
+                    self._announce("No other match")
+                self._focus_row(index)
+                return
+        self._announce(f"'{getattr(self, '_find_term', '')}' not found")
 
     def _on_list_key(self, event: wx.KeyEvent) -> None:
         """Row keys for both responses controls — the list box and the
@@ -8423,6 +8452,10 @@ class SessionPanel(wx.Panel):
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             if sel != wx.NOT_FOUND:
                 self._open_row(sel)
+            return
+
+        if key == wx.WXK_F3:
+            self.find_next(-1 if event.ShiftDown() else 1)
             return
 
         if key == wx.WXK_WINDOWS_MENU:

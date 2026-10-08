@@ -126,6 +126,7 @@ Follow everything, the default, speaks every tool call, result, and subagent lin
 - Ctrl+Shift+H reopen a past conversation. Ctrl+G list Hermes conversations, including running ones.
 - Ctrl+Shift+K compact this conversation. Ctrl+Shift+N start a fresh one.
 - Ctrl+F search responses. Ctrl+R jump to the latest.
+- F3 and Shift+F3, in the responses, move to the next or previous row holding the last search, whole text included, going round at either end.
 - Ctrl+Shift+E choose model and reasoning effort.
 - Ctrl+/ slash commands. Ctrl+. stop the running task.
 - Ctrl+Shift+A attach files. Ctrl+Shift+M cycle permission modes.
