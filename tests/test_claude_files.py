@@ -61,3 +61,24 @@ def test_memories_from_several_projects_say_which_project(tmp_path, monkeypatch)
     labels = [label for _path, label in app.claude_files(None)["Memories"]]
 
     assert labels == ["a.md, one", "b.md, two"]
+
+
+def test_a_nested_folder_finds_the_repository_roots_skills_and_agents_md(tmp_path, monkeypatch):
+    """Claude Code walks up from a subfolder for skills, agents and AGENTS.md."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    _write(repo / "AGENTS.md")
+    _write(repo / ".claude" / "skills" / "lint" / "SKILL.md")
+    _write(repo / ".claude" / "settings.json", "{}")
+
+    found = app.claude_files(str(repo / "packages" / "api"))
+
+    assert str(repo / "AGENTS.md") in [path for path, _label in found["Instructions"]]
+    assert [path for path, _label in found["Skills"]] == [
+        str(repo / ".claude" / "skills" / "lint" / "SKILL.md")
+    ]
+    # Settings come from the working folder alone, not the folders above it.
+    assert str(repo / ".claude" / "settings.json") not in [
+        path for path, _label in found["Settings"]
+    ]

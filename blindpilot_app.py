@@ -2807,19 +2807,29 @@ def claude_files(cwd: Optional[str]) -> dict[str, list[tuple[str, str]]]:
             found[kind].append((str(path), label))
 
     claude_dirs = [home]
+    settings_dirs = [home]
     if cwd:
         here = Path(cwd)
-        claude_dirs.append(here / ".claude")
-        # Claude Code reads CLAUDE.md from the working folder and every one above it.
+        settings_dirs.append(here / ".claude")
+        # Claude Code reads instructions, skills and agents from the working
+        # folder and every one above it; settings only from the folder itself.
+        walking = True  # .claude folders: up to the repository root, never home
         for folder in (here, *here.parents):
-            add("Instructions", [folder / "CLAUDE.md", folder / "CLAUDE.local.md"])
-            add("Instructions", [folder / ".claude" / "CLAUDE.md"])
+            add(
+                "Instructions",
+                [folder / name for name in ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")],
+            )
+            walking = walking and folder != Path.home()
+            if walking:
+                claude_dirs.append(folder / ".claude")
+                walking = not (folder / ".git").exists()
         add("Settings", [here / ".mcp.json"])
     for folder in claude_dirs:
         add("Instructions", [folder / "CLAUDE.md", *folder.glob("rules/**/*.md")])
         add("Skills", folder.glob("skills/*/SKILL.md"))
         add("Agents", folder.glob("agents/**/*.md"))
         add("Commands", folder.glob("commands/**/*.md"))
+    for folder in settings_dirs:
         add("Settings", [folder / "settings.json", folder / "settings.local.json"])
     add("Memories", home.glob("projects/*/memory/*.md"))
     for files in found.values():
