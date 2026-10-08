@@ -536,6 +536,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         # Answers Hermes' clarify, sudo and secret requests, each of which
         # blocks the agent until a reply arrives.
         on_question: Optional[AskQuestions] = None,
+        on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         on_subagent: Optional[SubagentReport] = None,
     ) -> None:
         super().__init__(daemon=True)
@@ -600,6 +601,9 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         self._on_done = on_done
         # Called by the clarify and secret handlers; None means answer empty.
         self._on_question = on_question
+        # Not yet wired to a Hermes approval request; accepted for parity
+        # with the upstream workers so the contract test holds.
+        self._on_permission = on_permission
         self._on_subagent = on_subagent or ignore_subagents
         # delegate_task children this turn has heard of, by subagent id, with
         # where each stands: interrupting the session does not reach them,
