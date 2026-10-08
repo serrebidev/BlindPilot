@@ -131,6 +131,7 @@ Follow everything, the default, speaks every tool call, result, and subagent lin
 - Ctrl+E export the conversation as Markdown, a web page, or plain text, offered in Documents.
 - Ctrl+Shift+T say how long the running turn has worked, its last step, and how many messages are queued.
 - Ctrl+Shift+D list the files that differ from the last commit in this folder's git repository, with lines added and removed; Enter reads a file's changes as Added, Removed and Unchanged lines.
+- F3 and Shift+F3, in the responses, move to the next or previous row holding the last search, whole text included, going round at either end.
 - Ctrl+Shift+E choose model and reasoning effort.
 - Ctrl+/ slash commands. Ctrl+. stop the running task.
 - Ctrl+Shift+A attach files. Ctrl+Shift+M cycle permission modes.

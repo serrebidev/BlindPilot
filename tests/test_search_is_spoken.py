@@ -55,6 +55,7 @@ def panel(monkeypatch):
     stub._row_count = lambda: len(stub._displayed)
     stub.focused: list[int] = []
     stub._focus_row = stub.focused.append
+    stub._selected_row = lambda: -1
     return stub
 
 
