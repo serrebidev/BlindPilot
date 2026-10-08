@@ -1,3 +1,9 @@
+# BlindPilot 0.37.1
+
+Recent Conversations opens again.
+
+- Ctrl+Shift+H, Recent Conversations, stopped opening: the dialog failed while it was being built, so none of its controls could be used, whichever backend you picked. It opens normally now, so you can reopen your muse.ai side chats, including ones muse.ai is still working in, and everything else 0.37.0 added to the list.
+
 # BlindPilot 0.37.0
 
 muse.ai joins as a backend, the backend lists are alphabetical, and Recent Conversations finds far more of your conversations.

@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.37.0"
+APP_VERSION = "0.37.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -6629,7 +6629,9 @@ class HistoryDialog(wx.Dialog):
         buttons.Insert(1, self.hide_button, 0, wx.RIGHT, self.FromDIP(PAD))
 
         pad = self.FromDIP(PAD_DIALOG)
-        pickers = wx.FlexGridSizer(2, 2, self.FromDIP(PAD), self.FromDIP(PAD))
+        # Rows 0: as many as there are pickers. Fixing it at 2 made wx refuse
+        # the third (Sort) with an assertion, so the dialog never opened.
+        pickers = wx.FlexGridSizer(0, 2, self.FromDIP(PAD), self.FromDIP(PAD))
         pickers.AddGrowableCol(1, 1)
         pickers.Add(backend_label_text, 0, wx.ALIGN_CENTER_VERTICAL)
         pickers.Add(self.backend_picker, 1, wx.EXPAND)
