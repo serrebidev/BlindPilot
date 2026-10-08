@@ -1,3 +1,11 @@
+# BlindPilot 0.36.0
+
+Edit anything in What Agents Know.
+
+- Everything Ctrl+Shift+I lists can now be changed without leaving BlindPilot: memories, tastes, Hermes memory entries, instructions, skills, agents and settings. Press Edit, Alt+E, on an entry in the list, or while you are reading it, and the text becomes editable where you are. Save, or Ctrl+S, writes it back, and the button says Save while you are editing.
+- Only what you edited changes. A Command Code taste is saved as its own line in its category's file, and a Hermes memory as its own entry; everything else in the file stays as it was. Memories, instructions and settings are saved as the whole file.
+- Nothing is lost by accident. Closing with changes you have not saved asks whether to save them. A taste or Hermes entry emptied out is not saved; Delete is how to remove one. Edit in Your Editor still opens the file in another program if you prefer.
+
 # BlindPilot 0.35.0
 
 What Claude Knows becomes What Agents Know, and you can now add and remove what your agents remember.
