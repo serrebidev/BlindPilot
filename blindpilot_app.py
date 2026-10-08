@@ -2755,6 +2755,34 @@ def readable_diff(diff: str) -> str:
     return "\n".join(out)
 
 
+# A CommonMark fenced code block: three or more backticks or tildes, closed by
+# a run of the same character at least as long, or by the end of the text.
+_FENCED_BLOCKS = [
+    re.compile(rf"(?ms)^ {{0,3}}({mark}{{3,}})[^\n]*\n.*?(?:^ {{0,3}}\1{mark}*[ \t]*$|\Z)")
+    for mark in ("`", "~")
+]
+
+
+def _sent_readback(text: str, limit: int = 300) -> str:
+    """'Sent: fix the build', said as the message goes, long ones cut short."""
+    for fence in _FENCED_BLOCKS:
+        text = fence.sub(" Code block omitted. ", text)
+    words = text.split()
+    if not words:
+        return "Sent"
+    said, rest = "", 0
+    for index, word in enumerate(words):
+        if len(said) + len(word) > limit:
+            rest = len(words) - index
+            if not said:
+                # One long path or URL: its start, rather than nothing at all.
+                said, rest = word[:limit], rest - 1
+            break
+        said = f"{said} {word}" if said else word
+    more = f"... and {rest} more {'word' if rest == 1 else 'words'}" if rest else ""
+    return f"Sent: {said}{more}"
+
+
 def _tab_label(title: str, cwd: str) -> str:
     """What a tab is called.
 
@@ -3172,6 +3200,9 @@ class _Settings:
         # another application has focus. Nothing is shown while BlindPilot is
         # in front: the announcement already said it.
         self.notify_in_background = bool(cfg.get("notify_in_background", True))
+        # Read your message back as it goes, so you hear what was actually
+        # sent: dictation and paste put text in the prompt nobody heard.
+        self.read_back_sent = bool(cfg.get("read_back_sent", True))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Read again in main() before the first window, which is the only
@@ -3190,6 +3221,7 @@ class _Settings:
         cfg["show_thinking"] = self.show_thinking
         cfg["ask_written_questions"] = self.ask_written_questions
         cfg["notify_in_background"] = self.notify_in_background
+        cfg["read_back_sent"] = self.read_back_sent
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["appearance"] = self.appearance
@@ -7957,7 +7989,7 @@ class SessionPanel(wx.Panel):
         self.prompt.SetValue("")
         self._attachments = []
 
-        self._announce("Sending")
+        self._announce(_sent_readback(prompt) if SETTINGS.read_back_sent else "Sending")
         self.send_btn.Disable()
         # Earcons: a one-shot "send", then loop "in progress" until the
         # response arrives (or the request fails).
@@ -11020,6 +11052,8 @@ class PreferencesDialog(wx.Dialog):
             panel, label="Notify me when a turn ends while BlindPilot is in the background"
         )
         self._notify.SetValue(SETTINGS.notify_in_background)
+        self._read_back = wx.CheckBox(panel, label="Read my message back when it is sent")
+        self._read_back.SetValue(SETTINGS.read_back_sent)
         for check in (
             self._live_rows,
             self._speak_live,
@@ -11027,6 +11061,7 @@ class PreferencesDialog(wx.Dialog):
             self._text_view,
             self._written_questions,
             self._notify,
+            self._read_back,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -11170,6 +11205,10 @@ class PreferencesDialog(wx.Dialog):
     @property
     def notify_in_background(self) -> bool:
         return self._notify.GetValue()
+
+    @property
+    def read_back_sent(self) -> bool:
+        return self._read_back.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -12022,6 +12061,7 @@ class MainFrame(wx.Frame):
         SETTINGS.text_view = dialog.text_view
         SETTINGS.ask_written_questions = dialog.ask_written_questions
         SETTINGS.notify_in_background = dialog.notify_in_background
+        SETTINGS.read_back_sent = dialog.read_back_sent
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         changed_appearance = dialog.appearance != SETTINGS.appearance

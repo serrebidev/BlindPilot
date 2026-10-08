@@ -15,6 +15,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 - Runs every backend in Bypass permissions mode by default, so a task does not stop to ask for approval. Change this under Model, Permission Mode.
 - Splits every answer into rows you can arrow through, one per heading, paragraph, list item, quote, code block, thought, tool call, and tool result.
 - Reads answers aloud as they stream, or stays silent until the whole answer is in.
+- Reads your message back as it is sent ("Sent: fix the build"), so dictated or pasted text is heard; long messages are cut short and code blocks left out. Turn it off in Preferences.
 - Speaks every step of a run, or only your message, the answer, and status changes. See Narration below.
 - Reopens past conversations from any backend and continues them. Compacts a long one in place.
 - Runs several sessions at once, one tab each, with its own folder, model, and permission mode.
