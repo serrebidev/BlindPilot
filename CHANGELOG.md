@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.34.1 - 2026-10-08
+
+- What Claude Knows lists the skills, agents, commands and rules in the .claude folders above a nested tab folder, up to the repository root, and lists AGENTS.md with the CLAUDE.md files. Settings still come from the working folder only (#74, from Codex review of #73).
+
 ## v0.34.0 - 2026-10-08
 
 - What Claude Knows (Ctrl+Shift+I, Model menu) lists Claude Code's instructions, memories, skills, agents, commands and settings by kind with counts, for the config folder and the tab's project. Enter reads a file; Edit in Your Editor opens it. Memories and skills are labelled from their front-matter name and description. BlindPilot never writes these files. Modelled on The Chat Place (#73).
