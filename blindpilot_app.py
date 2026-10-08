@@ -2603,6 +2603,15 @@ def _tab_title(text: str) -> str:
     return flat[:31].rstrip() + "…"
 
 
+def _context_line(used: int, window: int) -> str:
+    """'Context 62% full: 124,000 of 200,000 tokens', as far as it is known."""
+    if not used:
+        return "Context: not reported yet"
+    if not window:
+        return f"Context: {used:,} tokens used"
+    return f"Context {round(100 * used / window)}% full: {used:,} of {window:,} tokens"
+
+
 def _tab_label(title: str, cwd: str) -> str:
     """What a tab is called.
 
@@ -4147,6 +4156,23 @@ class ClaudeWorker(threading.Thread):
                 # collected up and read out as the reply.
                 from_subagent = bool(event.get("parent_tool_use_id"))
                 message = event.get("message") or {}
+                if not from_subagent:
+                    # Everything the model was sent for this reply, which is
+                    # how full the conversation's context now is.
+                    usage = message.get("usage")
+                    if isinstance(usage, dict):
+                        used = sum(
+                            int(usage.get(key) or 0)
+                            for key in (
+                                "input_tokens",
+                                "cache_creation_input_tokens",
+                                "cache_read_input_tokens",
+                                "output_tokens",
+                            )
+                        )
+                        if used:
+                            window = getattr(self, "context_tokens", (0, 0))[1]
+                            self.context_tokens = (used, window)
                 for block in message.get("content") or []:
                     if not isinstance(block, dict):
                         continue
@@ -4227,6 +4253,13 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
+                windows = [
+                    int(entry.get("contextWindow") or 0)
+                    for entry in (event.get("modelUsage") or {}).values()
+                    if isinstance(entry, dict)
+                ]
+                if max(windows, default=0) and getattr(self, "context_tokens", None):
+                    self.context_tokens = (self.context_tokens[0], max(windows))
                 queued = self._count(event.get("queued_turn_count"))
                 if not event.get("is_error") and queued:
                     # A resumed CLI can have a turn of its own to run first.
@@ -6466,6 +6499,23 @@ class SessionPanel(wx.Panel):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _note_context(self, seen: Optional[tuple[int, int]]) -> None:
+        """Keep the context fill the turn reported, and warn once past 80%.
+
+        A conversation that fills its window is compacted by the backend
+        without asking, or fails, and either one arrives with no warning.
+        """
+        if not seen:
+            return
+        used, window = seen
+        window = window or getattr(self, "_context", (0, 0))[1]
+        before = getattr(self, "_context", (0, 0))
+        self._context = (used, window)
+        if window and used >= 0.8 * window and not (before[1] and before[0] >= 0.8 * before[1]):
+            self._announce(
+                f"{_context_line(used, window)}. Compact Conversation, Ctrl+Shift+K, makes room."
+            )
+
     def _session_status_lines(self) -> list[str]:
         """What this tab will do with the next message, as the report says it."""
         backend = self.selected_backend()
@@ -6487,6 +6537,7 @@ class SessionPanel(wx.Panel):
             # than as a deliberate one.
             f"Folder: {self.cwd or 'chosen by the Hermes running this session'}",
             f"Conversation: {conversation}",
+            _context_line(*getattr(self, "_context", (0, 0))),
         ]
 
     def _show_status(self, backend: str, report: str) -> None:
@@ -8274,6 +8325,7 @@ class SessionPanel(wx.Panel):
         self._announce(f"Error: {message}", urgent=True)
 
     def _on_worker_finished(self) -> None:
+        SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
         self._settle_subagents()
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()
