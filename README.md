@@ -100,7 +100,7 @@ Type `/status` (or Model, Session Status) to hear the backend, model and effort,
 
 ## Menus
 
-Every action is in the menu bar except three chords. Ctrl+L focuses the prompt, Ctrl+1 to Ctrl+9 jump to a tab, and Ctrl+Shift+M cycles permission modes.
+Every action is in the menu bar except a few chords. Ctrl+L focuses the prompt, Ctrl+1 to Ctrl+9 jump to a tab, Ctrl+Shift+M cycles permission modes, and F6 and Shift+F6 move between the parts of the window.
 
 File. New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, shown only when Hermes is the backend), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
 
@@ -123,6 +123,7 @@ Follow everything, the default, speaks every tool call, result, and subagent lin
 ## Keyboard
 
 - Ctrl+L focus the prompt. Ctrl+T open a session. Ctrl+W close it.
+- F6 and Shift+F6 move between the tab strip, the responses, and the prompt, and read the status bar on the way round.
 - Ctrl+Shift+H reopen a past conversation. Ctrl+G list Hermes conversations, including running ones.
 - Ctrl+Shift+K compact this conversation. Ctrl+Shift+N start a fresh one.
 - Ctrl+F search responses. Ctrl+R jump to the latest.

@@ -10874,6 +10874,10 @@ class MainFrame(wx.Frame):
         id_cycle_mode = wx.NewIdRef()
         id_attach = wx.NewIdRef()
         id_jump_response = wx.NewIdRef()
+        id_next_pane = wx.NewIdRef()
+        id_prev_pane = wx.NewIdRef()
+        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_pane(+1), id=id_next_pane)
+        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_pane(-1), id=id_prev_pane)
         self.Bind(wx.EVT_MENU, lambda _e: self._focus_active("prompt"), id=id_focus_prompt)
         self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(+1), id=id_next_tab)
         self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(-1), id=id_prev_tab)
@@ -10890,6 +10894,8 @@ class MainFrame(wx.Frame):
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("M"), id_cycle_mode),
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("A"), id_attach),
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("R"), id_jump_response),
+            wx.AcceleratorEntry(wx.ACCEL_NORMAL, wx.WXK_F6, id_next_pane),
+            wx.AcceleratorEntry(wx.ACCEL_SHIFT, wx.WXK_F6, id_prev_pane),
         ]
         self._tab_jump_ids: list[wx.WindowIDRef] = []
         for n in range(1, 10):
@@ -12386,6 +12392,46 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.cycle_mode()
+
+    def _cycle_pane(self, step: int) -> None:
+        """F6 and Shift+F6: the tab strip, the responses, the prompt, the status.
+
+        The way every Windows application with panes moves between them. The
+        status bar cannot take focus, so its turn reads it aloud instead, which
+        is the one place its text was otherwise only reachable by the screen
+        reader's own command.
+        """
+        page = self.notebook.GetCurrentPage()
+        if self._app_mode != APP_MODE_AGENT or not isinstance(page, SessionPanel):
+            announce(self.statusbar.GetStatusText() or "Status bar is empty")
+            return
+        focused = wx.Window.FindFocus()
+
+        def within(window: Optional[wx.Window]) -> bool:
+            node = focused
+            while node is not None:
+                if node is window:
+                    return True
+                node = node.GetParent()
+            return False
+
+        if within(self.tab_switcher):
+            current = 0
+        elif within(page._responses_ctrl()) or within(page.subagents):
+            current = 1
+        elif within(page.prompt):
+            current = 2
+        else:
+            current = 3 if step > 0 else 0
+        target = (current + step) % 4
+        if target == 0:
+            self.tab_switcher.SetFocus()
+        elif target == 1:
+            page.focus_first_control()
+        elif target == 2:
+            page.focus_prompt()
+        else:
+            announce(f"Status: {self.statusbar.GetStatusText() or 'empty'}")
 
     def _find_active(self) -> None:
         page = self.notebook.GetCurrentPage()
