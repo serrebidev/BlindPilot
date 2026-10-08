@@ -1,3 +1,7 @@
+# BlindPilot 0.33.1
+
+Codex permission prompts. In Default mode Codex now asks before using a tool, the way Claude Code does since 0.33.0, instead of declining without a word. The dialog names the backend asking, and the other permission modes keep their automatic answers.
+
 # BlindPilot 0.33.0
 
 Seventeen new features, picked from an audit of Kelly Ford's The Chat Place, an accessible companion for Claude Code. The biggest: Claude Code can finally ask before it does something, instead of being refused without anyone being told.

@@ -3622,6 +3622,7 @@ class _TurnWorker(threading.Thread):
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
         on_question: Optional[AskQuestions] = None,
+        on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         on_subagent: Optional[SubagentReport] = None,
     ) -> None:
         super().__init__(daemon=True)
@@ -3645,6 +3646,7 @@ class _TurnWorker(threading.Thread):
         self._on_failed = on_failed
         self._on_done = on_done
         self._on_question = on_question
+        self._on_permission = on_permission
         self._on_subagent = on_subagent or ignore_subagents
         self._cancelled = False
         # Set once the turn's ending has been reported, whichever way it
@@ -4489,17 +4491,46 @@ class CodexWorker(_TurnWorker):
         request_id = message.get("id")
         mode = self._permission_mode
         if method == "item/commandExecution/requestApproval":
-            decision = "accept" if mode in ("auto", "bypassPermissions") else "decline"
+            if mode == "default" and self._on_permission is not None:
+                decision = self._ask_codex_permission(message, "command")
+            else:
+                decision = "accept" if mode in ("auto", "bypassPermissions") else "decline"
             self._send({"id": request_id, "result": {"decision": decision}})
         elif method == "item/fileChange/requestApproval":
-            decision = (
-                "accept" if mode in ("acceptEdits", "auto", "bypassPermissions") else "decline"
-            )
+            if mode == "default" and self._on_permission is not None:
+                decision = self._ask_codex_permission(message, "file change")
+            else:
+                decision = (
+                    "accept" if mode in ("acceptEdits", "auto", "bypassPermissions") else "decline"
+                )
             self._send({"id": request_id, "result": {"decision": decision}})
         elif method == "item/tool/requestUserInput":
             self._answer_user_input(request_id, message.get("params") or {})
         else:
             self._send(_unhandled_request(request_id))
+
+    def _ask_codex_permission(self, message: dict, kind: str) -> str:
+        """Ask the person about a Codex approval request; worker thread blocks.
+
+        Translates the backend-neutral dialog answer to Codex's accept/decline.
+        A stop or closed tab denies, the same as the dialog's default.
+        """
+        params = message.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        tool = str(params.get("command") or params.get("tool") or kind)
+        payload = {
+            key: params[key]
+            for key in ("command", "cwd", "reason", "explanation")
+            if key in params
+        }
+        try:
+            answer = self._on_permission(tool, payload, [])
+        except Exception:
+            return "decline"
+        if isinstance(answer, dict) and answer.get("behavior") == "allow":
+            return "accept"
+        return "decline"
 
     def _answer_user_input(self, request_id: object, params: dict) -> None:
         """Put request_user_input in front of the person and answer it.

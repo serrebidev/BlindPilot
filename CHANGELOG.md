@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.33.1 - 2026-10-08
+
+- Codex permission prompts in Default mode: the tool request now opens the permission dialog (naming Codex as the asker) instead of being silently declined. Other modes keep their automatic answers. The dialog itself is backend-neutral now.
+
 ## v0.33.0 - 2026-10-08
 
 Seventeen features from an audit of The Chat Place (kellylford/AIChat), PRs #56 to #72.
