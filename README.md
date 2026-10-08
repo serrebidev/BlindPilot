@@ -45,6 +45,8 @@ macOS. Download `BlindPilot-macOS-arm64.zip`; BlindPilot is built for Apple Sili
 
 Linux. There is no packaged build. Run from source as described below.
 
+Only one copy runs at a time. On Windows, starting BlindPilot again brings the running one to the front, setup wizard included; on Linux, and on macOS when run from source, the second copy says BlindPilot is already running and closes.
+
 Settings live in `%APPDATA%\BlindPilot\config.json` on Windows, `~/Library/Application Support/BlindPilot` on macOS, and `~/.config/blindpilot` on Linux. On macOS, settings from an older version are moved to the new folder once; nothing already there is overwritten. An existing Claude Code Reader configuration is imported once and never modified.
 
 ## Set up a backend
