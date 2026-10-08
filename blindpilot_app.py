@@ -8625,10 +8625,16 @@ class SessionPanel(wx.Panel):
             if dlg.ShowModal() != wx.ID_OK:
                 return
             path = dlg.GetPath()
-        text = reassemble_all(self._rows)
+            chosen = (".md", ".html", ".txt")[max(0, min(dlg.GetFilterIndex(), 2))]
         kind = os.path.splitext(path)[1].lower()
-        if kind in (".md", ".html", ".htm"):
-            text = re.sub(r"(?m)^Response (\d+)$", r"## Response \1", text)
+        if kind not in (".md", ".html", ".htm", ".txt"):
+            # GTK and macOS can hand back the name as typed, with no extension
+            # from the type chosen; the type is then what says the format.
+            path, kind = path + chosen, chosen
+        if kind == ".txt":
+            text = reassemble_all(self._rows)
+        else:
+            text = reassemble_all(self._rows, header="## Response {}")
         if kind in (".html", ".htm"):
             text = markdown_page(text, name)
         try:

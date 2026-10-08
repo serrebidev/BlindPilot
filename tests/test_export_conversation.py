@@ -17,10 +17,10 @@ from markdown_rows import Row
 class _Dialog:
     """`wx.FileDialog` as `export_conversation` uses it: a context manager."""
 
-    def __init__(self, path, accepted=True, seen=None):
+    def __init__(self, path, accepted=True, kind=0):
         self._path = path
         self._accepted = accepted
-        self.seen = seen
+        self._kind = kind
 
     def __enter__(self):
         return self
@@ -33,6 +33,9 @@ class _Dialog:
 
     def GetPath(self):
         return str(self._path)
+
+    def GetFilterIndex(self):
+        return self._kind
 
 
 @pytest.fixture
@@ -50,12 +53,12 @@ def panel():
     return stub
 
 
-def _export(panel, monkeypatch, path, accepted=True):
+def _export(panel, monkeypatch, path, accepted=True, kind=0):
     offered: dict = {}
 
     def dialog(*args, **kwargs):
         offered.update(kwargs)
-        return _Dialog(path, accepted)
+        return _Dialog(path, accepted, kind)
 
     monkeypatch.setattr(app.wx, "FileDialog", dialog)
     app.SessionPanel.export_conversation(panel)
@@ -102,6 +105,26 @@ def test_plain_text_is_the_clipboard_text(panel, monkeypatch, tmp_path):
     _export(panel, monkeypatch, target)
 
     assert target.read_text(encoding="utf-8") == app.reassemble_all(panel._rows) + "\n"
+
+
+def test_a_name_without_an_extension_takes_the_chosen_type(panel, monkeypatch, tmp_path):
+    """GTK and macOS can return the name as typed; the Save as type decides."""
+    _export(panel, monkeypatch, tmp_path / "notes", kind=1)
+
+    assert "<h2>Response 1</h2>" in (tmp_path / "notes.html").read_text(encoding="utf-8")
+
+
+def test_only_real_response_headers_become_headings(panel, monkeypatch, tmp_path):
+    panel._rows.append(
+        Row(kind="code", label="code", payload="Response 7", response_number=1, language="text")
+    )
+    target = tmp_path / "out.md"
+
+    _export(panel, monkeypatch, target)
+
+    text = target.read_text(encoding="utf-8")
+    assert "## Response 1" in text
+    assert "## Response 7" not in text and "Response 7" in text
 
 
 def test_nothing_to_export_says_so(panel, monkeypatch, tmp_path):
