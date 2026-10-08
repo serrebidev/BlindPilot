@@ -1,3 +1,10 @@
+# BlindPilot 0.37.3
+
+See how far muse.ai has got.
+
+- While muse.ai is working on your message, or on a chat you reopened that it is still working on, the status line at the bottom of the tab keeps up with it: "muse.ai is working: 37 steps so far, latest at 2:00:13 PM". Asking BlindPilot what the turn is doing reports the same. It is not spoken and adds nothing to the conversation, because it changes every few seconds. muse.ai's own wording for each step, such as "Checking release" in the muse.ai app, is not available to other programs, so the count and time are what BlindPilot can show.
+- An answer from muse.ai is no longer cut short. muse.ai marks a message finished while its text is still arriving, and BlindPilot could catch it half written. It now waits until the text has stopped changing.
+
 # BlindPilot 0.37.2
 
 Check on muse.ai while it works.

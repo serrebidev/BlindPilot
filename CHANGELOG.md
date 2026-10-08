@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.37.3 - 2026-10-08
+
+- muse.ai progress on the status line: while muse.ai works (a sent message or a followed chat), the tab's status line says how many steps it has taken and when the latest was, and the progress report (what is it doing) says the same. Nothing is spoken or added to the conversation for it.
+- Fixed: a muse.ai message could be taken while its text was still arriving, cutting an answer short. A message is now used only once two reads agree on its text.
+
 ## v0.37.2 - 2026-10-08
 
 - Reopening a muse.ai chat that muse.ai is still working on follows it: BlindPilot says so, reads each status update as it is posted, and shows the answer when it comes, instead of leaving a blank response. Stop ends the following, not the work. Nothing is sent to the chat.

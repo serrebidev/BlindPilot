@@ -76,6 +76,14 @@ class MuseAiWorker(_TurnWorker):
 
     def _setup(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
+        # Each message's text as last read: muse.ai marks a message complete
+        # while its text is still arriving, so one is taken only once two
+        # reads in a row agree on it.
+        self._last_text: dict[str, str] = {}
+        # (seq, when) of every agent event last read, text or not: muse.ai's
+        # working steps carry no text, but their count and time say it is busy.
+        self._steps: list[tuple[int, int]] = []
+        self._step_said = ""
 
     def steer(self, text: str) -> bool:
         # The message is already with the agent; a second one waits its turn.
@@ -130,11 +138,18 @@ class MuseAiWorker(_TurnWorker):
         payload = _json_from(out) if code == 0 else None
         events = (payload or {}).get("chat_events") or []
         found = []
+        steps = []
         for event in events if isinstance(events, list) else []:
             if not isinstance(event, dict) or event.get("event_name") != "message.assistant":
                 continue
             raw = event.get("payload")
             body: dict = raw if isinstance(raw, dict) else {}
+            steps.append(
+                (
+                    int(body.get("seq") or event.get("seq") or 0),
+                    int(event.get("occurred_at_ms") or 0),
+                )
+            )
             text = str(body.get("content") or body.get("display_text") or "").strip()
             # No status yet means the agent is still writing it.
             if not text or not body.get("status") or _is_connection_notice(text):
@@ -143,7 +158,32 @@ class MuseAiWorker(_TurnWorker):
             message_id = str(body.get("message_id") or event.get("message_id") or "")
             direct = not (body.get("reply_to_message_id") or event.get("reply_to_message_id"))
             found.append((int(seq), message_id, text, direct))
+        if code == 0:
+            self._steps = steps
         return sorted(found)
+
+    def _report_steps(self, baseline: int) -> None:
+        """Keep the tab's status line on how far muse.ai has got, quietly."""
+        newer = [when for seq, when in self._steps if seq > baseline]
+        if not newer:
+            return
+        latest = time.strftime("%I:%M:%S %p", time.localtime(max(newer) / 1000)).lstrip("0")
+        count = len(newer)
+        said = f"muse.ai is working: {count} step{'s' if count != 1 else ''} so far, latest at {latest}"
+        if said != self._step_said:
+            self._step_said = said
+            self._on_activity("step", said)
+
+    def _steady(
+        self, binary: str, session: str, wait: bool = True
+    ) -> list[tuple[int, str, str, bool]]:
+        """The chat's messages whose text has stopped changing (all of them
+        when `wait` is false, once the agent has answered and nothing more is
+        coming)."""
+        current = self._messages(binary, session)
+        ready = [m for m in current if not wait or self._last_text.get(m[1]) == m[2]]
+        self._last_text = {m[1]: m[2] for m in current}
+        return ready
 
     def _do_run(self) -> None:
         if self._cancelled:
@@ -175,8 +215,8 @@ class MuseAiWorker(_TurnWorker):
         baseline = max((m[0] for m in self._messages(binary, session)), default=0)
         relayed: set[str] = set()
 
-        def relay(skip: str = "") -> None:
-            for seq, message_id, text, _direct in self._messages(binary, session):
+        def relay(skip: str = "", wait: bool = True) -> None:
+            for seq, message_id, text, _direct in self._steady(binary, session, wait):
                 if seq <= baseline or message_id in relayed or message_id == skip:
                     continue
                 relayed.add(message_id)
@@ -197,6 +237,7 @@ class MuseAiWorker(_TurnWorker):
                 break
             if sender.is_alive():
                 relay()
+                self._report_steps(baseline)
         sender.join(10)
         code, out, err = sent.get("result", (None, "", ""))
         if self._cancelled:
@@ -215,7 +256,7 @@ class MuseAiWorker(_TurnWorker):
         text = str(reply.get("text") or "").strip() if isinstance(reply, dict) else ""
         final_id = str(reply.get("message_id") or "") if isinstance(reply, dict) else ""
         # Status updates posted just before the answer, in order, then the answer.
-        relay(skip=final_id)
+        relay(skip=final_id, wait=False)
         if not text:
             self._fail(
                 "muse.ai has the message but did not answer within an hour. "
@@ -248,7 +289,9 @@ class MuseAiWorker(_TurnWorker):
                 self._settled.set()
                 self._on_complete("Stopped following. muse.ai keeps working on its own machine.")
                 return
-            for seq, message_id, text, direct in self._messages(binary, session):
+            ready = self._steady(binary, session)
+            self._report_steps(baseline)
+            for seq, message_id, text, direct in ready:
                 if seq <= baseline or message_id in relayed:
                     continue
                 relayed.add(message_id)
