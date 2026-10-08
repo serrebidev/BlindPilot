@@ -7677,7 +7677,14 @@ class SessionPanel(wx.Panel):
             if panel is not None:
                 panel._queue_worker_event("late_turn", generation)
 
-        return {"held_for": self, "on_unsolicited": wake, "on_permission": self._ask_permission}
+        def ask(tool: str, payload: dict, suggestions: list) -> dict:
+            # Weak for the same reason as the wake-up: a closed tab is denied.
+            panel = tab()
+            if panel is None:
+                return {"behavior": "deny", "message": "The tab was closed."}
+            return SessionPanel._ask_permission(panel, tool, payload, suggestions)
+
+        return {"held_for": self, "on_unsolicited": wake, "on_permission": ask}
 
     def _start_late_turn(self, generation: int) -> None:
         """Receive what the CLI says with no turn of ours running.
