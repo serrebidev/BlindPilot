@@ -22,6 +22,7 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass
 from typing import Callable, List, Optional
@@ -405,6 +406,19 @@ def reassemble(rows: List[Row], response_number: int) -> str:
     if not blocks:
         return header_payload
     return "\n\n".join(blocks)
+
+
+# For a page somebody reads: raw HTML in an answer is shown as text, never run.
+_MD_PAGE = MarkdownIt("commonmark", {"html": False}).enable("table")
+
+
+def markdown_page(text: str, title: str) -> str:
+    """A whole HTML page of `text` rendered as Markdown, for browse mode."""
+    return (
+        '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+        f"<title>{html.escape(title)}</title></head>\n<body>\n"
+        f"<h1>{html.escape(title)}</h1>\n{_MD_PAGE.render(text)}</body></html>\n"
+    )
 
 
 def reassemble_all(rows: List[Row]) -> str:
