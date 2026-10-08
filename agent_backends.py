@@ -336,6 +336,8 @@ BACKEND_FREEBUFF = "freebuff"
 BACKEND_OPENCODE = "opencode"
 BACKEND_HERMES = "hermes"
 BACKEND_MUSE = "muse"
+# muse.ai, Meta's personal agent on its own cloud machine -- not Muse Code.
+BACKEND_MUSEAI = "museai"
 BACKEND_COMMANDCODE = "commandcode"
 BACKEND_GEMINI = "gemini"
 BACKEND_ANTIGRAVITY = "antigravity"
@@ -855,10 +857,35 @@ BACKENDS = {
         login_needs_terminal=True,
         login_watch_until_signed_in=True,
     ),
+    # Added last on purpose: a backend's send earcon is pitched by its place
+    # in this dict, so new backends go at the end and existing pitches stay.
+    BACKEND_MUSEAI: BackendInfo(
+        BACKEND_MUSEAI,
+        "muse.ai",
+        "muse-cli",
+        "uv tool install muse-cli",
+        # muse-cli signs in by copying the muse.ai cookies out of a Chrome
+        # that is signed in with remote debugging on; it prints what to do
+        # when that is missing, so the user needs to see its terminal.
+        ("auth", "export"),
+        # The agent picks its own model and runs its own tools on its own
+        # machine; none of these are BlindPilot's to set.
+        False,
+        False,
+        False,
+        supports_compaction=False,
+        login_needs_terminal=True,
+    ),
 }
 
-BACKEND_IDS = tuple(BACKENDS)
-BACKEND_LABELS = {id_: info.label for id_, info in BACKENDS.items()}
+# Alphabetical by label, so every menu and list of backends reads in the same
+# predictable order. `BACKENDS` itself stays in the order it was written.
+BACKEND_IDS = tuple(sorted(BACKENDS, key=lambda id_: BACKENDS[id_].label.casefold()))
+BACKEND_LABELS = {id_: BACKENDS[id_].label for id_ in BACKEND_IDS}
+# The order backends were added in, which never changes: what the send
+# earcon's pitch is keyed on, so a listener's ear for each backend survives
+# the menus being re-sorted.
+BACKEND_PITCH_ORDER = tuple(BACKENDS)
 
 # What a "compact this conversation" turn looks like per provider: the text to
 # send, and any extra keyword arguments its worker needs.
@@ -906,6 +933,9 @@ def normalize_backend(value: object) -> str:
         "muse": BACKEND_MUSE,
         "musecode": BACKEND_MUSE,
         "meta": BACKEND_MUSE,
+        "museai": BACKEND_MUSEAI,
+        "muse.ai": BACKEND_MUSEAI,
+        "musecli": BACKEND_MUSEAI,
         # "cmd" is one of Command Code's launcher names, and a stored settings
         # value using it should resolve here rather than fall back to Claude.
         "commandcode": BACKEND_COMMANDCODE,
@@ -1048,6 +1078,10 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
         return hermes_auth_ok(timeout=max(timeout, 25))
     if backend == BACKEND_MUSE:
         return _muse_signed_in_checked()
+    if backend == BACKEND_MUSEAI:
+        from museai_backend import museai_auth_ok
+
+        return museai_auth_ok(timeout=max(timeout, 20))
     if backend == BACKEND_COMMANDCODE:
         # `command-code status` is a Node start-up plus a request; the default
         # twelve seconds has been enough, but give it room like Hermes.
@@ -2048,6 +2082,10 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         lines.extend(_hermes_account_lines())
     elif backend == BACKEND_MUSE:
         lines.extend(_muse_account_lines())
+    elif backend == BACKEND_MUSEAI:
+        from museai_backend import museai_account_lines
+
+        lines.extend(museai_account_lines())
     elif backend == BACKEND_COMMANDCODE:
         from commandcode_backend import commandcode_account_lines
 
@@ -2203,6 +2241,14 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             "Muse's global settings: MCP servers and workspace trust. On Windows "
             "this file lives inside the WSL distribution the CLI runs in, not on "
             "this side.",
+        ),
+        SettingsFile(
+            BACKEND_MUSEAI,
+            "global",
+            home / ".config" / "muse-cli" / "config.json",
+            "muse-cli's own settings: which muse.ai machine it talks to. The "
+            "sign-in cookies sit beside it in cookies.txt. muse.ai's own "
+            "settings live on its machine and are changed in the muse.ai app.",
         ),
         SettingsFile(
             BACKEND_COMMANDCODE,
@@ -8324,6 +8370,10 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         from muse_worker import MuseWorker
 
         return MuseWorker
+    if backend == BACKEND_MUSEAI:
+        from museai_worker import MuseAiWorker
+
+        return MuseAiWorker
     if backend == BACKEND_COMMANDCODE:
         # Imported on demand: a machine without Command Code pays nothing, and
         # an import error here cannot stop the other backends working.

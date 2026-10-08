@@ -2552,6 +2552,11 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path, fa
     monkeypatch.setattr(agent_backends, "_muse_signed_in_checked", lambda: True)
     monkeypatch.setattr(agent_backends, "_muse_version_probe", lambda: "9.9.9")
     monkeypatch.setattr(agent_backends, "_muse_account_lines", lambda: ["Signed in: yes"])
+    # muse.ai answers `muse-cli status` from its gateway; the fake stands in
+    # for the user's real cloud agent.
+    import museai_backend
+
+    monkeypatch.setattr(museai_backend, "museai_status", lambda timeout=20: {"vm_id": "vm"})
     # Gemini CLI's Google sign-in is the credentials it cached; agy answers
     # `agy models` only when it is signed in.
     gemini = tmp_path / ".gemini"

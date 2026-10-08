@@ -203,13 +203,14 @@ def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path
     )
     # Claude Code memories, Command Code tastes and Hermes memories are offered
     # empty, so the first can be added; nothing else is listed when empty.
-    # In the backends' own order: Hermes is listed before Command Code.
+    # In the backends' own order, which is alphabetical by label: Command Code
+    # before Gemini CLI before Hermes.
     assert names == [
         f"{claude} Memories",
-        f"{hermes} Memories",
         f"{cc} Tastes",
         f"{cc} Instructions",
         f"{gemini} Instructions",
+        f"{hermes} Memories",
     ]
 
 

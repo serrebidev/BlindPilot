@@ -1,3 +1,14 @@
+# BlindPilot 0.37.0
+
+muse.ai joins as a backend, the backend lists are alphabetical, and Recent Conversations finds far more of your conversations.
+
+- muse.ai, Meta's personal agent, is the tenth backend. It is a different product from Muse Code: it lives on its own cloud machine with its own connectors, memory and browser, and BlindPilot talks to it through muse-cli. Install it from the wizard or with `uv tool install muse-cli`, and sign in with `muse-cli auth export`, which copies your muse.ai sign-in out of Chrome.
+- Each BlindPilot conversation with muse.ai is its own muse.ai side chat, so nothing lands in your main muse.ai chat, and reopening a conversation goes back to the same side chat.
+- You hear what muse.ai says while it works. Every status update it posts during a turn is added to the conversation as it arrives, followed by its answer. Connection notices are left out. Real work there can take minutes, so a turn waits up to an hour. Stop ends the wait, not the work: muse.ai finishes on its own machine and its reply appears in the muse.ai chat. A message typed while one is running waits its turn.
+- muse.ai cannot see this computer, so the working folder and attachments do not reach it. Paste in what it needs.
+- The Backend menu, the setup wizard and the history filter now list backends alphabetically, from Antigravity CLI to opencode. Each backend's send sound keeps the pitch you know it by.
+- Recent Conversations lists much more. Codex moved its conversations out of the files BlindPilot was reading into a database of its own, so no Codex conversations were showing; they are back, along with the Codex desktop app's. FreeBuff Desktop's threads, Claude Desktop's Cowork sessions and your muse.ai side chats are listed too. Command Code Desktop's threads were already there, because it shares the command line's storage. Claude Desktop's ordinary chats are kept on claude.ai rather than on this computer, so they cannot be listed.
+
 # BlindPilot 0.36.0
 
 Edit anything in What Agents Know.

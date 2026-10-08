@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.37.0 - 2026-10-08
+
+- New backend: muse.ai, Meta's personal agent on its own cloud machine (not Muse Code), driven through muse-cli (`uv tool install muse-cli`, sign in with `muse-cli auth export`). Each conversation is a muse.ai side chat; every status update the agent posts during a turn goes into the conversation, then the answer. Connection notices are left out. Messages sent mid-turn queue.
+- The Backend menu and every backend list are in alphabetical order. Each backend's send sound keeps its pitch.
+- Recent Conversations lists muse.ai side chats, Codex conversations from its new SQLite store (Codex moved them out of ~/.codex/sessions, so none were listed; the Codex desktop app's threads come with them), FreeBuff Desktop threads, and Claude Desktop's Cowork sessions. Command Code Desktop's threads were already listed. Claude Desktop's ordinary chats live on claude.ai and cannot be read here.
+
 ## v0.36.0 - 2026-10-08
 
 - Everything What Agents Know (Ctrl+Shift+I) lists can be edited in place: Edit (Alt+E) in the list or in the reading view makes the text editable, Save or Ctrl+S writes it back (a whole file, one Command Code taste line, or one Hermes entry), and closing with unsaved changes asks. An emptied taste or Hermes entry is refused in favour of Delete.

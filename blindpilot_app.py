@@ -92,7 +92,9 @@ from agent_backends import (
     BACKEND_IDS,
     BACKEND_LABELS,
     BACKEND_MUSE,
+    BACKEND_MUSEAI,
     BACKEND_OPENCODE,
+    BACKEND_PITCH_ORDER,
     BACKENDS,
     FREEBUFF_PREFERRED_MODEL,
     SUBAGENT_COMPLETED,
@@ -327,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.36.0"
+APP_VERSION = "0.37.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1357,7 +1359,9 @@ _NPM_BACKEND_PACKAGES = {
 # Backends whose turn is one process per message. A message typed while one
 # runs cannot join it, so it is queued and sent when the turn ends, and Steer
 # stops the turn and resumes with the instruction.
-_QUEUEING_BACKENDS = frozenset({BACKEND_COMMANDCODE, BACKEND_GEMINI, BACKEND_ANTIGRAVITY})
+_QUEUEING_BACKENDS = frozenset(
+    {BACKEND_COMMANDCODE, BACKEND_GEMINI, BACKEND_ANTIGRAVITY, BACKEND_MUSEAI}
+)
 
 
 def _backend_installs_with_npm(backend: str) -> bool:
@@ -1664,6 +1668,29 @@ def _install_failure_message(backend: str) -> str:
     )
 
 
+def install_museai(log: Callable[[str], None], upgrade: bool = False) -> Optional[str]:
+    """Install or upgrade muse-cli, the client muse.ai is driven through.
+
+    It is a Python package, so uv installs it as a tool (its own environment,
+    a launcher on PATH) and pip for this user is the fallback.
+    """
+    from museai_backend import MUSEAI_MISSING_PREREQ, museai_install_argv
+
+    label = backend_label(BACKEND_MUSEAI)
+    argv = museai_install_argv(upgrade=upgrade)
+    if argv is None:
+        log(MUSEAI_MISSING_PREREQ)
+        return None
+    log(f"{'Updating' if upgrade else 'Installing'} {label}'s command line, muse-cli...")
+    rc = _run_logged_process(argv, log)
+    binary = find_backend_cli(BACKEND_MUSEAI)
+    if binary is None:
+        log(f"muse-cli was not found afterwards (exit code {rc}).")
+        return None
+    log(f"muse-cli is ready at {binary}. Sign in with muse-cli auth export.")
+    return binary
+
+
 def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
     """Install one selected backend and return its discovered executable."""
     backend = normalize_backend(backend)
@@ -1675,6 +1702,8 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
         return install_hermes(log)
     if backend == BACKEND_MUSE:
         return install_muse(log)
+    if backend == BACKEND_MUSEAI:
+        return install_museai(log)
     if backend == BACKEND_ANTIGRAVITY:
         return install_antigravity(log)
     label = backend_label(backend)
@@ -1792,6 +1821,8 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
     if binary is None:
         log(f"{label} is not installed yet.")
         return False
+    if backend == BACKEND_MUSEAI:
+        return install_museai(log, upgrade=True) is not None
     previous_freebuff_model = ""
     if backend == BACKEND_FREEBUFF:
         _models, previous_freebuff_model, _error = freebuff_model_options()
@@ -2159,6 +2190,10 @@ def probe_model_options(
             list(_FALLBACK_EFFORTS) if BACKENDS[backend].supports_effort else [],
             error=f"{label} was not found.",
         )
+
+    if backend == BACKEND_MUSEAI:
+        # muse.ai picks its own model on its own machine; there is no list to offer.
+        return ModelOptions([], [])
 
     fresh = cached_model_options(cwd, max_age, backend)
     if fresh is not None:
@@ -3917,7 +3952,9 @@ class Earcons:
 
     def _send_for(self, backend: str) -> Optional[str]:
         if backend not in self._send_variants:
-            index = BACKEND_IDS.index(backend) if backend in BACKEND_IDS else 0
+            # Keyed on the fixed order backends were added in, not the
+            # alphabetical menu order, so each backend keeps its pitch.
+            index = BACKEND_PITCH_ORDER.index(backend) if backend in BACKEND_PITCH_ORDER else 0
             path = self.send
             if index and path and path.lower().endswith(".wav"):
                 try:

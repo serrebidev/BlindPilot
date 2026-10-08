@@ -51,8 +51,9 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional, Sequence
@@ -65,6 +66,7 @@ from agent_backends import (
     BACKEND_HERMES,
     BACKEND_IDS,
     BACKEND_MUSE,
+    BACKEND_MUSEAI,
     BACKEND_OPENCODE,
     normalize_backend,
 )
@@ -445,9 +447,37 @@ def _claude_project_dirs(cwd: Optional[str]) -> List[Path]:
         exact = root / claude_project_slug(cwd)
         return [exact] if exact.is_dir() else []
     try:
-        return sorted(path for path in root.iterdir() if path.is_dir())
+        found = sorted(path for path in root.iterdir() if path.is_dir())
     except OSError:
-        return []
+        found = []
+    # Claude Desktop's Cowork sessions run Claude Code in a sandbox folder of
+    # their own, with their own config dir, so their transcripts sit inside
+    # the desktop app's data rather than ~/.claude. They belong to no folder
+    # of the user's, so they join only the all-folders list. (Its ordinary
+    # chats live on claude.ai, not on this machine.)
+    return found + _globbed(
+        _claude_desktop_dir(), "local-agent-mode-sessions/*/*/local_*/.claude/projects/*"
+    )
+
+
+def _claude_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    """Claude Code's conversations, Cowork ones labelled as Claude Desktop's."""
+    return [
+        replace(entry, folder="Claude Desktop")
+        if "local-agent-mode-sessions" in entry.path
+        else entry
+        for entry in _jsonl_entries(_CLAUDE, cwd)
+    ]
+
+
+def _claude_desktop_dir() -> Path:
+    if os.name == "nt":
+        # From the home folder rather than %APPDATA%, the one place a test or
+        # a relocated profile can point the whole history search.
+        return _home() / "AppData" / "Roaming" / "Claude"
+    if sys.platform == "darwin":
+        return _home() / "Library" / "Application Support" / "Claude"
+    return _home() / ".config" / "Claude"
 
 
 def _claude_paths(cwd: Optional[str]) -> List[Path]:
@@ -903,6 +933,150 @@ def _muse_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     ]
 
 
+# ----- Codex's own databases -----
+#
+# Codex moved its conversations out of ~/.codex/sessions/*.jsonl into SQLite:
+# `state_5.sqlite` lists the threads and `thread_history_1.sqlite` holds every
+# item of every turn (measured 2026-10-08; the old rollout files are gone once
+# Codex migrates them). The Codex desktop app writes the same databases, its
+# threads marked `vscode`, so reading them brings in both. Subagent threads
+# (a JSON `source`) are the agent's own helpers and are left out.
+
+_CODEX_STATE_DB = "state_5.sqlite"
+_CODEX_HISTORY_DB = "thread_history_1.sqlite"
+
+
+def _codex_db_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    path = _home() / ".codex" / _CODEX_STATE_DB
+    connection = _hermes_connect(path) if path.is_file() else None
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT id, title, first_user_message, cwd, updated_at, rollout_path, source "
+            "FROM threads WHERE archived = 0 AND source NOT LIKE '{%'"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - another schema is not a crash
+        return []
+    finally:
+        connection.close()
+    entries: List[HistoryEntry] = []
+    for row in rows:
+        session_cwd = str(row["cwd"] or "").removeprefix("\\\\?\\")
+        if cwd and not _same_dir(session_cwd, cwd):
+            continue
+        title = make_title(clean_user_text(str(row["title"] or row["first_user_message"] or "")))
+        entries.append(
+            HistoryEntry(
+                backend=BACKEND_CODEX,
+                session_id=str(row["id"]),
+                title=title or str(row["id"]),
+                path=str(row["rollout_path"] or ""),
+                modified=float(row["updated_at"] or 0),
+                cwd=session_cwd,
+                folder=_folder_name(session_cwd),
+            )
+        )
+    return entries
+
+
+def _codex_db_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    path = _home() / ".codex" / _CODEX_HISTORY_DB
+    connection = _hermes_connect(path) if path.is_file() else None
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT turn_id, item_type, item_json FROM thread_items "
+            "WHERE thread_id = ? AND item_type IN ('userMessage', 'agentMessage') "
+            "ORDER BY rollout_ordinal",
+            (entry.session_id,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        connection.close()
+    turns: dict[str, HistoryTurn] = {}
+    for row in rows:
+        try:
+            item = json.loads(row["item_json"])
+        except ValueError:
+            continue
+        turn = turns.setdefault(str(row["turn_id"]), HistoryTurn())
+        if row["item_type"] == "userMessage":
+            parts = item.get("content") if isinstance(item.get("content"), list) else []
+            text = "\n".join(
+                str(p.get("text") or "") for p in parts if isinstance(p, dict) and p.get("text")
+            )
+            turn.prompt = (turn.prompt + "\n\n" + clean_user_text(text)).strip()
+        else:
+            turn.response = (turn.response + "\n\n" + str(item.get("text") or "")).strip()
+    return list(turns.values())
+
+
+def _codex_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    """Codex conversations from its databases, plus any older JSONL rollouts."""
+    entries = _codex_db_entries(cwd)
+    known = {entry.session_id for entry in entries}
+    return entries + [e for e in _jsonl_entries(_CODEX, cwd) if e.session_id not in known]
+
+
+def _codex_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    turns = _codex_db_turns(entry)
+    if turns:
+        return turns
+    if entry.path and Path(entry.path).is_file():
+        return _jsonl_turns(_CODEX, entry)
+    return []
+
+
+# ----- muse.ai -----
+
+
+def _museai_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    """muse.ai's side chats, wherever they were started.
+
+    They live on the agent's own machine and belong to no folder here, so they
+    are listed whatever folder the picker is limited to: a chat started from
+    the muse.ai app is as much a conversation to reopen as one started here.
+    """
+    # No muse-cli sign-in, no chats to ask for: don't start the CLI (and its
+    # network round trip) for someone who never set muse.ai up.
+    if not (_home() / ".config" / "muse-cli" / "config.json").is_file():
+        return []
+    from museai_backend import museai_side_chats
+
+    entries: List[HistoryEntry] = []
+    for chat in museai_side_chats():
+        if chat.get("archived"):
+            continue
+        try:
+            stamp = time.mktime(time.strptime(str(chat.get("updated") or ""), "%Y-%m-%d %H:%M"))
+        except (ValueError, OverflowError):
+            stamp = 0.0
+        session_id = str(chat["session_id"])
+        entries.append(
+            HistoryEntry(
+                backend=BACKEND_MUSEAI,
+                session_id=session_id,
+                title=make_title(str(chat.get("title") or "")) or "Untitled muse.ai chat",
+                path="",
+                modified=stamp,
+                folder="muse.ai",
+            )
+        )
+    return entries
+
+
+def _museai_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    from museai_backend import museai_chat_turns
+
+    return [
+        HistoryTurn(prompt=prompt, response=response)
+        for prompt, response in museai_chat_turns(entry.session_id)
+    ]
+
+
 # ----- FreeBuff -----
 
 
@@ -1003,6 +1177,97 @@ def _freebuff_entries(cwd: Optional[str]) -> List[HistoryEntry]:
                 seen.add(chat.name)
                 entries.append(entry)
     return entries
+
+
+_FREEBUFF_DESKTOP_DB = "desktop-v2.db"
+
+
+def _freebuff_desktop_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    """FreeBuff Desktop's threads: one SQLite store per project it has opened.
+
+    The desktop app does not use the CLI's chat folders; each project gets
+    ``~/.config/freebuff-desktop/projects/<name>-<uuid>/desktop-v2.db``
+    (measured 2026-10-08). Archived threads are left out, as the app hides them.
+    """
+    root = _home() / ".config" / "freebuff-desktop" / "projects"
+    entries: List[HistoryEntry] = []
+    for db in _globbed(root, f"*/{_FREEBUFF_DESKTOP_DB}"):
+        connection = _hermes_connect(db)
+        if connection is None:
+            continue
+        try:
+            # Older stores predate the archive columns, so read whole rows.
+            rows = connection.execute("SELECT * FROM threads").fetchall()
+        except Exception:  # noqa: BLE001 - an older schema is not a crash
+            rows = []
+        finally:
+            connection.close()
+        for row in rows:
+            keys = row.keys()
+            if any(k in keys and row[k] for k in ("archived_at", "sidebar_archived_at")):
+                continue
+            session_cwd = str(row["project_path"] or "")
+            if cwd and not _same_dir(session_cwd, cwd):
+                continue
+            entries.append(
+                HistoryEntry(
+                    backend=BACKEND_FREEBUFF,
+                    session_id=str(row["id"]),
+                    title=make_title(str(row["title"] or "")) or "FreeBuff Desktop thread",
+                    path=str(db),
+                    modified=float(row["updated_at"] or 0) / 1000,
+                    cwd=session_cwd,
+                    folder=_folder_name(session_cwd),
+                )
+            )
+    return entries
+
+
+def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    connection = _hermes_connect(Path(entry.path))
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT role, parts_json FROM messages WHERE thread_id = ? ORDER BY seq",
+            (entry.session_id,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        connection.close()
+    turns: List[HistoryTurn] = []
+    for row in rows:
+        try:
+            parts = json.loads(row["parts_json"] or "[]")
+        except ValueError:
+            continue
+        # Only what was written to be read: reasoning and tool parts are not.
+        texts = [
+            str(p.get("text") or "").strip()
+            for p in (parts if isinstance(parts, list) else [])
+            if isinstance(p, dict) and p.get("kind") == "text"
+        ]
+        text = "\n\n".join(t for t in texts if t)
+        if not text:
+            continue
+        if row["role"] == "user":
+            turns.append(HistoryTurn(prompt=clean_user_text(text)))
+        else:
+            if not turns:
+                turns.append(HistoryTurn())
+            turns[-1].response = (turns[-1].response + "\n\n" + text).strip()
+    return turns
+
+
+def _freebuff_all_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    return _freebuff_entries(cwd) + _freebuff_desktop_entries(cwd)
+
+
+def _freebuff_any_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    if entry.path.endswith(_FREEBUFF_DESKTOP_DB):
+        return _freebuff_desktop_turns(entry)
+    return _freebuff_turns(entry)
 
 
 def _freebuff_turns(entry: HistoryEntry) -> List[HistoryTurn]:
@@ -1237,12 +1502,13 @@ def _opencode_turns(entry: HistoryEntry) -> List[HistoryTurn]:
 # ----- Public API -----
 
 _LISTERS: dict[str, Callable[[Optional[str]], List[HistoryEntry]]] = {
-    BACKEND_CLAUDE: partial(_jsonl_entries, _CLAUDE),
-    BACKEND_CODEX: partial(_jsonl_entries, _CODEX),
-    BACKEND_FREEBUFF: _freebuff_entries,
+    BACKEND_CLAUDE: _claude_entries,
+    BACKEND_CODEX: _codex_entries,
+    BACKEND_FREEBUFF: _freebuff_all_entries,
     BACKEND_OPENCODE: _opencode_entries,
     BACKEND_HERMES: _hermes_entries,
     BACKEND_MUSE: _muse_entries,
+    BACKEND_MUSEAI: _museai_entries,
     BACKEND_COMMANDCODE: partial(_jsonl_entries, _COMMANDCODE),
 }
 
@@ -1251,11 +1517,12 @@ _LISTERS: dict[str, Callable[[Optional[str]], List[HistoryEntry]]] = {
 # transcript is the session id, not a file of its own.
 _READERS: dict[str, Callable[[HistoryEntry], List[HistoryTurn]]] = {
     BACKEND_CLAUDE: partial(_jsonl_turns, _CLAUDE),
-    BACKEND_CODEX: partial(_jsonl_turns, _CODEX),
-    BACKEND_FREEBUFF: _freebuff_turns,
+    BACKEND_CODEX: _codex_turns,
+    BACKEND_FREEBUFF: _freebuff_any_turns,
     BACKEND_OPENCODE: _opencode_turns,
     BACKEND_HERMES: _hermes_turns,
     BACKEND_MUSE: _muse_turns,
+    BACKEND_MUSEAI: _museai_turns,
     BACKEND_COMMANDCODE: partial(_jsonl_turns, _COMMANDCODE),
 }
 
