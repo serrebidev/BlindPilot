@@ -9070,6 +9070,11 @@ class SessionPanel(wx.Panel):
             self.find_next(-1 if event.ShiftDown() else 1)
             return
 
+        if key == ord("C") and event.CmdDown() and event.ShiftDown():
+            if sel != wx.NOT_FOUND:
+                self.copy_last_code(self._displayed[sel].response_number)
+            return
+
         if key == wx.WXK_WINDOWS_MENU:
             self._show_row_menu()
             return
@@ -9147,6 +9152,21 @@ class SessionPanel(wx.Panel):
     def _copy_response(self, sel: int) -> None:
         if 0 <= sel < len(self._displayed):
             self._action_copy_response(self._displayed[sel])
+
+    def copy_last_code(self, response_number: int) -> None:
+        """Copy the response's last code block (Ctrl+Shift+C in the responses).
+
+        The code an answer ends on is usually the one wanted, and reaching it
+        meant arrowing past everything written after it.
+        """
+        code = [r for r in self._rows if r.kind == "code" and r.response_number == response_number]
+        if not code:
+            self._announce(f"Response {response_number} has no code block")
+            return
+        if not _copy_to_clipboard(code[-1].payload):
+            self._announce("Error: Could not access clipboard")
+            return
+        self._announce(self._copy_message(code[-1]))
 
     @staticmethod
     def _copy_message(row: Row) -> str:
