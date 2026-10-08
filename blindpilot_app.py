@@ -2756,6 +2756,77 @@ def readable_diff(diff: str) -> str:
     return "\n".join(out)
 
 
+CLAUDE_FILE_KINDS = ("Instructions", "Memories", "Skills", "Agents", "Commands", "Settings")
+
+
+def _front_matter(path: Path) -> dict[str, str]:
+    """The one-line `key: value` fields of a Markdown file's YAML header."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(16384)
+    except OSError:
+        return {}
+    match = re.match(r"---\r?\n(.*?)\r?\n---", head, re.S)
+    fields: dict[str, str] = {}
+    for line in match.group(1).splitlines() if match else ():
+        key, sep, value = line.partition(":")
+        value = value.strip().strip("\"'")
+        if sep and key[:1].strip() and value not in ("", ">", "|", ">-", "|-"):
+            fields[key.strip()] = value
+    return fields
+
+
+def claude_files(cwd: Optional[str]) -> dict[str, list[tuple[str, str]]]:
+    """Every file Claude Code keeps about you, as {kind: [(path, label)]}.
+
+    Your own instructions, memories, skills, agents, commands and settings
+    under the config folder, plus the ones the project in `cwd` adds, each
+    kind sorted by label so a letter jumps to the names starting with it.
+    Labels are a file's front-matter name and description where it has them.
+    """
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    found: dict[str, list[tuple[str, str]]] = {kind: [] for kind in CLAUDE_FILE_KINDS}
+    seen: set[str] = set()
+    memory_dirs = {path.parent for path in home.glob("projects/*/memory/*.md")}
+
+    def add(kind: str, paths) -> None:
+        for path in paths:
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen or not path.is_file():
+                continue
+            seen.add(key)
+            fields = _front_matter(path) if path.suffix == ".md" else {}
+            name = fields.get("name") or (
+                path.parent.name if path.name == "SKILL.md" else path.name
+            )
+            label = f"{name}: {fields['description']}" if "description" in fields else name
+            if kind != "Memories":
+                label += f", in {path.parent}"
+            elif len(memory_dirs) > 1:
+                label += f", {path.parent.parent.name}"
+            found[kind].append((str(path), label))
+
+    claude_dirs = [home]
+    if cwd:
+        here = Path(cwd)
+        claude_dirs.append(here / ".claude")
+        # Claude Code reads CLAUDE.md from the working folder and every one above it.
+        for folder in (here, *here.parents):
+            add("Instructions", [folder / "CLAUDE.md", folder / "CLAUDE.local.md"])
+            add("Instructions", [folder / ".claude" / "CLAUDE.md"])
+        add("Settings", [here / ".mcp.json"])
+    for folder in claude_dirs:
+        add("Instructions", [folder / "CLAUDE.md", *folder.glob("rules/**/*.md")])
+        add("Skills", folder.glob("skills/*/SKILL.md"))
+        add("Agents", folder.glob("agents/**/*.md"))
+        add("Commands", folder.glob("commands/**/*.md"))
+        add("Settings", [folder / "settings.json", folder / "settings.local.json"])
+    add("Memories", home.glob("projects/*/memory/*.md"))
+    for files in found.values():
+        files.sort(key=lambda entry: entry[1].casefold())
+    return found
+
+
 # A CommonMark fenced code block: three or more backticks or tildes, closed by
 # a run of the same character at least as long, or by the end of the text.
 _FENCED_BLOCKS = [
@@ -4802,7 +4873,14 @@ class ReadView(wx.Dialog):
     words, and select / copy normally with Ctrl+A / Ctrl+C.
     """
 
-    def __init__(self, parent: wx.Window, text: str, title: str, monospace: bool = False):
+    def __init__(
+        self,
+        parent: wx.Window,
+        text: str,
+        title: str,
+        monospace: bool = False,
+        edit_path: Optional[str] = None,
+    ):
         super().__init__(
             parent,
             title=title,
@@ -4824,11 +4902,23 @@ class ReadView(wx.Dialog):
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(viewer, 1, wx.EXPAND | wx.ALL, self.FromDIP(PAD_DIALOG))
+        if edit_path:
+            # The viewer never writes; a change goes through the file's own app.
+            edit = wx.Button(self, label="&Edit in Your Editor")
+            edit.Bind(wx.EVT_BUTTON, lambda _event: self._edit(edit_path))
+            buttons = wx.BoxSizer(wx.HORIZONTAL)
+            buttons.Add(edit)
+            buttons.Add(wx.Button(self, wx.ID_CANCEL, "Close"), 0, wx.LEFT, self.FromDIP(8))
+            sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, self.FromDIP(PAD_DIALOG))
         self.SetSizerAndFit(sizer)
 
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         viewer.SetFocus()
         self.CentreOnParent()
+
+    def _edit(self, path: str) -> None:
+        if not _open_path(path):
+            announce(f"Could not open {path}")
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
@@ -7546,9 +7636,7 @@ class SessionPanel(wx.Panel):
                 return None
         return held["answers"]
 
-    def _ask_permission(
-        self, backend: str, tool: str, payload: dict, suggestions: list
-    ) -> dict:
+    def _ask_permission(self, backend: str, tool: str, payload: dict, suggestions: list) -> dict:
         """Ask whether `backend` may use `tool`; the worker thread waits for it.
 
         Returns the body the backend takes back: allow (with the rules it
@@ -7579,7 +7667,9 @@ class SessionPanel(wx.Panel):
         """Open the permission or plan dialog. GUI thread only."""
         plan = tool == "ExitPlanMode"
         label = backend_label(backend)
-        asking = f"{label} has a plan for you to approve" if plan else f"{label} wants to use {tool}"
+        asking = (
+            f"{label} has a plan for you to approve" if plan else f"{label} wants to use {tool}"
+        )
         self._announce(asking, urgent=True)
         # The turn waits on this, so someone in another window needs to know.
         _notify_if_away(self, asking)
@@ -8313,11 +8403,14 @@ class SessionPanel(wx.Panel):
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,
-            on_permission=lambda tool, payload, suggestions: self._ask_permission(
-                selected_backend, tool, payload, suggestions
-            ),
             on_subagent=lambda *report: self._queue_worker_event("subagent", *report),
-            **extra,
+            # A Claude turn brings its own, which holds the tab weakly.
+            **{
+                "on_permission": lambda tool, payload, suggestions: self._ask_permission(
+                    selected_backend, tool, payload, suggestions
+                ),
+                **extra,
+            },
         )
         try:
             self._worker.start()
@@ -8361,9 +8454,7 @@ class SessionPanel(wx.Panel):
             panel = tab()
             if panel is None:
                 return {"behavior": "deny", "message": "The tab was closed."}
-            return SessionPanel._ask_permission(
-                panel, BACKEND_CLAUDE, tool, payload, suggestions
-            )
+            return SessionPanel._ask_permission(panel, BACKEND_CLAUDE, tool, payload, suggestions)
 
         return {"held_for": self, "on_unsolicited": wake, "on_permission": ask}
 
@@ -12704,6 +12795,12 @@ class MainFrame(wx.Frame):
             "List the files that differ from the last commit, and read each change",
             self._changed_files_active,
         )
+        self._menu_item(
+            menu,
+            "What Claude &Knows…\tCtrl+Shift+I",
+            "Read the instructions, memories, skills and settings Claude Code keeps about you",
+            self._claude_files_active,
+        )
         menu.AppendSeparator()
         add(
             menu,
@@ -13013,6 +13110,55 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_status_dialog()
+
+    def _claude_files_active(self) -> None:
+        """Everything Claude Code keeps about you (Model menu, Ctrl+Shift+I).
+
+        A list of kinds with their counts, then the files of the chosen kind;
+        Enter reads one, and Escape steps back a list. Read only: Edit in
+        Your Editor hands the file to the system for any change.
+        """
+        page = self.notebook.GetCurrentPage()
+        found = claude_files(page.cwd if isinstance(page, SessionPanel) else None)
+        kinds = [kind for kind in CLAUDE_FILE_KINDS if found[kind]]
+        if not kinds:
+            announce("Claude Code has no instructions, memories, skills or settings here")
+            return
+        kind_at = file_at = 0
+        while True:
+            with wx.SingleChoiceDialog(
+                self,
+                "What Claude Code keeps about you on this computer. Enter lists a kind.",
+                "What Claude Knows",
+                [f"{kind}, {len(found[kind])}" for kind in kinds],
+            ) as dlg:
+                dlg.SetSelection(kind_at)
+                if dlg.ShowModal() != wx.ID_OK:
+                    break
+                kind_at, file_at = dlg.GetSelection(), 0
+            files = found[kinds[kind_at]]
+            while True:
+                with wx.SingleChoiceDialog(
+                    self,
+                    f"{kinds[kind_at]}. Enter reads one; Escape goes back to the kinds.",
+                    kinds[kind_at],
+                    [label for _path, label in files],
+                ) as dlg:
+                    dlg.SetSelection(file_at)
+                    if dlg.ShowModal() != wx.ID_OK:
+                        break
+                    file_at = dlg.GetSelection()
+                path = files[file_at][0]
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                except OSError as exc:
+                    text = f"Could not read the file: {exc}"
+                view = ReadView(self, text or "This file is empty", path, edit_path=path)
+                try:
+                    view.ShowModal()
+                finally:
+                    view.Destroy()
 
     def _settings_files_active(self) -> None:
         """Where the backends keep their settings (Model > Backend Settings).
@@ -13721,6 +13867,7 @@ Ctrl+Shift+H: Recent Conversations. In its list, F2 renames and Delete hides.
 Ctrl+G: Hermes conversations, when Hermes is the backend.
 Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
 Ctrl+Shift+T: turn status. Ctrl+Shift+D: changed files.
+Ctrl+Shift+I: what Claude knows: its instructions, memories, skills and settings.
 Ctrl+Shift+R: repeat the last announcement.
 Ctrl+Comma: Preferences. F1: this list.
 
