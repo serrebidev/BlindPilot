@@ -6512,7 +6512,11 @@ class SessionPanel(wx.Panel):
             if last is not None:
                 said += f" The last one took {_spoken_duration(last)}."
         else:
-            said = f"Working for {_spoken_duration(time.monotonic() - started)}."
+            took = _spoken_duration(time.monotonic() - started)
+            if getattr(self, "_turn_attached", False):
+                said = f"Attached to a running turn {took} ago."
+            else:
+                said = f"Working for {took}."
             step = getattr(self, "_last_step", "")
             said += f" Last step: {step}." if step else " No tool used yet."
         queued = len(getattr(self, "_pending_messages", []))
@@ -7484,6 +7488,7 @@ class SessionPanel(wx.Panel):
         which has nothing to send and only reads what has already arrived."""
         self._active_send_text = send_text or ""
         self._turn_started_at: Optional[float] = time.monotonic()
+        self._turn_attached = False
         self._last_step = ""
         worker_type = worker_class(selected_backend, ClaudeWorker)
         # Agents that finished in an earlier turn have been read or ignored by
@@ -7515,6 +7520,7 @@ class SessionPanel(wx.Panel):
             # is what says the turn is over. Clearing this by hand is what
             # keeps a failure here from leaving Send refused for good.
             self._worker = None
+            self._turn_started_at = None
             self._earcons.stop_progress()
             self._hide_working()
             self.send_btn.Enable()
@@ -7978,6 +7984,12 @@ class SessionPanel(wx.Panel):
             **extra,
         )
         self._worker.start()
+        if attaching:
+            # A turn somebody else started: how long it ran before is unknown,
+            # so Turn Status counts from here and says so.
+            self._turn_started_at = time.monotonic()
+            self._turn_attached = True
+            self._last_step = ""
         self.stop_btn.Enable()
         if attaching:
             # Steering a turn someone else started is exactly what this is for.
