@@ -216,6 +216,10 @@ def _make_speaker():
 
 _SPEAKER = _make_speaker()
 
+# What `announce` said last, for Repeat Last Announcement. A line spoken while
+# the reader was busy, or cut off by a keystroke, is otherwise gone for good.
+_last_announcement = ""
+
 
 def _linux_announce(text: str) -> bool:
     """Post an ATK announcement that Orca reads without moving keyboard focus."""
@@ -227,6 +231,11 @@ def _linux_announce(text: str) -> bool:
     return _linux_native_announce(text)
 
 
+def repeat_last_announcement() -> None:
+    """Say the last announcement again (Conversation menu, Ctrl+Shift+R)."""
+    announce(_last_announcement or "Nothing has been announced yet")
+
+
 def announce(text: str, urgent: bool = False) -> None:
     """Speak `text` via the screen reader without stealing focus.
 
@@ -235,7 +244,8 @@ def announce(text: str, urgent: bool = False) -> None:
     also mirror the message to the status bar so there is a fallback the review
     cursor can reach.
     """
-    global _SPEAKER, _speaker_retry_after
+    global _SPEAKER, _speaker_retry_after, _last_announcement
+    _last_announcement = text
     if _SPEAKER is None and platform.system() == "Windows":
         # No reader when BlindPilot started, or the last rebuild failed too.
         # Looked for again occasionally, so a reader started afterwards is
@@ -11742,6 +11752,14 @@ class MainFrame(wx.Frame):
             "&Jump to Latest Response\tCtrl+R",
             "Move to the newest response, then back through the ones before it",
             self._jump_to_latest_response,
+        )
+        # Not an agent item: Chat mode speaks too, and losing a line to a
+        # keystroke is no less likely there.
+        self._menu_item(
+            menu,
+            "Repeat Last Announ&cement\tCtrl+Shift+R",
+            "Say again the last thing BlindPilot announced",
+            repeat_last_announcement,
         )
         return menu
 
