@@ -8066,7 +8066,8 @@ class SessionPanel(wx.Panel):
         exception: its rows are the transcript, not live activity, and without
         them a reopened conversation would show nothing at all.
         """
-        if kind == "tool" and text.strip():
+        if kind == "tool" and text.strip() and not self._replaying:
+            # A replayed history row is an old step, not what this turn did last.
             self._last_step = text.strip()
         if not SETTINGS.live_rows and not self._replaying:
             return
