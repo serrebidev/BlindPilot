@@ -8075,7 +8075,7 @@ class SessionPanel(wx.Panel):
             self._replay_done = True
             return
         if kind == "tool" and text.strip():
-            if not self._replaying or getattr(self, "_replay_done", False):
+            if not getattr(self, "_replaying", False) or getattr(self, "_replay_done", False):
                 # A replayed history row is an old step, not what this turn did.
                 self._last_step = text.strip()
         if not SETTINGS.live_rows and not self._replaying:
