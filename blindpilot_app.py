@@ -325,7 +325,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.33.0"
+APP_VERSION = "0.33.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -5053,7 +5053,7 @@ def _permission_text(tool: str, payload: dict) -> str:
 
 
 class PermissionDialog(wx.Dialog):
-    """Claude asks to use a tool, or to leave plan mode with a plan.
+    """A backend asks to use a tool, or (Claude) to leave plan mode with a plan.
 
     Deny (or Keep Planning) is the default button, and Escape is the same as
     choosing it: nothing is allowed by closing a dialog.
@@ -5062,9 +5062,17 @@ class PermissionDialog(wx.Dialog):
     ALLOW, ALLOW_SESSION, DENY = wx.ID_HIGHEST + 1, wx.ID_HIGHEST + 2, wx.ID_HIGHEST + 3
     APPROVE_EDITS, APPROVE_ASK = wx.ID_HIGHEST + 4, wx.ID_HIGHEST + 5
 
-    def __init__(self, parent: wx.Window, tool: str, payload: dict, offer_session: bool):
+    def __init__(
+        self,
+        parent: wx.Window,
+        backend: str,
+        tool: str,
+        payload: dict,
+        offer_session: bool,
+    ):
         plan = tool == "ExitPlanMode"
-        title = "Approve Claude's Plan" if plan else f"Claude Wants to Use {tool}"
+        label = backend_label(backend)
+        title = f"Approve {label}'s Plan" if plan else f"{label} Wants to Use {tool}"
         super().__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -7538,12 +7546,14 @@ class SessionPanel(wx.Panel):
                 return None
         return held["answers"]
 
-    def _ask_permission(self, tool: str, payload: dict, suggestions: list) -> dict:
-        """Ask whether Claude may use `tool`; the worker thread waits for it.
+    def _ask_permission(
+        self, backend: str, tool: str, payload: dict, suggestions: list
+    ) -> dict:
+        """Ask whether `backend` may use `tool`; the worker thread waits for it.
 
-        Returns the body Claude Code takes back: allow (with the rules it
+        Returns the body the backend takes back: allow (with the rules it
         suggested when the answer was "for this session") or deny with a
-        reason Claude reads. Stopped, or the tab gone, it is a denial.
+        reason it reads. Stopped, or the tab gone, it is a denial.
         """
         answered = threading.Event()
         held: dict[str, dict] = {"answer": {"behavior": "deny", "message": "Nobody answered."}}
@@ -7551,7 +7561,9 @@ class SessionPanel(wx.Panel):
         def show() -> None:
             try:
                 if self:
-                    held["answer"] = self._show_permission_dialog(tool, payload, suggestions)
+                    held["answer"] = self._show_permission_dialog(
+                        backend, tool, payload, suggestions
+                    )
             finally:
                 answered.set()
 
@@ -7561,16 +7573,19 @@ class SessionPanel(wx.Panel):
                 return {"behavior": "deny", "message": "The turn was stopped.", "interrupt": True}
         return held["answer"]
 
-    def _show_permission_dialog(self, tool: str, payload: dict, suggestions: list) -> dict:
+    def _show_permission_dialog(
+        self, backend: str, tool: str, payload: dict, suggestions: list
+    ) -> dict:
         """Open the permission or plan dialog. GUI thread only."""
         plan = tool == "ExitPlanMode"
-        asking = "Claude has a plan for you to approve" if plan else f"Claude wants to use {tool}"
+        label = backend_label(backend)
+        asking = f"{label} has a plan for you to approve" if plan else f"{label} wants to use {tool}"
         self._announce(asking, urgent=True)
         # The turn waits on this, so someone in another window needs to know.
         _notify_if_away(self, asking)
         self._earcons.stop_progress()
         self._hide_working()
-        dlg = PermissionDialog(self, tool, payload, bool(suggestions))
+        dlg = PermissionDialog(self, backend, tool, payload, bool(suggestions))
         try:
             choice = dlg.ShowModal()
             reason = dlg.reason()
@@ -8298,6 +8313,9 @@ class SessionPanel(wx.Panel):
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,
+            on_permission=lambda tool, payload, suggestions: self._ask_permission(
+                selected_backend, tool, payload, suggestions
+            ),
             on_subagent=lambda *report: self._queue_worker_event("subagent", *report),
             **extra,
         )
@@ -8343,7 +8361,9 @@ class SessionPanel(wx.Panel):
             panel = tab()
             if panel is None:
                 return {"behavior": "deny", "message": "The tab was closed."}
-            return SessionPanel._ask_permission(panel, tool, payload, suggestions)
+            return SessionPanel._ask_permission(
+                panel, BACKEND_CLAUDE, tool, payload, suggestions
+            )
 
         return {"held_for": self, "on_unsolicited": wake, "on_permission": ask}
 
