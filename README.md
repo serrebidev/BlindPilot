@@ -130,6 +130,7 @@ Follow everything, the default, speaks every tool call, result, and subagent lin
 - Ctrl+/ slash commands. Ctrl+. stop the running task.
 - Ctrl+Shift+A attach files. Ctrl+Shift+M cycle permission modes.
 - Ctrl+Tab and Ctrl+Shift+Tab move between tabs, as do Ctrl+Shift+] and Ctrl+Shift+[. Ctrl+1 to Ctrl+9 jump to a tab. On macOS use Cmd+Shift+] and Cmd+Shift+[, because Cmd+Tab belongs to the system.
+- Ctrl+Shift+C in the responses copies the last code block of the response you are on.
 - Ctrl+Up (or Alt+Up) from the prompt enters the newest response. Shift+Tab also reaches the responses. Inside the responses, Down on the last row stays there; Tab returns to the prompt.
 - Enter sends the prompt. Shift+Enter inserts a new line.
 - While a task has subagents running, a Subagents running list sits between the tab strip and the responses; Tab from the tab strip lands on it. Each row names an agent, says whether it is running, completed, failed, or stopped, and gives the last thing it did. Enter on a row opens that agent's activity in a read-only edit field that keeps up with it while it is open: leave the caret on the last line and it follows new lines, move it anywhere else and it stays put. The list leaves the tab order when no subagent is running.
