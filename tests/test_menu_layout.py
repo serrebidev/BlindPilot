@@ -252,6 +252,7 @@ def _model_menu(frame):
         "_status_active",
         "_turn_status_active",
         "_changed_files_active",
+        "_claude_files_active",
         "_settings_files_active",
     ):
         setattr(frame, name, lambda: None)
