@@ -4252,6 +4252,13 @@ class CodexWorker(_TurnWorker):
                 if delta:
                     item_id = str(params.get("itemId") or "")
                     self._reasoning_streams.setdefault(item_id, []).append(delta)
+            elif method == "thread/tokenUsage/updated":
+                usage = params.get("tokenUsage") or {}
+                last = usage.get("last") or {}
+                used = _as_number(last.get("totalTokens"))
+                if used:
+                    window = _as_number(usage.get("modelContextWindow")) or 0
+                    self.context_tokens = (int(used), int(window))
             elif method == "item/commandExecution/outputDelta":
                 item_id = str(params.get("itemId") or "")
                 delta = str(params.get("delta") or "")
