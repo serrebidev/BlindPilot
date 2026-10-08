@@ -1,3 +1,23 @@
+# BlindPilot 0.33.0
+
+Seventeen new features, picked from an audit of Kelly Ford's The Chat Place, an accessible companion for Claude Code. The biggest: Claude Code can finally ask before it does something, instead of being refused without anyone being told.
+
+- Claude Code permission prompts. Outside Bypass permissions, a tool call Claude Code's permission mode leaves to you used to be refused without a word. Now a dialog shows the whole request to read line by line, with Allow, Allow for this session, or Deny, which is the default and can carry a reason Claude reads. "For this session" stays in memory and is never written to Claude's settings files. In Plan mode the plan opens the same way: approve it and carry on accepting edits, approve it and keep being asked, or keep planning with what to change.
+- Changed Files, Ctrl+Shift+D, in the Model menu. It lists the files that differ from the last commit in this tab's git repository, with lines added and removed, and Enter reads a file's changes as Added, Removed and Unchanged lines. It asks git, so it works the same for all nine backends.
+- How full the context is. Session Status now says it, for Claude Code and Codex ("Context 62% full: 124,000 of 200,000 tokens"), and BlindPilot tells you once when a conversation passes 80%, pointing you to Compact Conversation.
+- Turn Status, Ctrl+Shift+T, in the Model menu, says how long the running turn has been working, the last thing it did, and how many messages are queued.
+- Notifications. When a turn finishes, fails, asks you a question or wants permission while you are in another window, a system notification says so, and choosing it brings that tab forward. Turn it off in Preferences.
+- Export Conversation, Ctrl+E, saves the conversation as Markdown, a web page, or plain text, offered in Documents. Each response is a heading, so browse mode moves between them.
+- Shift+Enter on a row opens the whole response as a formatted page, so your screen reader's browse mode moves by heading, list, table and link. Nothing is fetched from the internet, and links open in your browser.
+- Repeat Last Announcement, Ctrl+Shift+R, says the last thing BlindPilot announced, for when a keystroke cut it off.
+- Your message is read back as it is sent ("Sent: fix the build"), so dictated or pasted text is heard. Long messages are cut short and code blocks left out. Turn it off in Preferences.
+- F3 and Shift+F3 in the responses move to the next and previous match of your last search. F6 and Shift+F6 move between the tab strip, the responses and the prompt, and read the status bar on the way round. Ctrl+Shift+C copies the last code block of the response you are on.
+- Recent Conversations can be sorted newest first, oldest first, by title or by folder. F2 renames a conversation and Delete hides it; Show hidden conversations brings it back. No backend's files are changed.
+- Only one BlindPilot runs at a time. On Windows, starting it again brings the running one to the front.
+- Help, Report a Bug asks what happened and opens GitHub's new-issue page with it filled in, showing exactly what else goes with it: versions and settings, never anything from a conversation.
+- Help, Keyboard Shortcuts, F1, lists every shortcut grouped by where it works.
+- Check for Updates asks before installing would stop a running turn or lose a message you have not sent.
+
 # BlindPilot 0.32.1
 
 Clearer Gemini messages, a tidier Gemini model list in Chat mode, and no more blank row after answers.

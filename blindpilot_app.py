@@ -325,7 +325,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.32.1"
+APP_VERSION = "0.33.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7564,10 +7564,10 @@ class SessionPanel(wx.Panel):
     def _show_permission_dialog(self, tool: str, payload: dict, suggestions: list) -> dict:
         """Open the permission or plan dialog. GUI thread only."""
         plan = tool == "ExitPlanMode"
-        self._announce(
-            "Claude has a plan for you to approve" if plan else f"Claude wants to use {tool}",
-            urgent=True,
-        )
+        asking = "Claude has a plan for you to approve" if plan else f"Claude wants to use {tool}"
+        self._announce(asking, urgent=True)
+        # The turn waits on this, so someone in another window needs to know.
+        _notify_if_away(self, asking)
         self._earcons.stop_progress()
         self._hide_working()
         dlg = PermissionDialog(self, tool, payload, bool(suggestions))

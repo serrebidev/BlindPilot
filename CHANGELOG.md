@@ -2,6 +2,23 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.33.0 - 2026-10-08
+
+Seventeen features from an audit of The Chat Place (kellylford/AIChat), PRs #56 to #72.
+
+- Claude Code permission prompts are answered instead of silently denied outside Bypass permissions: Allow, Allow for this session (kept in memory, never written to a settings file), or Deny with a reason. Plan mode's plan can be approved into Accept edits or Default, or sent back with what to change (#62).
+- Changed Files (Ctrl+Shift+D) lists what differs from the last commit in the tab's git repository, and reads each file's changes as Added, Removed and Unchanged lines. Same for every backend (#61).
+- Session Status says how full the context is for Claude Code and Codex, and BlindPilot warns once past 80% (#60).
+- Turn Status (Ctrl+Shift+T): how long the running turn has worked, its last step, and what is queued; attached Hermes turns are counted from the attach (#58).
+- A system notification when a turn finishes, fails, asks a question or wants permission while BlindPilot is in the background; choosing it brings the tab forward. Off in Preferences (#59).
+- Export Conversation (Ctrl+E) as Markdown, a web page, or plain text (#57). Shift+Enter reads a whole response as a formatted page for browse mode, fetching nothing (#66).
+- Repeat Last Announcement (Ctrl+Shift+R) (#56). Your message is read back as it is sent, code blocks left out; off in Preferences (#65).
+- F3 and Shift+F3 step through matches of the last search (#63). F6 and Shift+F6 move between the tab strip, responses, prompt and status bar (#64). Ctrl+Shift+C copies a response's last code block (#67).
+- Recent Conversations can be sorted, renamed (F2) and hidden (Delete), in BlindPilot's own config (#70).
+- Only one copy runs at a time; on Windows a second launch brings the first forward (#68).
+- Help, Report a Bug (#69) and Help, Keyboard Shortcuts (F1) (#72).
+- Help, Check for Updates asks before an install would stop a running turn or lose an unsent message (#71).
+
 ## v0.32.1 - 2026-10-06
 
 - A Gemini CLI turn refused because Google no longer serves personal Google accounts there (IneligibleTierError, since June 2026) now says so and points to Antigravity CLI, instead of reading a Node stack-frame line. The setup wizard's Gemini sign-in page warns about it up front. Stack frames are never taken as a turn's error detail.
