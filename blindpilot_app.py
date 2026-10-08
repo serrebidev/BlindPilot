@@ -2630,8 +2630,8 @@ def changed_files(cwd: str) -> Optional[tuple[str, list[tuple[str, str, bool]]]]
     files: list[tuple[str, str]] = []
     # -z: paths exactly as they are, not C-quoted, and a rename as old and new.
     fields = iter(_git(root, "diff", "--numstat", "-z", "HEAD").stdout.split("\0"))
-    for field in fields:
-        parts = field.split("\t", 2)
+    for entry in fields:
+        parts = entry.split("\t", 2)
         if len(parts) != 3:
             continue
         added, removed, path = parts
