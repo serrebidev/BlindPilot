@@ -6558,7 +6558,7 @@ class SessionPanel(wx.Panel):
             # than as a deliberate one.
             f"Folder: {self.cwd or 'chosen by the Hermes running this session'}",
             f"Conversation: {conversation}",
-            _context_line(*self._known_context()),
+            _context_line(*SessionPanel._known_context(self)),
         ]
 
     def _show_status(self, backend: str, report: str) -> None:
