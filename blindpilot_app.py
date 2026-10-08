@@ -2667,6 +2667,94 @@ def _context_line(used: int, window: int) -> str:
     return f"Context {round(100 * used / window)}% full: {used:,} of {window:,} tokens"
 
 
+def _git(cwd: str, *args: str) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(
+        ["git", "-C", cwd, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        **no_window_kwargs(),
+    )
+
+
+def changed_files(cwd: str) -> Optional[tuple[str, list[tuple[str, str, bool]]]]:
+    """What differs from the last commit in `cwd`'s repository, or None.
+
+    Returns the repository root and (path, spoken description, is new)
+    triples, paths relative to that root. Read from git rather than from the transcript, so it
+    is the same for every backend and counts what a subagent or a shell
+    command changed too.
+    """
+    top = _git(cwd, "rev-parse", "--show-toplevel")
+    if top.returncode:
+        return None
+    root = top.stdout.strip()
+    files: list[tuple[str, str]] = []
+    # -z: paths exactly as they are, not C-quoted, and a rename as old and new.
+    fields = iter(_git(root, "diff", "--numstat", "-z", "HEAD").stdout.split("\0"))
+    for entry in fields:
+        parts = entry.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        added, removed, path = parts
+        if not path:
+            next(fields, "")  # the old name
+            path = next(fields, "")
+        if added == "-":
+            files.append((path, "binary file changed"))
+        else:
+            lines = "line" if added == "1" else "lines"
+            files.append((path, f"{added} {lines} added, {removed} removed"))
+    listed = _git(root, "ls-files", "-z", "--others", "--exclude-standard").stdout
+    new = [path for path in listed.split("\0") if path]
+    files += [(path, "new file") for path in new]
+    described = []
+    for path, what in files:
+        folder = os.path.dirname(path)
+        where = f", in {folder}" if folder else ""
+        label = f"{os.path.basename(path)}, {what}{where}"
+        described.append((path, label, path in new))
+    return root, described
+
+
+# Lines of a unified diff that describe the files rather than change them.
+_DIFF_HEADERS = (
+    "diff --git",
+    "index ",
+    "--- ",
+    "+++ ",
+    "\\",
+    "new file mode",
+    "deleted file mode",
+    "similarity ",
+    "rename ",
+    "old mode",
+    "new mode",
+)
+
+
+def readable_diff(diff: str) -> str:
+    """A unified diff as lines that say what they are when read aloud."""
+    out = []
+    for line in diff.splitlines():
+        if line.startswith(_DIFF_HEADERS):
+            continue
+        if line.startswith("@@"):
+            match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
+            out.append(f"At line {match.group(1) if match else '?'}:")
+        elif line.startswith("+"):
+            out.append(f"Added: {line[1:]}")
+        elif line.startswith("-"):
+            out.append(f"Removed: {line[1:]}")
+        elif line.startswith("Binary files "):
+            out.append("Binary file changed; its contents cannot be read as text.")
+        else:
+            out.append(f"Unchanged: {line[1:]}")
+    return "\n".join(out)
+
+
 def _tab_label(title: str, cwd: str) -> str:
     """What a tab is called.
 
@@ -6701,6 +6789,54 @@ class SessionPanel(wx.Panel):
         if queued:
             said += f" {queued} {'message' if queued == 1 else 'messages'} queued."
         self._announce(said)
+
+    def open_changed_files(self) -> None:
+        """What differs from the last commit here (Model menu, Ctrl+Shift+D).
+
+        Enter on a file reads its changes a line at a time; closing that comes
+        back to the list on the same file.
+        """
+        try:
+            found = changed_files(self.cwd) if self.cwd else None
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._announce(f"Error: git could not be run: {exc}")
+            return
+        if found is None:
+            self._announce("This folder is not in a git repository, so changes cannot be listed")
+            return
+        root, files = found
+        if not files:
+            self._announce("No changed files since the last commit")
+            return
+        n = len(files)
+        chosen = 0
+        while True:
+            with wx.SingleChoiceDialog(
+                self,
+                f"{n} changed {'file' if n == 1 else 'files'} since the last commit. "
+                "Enter reads a file's changes.",
+                "Changed Files",
+                [label for _path, label, _new in files],
+            ) as dlg:
+                dlg.SetSelection(chosen)
+                if dlg.ShowModal() != wx.ID_OK:
+                    break
+                chosen = dlg.GetSelection()
+            path, _label, new = files[chosen]
+            if new:
+                try:
+                    with open(os.path.join(root, path), encoding="utf-8", errors="replace") as fh:
+                        text = "New file:\n" + fh.read()
+                except OSError as exc:
+                    text = f"Could not read the file: {exc}"
+            else:
+                text = readable_diff(_git(root, "diff", "HEAD", "--", path).stdout)
+            view = ReadView(self, text or "No changes to show", path, monospace=True)
+            try:
+                view.ShowModal()
+            finally:
+                view.Destroy()
+        self.prompt.SetFocus()
 
     def _show_status(self, backend: str, report: str) -> None:
         """Put the finished report on screen, once the probe has answered."""
@@ -11949,6 +12085,12 @@ class MainFrame(wx.Frame):
             "Say how long the running turn has worked, its last step, and what is queued",
             self._turn_status_active,
         )
+        add(
+            menu,
+            "Changed &Files…\tCtrl+Shift+D",
+            "List the files that differ from the last commit, and read each change",
+            self._changed_files_active,
+        )
         menu.AppendSeparator()
         add(
             menu,
@@ -12247,6 +12389,11 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.turn_status()
+
+    def _changed_files_active(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.open_changed_files()
 
     def _status_active(self) -> None:
         """What the active tab is set to (Model > Session Status, or /status)."""

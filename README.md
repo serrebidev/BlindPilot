@@ -107,7 +107,7 @@ File. New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversa
 
 Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
 
-Model. Backend (one radio item per CLI), Model and Effort (Ctrl+Shift+E), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Session Status, Turn Status (Ctrl+Shift+T), Backend Settings, Manage Backends, Connect a Provider.
+Model. Backend (one radio item per CLI), Model and Effort (Ctrl+Shift+E), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Session Status, Turn Status (Ctrl+Shift+T), Changed Files (Ctrl+Shift+D), Backend Settings, Manage Backends, Connect a Provider.
 
 Options. Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Ask me questions a turn wrote into its answer, Silent until the response mode, Working sound (continuous, every few seconds, off), Working sound interval, Remote Hermes, Preferences (Ctrl+,). On macOS, Preferences is in the application menu on Cmd+, as in every Mac app.
 
@@ -130,6 +130,7 @@ Follow everything, the default, speaks every tool call, result, and subagent lin
 - Ctrl+Shift+R say the last announcement again, after a keystroke cut it off.
 - Ctrl+E export the conversation as Markdown, a web page, or plain text, offered in Documents.
 - Ctrl+Shift+T say how long the running turn has worked, its last step, and how many messages are queued.
+- Ctrl+Shift+D list the files that differ from the last commit in this folder's git repository, with lines added and removed; Enter reads a file's changes as Added, Removed and Unchanged lines.
 - Ctrl+Shift+E choose model and reasoning effort.
 - Ctrl+/ slash commands. Ctrl+. stop the running task.
 - Ctrl+Shift+A attach files. Ctrl+Shift+M cycle permission modes.
