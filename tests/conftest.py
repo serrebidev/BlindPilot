@@ -65,6 +65,23 @@ def the_usage_report_stays_off_the_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def notifications_stay_off_the_desktop(monkeypatch):
+    """No test puts a real system notification on the screen.
+
+    A test process is never the active application, so every turn a test
+    finishes would otherwise count as one that ended in the background. The
+    tests that mean to exercise notifications turn the setting back on.
+    """
+    try:
+        import blindpilot_app
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(blindpilot_app.SETTINGS, "notify_in_background", False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def chat_data_stays_out_of_the_real_folder(monkeypatch):
     """Point Chat mode's data folder at a throwaway directory for every test.
 

@@ -61,6 +61,7 @@ from typing import Any, Callable, List, Optional, Sequence, cast
 from linux_accessibility import announce as _linux_native_announce
 
 import wx
+import wx.adv
 from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
@@ -2623,6 +2624,40 @@ def _spoken_duration(seconds: float) -> str:
     return " ".join(said) or "0 seconds"
 
 
+def _notify_if_away(panel: "SessionPanel", message: str) -> None:
+    """A system notification, only while another application has focus.
+
+    A turn that ends while you are in your editor or browser was announced
+    to a window nobody is looking at. Choosing the notification brings
+    BlindPilot forward on this tab.
+    """
+    app = wx.GetApp()
+    if not SETTINGS.notify_in_background or app is None or app.IsActive():
+        return
+    title = _tab_label(getattr(panel, "tab_title", ""), getattr(panel, "cwd", ""))
+    note = wx.adv.NotificationMessage(f"BlindPilot: {title}", message, panel)
+    # Every one is held until it is chosen or dismissed: dropping the wrapper
+    # drops its click handler, and choosing it would then do nothing.
+    held = getattr(panel, "_notifications", None)
+    if held is None:
+        held = panel._notifications = []
+    held.append(note)
+
+    def done(_event, chosen: bool) -> None:
+        if note in held:
+            held.remove(note)
+        if chosen:
+            panel._come_forward()
+
+    # wxPython names the event types but ships no binders for them.
+    for event_type, chosen in (
+        (wx.adv.wxEVT_NOTIFICATION_MESSAGE_CLICK, True),
+        (wx.adv.wxEVT_NOTIFICATION_MESSAGE_DISMISSED, False),
+    ):
+        note.Bind(wx.PyEventBinder(event_type), lambda e, c=chosen: done(e, c))
+    note.Show()
+
+
 def _tab_label(title: str, cwd: str) -> str:
     """What a tab is called.
 
@@ -3036,6 +3071,10 @@ class _Settings:
         # judgement is a reading of prose and can be wrong, and a dialog that
         # opens when nothing was asked interrupts.
         self.ask_written_questions = bool(cfg.get("ask_written_questions", True))
+        # A system notification when a turn ends, fails or asks something while
+        # another application has focus. Nothing is shown while BlindPilot is
+        # in front: the announcement already said it.
+        self.notify_in_background = bool(cfg.get("notify_in_background", True))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Read again in main() before the first window, which is the only
@@ -3053,6 +3092,7 @@ class _Settings:
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
         cfg["ask_written_questions"] = self.ask_written_questions
+        cfg["notify_in_background"] = self.notify_in_background
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["appearance"] = self.appearance
@@ -6754,6 +6794,23 @@ class SessionPanel(wx.Panel):
         self.last_status = text
         self._on_status(self, text)
 
+    def _come_forward(self) -> None:
+        """Raise the window with this tab showing, from a notification."""
+        if not self:
+            return
+        frame = wx.GetTopLevelParent(self)
+        if frame is None:
+            return
+        frame.Iconize(False)
+        frame.Raise()
+        if getattr(frame, "_app_mode", APP_MODE_AGENT) != APP_MODE_AGENT:
+            # Chat hides every session tab; the turn that called is one of them.
+            frame._set_app_mode(APP_MODE_AGENT)
+        notebook = getattr(frame, "notebook", None)
+        if notebook is not None and notebook.FindPage(self) != wx.NOT_FOUND:
+            notebook.SetSelection(notebook.FindPage(self))
+        self.focus_prompt()
+
     def _announce(self, text: str, urgent: bool = False) -> None:
         """Speak a confirmation and mirror it to the status bar as a fallback."""
         announce(text, urgent=urgent)
@@ -6896,6 +6953,7 @@ class SessionPanel(wx.Panel):
             return None
         backend = self._session_backend or self.selected_backend()
         self._announce(f"{backend_label(backend)} is asking a question")
+        _notify_if_away(self, f"{backend_label(backend)} is asking you a question")
         # The progress loop means "still working", and it is not: the run is
         # waiting on this dialog, and a loop under a question is only noise.
         self._earcons.stop_progress()
@@ -8392,6 +8450,8 @@ class SessionPanel(wx.Panel):
         self._refresh_list()
         self._stream_response = None
         self._announce(f"Error: {message}", urgent=True)
+        self._turn_failed = True
+        _notify_if_away(self, f"The turn failed: {message}")
 
     def _on_worker_finished(self) -> None:
         started = getattr(self, "_turn_started_at", None)
@@ -8409,6 +8469,9 @@ class SessionPanel(wx.Panel):
         if self._stopping:
             self._stopping = False
             self._finish_stopped_turn()
+        elif not getattr(self, "_turn_failed", False):
+            _notify_if_away(self, "The turn finished")
+        self._turn_failed = False
         if self.send_btn:
             self.send_btn.Enable()
         if self.steer_btn:
@@ -10531,12 +10594,17 @@ class PreferencesDialog(wx.Dialog):
             panel, label="Ask me questions a turn wrote into its answer"
         )
         self._written_questions.SetValue(SETTINGS.ask_written_questions)
+        self._notify = wx.CheckBox(
+            panel, label="Notify me when a turn ends while BlindPilot is in the background"
+        )
+        self._notify.SetValue(SETTINGS.notify_in_background)
         for check in (
             self._live_rows,
             self._speak_live,
             self._thinking,
             self._text_view,
             self._written_questions,
+            self._notify,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -10676,6 +10744,10 @@ class PreferencesDialog(wx.Dialog):
     @property
     def ask_written_questions(self) -> bool:
         return self._written_questions.GetValue()
+
+    @property
+    def notify_in_background(self) -> bool:
+        return self._notify.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -11521,6 +11593,7 @@ class MainFrame(wx.Frame):
         SETTINGS.sound_cues = dict(dialog.sound_cues)
         SETTINGS.text_view = dialog.text_view
         SETTINGS.ask_written_questions = dialog.ask_written_questions
+        SETTINGS.notify_in_background = dialog.notify_in_background
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         changed_appearance = dialog.appearance != SETTINGS.appearance
