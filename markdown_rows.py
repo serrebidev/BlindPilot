@@ -422,6 +422,10 @@ def markdown_page(text: str, title: str) -> str:
     """A whole HTML page of `text` rendered as Markdown, for browse mode."""
     return (
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+        # Nothing an answer names is fetched: an image or stylesheet URL in it
+        # would otherwise be loaded the moment the page opens.
+        '<meta http-equiv="Content-Security-Policy" '
+        "content=\"default-src 'none'; style-src 'unsafe-inline'\">"
         f"<title>{html.escape(title)}</title></head>\n<body>\n"
         f"<h1>{html.escape(title)}</h1>\n{_MD_PAGE.render(text)}</body></html>\n"
     )

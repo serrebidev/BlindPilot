@@ -38,7 +38,8 @@ datas = [
     # frozen, so it ships beside the sounds rather than only inside the EXE.
     ("packaging/BlindPilot.ico", "packaging"),
 ]
-hiddenimports = []
+# Imported only when a response is opened as a formatted page.
+hiddenimports = ["wx.html2"]
 binaries = []
 
 # websocket's jsonrpc/transport submodules are imported by name at runtime, and

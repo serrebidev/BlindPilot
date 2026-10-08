@@ -4401,6 +4401,58 @@ def _monospace_font(window: wx.Window) -> wx.Font:
     return wx.Font(wx.FontInfo(window.GetFont().GetPointSize()).Family(wx.FONTFAMILY_TELETYPE))
 
 
+class FormattedView(wx.Dialog):
+    """A rendered page in a web view; Escape closes, links open the browser.
+
+    Nothing is fetched: the page is set from a string, and any navigation away
+    from it is refused and handed to the default browser instead.
+    """
+
+    @classmethod
+    def open(cls, parent: wx.Window, page: str, title: str) -> Optional["FormattedView"]:
+        """The view, or None when this machine has no usable web view."""
+        try:
+            import wx.html2 as html2
+
+            backend = html2.WebViewBackendEdge if platform.system() == "Windows" else ""
+            if backend and not html2.WebView.IsBackendAvailable(backend):
+                return None
+            return cls(parent, page, title, html2, backend)
+        except Exception:
+            logging.getLogger("blindpilot").info("formatted view unavailable", exc_info=True)
+            return None
+
+    def __init__(self, parent: wx.Window, page: str, title: str, html2, backend: str):
+        super().__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        kwargs = {"backend": backend} if backend else {}
+        self.view = html2.WebView.New(self, wx.ID_ANY, **kwargs)
+        self.view.SetMinSize(self.FromDIP(wx.Size(720, 520)))
+        self.view.Bind(html2.EVT_WEBVIEW_NAVIGATING, self._on_navigating)
+        self.view.Bind(html2.EVT_WEBVIEW_LOADED, lambda _e: self.view.SetFocus())
+        self._loaded = False
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.view, 1, wx.EXPAND)
+        self.SetSizerAndFit(sizer)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.view.SetPage(page, "")
+
+    def _on_navigating(self, event) -> None:
+        url = event.GetURL()
+        if not self._loaded:
+            # The first navigation is the page being set.
+            self._loaded = True
+            return
+        if url.startswith(("http://", "https://", "mailto:")):
+            wx.LaunchDefaultBrowser(url)
+        event.Veto()
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        event.Skip()
+
+
 class ReadView(wx.Dialog):
     """Modal read-only viewer for a single row's payload. Esc closes.
 
@@ -8433,7 +8485,10 @@ class SessionPanel(wx.Panel):
 
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
             if sel != wx.NOT_FOUND:
-                self._open_row(sel)
+                if event.ShiftDown():
+                    self._read_formatted(self._displayed[sel])
+                else:
+                    self._open_row(sel)
             return
 
         if key == wx.WXK_WINDOWS_MENU:
@@ -8544,6 +8599,8 @@ class SessionPanel(wx.Panel):
             return
         row = self._displayed[sel]
         menu = wx.Menu()
+        formatted = menu.Append(wx.ID_ANY, "Read response as formatted page\tShift+Enter")
+        self.Bind(wx.EVT_MENU, lambda _e, r=row: self._read_formatted(r), formatted)
         if row.kind == "code":
             item = menu.Append(wx.ID_ANY, "Save code to file…")
             self.Bind(wx.EVT_MENU, lambda _e, r=row: self._action_save_code(r), item)
@@ -8555,6 +8612,32 @@ class SessionPanel(wx.Panel):
         self.Bind(wx.EVT_MENU, lambda _e: self._action_copy_conversation(), copy_all_item)
         self._responses_ctrl().PopupMenu(menu)
         menu.Destroy()
+
+    def _read_formatted(self, row: Row) -> None:
+        """The row's whole response as a web page, for browse mode.
+
+        A response split into rows is read a row at a time; as a page, the
+        screen reader's own keys move by heading, list, table and link. Falls
+        back to the plain text view where no web view is available.
+        """
+        n = row.response_number
+        header = next(
+            (r for r in self._rows if r.kind == "header" and r.response_number == n), None
+        )
+        text = (
+            header.payload if header is not None and header.payload else reassemble(self._rows, n)
+        )
+        title = f"Response {n}"
+        dlg = FormattedView.open(self, markdown_page(text, title), title) or ReadView(
+            self, text, title
+        )
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+        sel = self._selected_row()
+        if sel != wx.NOT_FOUND:
+            self._focus_row(sel)
 
     def _action_save_code(self, row: Row) -> None:
         ext = _LANG_EXT.get(row.language or "", ".txt")
