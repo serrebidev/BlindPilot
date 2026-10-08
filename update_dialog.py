@@ -66,6 +66,7 @@ class UpdateDialog(wx.Dialog):
         current_version: str,
         speak: Callable[[str], None],
         start_check: bool = True,
+        confirm_install: Optional[Callable[[], bool]] = None,
     ):
         super().__init__(
             parent,
@@ -81,6 +82,9 @@ class UpdateDialog(wx.Dialog):
         self.cancel_event = threading.Event()
         self.worker: Optional[threading.Thread] = None
         self.restart_pending = False
+        # Asked just before installing, which closes BlindPilot: False keeps it
+        # open, because a running turn or an unsent message would be lost.
+        self.confirm_install = confirm_install
         self._closing = False
         self._last_announced_percent = -1
 
@@ -333,6 +337,9 @@ class UpdateDialog(wx.Dialog):
     def _install_and_restart(self) -> None:
         if self.archive is None:
             self._show_error("The update is not ready. Check for updates again.")
+            return
+        if self.confirm_install is not None and not self.confirm_install():
+            self.speak("Update not installed yet. Choose Restart now when you are ready.")
             return
         try:
             schedule_install(self.archive)
