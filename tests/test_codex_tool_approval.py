@@ -19,18 +19,12 @@ def _worker(answer):
 
 def test_allow_becomes_accept():
     worker = _worker({"behavior": "allow"})
-    assert (
-        worker._ask_codex_permission({"params": {"command": "rm -rf /"}}, "command")
-        == "accept"
-    )
+    assert worker._ask_codex_permission({"params": {"command": "rm -rf /"}}, "command") == "accept"
 
 
 def test_deny_becomes_decline():
     worker = _worker({"behavior": "deny", "message": "no"})
-    assert (
-        worker._ask_codex_permission({"params": {"command": "rm -rf /"}}, "command")
-        == "decline"
-    )
+    assert worker._ask_codex_permission({"params": {"command": "rm -rf /"}}, "command") == "decline"
 
 
 def test_a_failed_ask_denies():
@@ -39,10 +33,7 @@ def test_a_failed_ask_denies():
 
     worker = ab.CodexWorker.__new__(ab.CodexWorker)
     worker._on_permission = boom
-    assert (
-        worker._ask_codex_permission({"params": {"command": "rm -rf /"}}, "command")
-        == "decline"
-    )
+    assert worker._ask_codex_permission({"params": {"command": "rm -rf /"}}, "command") == "decline"
 
 
 def test_the_dialog_sees_the_command():
