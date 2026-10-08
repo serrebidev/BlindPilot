@@ -12496,8 +12496,14 @@ def _raise_running_copy() -> bool:
     import ctypes
 
     user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-    for window_class in ("wxWindowNR", "wxWindow"):
-        hwnd = user32.FindWindowW(window_class, APP_NAME)
+    # The main window, or the setup wizard if the first copy is still in it.
+    for window_class, title in (
+        ("wxWindowNR", APP_NAME),
+        ("wxWindow", APP_NAME),
+        ("wxWindowNR", f"{APP_NAME} — Setup"),
+        ("wxWindow", f"{APP_NAME} — Setup"),
+    ):
+        hwnd = user32.FindWindowW(window_class, title)
         if hwnd:
             if user32.IsIconic(hwnd):
                 user32.ShowWindow(hwnd, 9)  # SW_RESTORE
