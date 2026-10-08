@@ -1,3 +1,9 @@
+# BlindPilot 0.37.2
+
+Check on muse.ai while it works.
+
+- When you reopen a muse.ai chat from Recent Conversations and muse.ai has not answered your last message yet, the response no longer just sits blank. BlindPilot tells you muse.ai is still working and follows the chat: each status update it posts is read out and added as it arrives, and its answer ends the turn. Nothing is sent to the chat by following it. Stop ends the following, not muse.ai's work, and you can reopen the chat later to pick up where it got to.
+
 # BlindPilot 0.37.1
 
 Recent Conversations opens again.

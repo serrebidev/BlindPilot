@@ -129,3 +129,21 @@ def test_a_signed_out_cli_fails_the_turn_with_its_own_words(monkeypatch):
 
     failed = [e for e in events if e[0] == "failed"]
     assert failed and "not signed in" in failed[0][1]
+
+
+def test_a_reopened_chat_still_running_is_followed_until_its_answer(monkeypatch):
+    """Nothing is sent; updates the agent posts on its own are relayed, and its
+    next direct answer ends the turn."""
+    old = [_event(5, "Earlier answer")]
+    update = _event(6, "## Status\n\nTests running.")
+    update["payload"]["reply_to_message_id"] = "root"
+    later = old + [update, _event(7, "## Done\n\nReleased v1.2.")]
+    worker, calls, events = _worker(
+        monkeypatch, send=None, histories=[old, later], session_id="chat-9"
+    )
+    worker._prompt = None
+    worker.run()
+
+    assert not [c for c in calls if c[0] == "send"]
+    assert _said(events) == ["## Status\n\nTests running.", "## Done\n\nReleased v1.2."]
+    assert ("complete", "## Done\n\nReleased v1.2.") in events

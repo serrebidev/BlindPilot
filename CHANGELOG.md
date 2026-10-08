@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.37.2 - 2026-10-08
+
+- Reopening a muse.ai chat that muse.ai is still working on follows it: BlindPilot says so, reads each status update as it is posted, and shows the answer when it comes, instead of leaving a blank response. Stop ends the following, not the work. Nothing is sent to the chat.
+
 ## v0.37.1 - 2026-10-08
 
 - Fixed: Recent Conversations (Ctrl+Shift+H) did not open at all. Its picker grid was declared two rows high and the Sort picker made three, which wx refused, so nothing in the dialog could be used, for any backend, muse.ai included.

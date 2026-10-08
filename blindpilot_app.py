@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.37.1"
+APP_VERSION = "0.37.2"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -9371,6 +9371,30 @@ class SessionPanel(wx.Panel):
             "1 response" if self._response_count == 1 else f"{self._response_count} responses"
         )
         self._set_status(f"Resumed: {entry.title} — {responses}")
+        # A muse.ai chat can still be running on its own machine: the last
+        # thing in it is a message with no answer yet. Sit in on it so its
+        # updates and answer arrive here instead of a blank response.
+        if (
+            self._session_backend == BACKEND_MUSEAI
+            and turns
+            and turns[-1].prompt.strip()
+            and not turns[-1].response.strip()
+        ):
+            wx.CallAfter(self._follow_museai)
+
+    def _follow_museai(self) -> None:
+        """A turn with nothing to send that reads what muse.ai posts next."""
+        if not self or self._run_in_progress():
+            return
+        self._assistant_narrated_this_turn = False
+        self._streamed_assistant = ""
+        self._stopping = False
+        self._turns.append(Turn(prompt=""))
+        self._announce("muse.ai is still working on this. Following it.")
+        self.send_btn.Disable()
+        self._earcons.start_progress()
+        self._show_working()
+        self._launch_turn(None, BACKEND_MUSEAI, {})
 
     def open_hermes_session(self, session_id: str, title: str, attaching: bool) -> None:
         """Take over this tab with a Hermes conversation, and read it back.
