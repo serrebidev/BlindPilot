@@ -2616,13 +2616,26 @@ def _notify_if_away(panel: "SessionPanel", message: str) -> None:
         return
     title = _tab_label(getattr(panel, "tab_title", ""), getattr(panel, "cwd", ""))
     note = wx.adv.NotificationMessage(f"BlindPilot: {title}", message, panel)
-    # wxPython names the event type but ships no binder for it.
-    clicked = wx.PyEventBinder(wx.adv.wxEVT_NOTIFICATION_MESSAGE_CLICK)
-    note.Bind(clicked, lambda _e: panel._come_forward())
+    # Every one is held until it is chosen or dismissed: dropping the wrapper
+    # drops its click handler, and choosing it would then do nothing.
+    held = getattr(panel, "_notifications", None)
+    if held is None:
+        held = panel._notifications = []
+    held.append(note)
+
+    def done(_event, chosen: bool) -> None:
+        if note in held:
+            held.remove(note)
+        if chosen:
+            panel._come_forward()
+
+    # wxPython names the event types but ships no binders for them.
+    for event_type, chosen in (
+        (wx.adv.wxEVT_NOTIFICATION_MESSAGE_CLICK, True),
+        (wx.adv.wxEVT_NOTIFICATION_MESSAGE_DISMISSED, False),
+    ):
+        note.Bind(wx.PyEventBinder(event_type), lambda e, c=chosen: done(e, c))
     note.Show()
-    # Every one still on screen is held, or choosing an older one fires nothing.
-    # ponytail: keeps the last 20 per tab; older ones have left Action Center.
-    panel._notifications = [*getattr(panel, "_notifications", [])[-19:], note]
 
 
 def _tab_label(title: str, cwd: str) -> str:
