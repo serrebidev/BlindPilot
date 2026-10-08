@@ -171,6 +171,7 @@ from markdown_rows import (
 from session_history import (
     HistoryEntry,
     HistoryTurn,
+    claude_project_slug,
     describe_age,
     list_history,
     load_turns,
@@ -325,7 +326,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.34.1"
+APP_VERSION = "0.35.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2770,7 +2771,11 @@ def _front_matter(path: Path) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in match.group(1).splitlines() if match else ():
         key, sep, value = line.partition(":")
-        value = value.strip().strip("\"'")
+        value = value.strip()
+        try:
+            value = json.loads(value) if value[:1] == '"' else value.strip("'")
+        except ValueError:
+            value = value.strip('"')
         if sep and key[:1].strip() and value not in ("", ">", "|", ">-", "|-"):
             fields[key.strip()] = value
     return fields
@@ -2835,6 +2840,291 @@ def claude_files(cwd: Optional[str]) -> dict[str, list[tuple[str, str]]]:
     for files in found.values():
         files.sort(key=lambda entry: entry[1].casefold())
     return found
+
+
+MEMORY_TYPES = ("user", "feedback", "project", "reference")
+
+
+def memory_folders(cwd: Optional[str]) -> list[Path]:
+    """Where a new memory can go: every memory folder Claude Code has, and
+    the active tab's own (first, made on save) when it has none yet."""
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    folders = sorted({path.parent for path in home.glob("projects/*/memory/*.md")})
+    if cwd:
+        own = home / "projects" / claude_project_slug(cwd) / "memory"
+        if own in folders:
+            folders.remove(own)
+        folders.insert(0, own)
+    return folders
+
+
+def add_memory(folder: Path, name: str, description: str, kind: str, body: str) -> Path:
+    """Write a memory as Claude Code does and list it in MEMORY.md.
+
+    The file name is the name made safe; an existing one is never replaced.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "memory"
+    path = folder / f"{slug}.md"
+    if path.exists():
+        raise FileExistsError(f"A memory called {slug} already exists")
+    description = " ".join(description.split())
+    folder.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nname: {slug}\ndescription: {json.dumps(description)}\n"
+        f"metadata:\n  type: {kind}\n---\n\n{body.strip()}\n",
+        encoding="utf-8",
+    )
+    index = folder / "MEMORY.md"
+    old = index.read_text(encoding="utf-8") if index.exists() else "# Memory index\n"
+    with open(index, "w", encoding="utf-8", newline="") as fh:
+        fh.write(f"{old.rstrip()}\n- [{slug}]({slug}.md) — {description}\n")
+    return path
+
+
+def delete_memory(path: Path) -> None:
+    """Remove a memory and the MEMORY.md lines that point to it."""
+    path.unlink()
+    index = path.parent / "MEMORY.md"
+    if path.name == "MEMORY.md" or not index.exists():
+        return
+    lines = index.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept = [
+        line
+        for line in lines
+        if f"({path.name})" not in line and not line.startswith(f"- {path.stem}:")
+    ]
+    if kept != lines:
+        with open(index, "w", encoding="utf-8", newline="") as fh:
+            fh.writelines(kept)
+
+
+@dataclass
+class AgentFiles:
+    """One kind of file one backend keeps, for What Agents Know.
+
+    `files` are (key, label). A key is a path, or for tastes and Hermes
+    memories "path\\nindex": one taste line or one Hermes entry of that file.
+    `editable` says what Add and Delete do: "memory" (a Claude Code memory
+    file), "taste" (a Command Code taste line), "hermes" (a Hermes entry), or
+    "" for read only. `home` is where Add writes.
+    """
+
+    backend: str
+    kind: str
+    files: list[tuple[str, str]]
+    editable: str = ""
+    home: Optional[Path] = None
+
+
+def _commandcode_home() -> Path:
+    return Path.home() / ".commandcode"
+
+
+def _hermes_home() -> Path:
+    from hermes_backend import hermes_home
+
+    return hermes_home()
+
+
+def _plain_files(paths, folder: bool = True) -> list[tuple[str, str]]:
+    """Existing files once each, labelled by front-matter name and description."""
+    out: dict[str, tuple[str, str]] = {}
+    for path in paths:
+        key = os.path.normcase(os.path.abspath(path))
+        if key in out or not path.is_file():
+            continue
+        fields = _front_matter(path) if path.suffix == ".md" else {}
+        name = fields.get("name") or (path.parent.name if path.name == "SKILL.md" else path.name)
+        label = f"{name}: {fields['description']}" if "description" in fields else name
+        out[key] = (str(path), f"{label}, in {path.parent}" if folder else label)
+    return sorted(out.values(), key=lambda entry: entry[1].casefold())
+
+
+def taste_category(path: Path, home: Path) -> str:
+    """A taste file's category: its folder under taste/, or "general"."""
+    rel = path.parent.relative_to(home / "taste")
+    return rel.as_posix() if rel.parts else "general"
+
+
+def tastes(home: Path) -> list[tuple[str, str]]:
+    """Every Command Code taste, one per bullet line of a taste/**/taste.md."""
+    out = []
+    for path in sorted((home / "taste").glob("**/taste.md")):
+        category = taste_category(path, home)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        for at, line in enumerate(lines):
+            if line.startswith("- "):
+                out.append((f"{path}\n{at}", f"{category}: {line[2:].strip()}"))
+    return sorted(out, key=lambda entry: entry[1].casefold())
+
+
+def add_taste(home: Path, category: str, text: str) -> Path:
+    """Append one taste line to its category's taste.md, made if new."""
+    category = re.sub(r"[^a-z0-9/-]+", "-", category.strip().casefold()).strip("-/")
+    folder = home / "taste" / category if category and category != "general" else home / "taste"
+    path = folder / "taste.md"
+    old = path.read_text(encoding="utf-8").rstrip() + "\n" if path.exists() else ""
+    if not old.strip():
+        old = f"# {(category or 'general').capitalize()} taste\n\n"
+    folder.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(f"{old}- {' '.join(text.split())}\n")
+    return path
+
+
+_HERMES_SEPARATOR = re.compile(r"^\s*§\s*$", re.M)
+
+
+def hermes_entries(path: Path) -> list[str]:
+    """The entries of a Hermes memory file, which Hermes separates with §."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return [entry.strip() for entry in _HERMES_SEPARATOR.split(text)]
+
+
+def hermes_memories(home: Path) -> list[tuple[str, str]]:
+    out = []
+    for path in sorted((home / "memories").glob("*.md")):
+        for at, entry in enumerate(hermes_entries(path)):
+            if entry:
+                out.append((f"{path}\n{at}", f"{path.stem}: {' '.join(entry.split())}"))
+    return out
+
+
+def add_hermes_memory(path: Path, text: str) -> None:
+    entries = [e for e in hermes_entries(path) if e] if path.exists() else []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write("\n§\n".join([*entries, text.strip()]))
+
+
+def entry_text(key: str, editable: str) -> tuple[str, str]:
+    """The file a key names, and the text to read for it."""
+    path, _, at = key.partition("\n")
+    if not at:
+        return path, Path(path).read_text(encoding="utf-8", errors="replace")
+    if editable == "hermes":
+        return path, hermes_entries(Path(path))[int(at)]
+    line = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[int(at)]
+    return path, line[2:].strip()
+
+
+def delete_entry(key: str, editable: str) -> None:
+    """Delete a Claude Code memory, one taste line, or one Hermes entry."""
+    path, _, at = key.partition("\n")
+    if editable == "memory":
+        delete_memory(Path(path))
+        return
+    file = Path(path)
+    if editable == "hermes":
+        entries = hermes_entries(file)
+        del entries[int(at)]
+        text = "\n§\n".join(e for e in entries if e)
+    else:
+        lines = file.read_text(encoding="utf-8").splitlines(keepends=True)
+        del lines[int(at)]
+        text = "".join(lines)
+    with open(file, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
+def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
+    """What every backend keeps about you on this computer, kind by kind.
+
+    Kinds that are empty are left out, except the ones Add can start: Claude
+    Code memories always, Command Code tastes and Hermes memories once that
+    backend's folder exists. Settings come from Backend Settings' own list.
+    """
+    project = Path(cwd) if cwd else None
+    here = [project / "AGENTS.md"] if project else []
+    claude = claude_files(cwd)
+    cc, codex = _commandcode_home(), Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    hermes, gemini = _hermes_home(), Path.home() / ".gemini"
+    opencode = Path.home() / ".config" / "opencode"
+    groups = [
+        AgentFiles(BACKEND_LABELS[BACKEND_CLAUDE], kind, claude[kind]) for kind in CLAUDE_FILE_KINDS
+    ]
+    groups[1].editable = "memory"
+    groups += [
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COMMANDCODE],
+            "Tastes",
+            tastes(cc) if cc.is_dir() else [],
+            "taste",
+            cc,
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COMMANDCODE],
+            "Instructions",
+            _plain_files([cc / "AGENTS.md", *here]),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COMMANDCODE],
+            "Skills",
+            _plain_files(cc.glob("skills/*/SKILL.md")),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COMMANDCODE],
+            "Agents",
+            _plain_files(cc.glob("agents/*.md"), False),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_HERMES],
+            "Memories",
+            hermes_memories(hermes) if hermes.is_dir() else [],
+            "hermes",
+            hermes,
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_HERMES],
+            "Skills",
+            _plain_files(hermes.glob("skills/**/SKILL.md")),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_CODEX],
+            "Instructions",
+            _plain_files(
+                [codex / "AGENTS.md", codex / "AGENTS.override.md", *codex.glob("rules/*"), *here]
+            ),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_CODEX],
+            "Memories",
+            _plain_files(codex.glob("memories/**/*.md"), False),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_CODEX], "Skills", _plain_files(codex.glob("skills/*/SKILL.md"))
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_GEMINI],
+            "Instructions",
+            _plain_files([gemini / "GEMINI.md", *([project / "GEMINI.md"] if project else [])]),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_GEMINI], "Skills", _plain_files(gemini.glob("skills/*/SKILL.md"))
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_OPENCODE],
+            "Instructions",
+            _plain_files([opencode / "AGENTS.md", *here]),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_OPENCODE],
+            "Agents",
+            _plain_files(opencode.glob("agent*/*.md"), False),
+        ),
+    ]
+    for backend in BACKEND_LABELS:
+        if backend == BACKEND_CLAUDE:
+            continue  # claude_files has these, with the rules Claude Code reads them by
+        found = _plain_files(
+            entry.path
+            for entry in settings_files(cwd)
+            if entry.backend == backend and entry.path.suffix != ".md"
+        )
+        groups.append(AgentFiles(BACKEND_LABELS[backend], "Settings", found))
+    order = list(BACKEND_LABELS.values())
+    groups.sort(key=lambda g: order.index(g.backend))  # stable: kinds keep their order
+    return [g for g in groups if g.files or g.editable == "memory" or (g.home and g.home.is_dir())]
 
 
 # A CommonMark fenced code block: three or more backticks or tildes, closed by
@@ -4935,6 +5225,141 @@ class ReadView(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
             return
         event.Skip()
+
+
+class AgentFileList(wx.Dialog):
+    """One kind of file one backend keeps, for What Agents Know.
+
+    Ends with wx.ID_OPEN to read the selected entry, and where entries can be
+    added and removed with wx.ID_ADD or wx.ID_DELETE (the Delete key too).
+    Escape goes back.
+    """
+
+    def __init__(
+        self, parent: wx.Window, kind: str, labels: list[str], selected: int, add_label: str = ""
+    ):
+        super().__init__(parent, title=kind, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        memories = bool(add_label)
+        hint = f"{kind}. Enter reads one."
+        if memories:
+            hint += " Delete removes one."
+        prompt = wx.StaticText(self, label=hint)
+        self.list = wx.ListBox(self, choices=labels, style=wx.LB_SINGLE)
+        self.list.SetName(kind)
+        self.list.SetMinSize(self.FromDIP(wx.Size(560, 320)))
+        if labels:
+            self.list.SetSelection(min(selected, len(labels) - 1))
+        self.list.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._end(wx.ID_OPEN))
+        self.list.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
+
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        actions = [(wx.ID_OPEN, "&Read")]
+        if memories:
+            actions += [(wx.ID_ADD, add_label), (wx.ID_DELETE, "&Delete")]
+        for id_, label in actions:
+            button = wx.Button(self, id_, label)
+            button.Bind(wx.EVT_BUTTON, lambda _e, id_=id_: self._end(id_))
+            buttons.Add(button, 0, wx.RIGHT, self.FromDIP(8))
+        buttons.Add(wx.Button(self, wx.ID_CANCEL, "Back"))
+        self.FindWindow(wx.ID_OPEN).SetDefault()
+
+        pad = self.FromDIP(PAD_DIALOG)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(prompt, 0, wx.ALL, pad)
+        sizer.Add(self.list, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(buttons, 0, wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+        (self.list if labels else self.FindWindow(wx.ID_ADD) or self.list).SetFocus()
+        self.CentreOnParent()
+
+    def _end(self, id_: int) -> None:
+        if id_ in (wx.ID_OPEN, wx.ID_DELETE) and self.list.GetSelection() == wx.NOT_FOUND:
+            return
+        self.EndModal(id_)
+
+    def _on_list_key(self, event: wx.KeyEvent) -> None:
+        key = event.GetKeyCode()
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            self._end(wx.ID_OPEN)
+        elif key in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE) and self.FindWindow(wx.ID_DELETE):
+            self._end(wx.ID_DELETE)
+        else:
+            event.Skip()
+
+
+class AddMemoryDialog(wx.Dialog):
+    """Name, description, type, folder and text of a new Claude Code memory."""
+
+    def __init__(self, parent: wx.Window, folders: list[Path]):
+        super().__init__(
+            parent, title="Add Memory", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
+        )
+        grid = wx.FlexGridSizer(cols=2, vgap=self.FromDIP(6), hgap=self.FromDIP(8))
+        grid.AddGrowableCol(1)
+
+        def field(label: str, control: wx.Window) -> wx.Window:
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            control.SetName(label.replace("&", "").rstrip(":"))
+            grid.Add(control, 1, wx.EXPAND)
+            return control
+
+        self.name = field("&Name:", wx.TextCtrl(self))
+        self.description = field("&Description, one line:", wx.TextCtrl(self))
+        self.kind = field("&Type:", wx.Choice(self, choices=list(MEMORY_TYPES)))
+        self.kind.SetSelection(MEMORY_TYPES.index("project"))
+        self.folders = folders
+        self.folder = field("&Folder:", wx.Choice(self, choices=[str(f) for f in folders]))
+        self.folder.SetSelection(0)
+        self.body = field("&Memory:", wx.TextCtrl(self, style=wx.TE_MULTILINE))
+        self.body.SetMinSize(self.FromDIP(wx.Size(480, 160)))
+        grid.AddGrowableRow(4)
+
+        pad = self.FromDIP(PAD_DIALOG)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(grid, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0, wx.EXPAND | wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+        self.name.SetFocus()
+        self.CentreOnParent()
+
+    def values(self) -> tuple[Path, str, str, str, str]:
+        return (
+            self.folders[self.folder.GetSelection()],
+            self.name.GetValue().strip(),
+            self.description.GetValue().strip(),
+            MEMORY_TYPES[self.kind.GetSelection()],
+            self.body.GetValue(),
+        )
+
+
+class AddNoteDialog(wx.Dialog):
+    """A Command Code taste or a Hermes memory entry: where it goes, and its text.
+
+    `editable` lets a new category be typed into the place box.
+    """
+
+    def __init__(
+        self, parent: wx.Window, title: str, place: str, places: list[str], editable: bool
+    ):
+        super().__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        style = wx.CB_DROPDOWN if editable else wx.CB_READONLY
+        self.place = wx.ComboBox(self, choices=places, style=style)
+        self.place.SetName(place.replace("&", "").rstrip(":"))
+        if places:
+            self.place.SetSelection(0)
+        self.text = wx.TextCtrl(self, style=wx.TE_MULTILINE)
+        self.text.SetName("Text")
+        self.text.SetMinSize(self.FromDIP(wx.Size(480, 140)))
+        pad = self.FromDIP(PAD_DIALOG)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(wx.StaticText(self, label=place), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.place, 0, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(wx.StaticText(self, label="&Text:"), 0, wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(self.text, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0, wx.EXPAND | wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+        self.text.SetFocus()
+        self.CentreOnParent()
 
 
 class ModelDialog(wx.Dialog):
@@ -12807,8 +13232,8 @@ class MainFrame(wx.Frame):
         )
         self._menu_item(
             menu,
-            "What Claude &Knows…\tCtrl+Shift+I",
-            "Read the instructions, memories, skills and settings Claude Code keeps about you",
+            "What Agents &Know…\tCtrl+Shift+I",
+            "Read and change the memories, tastes, instructions and skills your coding agents keep",
             self._claude_files_active,
         )
         menu.AppendSeparator()
@@ -13122,53 +13547,147 @@ class MainFrame(wx.Frame):
             page.open_status_dialog()
 
     def _claude_files_active(self) -> None:
-        """Everything Claude Code keeps about you (Model menu, Ctrl+Shift+I).
+        """What every backend keeps about you (Model menu, Ctrl+Shift+I).
 
-        A list of kinds with their counts, then the files of the chosen kind;
-        Enter reads one, and Escape steps back a list. Read only: Edit in
-        Your Editor hands the file to the system for any change.
+        A list of each backend's kinds with their counts, then the entries of
+        the chosen one; Enter reads one, and Escape steps back a list. Claude
+        Code memories, Command Code tastes and Hermes memories can be added
+        and deleted here; any other change goes through Edit in Your Editor.
         """
         page = self.notebook.GetCurrentPage()
-        found = claude_files(page.cwd if isinstance(page, SessionPanel) else None)
-        kinds = [kind for kind in CLAUDE_FILE_KINDS if found[kind]]
-        if not kinds:
-            announce("Claude Code has no instructions, memories, skills or settings here")
-            return
-        kind_at = file_at = 0
+        cwd = page.cwd if isinstance(page, SessionPanel) else None
+        group_at = 0
         while True:
+            groups = agent_files(cwd)
             with wx.SingleChoiceDialog(
                 self,
-                "What Claude Code keeps about you on this computer. Enter lists a kind.",
-                "What Claude Knows",
-                [f"{kind}, {len(found[kind])}" for kind in kinds],
+                "What your coding agents keep about you on this computer. Enter lists one.",
+                "What Agents Know",
+                [f"{g.backend} {g.kind.lower()}, {len(g.files)}" for g in groups],
             ) as dlg:
-                dlg.SetSelection(kind_at)
+                dlg.SetSelection(min(group_at, len(groups) - 1))
                 if dlg.ShowModal() != wx.ID_OK:
                     break
-                kind_at, file_at = dlg.GetSelection(), 0
-            files = found[kinds[kind_at]]
-            while True:
-                with wx.SingleChoiceDialog(
-                    self,
-                    f"{kinds[kind_at]}. Enter reads one; Escape goes back to the kinds.",
-                    kinds[kind_at],
-                    [label for _path, label in files],
-                ) as dlg:
-                    dlg.SetSelection(file_at)
-                    if dlg.ShowModal() != wx.ID_OK:
-                        break
-                    file_at = dlg.GetSelection()
-                path = files[file_at][0]
+                group_at = dlg.GetSelection()
+            self._agent_files_of(cwd, groups[group_at].backend, groups[group_at].kind)
+
+    def _agent_files_of(self, cwd: Optional[str], backend: str, kind: str) -> None:
+        add_labels = {"memory": "&Add Memory…", "taste": "&Add Taste…", "hermes": "&Add Memory…"}
+        title = f"{backend} {kind.lower()}"
+        file_at = 0
+        while True:
+            group = next(
+                (g for g in agent_files(cwd) if (g.backend, g.kind) == (backend, kind)), None
+            )
+            if group is None:
+                return
+            files = group.files
+            labels = [label for _key, label in files]
+            with AgentFileList(
+                self, title, labels, file_at, add_labels.get(group.editable, "")
+            ) as dlg:
+                action = dlg.ShowModal()
+                file_at = max(dlg.list.GetSelection(), 0)
+            if action == wx.ID_ADD:
+                added = self._add_entry(cwd, group)
+                if added:
+                    keys = [
+                        key
+                        for g in agent_files(cwd)
+                        if (g.backend, g.kind) == (backend, kind)
+                        for key, _label in g.files
+                    ]
+                    file_at = keys.index(added) if added in keys else file_at
+            elif action == wx.ID_DELETE:
+                key, label = files[file_at]
+                if (
+                    wx.MessageBox(
+                        f"Delete {label}? This cannot be undone.",
+                        f"Delete from {title}",
+                        wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+                        self,
+                    )
+                    == wx.YES
+                ):
+                    try:
+                        delete_entry(key, group.editable)
+                        announce("Deleted")
+                    except (OSError, IndexError) as exc:
+                        announce(f"Error: could not delete it: {exc}")
+            elif action == wx.ID_OPEN:
                 try:
-                    with open(path, encoding="utf-8", errors="replace") as fh:
-                        text = fh.read()
-                except OSError as exc:
-                    text = f"Could not read the file: {exc}"
+                    path, text = entry_text(files[file_at][0], group.editable)
+                except (OSError, IndexError) as exc:
+                    path, text = files[file_at][0].partition("\n")[0], f"Could not read it: {exc}"
                 view = ReadView(self, text or "This file is empty", path, edit_path=path)
                 try:
                     view.ShowModal()
                 finally:
                     view.Destroy()
+            else:
+                return
+
+    def _add_entry(self, cwd: Optional[str], group: AgentFiles) -> Optional[str]:
+        """Ask for a new memory or taste and save it; its key, or None."""
+        if group.editable == "memory":
+            return self._add_memory(cwd)
+        assert group.home is not None
+        home = group.home
+        if group.editable == "taste":
+            title, place, editable = "Add Taste", "&Category, or type a new one:", True
+            places = sorted(
+                {taste_category(p, home) for p in (home / "taste").glob("**/taste.md")}
+                | {"general"}
+            )
+        else:
+            title, place, editable = "Add Hermes Memory", "&File:", False
+            places = ["MEMORY.md, notes about your work", "USER.md, about you"]
+        with AddNoteDialog(self, title, place, places, editable) as dlg:
+            while dlg.ShowModal() == wx.ID_OK:
+                text = dlg.text.GetValue().strip()
+                if not text:
+                    continue
+                try:
+                    if group.editable == "taste":
+                        path = add_taste(home, dlg.place.GetValue(), text)
+                        at = len(path.read_text(encoding="utf-8").splitlines()) - 1
+                    else:
+                        name = ("MEMORY.md", "USER.md")[max(dlg.place.GetSelection(), 0)]
+                        path = home / "memories" / name
+                        add_hermes_memory(path, text)
+                        at = len(hermes_entries(path)) - 1
+                except OSError as exc:
+                    wx.MessageBox(str(exc), title, wx.OK | wx.ICON_ERROR, dlg)
+                    continue
+                announce("Added")
+                return f"{path}\n{at}"
+        return None
+
+    def _add_memory(self, cwd: Optional[str]) -> Optional[str]:
+        """Ask for a new memory and save it; the path saved, or None."""
+        folders = memory_folders(cwd)
+        if not folders:
+            announce("Open a session tab first, so the memory has a project to belong to")
+            return None
+        with AddMemoryDialog(self, folders) as dlg:
+            while dlg.ShowModal() == wx.ID_OK:
+                folder, name, description, kind, body = dlg.values()
+                if not (name and description and body.strip()):
+                    wx.MessageBox(
+                        "A memory needs a name, a description and its text.",
+                        "Add Memory",
+                        wx.OK | wx.ICON_INFORMATION,
+                        dlg,
+                    )
+                    continue
+                try:
+                    path = add_memory(folder, name, description, kind, body)
+                except OSError as exc:
+                    wx.MessageBox(str(exc), "Add Memory", wx.OK | wx.ICON_ERROR, dlg)
+                    continue
+                announce("Memory added")
+                return str(path)
+        return None
 
     def _settings_files_active(self) -> None:
         """Where the backends keep their settings (Model > Backend Settings).
@@ -13877,7 +14396,8 @@ Ctrl+Shift+H: Recent Conversations. In its list, F2 renames and Delete hides.
 Ctrl+G: Hermes conversations, when Hermes is the backend.
 Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
 Ctrl+Shift+T: turn status. Ctrl+Shift+D: changed files.
-Ctrl+Shift+I: what Claude knows: its instructions, memories, skills and settings.
+Ctrl+Shift+I: what agents know: memories, tastes, instructions, skills and settings.
+In Claude Code memories, Command Code tastes and Hermes memories, Alt+A adds one and Delete removes one.
 Ctrl+Shift+R: repeat the last announcement.
 Ctrl+Comma: Preferences. F1: this list.
 
