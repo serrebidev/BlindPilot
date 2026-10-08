@@ -51,6 +51,7 @@ def frame(wx_app):
         "_new_conversation_active",
         "_find_active",
         "_jump_to_latest_response",
+        "_export_active",
     ):
         setattr(window, name, lambda: None)
     try:
@@ -95,6 +96,7 @@ CONVERSATION_ITEMS = [
     "Find in Responses",
     "Jump to Latest Response",
     "Repeat Last Announcement",
+    "Export Conversation",
 ]
 
 
@@ -133,6 +135,7 @@ def test_nothing_is_offered_in_both_menus(frame):
         ("Slash Command", "Ctrl+/"),
         ("Jump to Latest Response", "Ctrl+R"),
         ("Repeat Last Announcement", "Ctrl+Shift+R"),
+        ("Export Conversation", "Ctrl+E"),
     ],
 )
 def test_a_shortcut_only_command_says_its_chord_in_the_accelerator_column(frame, item, chord):
