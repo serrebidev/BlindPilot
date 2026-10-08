@@ -2603,6 +2603,22 @@ def _tab_title(text: str) -> str:
     return flat[:31].rstrip() + "…"
 
 
+def _sent_readback(text: str, limit: int = 300) -> str:
+    """'Sent: fix the build', said as the message goes, long ones cut short."""
+    text = re.sub(r"(?s)```.*?(```|$)", " Code block omitted. ", text)
+    words = text.split()
+    if not words:
+        return "Sent"
+    said, rest = "", 0
+    for index, word in enumerate(words):
+        if len(said) + len(word) > limit:
+            rest = len(words) - index
+            break
+        said = f"{said} {word}" if said else word
+    more = f"... and {rest} more {'word' if rest == 1 else 'words'}" if rest else ""
+    return f"Sent: {said}{more}"
+
+
 def _tab_label(title: str, cwd: str) -> str:
     """What a tab is called.
 
@@ -3016,6 +3032,9 @@ class _Settings:
         # judgement is a reading of prose and can be wrong, and a dialog that
         # opens when nothing was asked interrupts.
         self.ask_written_questions = bool(cfg.get("ask_written_questions", True))
+        # Read your message back as it goes, so you hear what was actually
+        # sent: dictation and paste put text in the prompt nobody heard.
+        self.read_back_sent = bool(cfg.get("read_back_sent", True))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Read again in main() before the first window, which is the only
@@ -3033,6 +3052,7 @@ class _Settings:
         cfg["text_view"] = self.text_view
         cfg["show_thinking"] = self.show_thinking
         cfg["ask_written_questions"] = self.ask_written_questions
+        cfg["read_back_sent"] = self.read_back_sent
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["appearance"] = self.appearance
@@ -7424,7 +7444,7 @@ class SessionPanel(wx.Panel):
         self.prompt.SetValue("")
         self._attachments = []
 
-        self._announce("Sending")
+        self._announce(_sent_readback(prompt) if SETTINGS.read_back_sent else "Sending")
         self.send_btn.Disable()
         # Earcons: a one-shot "send", then loop "in progress" until the
         # response arrives (or the request fails).
@@ -10316,12 +10336,15 @@ class PreferencesDialog(wx.Dialog):
             panel, label="Ask me questions a turn wrote into its answer"
         )
         self._written_questions.SetValue(SETTINGS.ask_written_questions)
+        self._read_back = wx.CheckBox(panel, label="Read my message back when it is sent")
+        self._read_back.SetValue(SETTINGS.read_back_sent)
         for check in (
             self._live_rows,
             self._speak_live,
             self._thinking,
             self._text_view,
             self._written_questions,
+            self._read_back,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -10461,6 +10484,10 @@ class PreferencesDialog(wx.Dialog):
     @property
     def ask_written_questions(self) -> bool:
         return self._written_questions.GetValue()
+
+    @property
+    def read_back_sent(self) -> bool:
+        return self._read_back.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -11306,6 +11333,7 @@ class MainFrame(wx.Frame):
         SETTINGS.sound_cues = dict(dialog.sound_cues)
         SETTINGS.text_view = dialog.text_view
         SETTINGS.ask_written_questions = dialog.ask_written_questions
+        SETTINGS.read_back_sent = dialog.read_back_sent
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         changed_appearance = dialog.appearance != SETTINGS.appearance
