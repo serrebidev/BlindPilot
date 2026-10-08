@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.36.0 - 2026-10-08
+
+- Everything What Agents Know (Ctrl+Shift+I) lists can be edited in place: Edit (Alt+E) in the list or in the reading view makes the text editable, Save or Ctrl+S writes it back (a whole file, one Command Code taste line, or one Hermes entry), and closing with unsaved changes asks. An emptied taste or Hermes entry is refused in favour of Delete.
+
 ## v0.35.0 - 2026-10-08
 
 - What Claude Knows is now What Agents Know (Ctrl+Shift+I): every backend's memories, tastes, instructions, skills, agents and settings, grouped by backend and kind with counts (Claude Code, Codex, Hermes, Command Code, Gemini CLI, opencode, and the settings of the rest).

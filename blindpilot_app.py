@@ -30,6 +30,7 @@ terminal sessions in different project folders.
 from __future__ import annotations
 
 import bisect
+import functools
 import hashlib
 import importlib.util
 import json
@@ -326,7 +327,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.35.0"
+APP_VERSION = "0.36.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -3027,6 +3028,29 @@ def delete_entry(key: str, editable: str) -> None:
         fh.write(text)
 
 
+def save_entry(key: str, editable: str, text: str) -> None:
+    """Write back what was edited: a whole file, one taste line, or one Hermes entry."""
+    path, _, at = key.partition("\n")
+    file = Path(path)
+    if not at:
+        with open(file, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        return
+    if not text.strip():
+        raise ValueError("it would be empty; Delete removes it instead")
+    if editable == "hermes":
+        entries = hermes_entries(file)
+        entries[int(at)] = text.strip()
+        new = "\n§\n".join(e for e in entries if e)
+    else:
+        lines = file.read_text(encoding="utf-8").splitlines(keepends=True)
+        end = "\n" if lines[int(at)].endswith("\n") else ""
+        lines[int(at)] = f"- {' '.join(text.split())}{end}"
+        new = "".join(lines)
+    with open(file, "w", encoding="utf-8", newline="") as fh:
+        fh.write(new)
+
+
 def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
     """What every backend keeps about you on this computer, kind by kind.
 
@@ -5180,6 +5204,8 @@ class ReadView(wx.Dialog):
         title: str,
         monospace: bool = False,
         edit_path: Optional[str] = None,
+        on_save: Optional[Callable[[str], None]] = None,
+        start_editing: bool = False,
     ):
         super().__init__(
             parent,
@@ -5203,26 +5229,75 @@ class ReadView(wx.Dialog):
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(viewer, 1, wx.EXPAND | wx.ALL, self.FromDIP(PAD_DIALOG))
         if edit_path:
-            # The viewer never writes; a change goes through the file's own app.
-            edit = wx.Button(self, label="&Edit in Your Editor")
-            edit.Bind(wx.EVT_BUTTON, lambda _event: self._edit(edit_path))
             buttons = wx.BoxSizer(wx.HORIZONTAL)
-            buttons.Add(edit)
-            buttons.Add(wx.Button(self, wx.ID_CANCEL, "Close"), 0, wx.LEFT, self.FromDIP(8))
+            if on_save:
+                # Read only until Edit; on_save writes the text back.
+                self.edit_button = wx.Button(self, label="&Edit")
+                self.edit_button.Bind(wx.EVT_BUTTON, lambda _event: self._toggle_edit())
+                buttons.Add(self.edit_button, 0, wx.RIGHT, self.FromDIP(8))
+            outside = wx.Button(self, label="Edit in &Your Editor")
+            outside.Bind(wx.EVT_BUTTON, lambda _event: self._edit(edit_path))
+            buttons.Add(outside)
+            close = wx.Button(self, wx.ID_CANCEL, "Close")
+            close.Bind(wx.EVT_BUTTON, lambda _event: self._close())
+            buttons.Add(close, 0, wx.LEFT, self.FromDIP(8))
             sizer.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, self.FromDIP(PAD_DIALOG))
         self.SetSizerAndFit(sizer)
 
+        self.viewer = viewer
+        self._on_save = on_save
+        self._saved = text
+        self._editing = False
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.Bind(wx.EVT_CLOSE, lambda _event: self._close())
         viewer.SetFocus()
         self.CentreOnParent()
+        if on_save and start_editing:
+            self._toggle_edit()
 
     def _edit(self, path: str) -> None:
         if not _open_path(path):
             announce(f"Could not open {path}")
 
+    def _toggle_edit(self) -> None:
+        """Edit turns the text editable and becomes Save; Save writes it."""
+        if self._editing:
+            self._save()
+            return
+        self._editing = True
+        self.viewer.SetEditable(True)
+        self.edit_button.SetLabel("&Save")
+        self.viewer.SetFocus()
+        announce("Editing. Ctrl+S saves.")
+
+    def _save(self) -> bool:
+        assert self._on_save is not None
+        text = self.viewer.GetValue()
+        try:
+            self._on_save(text)
+        except (OSError, IndexError, ValueError) as exc:
+            wx.MessageBox(f"Could not save: {exc}", "Save", wx.OK | wx.ICON_ERROR, self)
+            return False
+        self._saved = text
+        announce("Saved")
+        return True
+
+    def _close(self) -> None:
+        """Close, asking first when an edit has not been saved."""
+        if self._editing and self.viewer.GetValue() != self._saved:
+            answer = wx.MessageBox(
+                "Save your changes?", "Save", wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION, self
+            )
+            if answer == wx.CANCEL or (answer == wx.YES and not self._save()):
+                return
+        self.EndModal(wx.ID_CANCEL)
+
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
-            self.EndModal(wx.ID_CANCEL)
+            self._close()
+            return
+        if self._editing and event.ControlDown() and event.GetKeyCode() == ord("S"):
+            self._save()
             return
         event.Skip()
 
@@ -5230,8 +5305,9 @@ class ReadView(wx.Dialog):
 class AgentFileList(wx.Dialog):
     """One kind of file one backend keeps, for What Agents Know.
 
-    Ends with wx.ID_OPEN to read the selected entry, and where entries can be
-    added and removed with wx.ID_ADD or wx.ID_DELETE (the Delete key too).
+    Ends with wx.ID_OPEN to read the selected entry, wx.ID_EDIT to edit it,
+    and where entries can be added and removed with wx.ID_ADD or wx.ID_DELETE
+    (the Delete key too).
     Escape goes back.
     """
 
@@ -5253,7 +5329,7 @@ class AgentFileList(wx.Dialog):
         self.list.Bind(wx.EVT_KEY_DOWN, self._on_list_key)
 
         buttons = wx.BoxSizer(wx.HORIZONTAL)
-        actions = [(wx.ID_OPEN, "&Read")]
+        actions = [(wx.ID_OPEN, "&Read"), (wx.ID_EDIT, "&Edit")]
         if memories:
             actions += [(wx.ID_ADD, add_label), (wx.ID_DELETE, "&Delete")]
         for id_, label in actions:
@@ -5273,7 +5349,7 @@ class AgentFileList(wx.Dialog):
         self.CentreOnParent()
 
     def _end(self, id_: int) -> None:
-        if id_ in (wx.ID_OPEN, wx.ID_DELETE) and self.list.GetSelection() == wx.NOT_FOUND:
+        if id_ != wx.ID_ADD and self.list.GetSelection() == wx.NOT_FOUND:
             return
         self.EndModal(id_)
 
@@ -13552,7 +13628,7 @@ class MainFrame(wx.Frame):
         A list of each backend's kinds with their counts, then the entries of
         the chosen one; Enter reads one, and Escape steps back a list. Claude
         Code memories, Command Code tastes and Hermes memories can be added
-        and deleted here; any other change goes through Edit in Your Editor.
+        and deleted here, and anything listed can be edited and saved.
         """
         page = self.notebook.GetCurrentPage()
         cwd = page.cwd if isinstance(page, SessionPanel) else None
@@ -13614,12 +13690,21 @@ class MainFrame(wx.Frame):
                         announce("Deleted")
                     except (OSError, IndexError) as exc:
                         announce(f"Error: could not delete it: {exc}")
-            elif action == wx.ID_OPEN:
+            elif action in (wx.ID_OPEN, wx.ID_EDIT):
+                key = files[file_at][0]
                 try:
-                    path, text = entry_text(files[file_at][0], group.editable)
+                    path, text = entry_text(key, group.editable)
                 except (OSError, IndexError) as exc:
-                    path, text = files[file_at][0].partition("\n")[0], f"Could not read it: {exc}"
-                view = ReadView(self, text or "This file is empty", path, edit_path=path)
+                    announce(f"Error: could not read it: {exc}")
+                    continue
+                view = ReadView(
+                    self,
+                    text,
+                    path,
+                    edit_path=path,
+                    on_save=functools.partial(save_entry, key, group.editable),
+                    start_editing=action == wx.ID_EDIT,
+                )
                 try:
                     view.ShowModal()
                 finally:
@@ -14398,6 +14483,7 @@ Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
 Ctrl+Shift+T: turn status. Ctrl+Shift+D: changed files.
 Ctrl+Shift+I: what agents know: memories, tastes, instructions, skills and settings.
 In Claude Code memories, Command Code tastes and Hermes memories, Alt+A adds one and Delete removes one.
+Alt+E edits whatever is selected; in the text, Ctrl+S saves.
 Ctrl+Shift+R: repeat the last announcement.
 Ctrl+Comma: Preferences. F1: this list.
 

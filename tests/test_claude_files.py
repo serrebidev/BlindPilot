@@ -9,6 +9,8 @@ description, so the list reads like an index rather than a column of paths.
 
 from __future__ import annotations
 
+import pytest
+
 import blindpilot_app as app
 
 
@@ -209,3 +211,24 @@ def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path
         f"{cc} Instructions",
         f"{gemini} Instructions",
     ]
+
+
+def test_an_edit_saves_back_to_just_what_was_edited(tmp_path):
+    """A whole file, one taste line, or one Hermes entry; nothing around it moves."""
+    memory = tmp_path / "m.md"
+    _write(memory, "old")
+    app.save_entry(str(memory), "memory", "new\ntext")
+    assert memory.read_text(encoding="utf-8") == "new\ntext"
+
+    taste = tmp_path / "taste" / "taste.md"
+    _write(taste, "# General taste\n\n- one\n- two\n")
+    app.save_entry(f"{taste}\n2", "taste", "uno\n  again")
+    assert taste.read_text(encoding="utf-8") == "# General taste\n\n- uno again\n- two\n"
+
+    hermes = tmp_path / "MEMORY.md"
+    _write(hermes, "a\n§\nb\n§\nc")
+    app.save_entry(f"{hermes}\n1", "hermes", "B\nmore")
+    assert hermes.read_text(encoding="utf-8") == "a\n§\nB\nmore\n§\nc"
+
+    with pytest.raises(ValueError):
+        app.save_entry(f"{hermes}\n0", "hermes", "  ")
