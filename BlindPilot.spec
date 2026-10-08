@@ -34,6 +34,7 @@ APP_VERSION = app_version_match.group(1)
 
 datas = [
     ("EarCons", "EarCons"),
+    ("museai_cli_patch/sitecustomize.py", "museai_cli_patch"),
     # The window icon. The app looks for it under sys._MEIPASS/packaging when
     # frozen, so it ships beside the sounds rather than only inside the EXE.
     ("packaging/BlindPilot.ico", "packaging"),

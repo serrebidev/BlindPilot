@@ -7,8 +7,8 @@ own connectors, memory and browser, and is not the same product as Muse Code
 which reaches the agent's gateway with the muse.ai sign-in cookies it keeps
 in ``~/.config/muse-cli``.
 
-Each BlindPilot conversation is one muse.ai side chat, so turns from here
-never land in the user's main muse.ai chat. A turn is ``muse-cli send
+BlindPilot opens the main chat by default; new conversations are side chats.
+A turn is ``muse-cli send
 --thread <id> --wait <seconds> <text>``, which prints one JSON object with
 the agent's reply (measured at 0.3.2). The turn itself is in
 ``museai_worker``.
@@ -96,11 +96,191 @@ def _cli_json(args: list[str], timeout: int = 60) -> object:
         return None
 
 
-def museai_side_chats() -> list[dict]:
-    """The agent's side chats (not its main chat), newest first, as muse-cli lists them."""
+def museai_chats() -> list[dict]:
+    """The agent's main chat and side chats, as muse-cli lists them."""
     found = _cli_json(["threads"])
     chats = [c for c in found if isinstance(c, dict)] if isinstance(found, list) else []
-    return [c for c in chats if c.get("thread") and c.get("session_id")]
+    return [c for c in chats if c.get("session_id") and not c.get("archived")]
+
+
+def museai_main_session_id() -> Optional[str]:
+    return next((str(c["session_id"]) for c in museai_chats() if c.get("thread") is False), None)
+
+
+MUSEAI_VIEWS = {
+    "approvals": "egress.approvals",
+    "schedules": "tasks.list",
+    "feed": "feed.list",
+    "ideas": "api.idea-cards.list",
+}
+
+
+def museai_result(payload: object) -> dict:
+    """Raw commands retain the gateway envelope; errors are not empty views."""
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise ValueError("muse.ai could not be reached. Check your sign-in and try Refresh.")
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("muse.ai returned an unreadable response.")
+    return result
+
+
+def museai_pending(result: dict) -> list[dict]:
+    pending = result.get("pending_approvals", result.get("pending"))
+    return [a for a in _museai_records(pending) if a.get("approval_id")]
+
+
+def _museai_records(value: object) -> list[dict]:
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError("muse.ai returned an unreadable list.")
+    return value
+
+
+def museai_items(view: str) -> list[dict]:
+    # shortcut: current gateway page only; add paging when older feed or idea pages are needed.
+    result = museai_result(_cli_json(["raw", MUSEAI_VIEWS[view]]))
+    if view == "approvals":
+        recent = result.get("recent_approvals", result.get("recent", []))
+        return [dict(a, _pending=True) for a in museai_pending(result)] + [
+            dict(a, _pending=False) for a in _museai_records(recent)
+        ]
+    if view == "schedules":
+        return _museai_records(result.get("schedules"))
+    if view == "feed":
+        return [
+            dict(unit, date=day.get("local_date", ""), edition=edition.get("kind", ""))
+            for day in _museai_records(result.get("days"))
+            for edition in _museai_records(day.get("editions", []))
+            for unit in _museai_records(edition.get("units", []))
+        ]
+    return [
+        dict(card, section=section.get("title", ""))
+        for section in _museai_records(result.get("sections"))
+        for card in _museai_records(section.get("cards", section.get("ideas", [])))
+    ]
+
+
+def museai_item_title(view: str, item: dict) -> str:
+    display = item.get("display") or {}
+    if not isinstance(display, dict):
+        raise ValueError("muse.ai returned unreadable item details.")
+    title = str(
+        display.get("summary_title") or item.get("title") or item.get("display_name") or "Untitled"
+    )
+    if view == "approvals":
+        title = (
+            f"{'Pending' if item.get('_pending') else item.get('decision') or 'Recent'}: {title}"
+        )
+    return title
+
+
+def museai_item_text(view: str, item: dict) -> str:
+    lines = [museai_item_title(view, item)]
+    if view == "approvals":
+        display = item.get("display") or item
+        question = display.get("permission_question") or {}
+        payload = item.get("payload") or {}
+        if not isinstance(question, dict) or not isinstance(payload, dict):
+            raise ValueError("muse.ai returned unreadable approval details.")
+        network = payload.get("network_payload") or item
+        rows = display.get("detail_rows", [])
+        if (
+            not isinstance(network, dict)
+            or not isinstance(rows, list)
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            raise ValueError("muse.ai returned unreadable approval details.")
+        for key in (
+            "purpose_summary",
+            "scope_summary",
+            "reason",
+            "short_explanation",
+            "rich_explanation",
+        ):
+            if display.get(key):
+                lines.append(str(display[key]))
+        if question.get("text"):
+            lines.append(str(question["text"]))
+        for row in rows:
+            lines.append(f"{row.get('label', '')}: {row.get('value', '')}")
+        for key in ("host", "port", "scheme", "method", "path"):
+            if network.get(key):
+                lines.append(f"{key.title()}: {network[key]}")
+    elif view == "schedules":
+        lines += ["Enabled" if item.get("enabled") else "Disabled"]
+        for key, label in (
+            ("schedule_key", "Schedule"),
+            ("timezone", "Timezone"),
+            ("next_run_at_utc", "Next run (UTC)"),
+        ):
+            if item.get(key):
+                lines.append(f"{label}: {item[key]}")
+    else:
+        content = item.get("content") or {}
+        for key in (
+            "date",
+            "edition",
+            "section",
+            "kicker",
+            "summary",
+            "body_md",
+            "prerequisiteNotes",
+            "buildStatus",
+        ):
+            if item.get(key):
+                lines.append(str(item[key]))
+        for key in ("title", "summary", "buildSummary"):
+            if isinstance(content, dict) and content.get(key):
+                lines.append(str(content[key]))
+        for part in item.get("items", []):
+            if isinstance(part, dict) and isinstance(part.get("content"), dict):
+                lines.extend(
+                    str(value)
+                    for value in part["content"].values()
+                    if isinstance(value, str) and value
+                )
+    return "\n\n".join(dict.fromkeys(lines))
+
+
+def museai_read_item(view: str, item: dict) -> dict:
+    if view != "ideas":
+        return item
+    found = _cli_json(["idea", str(item.get("id") or item.get("ideaCardId") or "")])
+    card = found.get("card") if isinstance(found, dict) else None
+    if not isinstance(card, dict):
+        raise ValueError("muse.ai could not read this idea.")
+    return dict(card, section=item.get("section", ""))
+
+
+def museai_allowed_decisions(approval: dict) -> set[str]:
+    options = approval.get("decision_options")
+    if options is None:
+        return {"allow_once", "deny"}
+    if not isinstance(options, list):
+        raise ValueError("muse.ai returned unreadable approval choices.")
+    return {
+        str(option.get("kind")) if isinstance(option, dict) else str(option) for option in options
+    } & {"allow_once", "deny"}
+
+
+def museai_decision_args(approval_id: str, decision: str, reason: str = "") -> list[str]:
+    if not approval_id or decision not in {"allow_once", "deny"}:
+        raise ValueError("Choose a pending approval and Allow once or Deny.")
+    body = {"approval_id": approval_id, "decision": decision}
+    if reason:
+        body["reason"] = reason
+    return [
+        "raw",
+        "egress.approval.decide",
+        "--param",
+        f"approval_id={approval_id}",
+        "--body",
+        json.dumps(body),
+    ]
+
+
+def museai_decide(approval_id: str, decision: str, reason: str = "") -> None:
+    museai_result(_cli_json(museai_decision_args(approval_id, decision, reason)))
 
 
 def museai_chat_turns(session_id: str, limit: int = 300) -> list[tuple[str, str]]:

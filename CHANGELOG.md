@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.39.0 - 2026-10-08
+
+- muse.ai: the main conversation now appears as Main chat in Recent Conversations (Ctrl+Shift+H), alongside your side chats. Selecting the muse.ai backend or opening an unnamed tab with it selected loads the main chat and its history, ready to continue. New Conversation still starts a separate side chat, and reopening an existing chat continues that chat. If the main chat cannot be found, your prompt stays unsent rather than going to a new side chat.
+- Python CLI probes now use UTF-8 output, matching how BlindPilot reads them. On Windows, muse.ai history containing arrows and other Unicode characters could fail to print and appear empty.
+- muse.ai: Model now offers Approvals, Schedules, Feed, and Ideas in place of its unavailable permission modes. Native lists and readers show pending and recent approvals, scheduled tasks with cadence and next run, complete feed text, and idea details. Pending approvals can be allowed once or denied, and are also surfaced during running turns. Bypass mode never silently approves Sentinel actions; stopping leaves them undecided.
+- muse.ai: a compatibility fix for muse-cli 0.3.2 reassembles large incoming gateway replies before decoding them. Approval lists and other larger responses previously failed with a corrupt wire-format error. The fix is limited to muse-cli processes launched by BlindPilot and ships inside the application.
+
 ## v0.38.0 - 2026-10-08
 
 - Command Code: every slash command works, as in its console. The picker adds the commands Command Code's agent offers in the folder (skills, mod commands, /loop, /peek; read over `command-code acp`, cached per folder), sent as typed, and the console's built-ins from `command-code --help`. A console-only command (/context, /usage, /status, /export, /todos, ...) runs in Command Code's console off screen on the same conversation (`--resume <id> "/command"` in a hidden pseudo-terminal), and what it shows is added to the conversation. Menus list their choices. Requested by a BlindPilot user on Telegram.

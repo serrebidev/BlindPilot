@@ -1034,7 +1034,7 @@ def _codex_turns(entry: HistoryEntry) -> List[HistoryTurn]:
 
 
 def _museai_entries(cwd: Optional[str]) -> List[HistoryEntry]:
-    """muse.ai's side chats, wherever they were started.
+    """muse.ai's main chat and side chats, wherever they were started.
 
     They live on the agent's own machine and belong to no folder here, so they
     are listed whatever folder the picker is limited to: a chat started from
@@ -1044,12 +1044,10 @@ def _museai_entries(cwd: Optional[str]) -> List[HistoryEntry]:
     # network round trip) for someone who never set muse.ai up.
     if not (_home() / ".config" / "muse-cli" / "config.json").is_file():
         return []
-    from museai_backend import museai_side_chats
+    from museai_backend import museai_chats
 
     entries: List[HistoryEntry] = []
-    for chat in museai_side_chats():
-        if chat.get("archived"):
-            continue
+    for chat in museai_chats():
         try:
             stamp = time.mktime(time.strptime(str(chat.get("updated") or ""), "%Y-%m-%d %H:%M"))
         except (ValueError, OverflowError):
@@ -1059,7 +1057,11 @@ def _museai_entries(cwd: Optional[str]) -> List[HistoryEntry]:
             HistoryEntry(
                 backend=BACKEND_MUSEAI,
                 session_id=session_id,
-                title=make_title(str(chat.get("title") or "")) or "Untitled muse.ai chat",
+                title=(
+                    "Main chat"
+                    if chat.get("thread") is False
+                    else make_title(str(chat.get("title") or "")) or "Untitled muse.ai chat"
+                ),
                 path="",
                 modified=stamp,
                 folder="muse.ai",
