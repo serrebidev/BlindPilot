@@ -2603,6 +2603,15 @@ def _tab_title(text: str) -> str:
     return flat[:31].rstrip() + "…"
 
 
+def _spoken_duration(seconds: float) -> str:
+    """'2 minutes 5 seconds': how long something took, as it is said."""
+    minutes, secs = divmod(max(0, int(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = [(hours, "hour"), (minutes, "minute"), (secs, "second")]
+    said = [f"{n} {unit}{'' if n == 1 else 's'}" for n, unit in parts if n]
+    return " ".join(said) or "0 seconds"
+
+
 def _tab_label(title: str, cwd: str) -> str:
     """What a tab is called.
 
@@ -6489,6 +6498,28 @@ class SessionPanel(wx.Panel):
             f"Conversation: {conversation}",
         ]
 
+    def turn_status(self) -> None:
+        """How long this turn has run and what it did last (Ctrl+Shift+T).
+
+        A long turn with Keep up narration, or with live activity off, is
+        silent apart from the working sound, and that says nothing about
+        whether it is three seconds or thirty minutes in, or what it is doing.
+        """
+        started = getattr(self, "_turn_started_at", None)
+        if started is None:
+            last = getattr(self, "_last_turn_seconds", None)
+            said = "No turn is running."
+            if last is not None:
+                said += f" The last one took {_spoken_duration(last)}."
+        else:
+            said = f"Working for {_spoken_duration(time.monotonic() - started)}."
+            step = getattr(self, "_last_step", "")
+            said += f" Last step: {step}." if step else " No tool used yet."
+        queued = len(getattr(self, "_pending_messages", []))
+        if queued:
+            said += f" {queued} {'message' if queued == 1 else 'messages'} queued."
+        self._announce(said)
+
     def _show_status(self, backend: str, report: str) -> None:
         """Put the finished report on screen, once the probe has answered."""
         if not self:  # tab closed while the probe was running
@@ -7452,6 +7483,8 @@ class SessionPanel(wx.Panel):
         """Start the worker for one turn. `send_text` is None for a late turn,
         which has nothing to send and only reads what has already arrived."""
         self._active_send_text = send_text or ""
+        self._turn_started_at: Optional[float] = time.monotonic()
+        self._last_step = ""
         worker_type = worker_class(selected_backend, ClaudeWorker)
         # Agents that finished in an earlier turn have been read or ignored by
         # now; the ones still running stay, however old the turn that began
@@ -8021,6 +8054,8 @@ class SessionPanel(wx.Panel):
         exception: its rows are the transcript, not live activity, and without
         them a reopened conversation would show nothing at all.
         """
+        if kind == "tool" and text.strip():
+            self._last_step = text.strip()
         if not SETTINGS.live_rows and not self._replaying:
             return
         if not text.strip():
@@ -8274,6 +8309,10 @@ class SessionPanel(wx.Panel):
         self._announce(f"Error: {message}", urgent=True)
 
     def _on_worker_finished(self) -> None:
+        started = getattr(self, "_turn_started_at", None)
+        if started is not None:
+            self._last_turn_seconds = time.monotonic() - started
+            self._turn_started_at = None
         self._settle_subagents()
         # Safety net: make sure the loop is never left running.
         self._earcons.stop_progress()
@@ -11582,6 +11621,12 @@ class MainFrame(wx.Frame):
             "Show the backend, model, and account this conversation is using",
             self._status_active,
         )
+        add(
+            menu,
+            "T&urn Status\tCtrl+Shift+T",
+            "Say how long the running turn has worked, its last step, and what is queued",
+            self._turn_status_active,
+        )
         menu.AppendSeparator()
         add(
             menu,
@@ -11861,6 +11906,11 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_model_dialog()
+
+    def _turn_status_active(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.turn_status()
 
     def _status_active(self) -> None:
         """What the active tab is set to (Model > Session Status, or /status)."""
