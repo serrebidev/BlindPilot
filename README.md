@@ -106,6 +106,8 @@ Type `/status` (or Model, Session Status) to hear the backend, model and effort,
 
 Every action is in the menu bar except a few chords. Ctrl+L focuses the prompt, Ctrl+1 to Ctrl+9 jump to a tab, Ctrl+Shift+M cycles permission modes, and F6 and Shift+F6 move between the parts of the window.
 
+Recent Conversations can be sorted newest first, oldest first, by title or by folder (remembered). F2, or Rename, gives a conversation a name of your own, shown here and on its tab; a blank name goes back to the original. Delete, or Hide, takes one out of the list, and Show hidden conversations brings it back. Names and hiding are kept in BlindPilot's own config; no backend's files are changed.
+
 File. New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, shown only when Hermes is the backend), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
 
 Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
