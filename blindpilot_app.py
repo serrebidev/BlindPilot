@@ -8398,6 +8398,10 @@ class SessionPanel(wx.Panel):
             if self._search_term:
                 # Kept after the filter is cleared, for F3 and Shift+F3.
                 self._find_term = self._search_term
+        # The row being read, by identity: the list is rebuilt around a new
+        # filter and its numeric position no longer means the same row.
+        sel = self._selected_row()
+        reading = self._displayed[sel] if 0 <= sel < len(self._displayed) else None
         self._refresh_list()
         # Spoken, not just written to the status bar. No screen reader reads a
         # status bar it was not asked to, and a search that matched nothing
@@ -8411,6 +8415,9 @@ class SessionPanel(wx.Panel):
                 self._focus_row(0)
         else:
             self._announce("Search cleared")
+            same = [i for i, row in enumerate(self._displayed) if row is reading]
+            if same:
+                self._focus_row(same[0])
 
     def find_next(self, step: int) -> None:
         """Move to the next (1) or previous (-1) row holding the last search.
