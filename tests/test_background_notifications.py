@@ -65,3 +65,21 @@ def test_turned_off_nothing_is_shown(panel, monkeypatch):
     app._notify_if_away(panel, "The turn finished")
 
     assert _Note.shown == []
+
+
+def test_choosing_it_from_chat_mode_shows_the_agent_tabs_again(monkeypatch):
+    """Chat hides the session tabs, so the tab that called has to come back."""
+    modes: list[str] = []
+    frame = type("FrameStub", (), {})()
+    frame._app_mode = app.APP_MODE_CHAT
+    frame.Iconize = lambda _flag: None
+    frame.Raise = lambda: None
+    frame._set_app_mode = modes.append
+    frame.notebook = None
+    panel = type("PanelStub", (), {"__bool__": lambda s: True})()
+    panel.focus_prompt = lambda: None
+    monkeypatch.setattr(app.wx, "GetTopLevelParent", lambda _w: frame)
+
+    app.SessionPanel._come_forward(panel)
+
+    assert modes == [app.APP_MODE_AGENT]

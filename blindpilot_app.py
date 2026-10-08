@@ -6688,6 +6688,9 @@ class SessionPanel(wx.Panel):
             return
         frame.Iconize(False)
         frame.Raise()
+        if getattr(frame, "_app_mode", APP_MODE_AGENT) != APP_MODE_AGENT:
+            # Chat hides every session tab; the turn that called is one of them.
+            frame._set_app_mode(APP_MODE_AGENT)
         notebook = getattr(frame, "notebook", None)
         if notebook is not None and notebook.FindPage(self) != wx.NOT_FOUND:
             notebook.SetSelection(notebook.FindPage(self))
