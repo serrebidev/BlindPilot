@@ -25,6 +25,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 - Searches responses and copies a code block, a response, or the whole conversation, or exports the conversation as Markdown, a web page, or plain text.
 - Lists the models and effort levels the installed CLI reports.
 - Plays optional sounds for sent, working, received, and failed.
+- Shows a system notification when a turn finishes, fails, or asks you something while BlindPilot is in the background; choosing it brings that tab forward. Turn it off in Preferences.
 - Installs, updates, adds to PATH, and signs in to any backend from a wizard.
 - Has a Chat mode that talks to a provider API directly with no agent and no file access.
 - Drives a Hermes on another computer over the network.
