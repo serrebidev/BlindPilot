@@ -2620,8 +2620,9 @@ def _notify_if_away(panel: "SessionPanel", message: str) -> None:
     clicked = wx.PyEventBinder(wx.adv.wxEVT_NOTIFICATION_MESSAGE_CLICK)
     note.Bind(clicked, lambda _e: panel._come_forward())
     note.Show()
-    # Held until the next one, or the click has nothing left to fire it.
-    panel._notification = note
+    # Every one still on screen is held, or choosing an older one fires nothing.
+    # ponytail: keeps the last 20 per tab; older ones have left Action Center.
+    panel._notifications = [*getattr(panel, "_notifications", [])[-19:], note]
 
 
 def _tab_label(title: str, cwd: str) -> str:
