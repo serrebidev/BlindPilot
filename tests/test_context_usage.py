@@ -46,6 +46,15 @@ def test_a_turn_with_no_window_keeps_the_one_already_known(panel):
     assert panel._context == (20_000, 200_000)
 
 
+def test_another_conversation_forgets_the_reading(panel):
+    panel._session_id = "first"
+    app.SessionPanel._note_context(panel, (170_000, 200_000))
+
+    panel._session_id = None
+
+    assert app.SessionPanel._known_context(panel) == (0, 0)
+
+
 def test_nothing_reported_changes_nothing(panel):
     app.SessionPanel._note_context(panel, None)
 
