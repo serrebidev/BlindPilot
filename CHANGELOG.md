@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.38.0 - 2026-10-08
+
+- Command Code: every slash command works, as in its console. The picker adds the commands Command Code's agent offers in the folder (skills, mod commands, /loop, /peek; read over `command-code acp`, cached per folder), sent as typed, and the console's built-ins from `command-code --help`. A console-only command (/context, /usage, /status, /export, /todos, ...) runs in Command Code's console off screen on the same conversation (`--resume <id> "/command"` in a hidden pseudo-terminal), and what it shows is added to the conversation. Menus list their choices. Requested by a BlindPilot user on Telegram.
+- muse.ai: progress is the last row of the conversation, changed in place (not spoken, no selection move), as well as on the status line; removed when the turn ends.
+- muse.ai: a turn stays open after muse.ai answers until the chat has been quiet for 45 seconds, so a "still on it" answer no longer ends it, and an open muse.ai tab checks the chat every 30 seconds while idle and follows it again when muse.ai posts or works.
+
 ## v0.37.3 - 2026-10-08
 
 - muse.ai progress on the status line: while muse.ai works (a sent message or a followed chat), the tab's status line says how many steps it has taken and when the latest was, and the progress report (what is it doing) says the same. Nothing is spoken or added to the conversation for it.

@@ -37,6 +37,7 @@ _STYLES = {
     "thinking": RowStyle(muted=True),
     "tool": RowStyle(indented=True),
     "result": RowStyle(indented=True),
+    "step": RowStyle(indented=True, muted=True),
     "code": RowStyle(mono=True),
     "error": RowStyle(error=True),
 }
@@ -114,6 +115,18 @@ class ConversationList(wx.VListBox):
         # Heights of the rows that stayed are still right. Only the count grows.
         self.SetItemCount(len(self._rows))
         self.RefreshAll()
+
+    def ReplaceLast(self, item: Union[Row, str]) -> None:
+        """Change the last row in place: no rebuild, so the selection and the
+        reader stay where they are. A live status line uses it."""
+        if not self._rows:
+            self.AppendItems([item])
+            return
+        last = len(self._rows) - 1
+        self._rows[last] = as_rows([item])[0]
+        for key in [k for k in self._measured if k[0] == last]:
+            del self._measured[key]
+        self.RefreshRow(last)
 
     def SetSelection(self, index: int) -> None:  # type: ignore[override]
         if not self._rows:
@@ -373,6 +386,15 @@ class NativeConversationList(wx.ListBox):
         new_rows = as_rows(items)
         self._rows.extend(new_rows)
         super().AppendItems([row.label for row in new_rows])
+
+    def ReplaceLast(self, item: Union[Row, str]) -> None:
+        """Change the last row in place, leaving the selection alone."""
+        if not self._rows:
+            self.AppendItems([item])
+            return
+        row = as_rows([item])[0]
+        self._rows[-1] = row
+        self.SetString(len(self._rows) - 1, row.label)
 
     def SetSelection(self, index: int) -> None:  # type: ignore[override]
         if not self._rows:

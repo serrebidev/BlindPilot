@@ -184,14 +184,45 @@ def test_add_dir_is_passed_to_next_turn_without_splitting_spaces(tmp_path):
     assert tab.sent[0][3]["additional_dirs"] == (str(directory.resolve()),)
 
 
-@pytest.mark.parametrize("command", ["/context", "/worktree", "/logout", "/mcp", "/unknown"])
-def test_terminal_only_commands_are_explained_without_becoming_prompts(command):
+@pytest.fixture
+def offered(monkeypatch):
+    """What Command Code's agent advertises over ACP, without starting it."""
+    import commandcode_backend
+
+    monkeypatch.setattr(
+        commandcode_backend,
+        "commandcode_agent_commands",
+        lambda _cwd, wait=False: [("/ponytail", "Lazy mode"), ("/loop", "Repeat a task")],
+    )
+
+
+@pytest.mark.parametrize(
+    "command", ["/context", "/worktree list", "/logout", "/mcp", "/usage", "/unknown"]
+)
+def test_console_commands_run_in_command_codes_console_not_as_prompts(command, offered):
+    """Any slash command works, as in Command Code's console: one that only the
+    console knows runs there (off screen) instead of being sent to the model."""
     tab = panel()
+    ran = []
+    tab._run_commandcode_console = ran.append
     tab.prompt.SetValue(command)
     tab._on_send()
     assert not tab.sent and not tab._pending_messages
-    assert "no headless command" in tab.announced[-1]
-    assert tab.prompt.GetValue() == command
+    assert ran == [command]
+    assert tab.prompt.GetValue() == ""
+
+
+@pytest.mark.parametrize("command", ["/ponytail", "/loop 5m check the build"])
+def test_the_agents_own_commands_go_to_command_code_as_typed(command, offered):
+    """Skills and mod commands are carried out by a headless run."""
+    tab = panel()
+    tab._run_commandcode_console = lambda _c: pytest.fail("not a console command")
+    tab.prompt.SetValue(command)
+    tab._on_send()
+    finish(tab)
+    assert any(sent[0] == command for sent in tab.sent) or any(
+        p[0] == command for p in tab._pending_messages
+    )
 
 
 def test_plan_task_queues_a_real_prompt_and_changes_mode():

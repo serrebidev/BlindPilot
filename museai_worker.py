@@ -43,6 +43,8 @@ from agent_backends import (
 REPLY_WAIT_SECONDS = 3600
 # How often the chat is read for status updates while the agent works.
 STATUS_POLL_SECONDS = 5
+# An answer ends the turn once the chat has been quiet this long.
+QUIET_SECONDS = 45
 _TITLE_CHARS = 60
 # The agent coming online is not something it said about the work.
 _CONNECTION_NOTICES = (
@@ -83,6 +85,8 @@ class MuseAiWorker(_TurnWorker):
         # (seq, when) of every agent event last read, text or not: muse.ai's
         # working steps carry no text, but their count and time say it is busy.
         self._steps: list[tuple[int, int]] = []
+        # The newest event seen in the chat, for the tab to watch past.
+        self.last_seq = 0
         self._step_said = ""
 
     def steer(self, text: str) -> bool:
@@ -160,6 +164,8 @@ class MuseAiWorker(_TurnWorker):
             found.append((int(seq), message_id, text, direct))
         if code == 0:
             self._steps = steps
+            if steps:
+                self.last_seq = max(self.last_seq, max(seq for seq, _when in steps))
         return sorted(found)
 
     def _report_steps(self, baseline: int) -> None:
@@ -263,32 +269,55 @@ class MuseAiWorker(_TurnWorker):
                 "Its reply will appear in the muse.ai chat."
             )
             return
-        self._settled.set()
         if not final_id or final_id not in relayed:
             self._on_activity("assistant", text)
-        self._on_complete(text)
+            relayed.add(final_id)
+        # muse.ai often answers and carries on (background workers, follow-up
+        # updates), so the turn stays open until the chat has gone quiet.
+        later = self._watch(binary, session, baseline, relayed, text)
+        self._settled.set()
+        self._on_complete(later or text)
 
     def _follow(self, binary: str, session: str) -> None:
         """Sit in on a chat whose last message has no answer yet.
 
         A reopened conversation can still be running on muse.ai's machine.
-        Nothing is sent: every update it posts from here is relayed, and its
-        next direct answer ends the turn.
+        Nothing is sent: every update it posts from here is relayed, and the
+        turn ends once it has answered and the chat has gone quiet.
         """
         self._on_started()
         self._on_activity("tool", "muse.ai is still working on this. Following it.")
         baseline = max((m[0] for m in self._messages(binary, session)), default=0)
         relayed: set[str] = set()
+        answer = self._watch(binary, session, baseline, relayed)
+        if self._cancelled:
+            self._settled.set()
+            self._on_complete("Stopped following. muse.ai keeps working on its own machine.")
+            return
+        if answer:
+            self._settled.set()
+            self._on_complete(answer)
+            return
+        self._fail(
+            "muse.ai is still working after an hour. Reopen the chat later to read its answer."
+        )
+
+    def _watch(
+        self, binary: str, session: str, baseline: int, relayed: set[str], answer: str = ""
+    ) -> Optional[str]:
+        """Relay what the agent posts until it has answered and gone quiet.
+
+        Its latest direct answer is the turn's answer. Quiet means no event of
+        any kind, working steps included, for QUIET_SECONDS: an answer with
+        work still visibly going on is not the end of the turn. Returns None
+        if Stop was pressed.
+        """
         deadline = time.monotonic() + REPLY_WAIT_SECONDS
         while time.monotonic() < deadline:
             for _ in range(int(STATUS_POLL_SECONDS * 10) or 1):
                 if self._cancelled:
-                    break
+                    return None
                 time.sleep(0.1)
-            if self._cancelled:
-                self._settled.set()
-                self._on_complete("Stopped following. muse.ai keeps working on its own machine.")
-                return
             ready = self._steady(binary, session)
             self._report_steps(baseline)
             for seq, message_id, text, direct in ready:
@@ -297,12 +326,11 @@ class MuseAiWorker(_TurnWorker):
                 relayed.add(message_id)
                 self._on_activity("assistant", text)
                 if direct:
-                    self._settled.set()
-                    self._on_complete(text)
-                    return
-        self._fail(
-            "muse.ai is still working after an hour. Reopen the chat later to read its answer."
-        )
+                    answer = text
+            latest = max((when for seq, when in self._steps if seq > baseline), default=0)
+            if answer and time.time() - latest / 1000 >= QUIET_SECONDS:
+                return answer
+        return answer
 
     def _teardown(self) -> None:
         proc = self._proc
