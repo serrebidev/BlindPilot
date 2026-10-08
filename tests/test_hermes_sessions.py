@@ -325,7 +325,8 @@ def test_reopening_a_finished_conversation_replays_it_and_ends():
     assert len(resume) == 1
     # The transcript is the point of the request, so it must NOT be omitted.
     assert resume[0]["params"] == {"session_id": "stored-1", "omit_messages": False}
-    assert rows == [("you", "hello"), ("assistant", "hi")]
+    # The history, then the marker saying where it ends and live rows would start.
+    assert rows == [("you", "hello"), ("assistant", "hi"), ("replay_end", "")]
     # Nothing new was said, so the completion carries no text to append.
     assert completed == [""]
     assert sessions == ["stored-1"]
