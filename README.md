@@ -243,7 +243,7 @@ The level is INFO. Set `BLINDPILOT_LOG_LEVEL=DEBUG` for a bug report. Prompts, a
 
 ## Updates
 
-Help, Check for Updates asks GitHub Releases for a newer version, downloads it, verifies the published SHA-256, and restarts into the installer. Check for updates at startup does the same quietly and only speaks when there is something new. Builds run from source open the release page instead.
+Help, Check for Updates asks GitHub Releases for a newer version, downloads it, verifies the published SHA-256, and restarts into the installer. If a turn is running, or a prompt holds a message you have not sent, it says so and asks first (No is the default). Check for updates at startup does the same quietly and only speaks when there is something new. Builds run from source open the release page instead.
 
 ## Run from source
 

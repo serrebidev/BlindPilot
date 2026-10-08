@@ -12455,7 +12455,9 @@ class MainFrame(wx.Frame):
     def _show_update_dialog(self) -> None:
         from update_dialog import UpdateDialog
 
-        dialog = UpdateDialog(self, APP_VERSION, announce)
+        dialog = UpdateDialog(
+            self, APP_VERSION, announce, confirm_install=self._confirm_update_install
+        )
         try:
             dialog.ShowModal()
             restart = dialog.restart_pending
@@ -12463,6 +12465,34 @@ class MainFrame(wx.Frame):
             dialog.Destroy()
         if restart:
             self.Close(force=True)
+
+    def _confirm_update_install(self) -> bool:
+        """Installing closes BlindPilot. Say what that would cost, and ask.
+
+        A running turn is stopped by the restart, and text typed in a prompt
+        and not sent is gone. With neither, there is nothing to ask about.
+        """
+        panels = self._session_panels()
+        running = sum(1 for p in panels if p._worker is not None)
+        unsent = sum(1 for p in panels if p.prompt.GetValue().strip())
+        if not running and not unsent:
+            return True
+        lost = []
+        if running:
+            lost.append(
+                f"A turn is running in {running} {'tab' if running == 1 else 'tabs'}; "
+                "installing stops it."
+            )
+        if unsent:
+            lost.append(
+                f"{unsent} {'tab has' if unsent == 1 else 'tabs have'} a message you have "
+                "not sent, which will be lost."
+            )
+        message = " ".join(lost) + " Install the update now anyway?"
+        with wx.MessageDialog(
+            self, message, "BlindPilot Update", style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING
+        ) as dialog:
+            return dialog.ShowModal() == wx.ID_YES
 
     def report_failed_update(self) -> None:
         """Say why the last update did not install, if it did not.
