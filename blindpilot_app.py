@@ -2603,9 +2603,18 @@ def _tab_title(text: str) -> str:
     return flat[:31].rstrip() + "…"
 
 
+# A CommonMark fenced code block: three or more backticks or tildes, closed by
+# a run of the same character at least as long, or by the end of the text.
+_FENCED_BLOCKS = [
+    re.compile(rf"(?ms)^ {{0,3}}({mark}{{3,}})[^\n]*\n.*?(?:^ {{0,3}}\1{mark}*[ \t]*$|\Z)")
+    for mark in ("`", "~")
+]
+
+
 def _sent_readback(text: str, limit: int = 300) -> str:
     """'Sent: fix the build', said as the message goes, long ones cut short."""
-    text = re.sub(r"(?s)```.*?(```|$)", " Code block omitted. ", text)
+    for fence in _FENCED_BLOCKS:
+        text = fence.sub(" Code block omitted. ", text)
     words = text.split()
     if not words:
         return "Sent"
@@ -2613,6 +2622,9 @@ def _sent_readback(text: str, limit: int = 300) -> str:
     for index, word in enumerate(words):
         if len(said) + len(word) > limit:
             rest = len(words) - index
+            if not said:
+                # One long path or URL: its start, rather than nothing at all.
+                said, rest = word[:limit], rest - 1
             break
         said = f"{said} {word}" if said else word
     more = f"... and {rest} more {'word' if rest == 1 else 'words'}" if rest else ""
