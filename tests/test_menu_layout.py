@@ -245,6 +245,7 @@ def _model_menu(frame):
         "_connect_active",
         "_manage_backends",
         "_status_active",
+        "_changed_files_active",
         "_settings_files_active",
     ):
         setattr(frame, name, lambda: None)
