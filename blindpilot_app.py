@@ -10710,6 +10710,13 @@ class MainFrame(wx.Frame):
         )
         self._automatic_updates_item.Check(bool(cfg.get("check_for_updates_at_startup", True)))
         help_menu.AppendSeparator()
+        self._menu_item(
+            help_menu,
+            "&Keyboard Shortcuts\tF1",
+            "List every keyboard shortcut, grouped by where it works",
+            self._show_keyboard_shortcuts,
+        )
+        help_menu.AppendSeparator()
         logs_item = help_menu.Append(
             wx.ID_ANY,
             "Open &Log Folder",
@@ -11346,6 +11353,13 @@ class MainFrame(wx.Frame):
             # Nothing on screen changes yet, so without this the new choice
             # would seem to have done nothing.
             announce(APPEARANCE_RESTART_NOTE)
+
+    def _show_keyboard_shortcuts(self) -> None:
+        dlg = ReadView(self, KEYBOARD_SHORTCUTS, "Keyboard Shortcuts")
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
 
     def _show_about(self) -> None:
         description = about_description()
@@ -12482,6 +12496,43 @@ def _bring_to_front() -> None:
         nsapp.activateIgnoringOtherApps_(True)
     except Exception:
         pass
+
+
+# Every chord BlindPilot has, grouped by where it works, for Help, Keyboard
+# Shortcuts (F1). On macOS the Ctrl chords are Cmd.
+KEYBOARD_SHORTCUTS = """Anywhere
+Ctrl+L: focus the prompt.
+F6, Shift+F6: move between the tab strip, the responses and the prompt, and read the status bar.
+Ctrl+T: new session. Ctrl+W: close it. Ctrl+Q: quit.
+Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+Shift+], Ctrl+Shift+[: next and previous tab.
+Ctrl+1 to Ctrl+9: go to that tab.
+Ctrl+Shift+H: Recent Conversations. In its list, F2 renames and Delete hides.
+Ctrl+G: Hermes conversations, when Hermes is the backend.
+Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
+Ctrl+Shift+T: turn status. Ctrl+Shift+D: changed files.
+Ctrl+Shift+R: repeat the last announcement.
+Ctrl+Comma: Preferences. F1: this list.
+
+Prompt
+Enter: send. Shift+Enter: new line.
+Ctrl+/: slash commands. Ctrl+Shift+A: attach files. Ctrl+V: paste a picture as an attachment.
+Ctrl+Period: stop the running task.
+Ctrl+Shift+K: compact the conversation. Ctrl+Shift+N: start a fresh one.
+Ctrl+E: export the conversation.
+Ctrl+Up or Alt+Up: into the newest response.
+
+Responses
+Up and Down: rows. Ctrl+Down: next response.
+Enter: read the row in full. Shift+Enter: read the response as a formatted page.
+Applications key: the row's actions.
+C: copy the row. Shift+C: copy the whole response. Ctrl+Shift+C: copy its last code block.
+Ctrl+F: search. F3, Shift+F3: next and previous match.
+Ctrl+R: latest response, then back through the earlier ones.
+Tab: back to the prompt.
+
+Question and permission dialogs
+Escape answers later or denies. Nothing is allowed by closing a dialog.
+"""
 
 
 # True for the length of a packaged startup check. Nothing a check does may
