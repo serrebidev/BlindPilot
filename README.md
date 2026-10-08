@@ -97,7 +97,7 @@ Gemini CLI and Antigravity CLI sign in with your Google account. Sign In opens t
 
 opencode needs a provider connected to it. Use Model, Connect a Provider, or type `/connect`, or use the wizard. Pick a provider, then paste a key or sign in through the browser.
 
-Type `/status` (or Model, Session Status) to hear the backend, model and effort, permission mode, folder, whether the next message continues this conversation, and which account the backend is signed in as.
+Type `/status` (or Model, Session Status) to hear the backend, model and effort, permission mode, folder, whether the next message continues this conversation, how full its context is (Claude Code and Codex report it), and which account the backend is signed in as. Past 80% full, BlindPilot says so once and suggests Compact Conversation.
 
 ## Menus
 
