@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.34.0 - 2026-10-08
+
+- What Claude Knows (Ctrl+Shift+I, Model menu) lists Claude Code's instructions, memories, skills, agents, commands and settings by kind with counts, for the config folder and the tab's project. Enter reads a file; Edit in Your Editor opens it. Memories and skills are labelled from their front-matter name and description. BlindPilot never writes these files. Modelled on The Chat Place (#73).
+- Fixed: every Claude Code send failed with a TypeError in 0.33.1, because the permission handler reached the worker twice. The Claude turn's own weakly held handler now replaces the default (#73).
+
 ## v0.33.1 - 2026-10-08
 
 - Codex permission prompts in Default mode: the tool request now opens the permission dialog (naming Codex as the asker) instead of being silently declined. Other modes keep their automatic answers. The dialog itself is backend-neutral now.
