@@ -189,7 +189,8 @@ class MuseAiWorker(_TurnWorker):
         # The subscription replays from the start of what the server keeps; a
         # status older than this watcher (less a minute for clock skew) is
         # history, not current work.
-        since_ms = (time.time() - STATUS_SKEW_SECONDS) * 1000
+        started_ms = time.time() * 1000
+        since_ms = started_ms - STATUS_SKEW_SECONDS * 1000
         for line in proc.stdout or ():
             event = _json_from(line) or {}
             raw = event.get("payload")
@@ -213,7 +214,14 @@ class MuseAiWorker(_TurnWorker):
             # What it is actually doing ("Fetching release") also stays in the
             # conversation; "is working"/"is responding" would only be noise,
             # and returning to the same work after one of them is no new step.
-            if not generic and text != listed:
+            # A row is permanent, so only a status stamped since this watcher
+            # started gets one: the skew allowance above could let a previous
+            # turn's last step in.
+            # ponytail: a PC clock running ahead loses rows for that many
+            # seconds (the status line still shows them); key on the turn's
+            # message id if that ever matters.
+            fresh = isinstance(stamped, (int, float)) and stamped >= started_ms
+            if fresh and not generic and text != listed:
                 listed = text
                 self._on_activity("tool", text)
         # The stream ended early, so the step count takes over again.
