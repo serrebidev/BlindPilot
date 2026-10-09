@@ -230,8 +230,8 @@ def _status(code, text, session="chat-9", ts_ms=None, reply=None):
     return json.dumps({"event": "agent.status", "payload": payload, "ts_ms": ts_ms}) + "\n"
 
 
-def _sent(text, ts_ms=None):
-    event = {"event": "message.user", "payload": {"content": text}, "ts_ms": ts_ms}
+def _sent(text, seq):
+    event = {"event": "message.user", "payload": {"content": text}, "seq": seq}
     return json.dumps(event) + "\n"
 
 
@@ -242,16 +242,20 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
     going back to the same work after one of them adds no second row.
 
     Rows are permanent, so they start only once the sent message itself comes
-    through the stream, and never for a reply that was already being written
-    before it (a job left running after Stop): those reach the status line
-    only. Coming online, other chats, statuses replayed from long before, and
-    anything after the turn has settled say nothing."""
+    through the stream (past the chat as read before sending, so a replayed
+    copy of the same words from a quick retry does not count), and never for a
+    reply that was already being written before it (a job left running after
+    Stop): those reach the status line only. Coming online, other chats,
+    statuses replayed from long before, and anything after the turn has
+    settled say nothing."""
     worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
+    worker._chat_seq = 100
     lines = [
         _status("online", "online"),
+        _sent("Check the weather in Vancouver", seq=90),
         _status("working", "Old job", reply="old"),
-        _sent("Something said earlier"),
-        _sent("Check the weather in   Vancouver"),
+        _sent("Something said earlier", seq=101),
+        _sent("Check the weather in   Vancouver", seq=102),
         _status("working", "is working", reply="new"),
         json.dumps({"event": "task.status", "payload": {"session_id": "chat-9"}}) + "\n",
         _status("working", "Fetching release", reply="new"),
