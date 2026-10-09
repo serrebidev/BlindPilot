@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.41.0"
+APP_VERSION = "0.42.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7591,6 +7591,188 @@ class SlashCommandDialog(wx.Dialog):
         event.Skip()
 
 
+def _saved_prompts() -> list[dict]:
+    """The saved prompts, in the order the user put them: name and text each."""
+    found = _load_config().get("saved_prompts")
+    if not isinstance(found, list):
+        return []
+    return [
+        {"name": str(p["name"]), "text": str(p["text"])}
+        for p in found
+        if isinstance(p, dict) and p.get("name") and isinstance(p.get("text"), str)
+    ]
+
+
+def _store_saved_prompts(prompts: list[dict]) -> bool:
+    cfg = _load_config()
+    cfg["saved_prompts"] = prompts
+    return _save_config(cfg)
+
+
+class SavedPromptsDialog(wx.Dialog):
+    """Messages sent often, kept by name (Conversation, Saved Prompts, Ctrl+Shift+P).
+
+    Use (or Enter on a prompt) closes the dialog with `chosen` set to its
+    text. New starts from `draft`, what the prompt box holds, so saving what
+    was just typed is New then OK. Every change is saved at once.
+    """
+
+    def __init__(self, parent: wx.Window, draft: str = ""):
+        super().__init__(
+            parent, title="Saved Prompts", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
+        )
+        self.prompts = _saved_prompts()
+        self.draft = draft
+        self.chosen = ""
+        # Each label before its control: wxMSW names a control after the
+        # static text created just before it.
+        list_label = wx.StaticText(self, label="&Prompts:")
+        self.list_box = wx.ListBox(self, name="Prompts")
+        text_label = wx.StaticText(self, label="Te&xt:")
+        self.text = wx.TextCtrl(
+            self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2, name="Text"
+        )
+        buttons = wx.BoxSizer(wx.HORIZONTAL)
+        self.use_button = wx.Button(self, wx.ID_OK, "&Use")
+        buttons.Add(self.use_button, 0, wx.RIGHT, self.FromDIP(4))
+        for label, action in (
+            ("&New…", self._new),
+            ("&Edit…", self._edit),
+            ("&Delete", self._delete),
+            ("Mo&ve Up", lambda: self._move(-1)),
+            ("Move Do&wn", lambda: self._move(1)),
+        ):
+            button = wx.Button(self, label=label)
+            button.Bind(wx.EVT_BUTTON, lambda _e, a=action: a())
+            buttons.Add(button, 0, wx.RIGHT, self.FromDIP(4))
+        close = wx.Button(self, wx.ID_CANCEL, "&Close")
+        buttons.Add(close)
+
+        pad = self.FromDIP(PAD_DIALOG)
+        self.list_box.SetMinSize(self.FromDIP(wx.Size(480, 160)))
+        self.text.SetMinSize(self.FromDIP(wx.Size(480, 120)))
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.list_box, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(text_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        sizer.Add(self.text, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(buttons, 0, wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+
+        self.list_box.Bind(wx.EVT_LISTBOX, lambda _e: self._show_text())
+        self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._use())
+        self.Bind(wx.EVT_BUTTON, lambda _e: self._use(), id=wx.ID_OK)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self._refresh(0)
+        self.list_box.SetFocus()
+        self.CentreOnParent()
+
+    def _refresh(self, selection: int) -> None:
+        self.list_box.Set([p["name"] for p in self.prompts])
+        if self.prompts:
+            self.list_box.SetSelection(max(0, min(selection, len(self.prompts) - 1)))
+        self.use_button.Enable(bool(self.prompts))
+        self._show_text()
+
+    def _current(self) -> int:
+        index = self.list_box.GetSelection()
+        return index if 0 <= index < len(self.prompts) else -1
+
+    def _show_text(self) -> None:
+        index = self._current()
+        self.text.ChangeValue(self.prompts[index]["text"] if index >= 0 else "")
+
+    def _save(self, said: str, selection: int) -> None:
+        if _store_saved_prompts(self.prompts):
+            announce(said)
+        else:
+            announce(
+                "Saved prompts could not be written. Check that the settings folder is writable."
+            )
+        self._refresh(selection)
+        self.list_box.SetFocus()
+
+    def _ask(self, name: str, text: str) -> Optional[dict]:
+        """Name, then text. None if either was cancelled or left blank."""
+        with wx.TextEntryDialog(self, "Prompt name:", "Saved Prompt", name) as dlg:
+            if dlg.ShowModal() != wx.ID_OK or not dlg.GetValue().strip():
+                return None
+            name = dlg.GetValue().strip()
+        with wx.TextEntryDialog(
+            self,
+            "Prompt text. Enter starts a new line; Tab to OK to save.",
+            "Saved Prompt",
+            text,
+            style=wx.TextEntryDialogStyle | wx.TE_MULTILINE,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK or not dlg.GetValue().strip():
+                return None
+            return {"name": name, "text": dlg.GetValue()}
+
+    def _new(self) -> None:
+        draft = self.draft.strip()
+        prompt = self._ask(" ".join(draft.split()[:5]), self.draft)
+        if prompt:
+            self.prompts.append(prompt)
+            self._save(f"Prompt saved: {prompt['name']}", len(self.prompts) - 1)
+
+    def _edit(self) -> None:
+        index = self._current()
+        if index < 0:
+            return
+        prompt = self._ask(self.prompts[index]["name"], self.prompts[index]["text"])
+        if prompt:
+            self.prompts[index] = prompt
+            self._save(f"Prompt saved: {prompt['name']}", index)
+
+    def _delete(self) -> None:
+        index = self._current()
+        if index < 0:
+            return
+        name = self.prompts[index]["name"]
+        if (
+            wx.MessageBox(
+                f"Delete the prompt {name}?",
+                "Delete prompt",
+                wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
+                self,
+            )
+            != wx.YES
+        ):
+            return
+        del self.prompts[index]
+        self._save(f"Prompt deleted: {name}", index)
+
+    def _move(self, step: int) -> None:
+        index = self._current()
+        target = index + step
+        if index < 0 or not 0 <= target < len(self.prompts):
+            return
+        self.prompts[index], self.prompts[target] = self.prompts[target], self.prompts[index]
+        self._save(f"Moved to {target + 1} of {len(self.prompts)}", target)
+
+    def _use(self) -> None:
+        index = self._current()
+        if index < 0:
+            return
+        self.chosen = self.prompts[index]["text"]
+        self.EndModal(wx.ID_OK)
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        key = event.GetKeyCode()
+        if key == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        if self.FindFocus() is self.list_box:
+            if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+                self._use()
+                return
+            if key in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE):
+                self._delete()
+                return
+        event.Skip()
+
+
 class SessionPanel(wx.Panel):
     """One conversation tab. Owns its session_id, rows, and worker.
 
@@ -8448,6 +8630,25 @@ class SessionPanel(wx.Panel):
         self.prompt.SetInsertionPointEnd()
         self.prompt.SetFocus()
         self._announce(f"Slash command: {cmd_text}. Edit if needed, then press Enter to send.")
+
+    def _pick_saved_prompt(self) -> None:
+        """Saved Prompts: put one in the prompt at the caret, over any selection."""
+        dlg = SavedPromptsDialog(self, self.prompt.GetValue())
+        try:
+            if dlg.ShowModal() != wx.ID_OK or not dlg.chosen:
+                self.prompt.SetFocus()
+                return
+            chosen = dlg.chosen
+        finally:
+            dlg.Destroy()
+        start, end = self.prompt.GetSelection()
+        value = self.prompt.GetValue()
+        # ChangeValue fires no EVT_TEXT, so this is not read back as dictation.
+        self.prompt.ChangeValue(value[:start] + chosen + value[end:])
+        self._prompt_text = self.prompt.GetValue()
+        self.prompt.SetInsertionPoint(start + len(chosen))
+        self.prompt.SetFocus()
+        self._announce("Prompt inserted. Edit if needed, then press Enter to send.")
 
     def _add_attachments(self, paths) -> None:
         added = 0
@@ -14232,6 +14433,12 @@ class MainFrame(wx.Frame):
             "Pick one of this backend's slash commands from a list",
             self._slash_active,
         )
+        add(
+            menu,
+            "Saved &Prompts…	Ctrl+Shift+P",
+            "Insert, save and arrange messages you send often",
+            self._saved_prompts_active,
+        )
         menu.AppendSeparator()
         self._compact_item = self._menu_item(
             menu,
@@ -15185,6 +15392,11 @@ class MainFrame(wx.Frame):
         if isinstance(page, SessionPanel):
             page._pick_slash_command()
 
+    def _saved_prompts_active(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page._pick_saved_prompt()
+
     # ----- Cleanup -----
     def _on_close(self, event: wx.CloseEvent) -> None:
         if self.chat_panel is not None:
@@ -15279,6 +15491,7 @@ Ctrl+Comma: Preferences. F1: this list.
 
 Prompt
 Enter: send. Shift+Enter: new line.
+Ctrl+Shift+P: saved prompts. In its list, Enter inserts one and Delete removes it.
 Ctrl+/: slash commands. Ctrl+Shift+A: attach files. Ctrl+V: paste a picture as an attachment.
 Ctrl+Period: stop the running task.
 Ctrl+Shift+K: compact the conversation. Ctrl+Shift+N: start a fresh one.

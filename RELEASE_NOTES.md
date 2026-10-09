@@ -1,10 +1,12 @@
-# BlindPilot 0.41.0
+# BlindPilot 0.42.0
 
-While muse.ai works on a message, BlindPilot now tells you what it is doing, in the same words the muse.ai web app shows: "muse.ai: Searching", "muse.ai: Fetching release", "muse.ai is responding". Before, it could only count the agent's working steps.
+BlindPilot can now keep the messages you send often, so you do not have to type or paste them again. Open Saved Prompts from the Conversation menu, or press Ctrl+Shift+P anywhere in a session.
 
-- In the conversation: each real piece of work muse.ai reports, such as "muse.ai: Searching" or "muse.ai: Fetching issues", is added to the conversation as its own row and read out as it happens, so the transcript shows the steps that led to the answer. The general "is working" and "is responding" notices are left out of the conversation, and going back to the same work after one of them does not add a second row.
-- On the status line: every update, general notices included, goes on the status line and the live status row at the bottom of the conversation, which changes in place and is removed when the turn ends.
-- It works for the main chat, side chats, and a reopened chat that muse.ai is still working on. Only the conversation's own chat is followed, so activity in your other muse.ai chats does not appear here.
-- Only this turn's work is recorded. If you stopped waiting while muse.ai kept working and then send something new, the earlier job's steps show on the status line but are not recorded as part of the new reply. The rows are live only: muse.ai's own chat history does not keep them, so a reopened conversation shows the messages without the steps.
-- If the live connection drops, the status line falls back to the step count it used before. Your messages and answers travel exactly as they did; this only adds a listener alongside.
-- How it works: the muse.ai web app reads these updates from a live chat subscription. Upstream muse-cli 0.3.2 can subscribe, but in a way that never sees side-chat activity, and it prints nothing until the subscription ends. BlindPilot's existing compatibility hook for muse-cli 0.3.2 now lets its watcher subscribe the way the web app does and pass each update along as it arrives. The hook applies only to muse-cli processes BlindPilot starts; your installed muse-cli is unchanged.
+- The dialog lists your prompts by name. As you arrow through them, the selected prompt's full text is shown in a read-only box below the list (Alt+X), so you can check it before using it.
+- Use, or Enter on a prompt, closes the dialog and puts the prompt into the prompt box where your caret was. If you had text selected, the prompt replaces it; anything else you typed stays. Nothing is sent until you press Enter, so you can finish or change it first.
+- New starts from whatever is in the prompt box, with its first few words offered as the name. To save the message you have just written, press Ctrl+Shift+P, then New, and accept the name and text. If the prompt box is empty, you type both.
+- Edit changes a prompt's name or text. Delete, or the Delete key on the list, removes one after asking, with No as the default. Move Up and Move Down put them in the order you want.
+- Every change is saved straight away and spoken ("Prompt saved: Review", "Prompt deleted: Review"). Prompts live in BlindPilot's own settings file next to your other preferences; no backend's files are touched, and they work the same with every backend.
+- Escape or Close leaves the dialog and returns you to the prompt without changing it.
+
+The shortcut is listed in Help, Keyboard Shortcuts (F1) and in the README.
