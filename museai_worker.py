@@ -49,6 +49,8 @@ REPLY_WAIT_SECONDS = 3600
 STATUS_POLL_SECONDS = 5
 # An answer ends the turn once the chat has been quiet this long.
 QUIET_SECONDS = 45
+# How far the PC's clock may run ahead of muse.ai's before a fresh status looks old.
+STATUS_SKEW_SECONDS = 60
 _TITLE_CHARS = 60
 # The agent coming online is not something it said about the work.
 _CONNECTION_NOTICES = (
@@ -184,6 +186,10 @@ class MuseAiWorker(_TurnWorker):
 
     def _read_status(self, proc: subprocess.Popen, session: str) -> None:
         said = ""
+        # The subscription replays from the start of what the server keeps; a
+        # status older than this watcher (less a minute for clock skew) is
+        # history, not current work.
+        since_ms = (time.time() - STATUS_SKEW_SECONDS) * 1000
         for line in proc.stdout or ():
             event = _json_from(line) or {}
             raw = event.get("payload")
@@ -191,6 +197,9 @@ class MuseAiWorker(_TurnWorker):
             if (event.get("event") or event.get("type")) != "agent.status":
                 continue
             if body.get("session_id") not in (None, session):
+                continue
+            stamped = event.get("ts_ms")
+            if isinstance(stamped, (int, float)) and stamped < since_ms:
                 continue
             text = " ".join(str(body.get("activity_text") or "").split())
             if not text or body.get("activity_code") == "online" or self._settled.is_set():
