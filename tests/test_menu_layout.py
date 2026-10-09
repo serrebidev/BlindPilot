@@ -47,6 +47,7 @@ def frame(wx_app):
         "_stop_active",
         "_attach_active",
         "_slash_active",
+        "_saved_prompts_active",
         "_compact_active",
         "_new_conversation_active",
         "_find_active",
@@ -91,6 +92,7 @@ CONVERSATION_ITEMS = [
     "Stop Task",
     "Attach Files",
     "Slash Command",
+    "Saved Prompts",
     "Compact Conversation",
     "Start New Conversation",
     "Find in Responses",
@@ -133,6 +135,7 @@ def test_nothing_is_offered_in_both_menus(frame):
     [
         ("Attach Files", "Ctrl+Shift+A"),
         ("Slash Command", "Ctrl+/"),
+        ("Saved Prompts", "Ctrl+Shift+P"),
         ("Jump to Latest Response", "Ctrl+R"),
         ("Repeat Last Announcement", "Ctrl+Shift+R"),
         ("Export Conversation", "Ctrl+E"),

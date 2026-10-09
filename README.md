@@ -23,6 +23,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 - Lets you steer a running task with a new message, or stop it and keep what it produced. Stop also stops the subagents the task started.
 - Lists the subagents a task has running, and shows what each one is doing.
 - Attaches files and pasted images.
+- Keeps a library of messages you send often, by name, to put in the prompt with one keystroke.
 - Searches responses and copies a code block, a response, or the whole conversation, or exports the conversation as Markdown, a web page, or plain text.
 - Lists the models and effort levels the installed CLI reports.
 - Plays optional sounds for sent, working, received, and failed.
@@ -114,7 +115,7 @@ Recent Conversations can be sorted newest first, oldest first, by title or by fo
 
 File. New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, shown only when Hermes is the backend), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
 
-Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
+Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
 
 Model. Backend (one radio item per CLI), Model and Effort (Ctrl+Shift+E), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Session Status, Turn Status (Ctrl+Shift+T), Changed Files (Ctrl+Shift+D), What Agents Know (Ctrl+Shift+I), Backend Settings, Manage Backends, Connect a Provider.
 
@@ -147,6 +148,7 @@ Help, Keyboard Shortcuts (F1) shows this list in the app, grouped by where each 
 - F3 and Shift+F3, in the responses, move to the next or previous row holding the last search, whole text included, going round at either end.
 - Ctrl+Shift+E choose model and reasoning effort.
 - Ctrl+/ slash commands. Ctrl+. stop the running task.
+- Ctrl+Shift+P saved prompts: messages you send often, each with a name. The list shows the selected prompt's text below it. Use, or Enter on a prompt, puts it in the prompt at the caret (over any selected text), ready to change and send. New starts from what the prompt box holds, so saving what you just typed is New then OK; Edit changes one, Delete (or the Delete key) removes one after asking, and Move Up and Move Down set the order. Each change is saved at once in BlindPilot's own config.
 - Ctrl+Shift+A attach files. Ctrl+Shift+M cycle permission modes.
 - Ctrl+Tab and Ctrl+Shift+Tab move between tabs, as do Ctrl+Shift+] and Ctrl+Shift+[. Ctrl+1 to Ctrl+9 jump to a tab. On macOS use Cmd+Shift+] and Cmd+Shift+[, because Cmd+Tab belongs to the system.
 - Shift+Enter on a row, or Read response as formatted page on its context menu, opens the whole response as a web page, so the screen reader's browse mode moves by heading, list, table and link. Links open in your browser; nothing is fetched. Escape comes back. Where no web view is available it opens as plain text.

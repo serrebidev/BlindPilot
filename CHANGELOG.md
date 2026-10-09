@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.42.0 - 2026-10-09
+
+- Saved Prompts (Conversation menu, Ctrl+Shift+P): a library of messages you send often, each with a name. Enter or Use puts the selected prompt into the prompt box at the caret, replacing any selected text, ready to edit and send. New starts from what is already typed in the prompt box, with its first few words as the name, so saving the message you just wrote takes two keystrokes. Edit, Delete (asks first), Move Up and Move Down manage the list, and every change is saved at once in BlindPilot's config. Works with every backend.
+
 ## v0.41.0 - 2026-10-08
 
 - muse.ai: the status line and live status row now show what the agent says it is doing while it works ("Searching", "Fetching release", "is responding"), as the muse.ai web app does, instead of only a step count. The compatibility hook for muse-cli 0.3.2 lets `muse-cli watch` subscribe to the conversation's chat the way the web client does and stream each update as it arrives; muse-cli's own watch never saw side-chat activity and printed nothing until it ended. Works for the main chat, side chats, and followed chats. Statuses replayed from before the turn are ignored, and the step count returns if the live stream ends.
