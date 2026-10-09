@@ -185,7 +185,7 @@ class MuseAiWorker(_TurnWorker):
         threading.Thread(target=self._read_status, args=(proc, session), daemon=True).start()
 
     def _read_status(self, proc: subprocess.Popen, session: str) -> None:
-        said = ""
+        said = listed = ""
         # The subscription replays from the start of what the server keeps; a
         # status older than this watcher (less a minute for clock skew) is
         # history, not current work.
@@ -204,11 +204,18 @@ class MuseAiWorker(_TurnWorker):
             text = " ".join(str(body.get("activity_text") or "").split())
             if not text or body.get("activity_code") == "online" or self._settled.is_set():
                 continue
-            text = f"muse.ai {text}" if text.startswith("is ") else f"muse.ai: {text}"
+            generic = text.startswith("is ")
+            text = f"muse.ai {text}" if generic else f"muse.ai: {text}"
             if text != said:
                 said = text
                 self._live_status = True
                 self._on_activity("step", text)
+            # What it is actually doing ("Fetching release") also stays in the
+            # conversation; "is working"/"is responding" would only be noise,
+            # and returning to the same work after one of them is no new step.
+            if not generic and text != listed:
+                listed = text
+                self._on_activity("tool", text)
         # The stream ended early, so the step count takes over again.
         self._live_status = False
 
