@@ -301,3 +301,15 @@ def test_following_a_running_chat_lists_its_work_without_a_sent_message(monkeypa
     worker._on_activity = lambda kind, text: seen.append((kind, text))
     worker._read_status(SimpleNamespace(stdout=iter([_status("working", "Searching")])), "chat-9")
     assert seen == [("step", "muse.ai: Searching"), ("tool", "muse.ai: Searching")]
+
+
+def test_without_a_history_boundary_no_status_becomes_a_row(monkeypatch):
+    """If the chat could not be read before sending, a replayed copy of the
+    prompt is indistinguishable from the sent one: the status line still
+    follows the work, but nothing is recorded in the conversation."""
+    worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
+    seen = []
+    worker._on_activity = lambda kind, text: seen.append((kind, text))
+    lines = [_sent("Check the weather in Vancouver", seq=5), _status("working", "Searching")]
+    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
+    assert seen == [("step", "muse.ai: Searching")]
