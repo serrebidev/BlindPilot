@@ -103,8 +103,9 @@ class MuseAiWorker(_TurnWorker):
         self._watcher: Optional[subprocess.Popen] = None
         self._live_status = False
         # The newest event of any kind in the chat as last read: the message
-        # this turn sends is the first user message past it.
-        self._chat_seq = 0
+        # this turn sends is the first user message past it. -1 until a read
+        # succeeds: with no boundary, no status becomes a row.
+        self._chat_seq = -1
 
     def _check_approvals(self, binary: str) -> None:
         from museai_backend import (
@@ -214,7 +215,11 @@ class MuseAiWorker(_TurnWorker):
             if name == "message.user" and not anchored:
                 sent = body.get("content") or body.get("display_text") or ""
                 seq = int(body.get("chat_event_seq") or event.get("seq") or 0)
-                anchored = seq > self._chat_seq and " ".join(str(sent).split()) == prompt
+                anchored = (
+                    self._chat_seq >= 0
+                    and seq > self._chat_seq
+                    and " ".join(str(sent).split()) == prompt
+                )
                 continue
             if name != "agent.status":
                 continue
