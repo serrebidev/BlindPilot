@@ -102,6 +102,10 @@ class MuseAiWorker(_TurnWorker):
         # left alone.
         self._watcher: Optional[subprocess.Popen] = None
         self._live_status = False
+        # The newest event of any kind in the chat as last read: the message
+        # this turn sends is the first user message past it. -1 until a read
+        # succeeds: with no boundary, no status becomes a row.
+        self._chat_seq = -1
 
     def _check_approvals(self, binary: str) -> None:
         from museai_backend import (
@@ -182,33 +186,67 @@ class MuseAiWorker(_TurnWorker):
         except (OSError, ValueError):
             return
         self._watcher = proc
-        threading.Thread(target=self._read_status, args=(proc, session), daemon=True).start()
+        threading.Thread(
+            target=self._read_status, args=(proc, session, self._chat_seq), daemon=True
+        ).start()
 
-    def _read_status(self, proc: subprocess.Popen, session: str) -> None:
-        said = ""
+    def _read_status(self, proc: subprocess.Popen, session: str, boundary: int = -1) -> None:
+        """`boundary` is the chat's newest event seq read before sending,
+        taken when the watcher starts: later reads in the turn already
+        include the sent message."""
+        said = listed = ""
         # The subscription replays from the start of what the server keeps; a
         # status older than this watcher (less a minute for clock skew) is
         # history, not current work.
         since_ms = (time.time() - STATUS_SKEW_SECONDS) * 1000
+        # Rows are permanent, so they belong to this turn's work only. A sent
+        # message's work starts once the message itself comes through the
+        # stream, the first user message past the chat as read before sending
+        # (a replayed copy of the same words is older); a reply already being
+        # written before then (a job left running after Stop) is not this
+        # turn's. Following sends nothing, so the work under way is the work
+        # being followed.
+        prompt = " ".join((self._prompt or "").split())
+        anchored = not prompt
+        earlier: set[str] = set()
         for line in proc.stdout or ():
             event = _json_from(line) or {}
             raw = event.get("payload")
             body: dict = raw if isinstance(raw, dict) else {}
-            if (event.get("event") or event.get("type")) != "agent.status":
-                continue
-            if body.get("session_id") not in (None, session):
-                continue
+            name = event.get("event") or event.get("type")
             stamped = event.get("ts_ms")
             if isinstance(stamped, (int, float)) and stamped < since_ms:
                 continue
+            if name == "message.user" and not anchored:
+                sent = body.get("content") or body.get("display_text") or ""
+                seq = int(body.get("chat_event_seq") or event.get("seq") or 0)
+                anchored = (
+                    boundary >= 0 and seq > boundary and " ".join(str(sent).split()) == prompt
+                )
+                continue
+            if name != "agent.status":
+                continue
+            if body.get("session_id") not in (None, session):
+                continue
+            reply = str(body.get("message_id") or "")
+            if not anchored and reply:
+                earlier.add(reply)
             text = " ".join(str(body.get("activity_text") or "").split())
             if not text or body.get("activity_code") == "online" or self._settled.is_set():
                 continue
-            text = f"muse.ai {text}" if text.startswith("is ") else f"muse.ai: {text}"
+            generic = text.startswith("is ")
+            text = f"muse.ai {text}" if generic else f"muse.ai: {text}"
             if text != said:
                 said = text
                 self._live_status = True
                 self._on_activity("step", text)
+            # What it is actually doing ("Fetching release") also stays in the
+            # conversation; "is working"/"is responding" would only be noise,
+            # and returning to the same work after one of them is no new step.
+            ours = anchored and reply not in earlier
+            if ours and not generic and text != listed:
+                listed = text
+                self._on_activity("tool", text)
         # The stream ended early, so the step count takes over again.
         self._live_status = False
 
@@ -267,11 +305,15 @@ class MuseAiWorker(_TurnWorker):
         events = (payload or {}).get("chat_events") or []
         found = []
         steps = []
+        newest = 0
         for event in events if isinstance(events, list) else []:
-            if not isinstance(event, dict) or event.get("event_name") != "message.assistant":
+            if not isinstance(event, dict):
                 continue
             raw = event.get("payload")
             body: dict = raw if isinstance(raw, dict) else {}
+            newest = max(newest, int(body.get("seq") or event.get("seq") or 0))
+            if event.get("event_name") != "message.assistant":
+                continue
             steps.append(
                 (
                     int(body.get("seq") or event.get("seq") or 0),
@@ -287,6 +329,8 @@ class MuseAiWorker(_TurnWorker):
             direct = not (body.get("reply_to_message_id") or event.get("reply_to_message_id"))
             found.append((int(seq), message_id, text, direct))
         if code == 0:
+            if isinstance(payload, dict) and isinstance(events, list):
+                self._chat_seq = max(self._chat_seq, newest)
             self._steps = steps
             if steps:
                 self.last_seq = max(self.last_seq, max(seq for seq, _when in steps))
@@ -339,11 +383,11 @@ class MuseAiWorker(_TurnWorker):
             self._follow(binary, session)
             return
         self._on_started()
-        self._start_status(binary, session)
         self._on_activity("tool", "Sent to muse.ai. Waiting for its reply.")
         # Everything the agent says in this chat from here on is part of the
         # turn: its status updates while it works as well as the answer.
         baseline = max((m[0] for m in self._messages(binary, session)), default=0)
+        self._start_status(binary, session)
         if self._cancelled:
             return
         relayed: set[str] = set()

@@ -9,7 +9,6 @@ worker runs it, so nothing reaches the user's real cloud agent.
 from __future__ import annotations
 
 import json
-import time
 from types import SimpleNamespace
 
 import museai_worker
@@ -224,27 +223,48 @@ def test_progress_goes_to_the_status_line_not_the_conversation(monkeypatch):
     assert _said(events) == ["All done."]
 
 
-def _status(code, text, session="chat-9", ts_ms=None):
+def _status(code, text, session="chat-9", ts_ms=None, reply=None):
     payload = {"activity_code": code, "activity_text": text, "session_id": session}
+    if reply:
+        payload["message_id"] = reply
     return json.dumps({"event": "agent.status", "payload": payload, "ts_ms": ts_ms}) + "\n"
+
+
+def _sent(text, seq):
+    event = {"event": "message.user", "payload": {"content": text}, "seq": seq}
+    return json.dumps(event) + "\n"
 
 
 def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypatch):
     """What muse.ai says it is doing ("Fetching release") replaces the step
-    count on the status line. Coming online, repeats, other chats, statuses
-    replayed from before the watcher started, and anything after the turn has
+    count on the status line, and this turn's real work also gets a row in the
+    conversation; "is working"/"is responding" stay on the status line, and
+    going back to the same work after one of them adds no second row.
+
+    Rows are permanent, so they start only once the sent message itself comes
+    through the stream (past the chat as read before sending, so a replayed
+    copy of the same words from a quick retry does not count), and never for a
+    reply that was already being written before it (a job left running after
+    Stop): those reach the status line only. Coming online, other chats,
+    statuses replayed from long before, and anything after the turn has
     settled say nothing."""
     worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
     lines = [
         _status("online", "online"),
-        _status("working", "is working"),
+        _sent("Check the weather in Vancouver", seq=90),
+        _status("working", "Old job", reply="old"),
+        _sent("Something said earlier", seq=101),
+        _sent("Check the weather in   Vancouver", seq=102),
+        _status("working", "is working", reply="new"),
         json.dumps({"event": "task.status", "payload": {"session_id": "chat-9"}}) + "\n",
-        _status("working", "Fetching release"),
-        _status("working", "Fetching release"),
-        _status("working", "Reading mail", session="other-chat"),
-        _status("working", "Yesterday's work", ts_ms=1_000),
-        _status("working", "Just now", ts_ms=time.time() * 1000),
-        _status("responding", "is responding"),
+        _status("working", "Fetching release", reply="new"),
+        _status("working", "Fetching release", reply="new"),
+        _status("working", "Reading mail", session="other-chat", reply="new"),
+        _status("working", "Yesterday's work", ts_ms=1_000, reply="new"),
+        _status("working", "Old job still going", reply="old"),
+        _status("working", "Just now", reply="new"),
+        _status("responding", "is responding", reply="new"),
+        _status("working", "Just now", reply="new"),
     ]
     seen = []
 
@@ -253,15 +273,58 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
         assert worker._live_status
 
     worker._on_activity = on_activity
-    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
+    # A history poll during the turn already sees the sent message; the
+    # boundary taken when the watcher started is what counts.
+    worker._chat_seq = 102
+    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9", 100)
     assert seen == [
+        ("step", "muse.ai: Old job"),
         ("step", "muse.ai is working"),
         ("step", "muse.ai: Fetching release"),
+        ("tool", "muse.ai: Fetching release"),
+        ("step", "muse.ai: Old job still going"),
         ("step", "muse.ai: Just now"),
+        ("tool", "muse.ai: Just now"),
         ("step", "muse.ai is responding"),
+        ("step", "muse.ai: Just now"),
     ]
     assert not worker._live_status
 
     worker._settled.set()
     worker._read_status(SimpleNamespace(stdout=iter([_status("working", "Late")])), "chat-9")
-    assert len(seen) == 4
+    assert len(seen) == 9
+
+
+def test_following_a_running_chat_lists_its_work_without_a_sent_message(monkeypatch):
+    """Following sends nothing, so the work under way is the work followed."""
+    worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
+    worker._prompt = None
+    seen = []
+    worker._on_activity = lambda kind, text: seen.append((kind, text))
+    worker._read_status(SimpleNamespace(stdout=iter([_status("working", "Searching")])), "chat-9")
+    assert seen == [("step", "muse.ai: Searching"), ("tool", "muse.ai: Searching")]
+
+
+def test_without_a_history_boundary_no_status_becomes_a_row(monkeypatch):
+    """If the chat could not be read before sending, a replayed copy of the
+    prompt is indistinguishable from the sent one: the status line still
+    follows the work, but nothing is recorded in the conversation."""
+    worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
+    seen = []
+    worker._on_activity = lambda kind, text: seen.append((kind, text))
+    lines = [_sent("Check the weather in Vancouver", seq=5), _status("working", "Searching")]
+    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
+    assert seen == [("step", "muse.ai: Searching")]
+
+
+def test_unreadable_history_sets_no_boundary(monkeypatch):
+    """A history read that exits cleanly but prints no readable chat is no boundary."""
+    worker, _calls, _events = _worker(monkeypatch, send=None, session_id="chat-9")
+    monkeypatch.setattr(MuseAiWorker, "_run", lambda self, *a, **k: (0, "truncated {", ""))
+    worker._messages("muse-cli", "chat-9")
+    assert worker._chat_seq == -1
+    monkeypatch.setattr(
+        MuseAiWorker, "_run", lambda self, *a, **k: (0, json.dumps({"chat_events": []}), "")
+    )
+    worker._messages("muse-cli", "chat-9")
+    assert worker._chat_seq == 0
