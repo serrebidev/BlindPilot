@@ -53,11 +53,62 @@ def test_current_web_schedule_run_route_is_available_to_upstream_cli(monkeypatch
     from museai_cli_patch import sitecustomize
 
     gateway = SimpleNamespace(ROUTES={}, Gateway=type("Gateway", (), {}))
+    cli = SimpleNamespace(cmd_watch=None)
     monkeypatch.setattr(sitecustomize, "version", lambda _name: "0.3.2")
-    monkeypatch.setitem(sys.modules, "muse_cli", SimpleNamespace(gateway=gateway))
+    monkeypatch.setitem(sys.modules, "muse_cli", SimpleNamespace(gateway=gateway, cli=cli))
     sitecustomize.install()
     assert gateway.ROUTES["tasks.run"] == {
         "method": "tasks.run",
         "http": "POST",
         "path": "/tasks/{job_id}/run",
     }
+
+
+def _frame(stream, kind, data, end=False):
+    part = SimpleNamespace(body=data, data=data, end_body=end)
+    return SimpleNamespace(stream_id=stream, WhichOneof=lambda _k: kind, **{kind: part})
+
+
+def test_watch_streams_a_chats_live_status_the_way_the_web_client_subscribes(monkeypatch, capsys):
+    """muse-cli 0.3.2's watch never sees a side chat's live status (it sends
+    capabilities as an object and no session), and prints nothing until it
+    ends. With BLINDPILOT_MUSEAI_WATCH set it subscribes to that chat as the web
+    client does and prints each event line as soon as it is whole."""
+    import sys
+    from museai_cli_patch import sitecustomize
+
+    opened = []
+    frames = iter(
+        [
+            _frame(1, "response", b'{"event":"agent.status"}\n{"event":'),
+            _frame(2, "body_chunk", b'{"event":"other stream"}\n'),
+            _frame(1, "body_chunk", b'"task.status"}\n', end=True),
+        ]
+    )
+    gw = SimpleNamespace(
+        _open=lambda method, body: opened.append((method, body)) or 1,
+        _read_frame=lambda: next(frames),
+        close=lambda: opened.append("closed"),
+    )
+    plain = []
+    cli = SimpleNamespace(cmd_watch=plain.append, connect=lambda _cfg: gw, load_config=dict)
+    gateway = SimpleNamespace(ROUTES={}, Gateway=type("Gateway", (), {}))
+    monkeypatch.setattr(sitecustomize, "version", lambda _name: "0.3.2")
+    monkeypatch.setitem(sys.modules, "muse_cli", SimpleNamespace(gateway=gateway, cli=cli))
+    sitecustomize.install()
+
+    monkeypatch.delenv("BLINDPILOT_MUSEAI_WATCH", raising=False)
+    cli.cmd_watch("args")
+    assert plain == ["args"] and opened == []
+
+    monkeypatch.setenv("BLINDPILOT_MUSEAI_WATCH", "chat-7")
+    cli.cmd_watch("args")
+    method, body = opened[0]
+    assert method == "chat.subscribe"
+    assert body["session_id"] == "chat-7"
+    assert isinstance(body["capabilities"], list)
+    assert opened[-1] == "closed"
+    assert capsys.readouterr().out.splitlines() == [
+        '{"event":"agent.status"}',
+        '{"event":"task.status"}',
+    ]
