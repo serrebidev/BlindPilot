@@ -326,7 +326,8 @@ class MuseAiWorker(_TurnWorker):
             direct = not (body.get("reply_to_message_id") or event.get("reply_to_message_id"))
             found.append((int(seq), message_id, text, direct))
         if code == 0:
-            self._chat_seq = max(self._chat_seq, newest)
+            if isinstance(payload, dict) and isinstance(events, list):
+                self._chat_seq = max(self._chat_seq, newest)
             self._steps = steps
             if steps:
                 self.last_seq = max(self.last_seq, max(seq for seq, _when in steps))

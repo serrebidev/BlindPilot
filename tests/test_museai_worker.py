@@ -313,3 +313,16 @@ def test_without_a_history_boundary_no_status_becomes_a_row(monkeypatch):
     lines = [_sent("Check the weather in Vancouver", seq=5), _status("working", "Searching")]
     worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
     assert seen == [("step", "muse.ai: Searching")]
+
+
+def test_unreadable_history_sets_no_boundary(monkeypatch):
+    """A history read that exits cleanly but prints no readable chat is no boundary."""
+    worker, _calls, _events = _worker(monkeypatch, send=None, session_id="chat-9")
+    monkeypatch.setattr(MuseAiWorker, "_run", lambda self, *a, **k: (0, "truncated {", ""))
+    worker._messages("muse-cli", "chat-9")
+    assert worker._chat_seq == -1
+    monkeypatch.setattr(
+        MuseAiWorker, "_run", lambda self, *a, **k: (0, json.dumps({"chat_events": []}), "")
+    )
+    worker._messages("muse-cli", "chat-9")
+    assert worker._chat_seq == 0
