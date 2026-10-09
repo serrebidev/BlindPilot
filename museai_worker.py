@@ -189,19 +189,34 @@ class MuseAiWorker(_TurnWorker):
         # The subscription replays from the start of what the server keeps; a
         # status older than this watcher (less a minute for clock skew) is
         # history, not current work.
-        started_ms = time.time() * 1000
-        since_ms = started_ms - STATUS_SKEW_SECONDS * 1000
+        since_ms = (time.time() - STATUS_SKEW_SECONDS) * 1000
+        # Rows are permanent, so they belong to this turn's work only. A sent
+        # message's work starts once the message itself comes through the
+        # stream; a reply already being written before then (a job left
+        # running after Stop) is not this turn's. Following sends nothing, so
+        # the work under way is the work being followed.
+        prompt = " ".join((self._prompt or "").split())
+        anchored = not prompt
+        earlier: set[str] = set()
         for line in proc.stdout or ():
             event = _json_from(line) or {}
             raw = event.get("payload")
             body: dict = raw if isinstance(raw, dict) else {}
-            if (event.get("event") or event.get("type")) != "agent.status":
-                continue
-            if body.get("session_id") not in (None, session):
-                continue
+            name = event.get("event") or event.get("type")
             stamped = event.get("ts_ms")
             if isinstance(stamped, (int, float)) and stamped < since_ms:
                 continue
+            if name == "message.user" and not anchored:
+                sent = body.get("content") or body.get("display_text") or ""
+                anchored = " ".join(str(sent).split()) == prompt
+                continue
+            if name != "agent.status":
+                continue
+            if body.get("session_id") not in (None, session):
+                continue
+            reply = str(body.get("message_id") or "")
+            if not anchored and reply:
+                earlier.add(reply)
             text = " ".join(str(body.get("activity_text") or "").split())
             if not text or body.get("activity_code") == "online" or self._settled.is_set():
                 continue
@@ -214,14 +229,8 @@ class MuseAiWorker(_TurnWorker):
             # What it is actually doing ("Fetching release") also stays in the
             # conversation; "is working"/"is responding" would only be noise,
             # and returning to the same work after one of them is no new step.
-            # A row is permanent, so only a status stamped since this watcher
-            # started gets one: the skew allowance above could let a previous
-            # turn's last step in.
-            # ponytail: a PC clock running ahead loses rows for that many
-            # seconds (the status line still shows them); key on the turn's
-            # message id if that ever matters.
-            fresh = isinstance(stamped, (int, float)) and stamped >= started_ms
-            if fresh and not generic and text != listed:
+            ours = anchored and reply not in earlier
+            if ours and not generic and text != listed:
                 listed = text
                 self._on_activity("tool", text)
         # The stream ended early, so the step count takes over again.
