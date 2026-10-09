@@ -9,6 +9,7 @@ worker runs it, so nothing reaches the user's real cloud agent.
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import museai_worker
@@ -230,8 +231,8 @@ def _status(code, text, session="chat-9", ts_ms=None, reply=None):
     return json.dumps({"event": "agent.status", "payload": payload, "ts_ms": ts_ms}) + "\n"
 
 
-def _sent(text, seq):
-    event = {"event": "message.user", "payload": {"content": text}, "seq": seq}
+def _sent(text, seq, ts_ms=None):
+    event = {"event": "message.user", "payload": {"content": text}, "seq": seq, "ts_ms": ts_ms}
     return json.dumps(event) + "\n"
 
 
@@ -241,30 +242,34 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
     conversation; "is working"/"is responding" stay on the status line, and
     going back to the same work after one of them adds no second row.
 
-    Rows are permanent, so they start only once the sent message itself comes
-    through the stream (past the chat as read before sending, so a replayed
-    copy of the same words from a quick retry does not count), and never for a
-    reply that was already being written before it (a job left running after
-    Stop): those reach the status line only. Coming online, other chats,
-    statuses replayed from long before, and anything after the turn has
-    settled say nothing."""
+    Rows are permanent, so they belong to the sent message's reply only: the
+    message is recognised when it comes through the stream past the chat as
+    read before sending (a replayed copy of the same words from a quick retry
+    does not count), and a reply already being written before it (a job left
+    running after Stop) reaches the status line only. The stream is not in
+    order: the reply's first steps can arrive before the message's own echo,
+    and they become rows once it does. Coming online, other chats, statuses
+    replayed from long before, and anything after the turn has settled say
+    nothing."""
     worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
+    now = time.time() * 1000
     lines = [
-        _status("online", "online"),
-        _sent("Check the weather in Vancouver", seq=90),
-        _status("working", "Old job", reply="old"),
-        _sent("Something said earlier", seq=101),
-        _sent("Check the weather in   Vancouver", seq=102),
-        _status("working", "is working", reply="new"),
+        _status("online", "online", ts_ms=now - 30_000),
+        _sent("Check the weather in Vancouver", seq=90, ts_ms=now - 20_000),
+        _status("working", "Old job", reply="old", ts_ms=now - 10_000),
+        _sent("Something said earlier", seq=101, ts_ms=now - 5_000),
+        # The reply starts before the sent message's echo arrives.
+        _status("working", "is working", reply="new", ts_ms=now + 100),
+        _status("working", "Fetching release", reply="new", ts_ms=now + 200),
+        _sent("Check the weather in   Vancouver", seq=102, ts_ms=now),
         json.dumps({"event": "task.status", "payload": {"session_id": "chat-9"}}) + "\n",
-        _status("working", "Fetching release", reply="new"),
-        _status("working", "Fetching release", reply="new"),
-        _status("working", "Reading mail", session="other-chat", reply="new"),
+        _status("working", "Fetching release", reply="new", ts_ms=now + 300),
+        _status("working", "Reading mail", session="other-chat", reply="new", ts_ms=now + 400),
         _status("working", "Yesterday's work", ts_ms=1_000, reply="new"),
-        _status("working", "Old job still going", reply="old"),
-        _status("working", "Just now", reply="new"),
-        _status("responding", "is responding", reply="new"),
-        _status("working", "Just now", reply="new"),
+        _status("working", "Old job still going", reply="old", ts_ms=now + 500),
+        _status("working", "Just now", reply="new", ts_ms=now + 600),
+        _status("responding", "is responding", reply="new", ts_ms=now + 700),
+        _status("working", "Just now", reply="new", ts_ms=now + 800),
     ]
     seen = []
 
@@ -328,3 +333,114 @@ def test_unreadable_history_sets_no_boundary(monkeypatch):
     )
     worker._messages("muse-cli", "chat-9")
     assert worker._chat_seq == 0
+
+
+def _activity_event(agent, actions, subtitle="Running uname", status_title="Running commands"):
+    """An `activity.updated` line shaped like the live ones (2026-10-09)."""
+    payload = {
+        "message_id": "activity_thread:t1",
+        "status_title": status_title,
+        "subtitle": subtitle,
+        "timestamp": "2099-01-01T00:00:00Z",
+        "title": "Run system check",
+        "details": {
+            "activity_thread_agent_id": agent,
+            "goal": {"id": "activity_thread:t1", "name": "Run system check"},
+            "goal_actions": actions,
+        },
+    }
+    return json.dumps({"event": "activity.updated", "payload": payload}) + "\n"
+
+
+def _action(status, report, title="Deleted /w/bp-test.txt"):
+    return {"id": "call-1", "kind": "tool_call", "status": status, "report": report, "title": title}
+
+
+def test_live_activity_says_the_task_and_each_command_as_it_happens(monkeypatch):
+    """The Activity feed repeats the whole task on every change; each task,
+    step and command is said once, as it starts and as it finishes. Another
+    chat's agent's work stays out."""
+    worker, _calls, _events = _worker(monkeypatch, send=None, session_id="chat-9")
+    worker._prompt = None
+    seen = []
+    worker._on_activity = lambda kind, text: seen.append((kind, text))
+    agent_line = json.dumps(
+        {"event": "task.status", "payload": {"session_id": "chat-9", "agent_id": "a9"}}
+    )
+    lines = [
+        agent_line + "\n",
+        _activity_event("other-agent", [_action("RUNNING", "Running `rm -rf /elsewhere`")]),
+        _activity_event("a9", []),
+        _activity_event("a9", [_action("RUNNING", "Running `rm -f /w/bp-test.txt`")]),
+        _activity_event("a9", [_action("RUNNING", "Running `rm -f /w/bp-test.txt`")]),
+        _activity_event(
+            "a9",
+            [_action("SUCCESS", "Executed `rm -f /w/bp-test.txt` in `/home`.")],
+            status_title="Finished activity",
+        ),
+        _activity_event("a9", [_action("SUCCESS", "Executed it.")]),
+        # A call first seen finished names its command once, then stays quiet.
+        _activity_event(
+            "a9", [{**_action("SUCCESS", "Executed `df -h /`.", "Checked disk"), "id": "call-2"}]
+        ),
+        _activity_event(
+            "a9", [{**_action("SUCCESS", "Executed it.", "Checked disk"), "id": "call-2"}]
+        ),
+    ]
+    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
+    assert [text for kind, text in seen if kind == "tool"] == [
+        "muse.ai started a task: Run system check",
+        "muse.ai: Running uname",
+        "muse.ai is running rm -f /w/bp-test.txt",
+        "muse.ai: Deleted /w/bp-test.txt",
+        "muse.ai: Checked disk. Ran df -h /",
+    ]
+
+
+def test_a_finished_message_arrives_at_once_and_only_once(monkeypatch):
+    """A status message the agent finishes goes into the conversation from the
+    live stream, without waiting for a history read; the history read that
+    sees it later does not say it again, and nothing from before the turn is
+    said at all."""
+    worker, _calls, _events = _worker(monkeypatch, send=None, session_id="chat-9")
+    worker._prompt = None
+    worker._baseline = 50
+    said = []
+    worker._on_activity = lambda kind, text: said.append((kind, text))
+
+    def done(seq, text):
+        transcript = {"messages": [{"content": [{"type": "text", "text": text}]}]}
+        body = {
+            "message_id": f"m{seq}",
+            "message_seq": seq,
+            "session_id": "chat-9",
+            "status": "completed",
+            "transcript": transcript,
+        }
+        return json.dumps({"event": "delta.message_done", "payload": body}) + "\n"
+
+    lines = [
+        done(40, "Old answer"),
+        done(51, "## Status\n\nChecking ports."),
+        done(52, "Connected"),
+    ]
+    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
+    assert said == [("assistant", "## Status\n\nChecking ports.")]
+    assert not worker._relay(51, "m51", "## Status\n\nChecking ports.")
+
+
+def test_a_turn_says_connecting_and_connected_before_it_sends(monkeypatch):
+    worker, _calls, events = _worker(
+        monkeypatch,
+        send=(0, json.dumps({"sent": True, "reply": {"text": "Done", "message_id": "m9"}}), ""),
+        histories=[[], [_event(9, "Done")]],
+        session_id="chat-9",
+    )
+    worker.run()
+    rows = [e[2] for e in events if e[0] == "activity" and e[1] == "tool"]
+    assert rows[:3] == [
+        "Connecting to muse.ai.",
+        "Connected to muse.ai.",
+        "Sent to muse.ai. Waiting for its reply.",
+    ]
+    assert _said(events) == ["Done"]

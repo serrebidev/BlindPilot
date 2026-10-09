@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.1 - 2026-10-10
+
+- muse.ai: the conversation now shows what muse.ai is actually doing, as it happens. BlindPilot follows muse.ai's live Activity feed alongside the chat, so each task it starts ("muse.ai started a task: Check disk and uptime"), what it says it is doing in it, and every tool call (the command it runs, the file it writes or deletes) becomes a row the moment muse.ai reports it, with the command named. Only work by the conversation's own chat agent is shown. A turn also says "Connecting to muse.ai." and "Connected to muse.ai." before it sends.
+- muse.ai: steps such as "muse.ai: Verifying ports" stopped reaching the conversation. muse.ai's live stream does not arrive in order, and when the reply's first status beat the echo of the sent message, the reply was taken for older work and none of its steps were kept. A reply now counts as the turn's when its first status is stamped after the message was sent, and steps that arrive early wait for the echo.
+- muse.ai: status messages the agent posts while it works ("## Status ...") reach the conversation the moment they are finished, from the live stream, instead of on the next history read a few seconds later. A message is never shown twice, whichever source sees it first.
+
 ## v0.43.0 - 2026-10-09
 
 - Claude Code: when a turn reports that one of your plan's limits (five-hour, weekly, or a model's weekly) has passed its warning level or been reached, BlindPilot says so once, in every narration mode, with how full it is and when it resets ("Claude Code Weekly limit: 92% used, resets Mon 12 Oct 14:00 (in 2 days 22 hours)."). It is said again only for a new window or when the limit is reached. Before, the figures were only in Session Status, so a limit could run out mid-task with no warning.

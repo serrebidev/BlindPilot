@@ -70,13 +70,16 @@ def install():
     # side chat's live status, and prints nothing until it ends. With
     # BLINDPILOT_MUSEAI_WATCH set to a chat id, subscribe the way the web
     # client does and stream each event as one JSON line while the agent works.
+    # The web client's Activity panel is a second subscription on the same
+    # connection: `activity.updated` carries each task and every tool call in
+    # it (the command run, the file written) as it happens.
     def watch(args):
         session = os.environ.get("BLINDPILOT_MUSEAI_WATCH")
         if not session:
             return plain_watch(args)
         gw = cli.connect(cli.load_config())
         try:
-            stream = gw._open(
+            chat = gw._open(
                 "chat.subscribe",
                 body={
                     "after_stream_seq": 0,
@@ -85,22 +88,33 @@ def install():
                     "session_id": session,
                 },
             )
-            buf = b""
+            streams = {chat}
+            try:
+                streams.add(
+                    gw._open("activity.subscribe", body={"capabilities": ["ACTIVITY_FEED_GOALS"]})
+                )
+            except Exception:
+                pass
+            bufs = {}
             while True:
                 frame = gw._read_frame()
-                if frame.stream_id != stream:
+                if frame.stream_id not in streams:
                     continue
                 kind = frame.WhichOneof("kind")
                 if kind == "reset":
-                    return None
+                    if frame.stream_id == chat:
+                        return None
+                    streams.discard(frame.stream_id)
+                    continue
                 part = frame.response if kind == "response" else frame.body_chunk
+                buf = bufs.get(frame.stream_id, b"")
                 buf += bytes(part.body if kind == "response" else part.data)
-                *lines, buf = buf.split(b"\n")
+                *lines, bufs[frame.stream_id] = buf.split(b"\n")
                 for line in lines:
                     if line.strip():
                         sys.stdout.write(line.decode("utf-8", "replace") + "\n")
                 sys.stdout.flush()
-                if part.end_body:
+                if part.end_body and frame.stream_id == chat:
                     return None
         finally:
             gw.close()
