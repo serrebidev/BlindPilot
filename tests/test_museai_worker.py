@@ -9,7 +9,6 @@ worker runs it, so nothing reaches the user's real cloud agent.
 from __future__ import annotations
 
 import json
-import time
 from types import SimpleNamespace
 
 import museai_worker
@@ -224,34 +223,45 @@ def test_progress_goes_to_the_status_line_not_the_conversation(monkeypatch):
     assert _said(events) == ["All done."]
 
 
-def _status(code, text, session="chat-9", ts_ms=None):
+def _status(code, text, session="chat-9", ts_ms=None, reply=None):
     payload = {"activity_code": code, "activity_text": text, "session_id": session}
+    if reply:
+        payload["message_id"] = reply
     return json.dumps({"event": "agent.status", "payload": payload, "ts_ms": ts_ms}) + "\n"
+
+
+def _sent(text, ts_ms=None):
+    event = {"event": "message.user", "payload": {"content": text}, "ts_ms": ts_ms}
+    return json.dumps(event) + "\n"
 
 
 def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypatch):
     """What muse.ai says it is doing ("Fetching release") replaces the step
-    count on the status line, and real work also gets a row in the
+    count on the status line, and this turn's real work also gets a row in the
     conversation; "is working"/"is responding" stay on the status line, and
-    going back to the same work after one of them adds no second row. Only a
-    status stamped since the watcher started gets a row: the previous turn's
-    last step, a few seconds old, may reach the status line but never the
-    conversation. Coming online, repeats, other chats, statuses replayed from
-    long before, and anything after the turn has settled say nothing."""
+    going back to the same work after one of them adds no second row.
+
+    Rows are permanent, so they start only once the sent message itself comes
+    through the stream, and never for a reply that was already being written
+    before it (a job left running after Stop): those reach the status line
+    only. Coming online, other chats, statuses replayed from long before, and
+    anything after the turn has settled say nothing."""
     worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
-    now = time.time() * 1000
     lines = [
-        _status("online", "online", ts_ms=now + 1),
-        _status("working", "Last turn's step", ts_ms=now - 5_000),
-        _status("working", "is working", ts_ms=now + 1),
+        _status("online", "online"),
+        _status("working", "Old job", reply="old"),
+        _sent("Something said earlier"),
+        _sent("Check the weather in   Vancouver"),
+        _status("working", "is working", reply="new"),
         json.dumps({"event": "task.status", "payload": {"session_id": "chat-9"}}) + "\n",
-        _status("working", "Fetching release", ts_ms=now + 2),
-        _status("working", "Fetching release", ts_ms=now + 3),
-        _status("working", "Reading mail", session="other-chat", ts_ms=now + 4),
-        _status("working", "Yesterday's work", ts_ms=1_000),
-        _status("working", "Just now", ts_ms=now + 5),
-        _status("responding", "is responding", ts_ms=now + 6),
-        _status("working", "Just now", ts_ms=now + 7),
+        _status("working", "Fetching release", reply="new"),
+        _status("working", "Fetching release", reply="new"),
+        _status("working", "Reading mail", session="other-chat", reply="new"),
+        _status("working", "Yesterday's work", ts_ms=1_000, reply="new"),
+        _status("working", "Old job still going", reply="old"),
+        _status("working", "Just now", reply="new"),
+        _status("responding", "is responding", reply="new"),
+        _status("working", "Just now", reply="new"),
     ]
     seen = []
 
@@ -262,10 +272,11 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
     worker._on_activity = on_activity
     worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
     assert seen == [
-        ("step", "muse.ai: Last turn's step"),
+        ("step", "muse.ai: Old job"),
         ("step", "muse.ai is working"),
         ("step", "muse.ai: Fetching release"),
         ("tool", "muse.ai: Fetching release"),
+        ("step", "muse.ai: Old job still going"),
         ("step", "muse.ai: Just now"),
         ("tool", "muse.ai: Just now"),
         ("step", "muse.ai is responding"),
@@ -274,6 +285,15 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
     assert not worker._live_status
 
     worker._settled.set()
-    late = _status("working", "Late", ts_ms=time.time() * 1000 + 1_000)
-    worker._read_status(SimpleNamespace(stdout=iter([late])), "chat-9")
-    assert len(seen) == 8
+    worker._read_status(SimpleNamespace(stdout=iter([_status("working", "Late")])), "chat-9")
+    assert len(seen) == 9
+
+
+def test_following_a_running_chat_lists_its_work_without_a_sent_message(monkeypatch):
+    """Following sends nothing, so the work under way is the work followed."""
+    worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
+    worker._prompt = None
+    seen = []
+    worker._on_activity = lambda kind, text: seen.append((kind, text))
+    worker._read_status(SimpleNamespace(stdout=iter([_status("working", "Searching")])), "chat-9")
+    assert seen == [("step", "muse.ai: Searching"), ("tool", "muse.ai: Searching")]
