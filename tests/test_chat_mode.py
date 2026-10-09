@@ -178,7 +178,10 @@ def test_agent_only_commands_are_greyed_out_in_chat_mode(monkeypatch, tmp_path):
         assert all(item.IsEnabled() for item in frame._agent_menu_items)
 
         frame._set_app_mode(blindpilot_app.APP_MODE_CHAT)
-        assert not any(item.IsEnabled() for item in frame._agent_menu_items)
+        # The muse.ai submenu sits out of the Model menu until a muse.ai tab
+        # needs it, and is set as it goes back in; wxGTK cannot enable it while out.
+        shown = [i for i in frame._agent_menu_items if i in i.GetMenu().GetMenuItems()]
+        assert not any(item.IsEnabled() for item in shown)
         assert not frame._compact_item.IsEnabled()
         assert not frame._connect_item.IsEnabled()
 
