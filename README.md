@@ -1,61 +1,81 @@
 # BlindPilot
 
-A screen-reader-first desktop front end for AI coding CLIs. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, muse.ai, Command Code, Gemini CLI, and Antigravity CLI in native wxPython windows, so NVDA, JAWS, and VoiceOver read controls instead of a terminal. It runs on Windows, macOS, and Linux. Linux is the least tested of the three.
+A screen-reader-first desktop app for AI coding agents. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, muse.ai, Command Code, Gemini CLI, and Antigravity CLI in normal windows, so NVDA, JAWS, and VoiceOver read real buttons, lists and edit boxes instead of a terminal. It runs on Windows, macOS, and Linux. Linux gets the least testing of the three.
 
 [![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-Questions, bugs, and release news go to the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects). Bug reports and feature requests also go in [Issues](https://github.com/serrebidev/BlindPilot/issues).
+**Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects). That's the fastest way to reach me. Bug reports and feature requests can also go in [Issues](https://github.com/serrebidev/BlindPilot/issues).
 
-BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubletaponair/claude-code-reader) by doubletaponair and keeps its accessibility design. See [CREDITS.md](CREDITS.md).
+## Why this exists
+
+Coding agents live in terminals, and terminals are miserable with a screen reader. Output scrolls past, the screen redraws under you, and you can't tell if the thing is working, stuck, or waiting on you. BlindPilot puts the agent in a window your screen reader understands. Every answer is a list you can arrow through, and it tells you when something happens.
+
+BlindPilot is vibe-coded. I use it every day. It started as a fork of [Claude Code Reader](https://github.com/doubletaponair/claude-code-reader) by doubletaponair, and it keeps that app's accessibility design. See [CREDITS.md](CREDITS.md).
 
 ## What it does
 
-- Runs ten coding agents, picked per tab from Model, Backend, which lists them alphabetically. New tabs start on the backend of the tab you are in, and the choice is remembered. Once your tabs use more than one backend, each tab's name, its prompt, the announcement when you switch to it, and the pitch of its send sound all say which backend it sends to.
-- Runs every backend in Bypass permissions mode by default, so a task does not stop to ask for approval. Change this under Model, Permission Mode.
-- Splits every answer into rows you can arrow through, one per heading, paragraph, list item, quote, code block, thought, tool call, and tool result.
-- Reads answers aloud as they stream, or stays silent until the whole answer is in.
-- Reads your message back as it is sent ("Sent: fix the build"), so dictated or pasted text is heard; long messages are cut short and code blocks left out. Turn it off in Preferences.
-- Speaks every step of a run, or only your message, the answer, and status changes. See Narration below.
-- Reopens past conversations from any backend and continues them. Compacts a long one in place.
-- Runs several sessions at once, one tab each, with its own folder, model, and permission mode.
-- Answers the multiple-choice questions a backend stops to ask, in one dialog with radio buttons, checkboxes, and an Other box.
-- Lets you steer a running task with a new message, or stop it and keep what it produced. Stop also stops the subagents the task started.
-- Lists the subagents a task has running, and shows what each one is doing.
-- Attaches files and pasted images.
-- Keeps a library of messages you send often, by name, to put in the prompt with one keystroke.
-- Searches responses and copies a code block, a response, or the whole conversation, or exports the conversation as Markdown, a web page, or plain text.
-- Lists the models and effort levels the installed CLI reports.
-- Says once, as it happens, when a Claude Code plan limit (five-hour or weekly) passes its warning level or is reached, with how full it is and when it resets.
-- Plays optional sounds for sent, working, received, and failed.
-- Shows a system notification when a turn finishes, fails, or asks you something while BlindPilot is in the background; choosing it brings that tab forward. Turn it off in Preferences.
-- Installs, updates, adds to PATH, and signs in to any backend from a wizard.
-- Has a Chat mode that talks to a provider API directly with no agent and no file access.
-- Drives a Hermes on another computer over the network.
-- Updates itself from GitHub Releases after checking the published SHA-256.
-- Logs what it did, never what you or the model said.
+- Runs ten coding agents. Pick one per tab under Model, Backend. New tabs start on whatever agent the tab you're in uses. If your tabs use different agents, each tab's name, its prompt, and its send sound tell you which one you're talking to.
+- Doesn't stop to ask permission for every little thing. Every agent runs in Bypass permissions mode out of the box. If you want to approve things yourself, change it under Model, Permission Mode.
+- Splits every answer into rows: one per heading, paragraph, list item, quote, code block, thought, and tool step. Arrow through them like any list.
+- Reads answers out as they arrive, or stays quiet until the whole answer is in. Your choice.
+- Reads your message back when you send it ("Sent: fix the build"), so you know what dictation or a paste actually sent. Turn it off in Preferences.
+- Speaks every step the agent takes, or just your message, the answer, and anything important. See Narration below.
+- Reopens old conversations from any agent so you can keep going. Shrinks a long one so the agent has room to carry on.
+- Runs several conversations at once, one tab each, each with its own folder, model, and permission mode.
+- When the agent asks you a multiple-choice question, you get a normal dialog with radio buttons, checkboxes, and an Other box.
+- Lets you redirect a running task with a new message, or stop it and keep what it did. Stop also stops any helper agents it started.
+- Shows the helper agents (subagents) a task has running, and what each one is doing.
+- Attaches files and pasted pictures.
+- Keeps a list of messages you send all the time, by name, so you can drop one into the prompt with one key.
+- Searches answers. Copies a code block, an answer, or the whole conversation. Saves a conversation as Markdown, a web page, or plain text.
+- Lists the models and effort levels each agent offers.
+- Warns you once when a Claude Code plan limit (five-hour or weekly) is getting close or has run out, with how full it is and when it resets.
+- Plays sounds for sent, working, answered, and failed, if you want them.
+- Pops up a system notification when a task finishes, fails, or needs you while BlindPilot is in the background. Choosing it takes you to that tab. Turn it off in Preferences.
+- Installs, updates, and signs in to any agent from a setup wizard. No admin rights needed.
+- Has a Chat mode that talks to an AI service directly. No agent, no access to your files.
+- Can drive a Hermes running on another computer.
+- Updates itself, and checks the download is the real one before installing.
+- Keeps a log of what it did. Never what you or the AI said.
 
-## Install
+## Download and install
 
-Downloads are on the [Releases page](https://github.com/serrebidev/BlindPilot/releases). Version history is in [CHANGELOG.md](CHANGELOG.md).
+Get the latest build from the [Releases page](https://github.com/serrebidev/BlindPilot/releases). What changed in each version is in the [changelog](CHANGELOG.md).
 
-Windows installer. Download `BlindPilot-Setup-x64.exe` and run it. It installs per user with no administrator prompt, adds a Start Menu entry, and closes a running copy before replacing it.
+**Windows installer (recommended)**
 
-Windows portable. Download `BlindPilot-Windows-x64.zip`, extract it anywhere, run `BlindPilot.exe`.
+1. Download `BlindPilot-Setup-x64.exe`.
+2. Run it. It installs just for you, so there's no admin prompt. It adds a Start Menu entry, and closes BlindPilot first if it's running.
 
-macOS. Download `BlindPilot-macOS-arm64.zip`; BlindPilot is built for Apple Silicon Macs only. The builds are ad-hoc signed and not notarized, so the first launch may need approval in System Settings, Privacy & Security.
+**Windows portable**
 
-Linux. There is no packaged build. Run from source as described below.
+1. Download `BlindPilot-Windows-x64.zip`.
+2. Unzip it anywhere and run `BlindPilot.exe`.
 
-Only one copy runs at a time. On Windows, starting BlindPilot again brings the running one to the front, setup wizard included; on Linux, and on macOS when run from source, the second copy says BlindPilot is already running and closes.
+**macOS**
 
-Settings live in `%APPDATA%\BlindPilot\config.json` on Windows, `~/Library/Application Support/BlindPilot` on macOS, and `~/.config/blindpilot` on Linux. On macOS, settings from an older version are moved to the new folder once; nothing already there is overwritten. An existing Claude Code Reader configuration is imported once and never modified.
+Download `BlindPilot-macOS-arm64.zip`. It's Apple Silicon Macs only. The app isn't notarized by Apple, so the first time you open it you may have to allow it in System Settings, Privacy & Security.
 
-## Set up a backend
+**Linux**
 
-The first-run wizard and Model, Manage Backends find, install, update, and sign in to any of the ten backends. Claude Code, Hermes, Muse Code, and Antigravity CLI use their own installers; on Windows, Muse Code is installed and run inside WSL. muse.ai's client, muse-cli, is a Python package installed with uv, or with pip when uv is missing. Codex, FreeBuff, opencode, Command Code, and Gemini CLI come from npm; BlindPilot installs Node.js LTS if npm is missing, installs the CLI into a per-user folder, adds it to PATH, and checks that it starts. No administrator rights are needed.
+There's no ready-made build. Run it from source; see the developer section at the bottom.
 
-To do it by hand:
+Only one copy runs at a time. Start it again on Windows and it brings the open one to the front.
+
+Your settings are kept in `%APPDATA%\BlindPilot` on Windows, `~/Library/Application Support/BlindPilot` on macOS, and `~/.config/blindpilot` on Linux. If you used Claude Code Reader before, its settings are copied over once and left alone.
+
+## Set up an agent
+
+The first time you run BlindPilot, a wizard walks you through it. You can get back to it any time from Model, Manage Backends. It finds, installs, updates, and signs in to any of the ten backends. If an agent needs Node.js and you don't have it, the wizard installs that too. Nothing needs admin rights.
+
+Sign In runs the agent's own sign-in, reads out the web address, and opens your browser. If the site gives you a code, BlindPilot asks for it and passes it on. Hermes asks its setup questions in a terminal, so for Hermes, Sign In opens a terminal window. Answer the questions there, then choose Already Signed In.
+
+Gemini CLI and Antigravity CLI sign in with your Google account. Sign In opens them in a terminal window and starts Google's sign-in in your browser. In Gemini CLI, choose Sign in with Google if it asks. The wizard notices when you're signed in and moves on, then you can close the terminal. Heads up: Google stopped letting personal Google accounts use Gemini CLI on 18 June 2026, so a personal account may be refused. Work accounts on Gemini Code Assist Standard or Enterprise still work.
+
+opencode needs an AI provider hooked up to it. Use Model, Connect a Provider, or type `/connect`. Pick a provider, then paste a key or sign in through your browser.
+
+Rather use a terminal? To do it by hand:
 
 ```powershell
 # Claude Code
@@ -100,67 +120,179 @@ hermes status     # shows the provider and model it will use
 hermes model      # pick one, if none is set yet
 ```
 
-Sign In in the wizard runs the backend's own login, reads the sign-in address from its output, speaks it, and opens your browser. Open Sign-in Page opens it again. If the provider hands back a code, BlindPilot asks for it and passes it to the CLI. Hermes is different. Its setup asks questions interactively, so Sign In opens a real terminal window for it. Answer the questions there, then choose Already Signed In.
+Type `/status`, or use Model, Session Status, to hear which agent and model you're on, the permission mode, the folder, whether your next message carries on this conversation, how full the conversation is, and which account you're signed in as. When a conversation gets past 80% full, BlindPilot tells you once and suggests Compact Conversation.
 
-Gemini CLI and Antigravity CLI sign in with your Google account. Sign In opens the CLI in a terminal window (Gemini CLI in its screen-reader mode), and the CLI starts Google's sign-in in your browser; in Gemini CLI, choose Sign in with Google if it asks how to sign in. The wizard checks every few seconds and moves on by itself once the CLI reports you signed in, after which you can close the terminal. API keys are only for Chat mode: agent mode never hands either CLI a key. Google stopped serving Gemini CLI to personal Google accounts on 18 June 2026, so a personal account may be refused there; Gemini Code Assist Standard and Enterprise accounts, and any sign-in you set up in Gemini CLI yourself, keep working.
+## Using it
 
-opencode needs a provider connected to it. Use Model, Connect a Provider, or type `/connect`, or use the wizard. Pick a provider, then paste a key or sign in through the browser.
+The window has three parts: the tabs, the answers, and the prompt. F6 and Shift+F6 move between them, and read the status bar on the way past.
 
-Type `/status` (or Model, Session Status) to hear the backend, model and effort, permission mode, folder, whether the next message continues this conversation, how full its context is (Claude Code and Codex report it), and which account the backend is signed in as. Past 80% full, BlindPilot says so once and suggests Compact Conversation.
+Type in the prompt and press Enter to send. Shift+Enter starts a new line. Ctrl+Up takes you into the newest answer. Arrow through it, and press Tab to get back to the prompt.
 
-## Menus
+Everything is in the menu bar, so if you forget a key, it's there.
 
-Every action is in the menu bar except a few chords. Ctrl+L focuses the prompt, Ctrl+1 to Ctrl+9 jump to a tab, Ctrl+Shift+M cycles permission modes, and F6 and Shift+F6 move between the parts of the window.
+- **File:** New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, only when Hermes is the agent), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
+- **Conversation:** Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
+- **Model:** Backend, Model and Effort (Ctrl+Shift+E), Permission Mode, Session Status, Turn Status (Ctrl+Shift+T), Changed Files (Ctrl+Shift+D), What Agents Know (Ctrl+Shift+I), Backend Settings, Manage Backends, Connect a Provider.
+- **Options:** what gets spoken, sounds, narration, the working sound, Remote Hermes, and Preferences (Ctrl+Comma). On a Mac, Preferences is in the app menu on Cmd+Comma like every other Mac app.
+- **Chat:** accounts, profiles, models and logs for Chat mode. Only works when the Mode box is set to Chat.
+- **Help:** Keyboard Shortcuts (F1), Check for Updates, Open Log Folder, Report a Bug, About.
 
-Recent Conversations can be sorted newest first, oldest first, by title or by folder (remembered). Below the list, Last exchange (Alt+T) shows how the selected conversation ended: your last message and the answer to it, so two conversations that began alike can be told apart before you open one. F2, or Rename, gives a conversation a name of your own, shown here and on its tab; a blank name goes back to the original. Delete, or Hide, takes one out of the list, and Show hidden conversations brings it back. Names and hiding are kept in BlindPilot's own config; no backend's files are changed.
+Report a Bug asks what happened, what you expected, and how to make it happen. It shows you exactly what else goes in the report (versions and settings, never anything from your conversations), then opens GitHub with it filled in or copies it for you.
 
-File. New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, shown only when Hermes is the backend), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
+### Recent Conversations
 
-Conversation. Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
+Ctrl+Shift+H lists your old conversations. Sort them newest first, oldest first, by title, or by folder. Type in Filter to narrow the list. Under the list, Last exchange (Alt+T) shows your last message in the selected conversation and the answer to it, so you can tell apart two that started the same way. Enter opens one in a new tab.
 
-Model. Backend (one radio item per CLI), Model and Effort (Ctrl+Shift+E), Permission Mode (Default, Accept edits, Plan, Auto, Don't ask, Bypass permissions), Session Status, Turn Status (Ctrl+Shift+T), Changed Files (Ctrl+Shift+D), What Agents Know (Ctrl+Shift+I), Backend Settings, Manage Backends, Connect a Provider.
+F2 renames a conversation. Leave the name blank to go back to the original. Delete hides one, and Show hidden conversations brings it back. Names and hidden conversations are BlindPilot's own; the agents' files aren't touched.
 
-Options. Show live activity in the list, Speak activity aloud, Include the backend's reasoning, Play sound cues, Narration (Follow everything, Keep up), Sounds (Message sent, Working, Answer received, Something went wrong), Responses as a read-only text field, Ask me questions a turn wrote into its answer, Silent until the response mode, Working sound (continuous, every few seconds, off), Working sound interval, Remote Hermes, Preferences (Ctrl+,). On macOS, Preferences is in the application menu on Cmd+, as in every Mac app.
+### Saved Prompts
 
-Chat. Accounts, Conversation profiles, Refresh models, History view (List, Read-only text), Diagnostics. Enabled only when the Mode combo box is set to Chat.
+Ctrl+Shift+P opens your saved prompts: messages you send a lot, each with a name. Arrow through them and the full text shows underneath. Enter puts the prompt where your cursor is in the prompt box, ready to change and send. Nothing is sent until you press Enter.
 
-Help. Keyboard Shortcuts (F1), Check for Updates, Check for updates at startup, Open Log Folder, Report a Bug, About BlindPilot. Report a Bug asks what happened, what you expected and the steps, shows exactly what else goes with it (versions and settings, never anything from a conversation), and either opens GitHub's new-issue page filled in or copies the report.
-
-Backend, Permission Mode, Narration, and Working sound are radio items, so a screen reader reports them as exclusive choices. Compact Conversation and Connect a Provider are greyed out for backends that have no equivalent.
+New starts from whatever's already in the prompt box, so to save what you just typed, press Ctrl+Shift+P, then New, then OK. Edit changes one, Delete removes one after asking, and Move Up and Move Down put them in your order. Everything saves straight away.
 
 ### Narration
 
-Follow everything, the default, speaks every tool call, result, and subagent line in order. Keep up speaks your message, the answer, and BlindPilot's own status lines, such as why a run is waiting or how it ended. The tool steps still appear in the list; they are not spoken. Use Keep up when a run fans out into many parallel steps and the speech queue falls behind. BlindPilot cannot shorten the screen reader's own queue, so this is the control it offers instead.
+Follow everything, the default, speaks every step the agent takes. Keep up speaks only your message, the answer, and BlindPilot's own notices, like why a task is waiting or how it ended. The steps still show up in the list; they just aren't spoken.
+
+Switch to Keep up when an agent runs a pile of steps at once and your screen reader falls behind. BlindPilot can't shorten your screen reader's speech queue, so this is how you keep up.
+
+### Questions and permissions
+
+When an agent asks you something, you get a dialog. If it writes a question into its answer instead of asking properly, BlindPilot notices that too and opens the same dialog. What you type goes back as your next message. A friendly "Want me to run the tests too?" at the end of a finished task is left alone. Turn the whole thing off under Options if you'd rather a task just end.
+
+If you're not in Bypass permissions and Claude Code wants to do something it needs your OK for, you get the whole request to read line by line, then Allow, Allow for this session, or Deny. Deny is the default, and you can tell Claude why. In Plan mode the plan opens the same way: approve it, or keep planning and say what to change. Escape denies. Closing a dialog never allows anything.
 
 ## Keyboard
 
-Help, Keyboard Shortcuts (F1) shows this list in the app, grouped by where each chord works.
+Help, Keyboard Shortcuts (F1) shows all of this inside the app.
 
-- Ctrl+L focus the prompt. Ctrl+T open a session. Ctrl+W close it.
-- F6 and Shift+F6 move between the tab strip, the responses, and the prompt, and read the status bar on the way round.
-- Ctrl+Shift+H reopen a past conversation. Ctrl+G list Hermes conversations, including running ones.
-- Ctrl+Shift+K compact this conversation. Ctrl+Shift+N start a fresh one.
-- Ctrl+F search responses. Ctrl+R jump to the latest.
-- Ctrl+Shift+R say the last announcement again, after a keystroke cut it off.
-- Ctrl+E export the conversation as Markdown, a web page, or plain text, offered in Documents.
-- Ctrl+Shift+T say how long the running turn has worked, its last step, and how many messages are queued.
-- Ctrl+Shift+D list the files that differ from the last commit in this folder's git repository, with lines added and removed; Enter reads a file's changes as Added, Removed and Unchanged lines.
-- Ctrl+Shift+I what agents know: each backend's memories, tastes, instructions, skills, agents and settings, listed by backend and kind with their counts. Claude Code memories, Command Code tastes and Hermes memories can be added (Alt+A) and deleted (Delete, after asking); a Claude Code memory gets its line in MEMORY.md, and deleting it takes that line out. Enter reads anything, and Edit (Alt+E, in the list or while reading) makes it editable right there: Ctrl+S or Save writes it back, a taste as its one line and a Hermes memory as its one entry, and closing with changes unsaved asks first. Edit in Your Editor opens the file in another program instead.
-- F3 and Shift+F3, in the responses, move to the next or previous row holding the last search, whole text included, going round at either end.
-- Ctrl+Shift+E choose model and reasoning effort.
-- Ctrl+/ slash commands. Ctrl+. stop the running task.
-- Ctrl+Shift+P saved prompts: messages you send often, each with a name. The list shows the selected prompt's text below it. Use, or Enter on a prompt, puts it in the prompt at the caret (over any selected text), ready to change and send. New starts from what the prompt box holds, so saving what you just typed is New then OK; Edit changes one, Delete (or the Delete key) removes one after asking, and Move Up and Move Down set the order. Each change is saved at once in BlindPilot's own config.
-- Ctrl+Shift+A attach files. Ctrl+Shift+M cycle permission modes.
-- Ctrl+Tab and Ctrl+Shift+Tab move between tabs, as do Ctrl+Shift+] and Ctrl+Shift+[. Ctrl+1 to Ctrl+9 jump to a tab. On macOS use Cmd+Shift+] and Cmd+Shift+[, because Cmd+Tab belongs to the system.
-- Shift+Enter on a row, or Read response as formatted page on its context menu, opens the whole response as a web page, so the screen reader's browse mode moves by heading, list, table and link. Links open in your browser; nothing is fetched. Escape comes back. Where no web view is available it opens as plain text.
-- Ctrl+Shift+C in the responses copies the last code block of the response you are on.
-- Ctrl+Up (or Alt+Up) from the prompt enters the newest response. Shift+Tab also reaches the responses. Inside the responses, Down on the last row stays there; Tab returns to the prompt.
-- Enter sends the prompt. Shift+Enter inserts a new line.
-- While a task has subagents running, a Subagents running list sits between the tab strip and the responses; Tab from the tab strip lands on it. Each row names an agent, says whether it is running, completed, failed, or stopped, and gives the last thing it did. Enter on a row opens that agent's activity in a read-only edit field that keeps up with it while it is open: leave the caret on the last line and it follows new lines, move it anywhere else and it stays put. The list leaves the tab order when no subagent is running.
+- Ctrl+L: go to the prompt. Ctrl+T: new session. Ctrl+W: close it.
+- F6 and Shift+F6: move between the tabs, the answers, and the prompt.
+- Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+Shift+] and Ctrl+Shift+[: next and previous tab. Ctrl+1 to Ctrl+9: jump to a tab.
+- Ctrl+Shift+H: reopen an old conversation. Ctrl+G: Hermes conversations, including ones still running.
+- Ctrl+Shift+K: shrink this conversation. Ctrl+Shift+N: start a fresh one.
+- Ctrl+F: search the answers. F3 and Shift+F3: next and previous match. Ctrl+R: jump to the latest answer.
+- Ctrl+Shift+R: say the last announcement again, if a keypress cut it off.
+- Ctrl+E: save the conversation as Markdown, a web page, or plain text.
+- Ctrl+Shift+T: how long the current task has been running, what it did last, and how many messages are waiting.
+- Ctrl+Shift+D: files changed in this folder since the last git commit, with lines added and removed. Enter reads the changes.
+- Ctrl+Shift+I: what the agents know about you: their memories, instructions, skills and settings. Enter reads one. Alt+E edits it right there, and Ctrl+S saves. Alt+A adds a Claude Code memory, Command Code taste, or Hermes memory, and Delete removes one after asking.
+- Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
+- Ctrl+/: slash commands. Ctrl+Shift+P: saved prompts. Ctrl+Shift+A: attach files. Ctrl+V: paste a picture as an attachment.
+- Ctrl+.: stop the running task.
+- Enter: send. Shift+Enter: new line. Ctrl+Up or Alt+Up: into the newest answer.
+- In the answers: Enter reads a row in full. Shift+Enter opens the whole answer as a web page, so you can jump by heading, list, table and link; Escape comes back. C copies a row, Shift+C the whole answer, and Ctrl+Shift+C its last code block. Tab goes back to the prompt.
+- While helper agents are running, a Subagents running list appears above the answers. Enter on one follows what it's doing, live.
 
-On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, so that macOS does not swallow them. Recent Conversations is Ctrl+Shift+H (Cmd+H is Hide), and Model and Effort is Ctrl+Shift+E (Cmd+M is Minimize).
+On a Mac, Ctrl is Cmd. Two keys are different so macOS doesn't eat them: Recent Conversations is Cmd+Shift+H (Cmd+H hides the app), and Model and Effort is Cmd+Shift+E (Cmd+M minimizes). Use Cmd+Shift+] and Cmd+Shift+[ to change tabs, since Cmd+Tab belongs to macOS.
 
-## Backends
+## Things to know about each agent
+
+- **Claude Code:** warns you before a plan limit runs out, as well as when the conversation gets full.
+- **Codex:** one copy runs for all your tabs. It shuts down after fifteen minutes doing nothing, and starts again with your next message. BlindPilot tells you when.
+- **FreeBuff:** has no proper way for other apps to talk to it, so BlindPilot reads its screen behind the scenes and filters out the ads. If you send before it's ready, BlindPilot holds your message and sends it when it can.
+- **opencode:** one copy runs for all your tabs. Needs a provider connected first.
+- **Hermes:** keeps one connection open for the whole conversation. Its questions, approvals, and password requests come to you as dialogs.
+- **Muse Code:** Meta's coding agent. On Windows it runs inside WSL.
+- **muse.ai:** Meta's personal agent. It runs on Meta's computers, not yours, so it can't see your files; paste in what it needs. Picking it opens your main chat. New Conversation starts a side chat. Replies can take minutes, so BlindPilot waits up to an hour. Stop ends the wait, not the work; the answer still lands in your muse.ai chat. Model, muse.ai has Approvals, Schedules, Feed, Ideas, and Goals.
+- **Command Code:** messages sent while it's working are queued and sent in order when it finishes. `/queue list`, `/queue clear` and `/queue resume` manage them. Every one of its slash commands works.
+- **Gemini CLI** and **Antigravity CLI:** sign in with Google. They don't shrink conversations.
+
+## Chat mode
+
+Chat talks to an AI service directly. No agent, and it can't touch your files.
+
+Set the Mode box to Chat, add an account and key under Chat, Accounts, then Chat, Refresh models, and pick one. Supported providers are OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, Command Code, OpenCode Go, and any OpenAI-compatible endpoint. Keys are kept in your system's password store, not a text file.
+
+Profiles hold a system prompt, a default account and model, temperature, token limit, and whether to stream. You can attach pictures, PDFs, and text files. OpenRouter accounts also get web search, image generation and its other server tools, plus thinking controls. Those tools run on OpenRouter's servers, not your computer.
+
+If you used AccessibleAI before, its chat history is copied over once.
+
+## Hermes on another computer
+
+Turn on Options, Remote Hermes, and point it at the other machine. Test connection checks it before anything is sent.
+
+If Hermes is on the same machine and only listening locally, a session token is enough:
+
+```bash
+HERMES_DASHBOARD_SESSION_TOKEN=pick-a-long-random-string hermes serve --port 9119
+```
+
+If other machines need to reach it, Hermes makes you set a username and password first:
+
+```bash
+hermes config set dashboard.basic_auth.username your-name
+# Hermes prints the hash to store; run this from its own installation:
+python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('your-password'))"
+hermes config set dashboard.basic_auth.password_hash 'the-hash-it-printed'
+hermes serve --port 9119 --host 0.0.0.0
+```
+
+Then pick Username and password in Remote Hermes.
+
+Which one to pick:
+
+- **Hermes open to the network** (`--host 0.0.0.0`): Username and password. It refuses a session token.
+- **Hermes only listening locally**, reached through a tunnel or a reverse proxy: Session token. It has no login to offer.
+
+Behind a reverse proxy, tell Hermes the address you connect to, or it refuses you before checking anything:
+
+```bash
+hermes config set dashboard.public_url https://hermes.example.com
+```
+
+When Hermes says no, BlindPilot tells you why, and whether it was Hermes or something in front of it that refused.
+
+## Updates
+
+Help, Check for Updates downloads the new version, checks it's the real file, and restarts into it. If a task is running or you've got an unsent message, it asks first, and No is the default. Check for updates at startup does the same quietly and only speaks up when there's something new.
+
+## Privacy
+
+BlindPilot has no accounts, tracking, or analytics of its own. It talks to the agents and AI services you set up, each under their own privacy policy, and to GitHub to check for updates. Its log records what the app did, never your prompts, the answers, your files, or your passwords.
+
+## Contributing
+
+Pull requests are welcome. If BlindPilot has been useful to you, send a fix or a feature and I'll review it. If you want something that changes how the app works for everyone, ask in Telegram or Issues first.
+
+---
+
+## For developers
+
+Everything below is technical.
+
+### Run from source
+
+1. Install Python 3.10 or newer. Releases are built with 3.12.
+2. `pip install -r requirements.txt`
+3. `python blind_pilot.py`
+
+`blind_pilot.py` is the entry point; nearly all of the app is in `blindpilot_app.py`, with the backends in `agent_backends.py` and the per-backend `*_backend.py` / `*_worker.py` modules. The UI is wxPython, using native controls so MSAA/UIA, AT-SPI and NSAccessibility expose them.
+
+### Tests and checks
+
+Run these before opening a pull request. CI runs the same on Windows, macOS, and Linux.
+
+```powershell
+python -m pytest -q -W error
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy
+```
+
+### Build
+
+```powershell
+python -m pip install -r requirements-build.txt
+python -m PyInstaller --noconfirm --clean BlindPilot.spec
+```
+
+`BlindPilot.spec` reads the version from `APP_VERSION` in `blindpilot_app.py` and carries the bundle identifier, minimum macOS version, and icon (`tools/make_icon.py` generates the icon files into `packaging/`). The one-directory layout is what lets the updater replace the app after it exits. The Windows installer is `installer/BlindPilot.iss` (Inno Setup).
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It runs the tests and the packaged startup checks (`--startup-smoke`, `--startup-gui-smoke`), then publishes the Windows installer, the Windows zip, the Apple Silicon macOS zip, and a SHA-256 file for each. The updater verifies that SHA-256 before installing. macOS builds are ad-hoc signed, not notarized.
+
+### How each backend is driven
 
 | Backend | How BlindPilot talks to it | Model and effort | Permission modes | Compaction | Asks questions |
 |---|---|---|---|---|---|
@@ -175,123 +307,30 @@ On macOS the Ctrl chords are Cmd. Two chords differ from what you might expect, 
 | Gemini CLI | Headless stream-json CLI, one process per message | Model yes (its auto, pro, flash and flash-lite choices), effort no | Yes | No | In writing only |
 | Antigravity CLI | Print mode with stream-json in and out, one process per message | Yes, with reasoning effort up to max | Yes | No | In writing only |
 
-Every backend marked Yes in that column stops its turn and opens a question dialog through a question tool of its own. A model does not always use it: asked to interview you, or told to ask one question at a time, it will often write the question into its answer instead, and Command Code has its question tool withheld from headless runs altogether. A question written into an answer sends no event, so nothing used to announce it and no dialog opened - the turn simply ended, with no sign that anything was waiting on you. BlindPilot now reads the end of each answer, and a turn that ends by asking you something opens the same dialog, on every backend. What you type is sent as your next message. A turn that finished its work and signed off by offering the next step - "Want me to run the tests too?", "Anything else?" - is left to end quietly, because nothing is waiting on that answer and it is how most turns end; an offer that names a fork ("tabs or spaces?") is a decision, so it still asks. Turn the whole thing off under Options if you would rather a turn just end.
+"In writing only" means the backend has no question tool BlindPilot can intercept (Command Code withholds it from headless runs), so questions are detected from the end of the answer text. Claude Code and Codex are told in their system instructions to use their question tool; on Codex this is appended to your own `developer_instructions`.
 
-Outside Bypass permissions, a tool call Claude Code's permission mode leaves to a person opens a dialog with the whole request to read by line, then Allow, Allow for this session (when Claude Code suggests a rule), or Deny, which is the default and can carry a reason Claude reads. In Plan mode, the plan opens the same way: Approve and accept edits, Approve and ask before edits, or Keep planning with what to change. Approving switches the tab to the mode chosen. Escape denies; nothing is allowed by closing a dialog.
+Notes per backend:
 
-Claude Code and Codex are also told, in their own system instructions, to ask through their question tool rather than writing the question out. On Codex this is added to your own `developer_instructions` rather than replacing them.
+- **Claude Code:** `claude -p` with stream-json in and out, kept alive per tab. Permission prompts arrive as `can_use_tool` control requests. `rate_limit_event` drives the plan-limit warnings; `modelUsage.contextWindow` from the result drives the context-fill line.
+- **Codex:** one `codex app-server` shared by every tab, started on first message, closed after fifteen idle minutes.
+- **FreeBuff:** no JSON or headless API. Its TUI runs in a hidden pseudo-terminal and the answer is scraped a sentence at a time, with redraws and ads filtered.
+- **opencode:** one `opencode serve` on loopback behind a per-run generated password. History is read from its database, read-only. Images and text files go as file parts; other files are named by path.
+- **Hermes:** `tui_gateway` JSON-RPC, one connection per conversation. BlindPilot announces the capability for blocking prompts, so questions, dangerous-command approvals and secret requests arrive as requests this window answers. Reopening a conversation parked on a question hands it back. Prompts with no UI here (Hermes' in-app terminal or browser preview, password-manager entries) are declined. The reasoning channel carries a spinner, so it's filtered.
+- **Muse Code:** the CLI ships for macOS and Linux only, so on Windows it's reached inside WSL through the same bridge Hermes uses, with the working directory translated. Turns run over MSP. A Muse Spark access refusal is reported instead of hanging the turn.
+- **muse.ai:** through `muse-cli`, one process per message, waiting up to an hour. A compatibility hook for muse-cli 0.3.2 lets `muse-cli watch` subscribe the way the web client does, for live activity. API contracts are in [`docs/museai-gateway.md`](docs/museai-gateway.md).
+- **Command Code:** `-p` per message, resumed by the session id it reports. BlindPilot adds queueing, Steer (stop and resume with the new instruction), and runs console-only commands (`/context`, `/usage`, `/status`, `/export`, `/todos`) in the console off screen against the same conversation. `/compact` writes a new session and leaves the original listed.
+- **Remote Hermes:** Hermes issues a short-lived single-use ticket per WebSocket connection; BlindPilot logs in and fetches one each time. The login session is sent with the connection so cookie-affinity load balancers and authenticating proxies land it on the process that issued the ticket. `websocket-client` is only needed for this path; if it's missing BlindPilot says so and keeps running.
 
-FreeBuff has no JSON or headless API, so BlindPilot runs its terminal interface in a hidden pseudo-terminal and reads the answer off the screen a sentence at a time. Redraws and advertisements are filtered out. If you send a message before FreeBuff has finished starting, BlindPilot holds it and says so, then sends it when the session is live.
+### Settings, data and logs
 
-Codex runs as one app server shared by every tab. It starts with the first message, stays running between messages, and is closed after fifteen minutes with no turn. BlindPilot announces the close and the restart.
-
-opencode runs as one server shared by every tab, on loopback, behind a password generated for the run. Past conversations are read from opencode's own database, read-only. Attached pictures and text files travel as file parts the model reads; anything else is named by path in the prompt. Turns that change files or delegate to a subagent say so, naming what changed.
-
-Hermes answers stream a sentence at a time. One connection is kept for the whole conversation. Hermes' reasoning channel carries a terminal spinner rather than reasoning, so that is filtered out.
-
-A current Hermes keeps its blocking prompts on that same connection. A question, a dangerous-command approval and a password or secret request arrive as requests this window answers, which is the capability BlindPilot announces when it connects — a client that has not announced it is one the agent will not ask at all, and it waits out its full deadline instead. Reopening a conversation that is parked on a question hands that question back, so it is answered rather than left waiting. The few prompts with no window here to serve them — reading Hermes' in-app terminal or its browser preview, a password-manager entry — are declined rather than left unanswered, which is the same thing to the agent.
-
-Muse Code is Meta's terminal coding agent. Its CLI ships for macOS and Linux, so on Windows BlindPilot reaches it inside WSL through the same bridge Hermes uses, translating the working directory on the way over. Turns run over Muse's own host protocol, MSP, with the answer streamed a fragment at a time and spoken in whole sentences. Tool approvals and the agent's own questions are put in front of you, including ones a reopened conversation was parked on, and a permission mode picked mid-conversation reaches the session it belongs to. Past conversations list in Recent Conversations and reopen by session id. Attached images travel as pictures the model sees, the slash picker lists Muse's own skills for the folder, and the status report carries the subscription window the last turn observed. When Meta refuses a request for want of Muse Spark access, BlindPilot says so instead of leaving the turn hanging.
-
-muse.ai is Meta's personal agent, a different product from Muse Code: it runs on its own cloud machine with its own connectors, memory and browser, and BlindPilot reaches it through muse-cli. Selecting muse.ai opens your main chat and reads its history. Recent Conversations, Ctrl+Shift+H, lists it as Main chat alongside your side chats, and reopening any chat continues that same conversation. New Conversation, Ctrl+Shift+N, starts a separate side chat. A message waits up to an hour for the reply, since real work there can take minutes. muse.ai cannot see this computer, so the working folder and attachments do not reach it; paste what it needs into the message. Stop ends the wait, not the work: muse.ai finishes on its own machine, and its reply appears in the muse.ai chat. Messages sent while one is running are queued, as with Command Code. Sign in with `muse-cli auth export`, which copies your muse.ai sign-in out of a Chrome that is signed in to muse.ai.
-
-With muse.ai selected, Model, muse.ai opens Approvals, Schedules, Feed, Ideas, and Goals. Enter reads the selected item, and Refresh reloads the list. Feed can open article and social links, discuss a post in chat, and run linked ideas. Ideas can run the whole idea or selected parts and open the execution chat. Schedules can run enabled tasks now and read run history. Goals can be discussed, edited, paused, completed, reactivated, retired, or deleted with confirmation; Suggestions lets you accept and run a proposal or dismiss it. Discuss prepares an editable prompt containing the item's details; nothing is sent until you press Send. Feed and ideas show the current gateway page. The [gateway integration notes](docs/museai-gateway.md) record the researched API contracts and client compatibility fix.
-
-Approvals includes pending requests and recent decisions; Decide Approval lets you allow one action or deny it. Pending requests also open a permission dialog during a running turn. Muse.ai's Sentinel decides what needs approval; BlindPilot's permission modes do not override it, and Stop leaves requests undecided. Persistent permissions are managed in the muse.ai app.
-
-Command Code runs one process per message. `-p` answers a single query and exits, so a running turn cannot be steered by the CLI itself and the next message resumes the conversation by the session id the CLI reports. BlindPilot supplies the missing pieces: a message sent while a turn is running is queued and goes out the moment that turn finishes, in order and with its attachments; Steer stops the running turn and resumes the conversation with your new instruction; Stop pauses the queue, and `/queue list`, `/queue clear` and `/queue resume` manage it. `/compact` summarizes the conversation into a new saved session and leaves the original in Recent Conversations. Every slash command works, as it does in Command Code's own console. The picker lists BlindPilot's equivalents first, then the commands Command Code's agent offers in the folder (your skills, mod commands, `/loop`, `/peek`), which are sent as typed, then the console's built-in commands. A console command (`/context`, `/usage`, `/status`, `/export`, `/todos` and the rest) is run in Command Code's console, off screen, on the same conversation, and what it shows is added to the conversation. A command that opens a menu lists the choices; pick one with BlindPilot's own control for it, or in Command Code's console. Mid-run questions are not offered.
-
-### Hermes on another computer
-
-With Options, Remote Hermes off, BlindPilot runs the Hermes installed here, including one installed in WSL.
-
-For a Hermes on the same computer bound to localhost, a session token is enough:
-
-```bash
-HERMES_DASHBOARD_SESSION_TOKEN=pick-a-long-random-string hermes serve --port 9119
-```
-
-For a Hermes reachable from other machines, Hermes requires a login before it will bind to a public address. Configure one on the machine running Hermes:
-
-```bash
-hermes config set dashboard.basic_auth.username your-name
-# Hermes prints the hash to store; run this from its own installation:
-python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('your-password'))"
-hermes config set dashboard.basic_auth.password_hash 'the-hash-it-printed'
-hermes serve --port 9119 --host 0.0.0.0
-```
-
-Then choose Username and password in Remote Hermes. Hermes issues a short-lived single-use ticket for each WebSocket connection; BlindPilot logs in and fetches one itself each time it connects. Test connection checks the address and credentials before anything is sent.
-
-The two arrangements take different credentials, and Hermes does not say which one it is running:
-
-- **A Hermes bound to a public address** (`--host 0.0.0.0`) requires a login and refuses a session token outright. Choose Username and password.
-- **A Hermes bound to localhost**, reached through a tunnel or a reverse proxy, has no login to offer and refuses a ticket. Choose Session token. The token is the one `HERMES_DASHBOARD_SESSION_TOKEN` names, or the one Hermes prints for its own dashboard.
-
-Behind a reverse proxy, Hermes must be told what address it answers to, or it refuses the request before it looks at any credential. Set `dashboard.public_url` to the address you connect to:
-
-```bash
-hermes config set dashboard.public_url https://hermes.example.com
-```
-
-BlindPilot reads the status Hermes refused with and says which of these it is, rather than reporting every refusal as a wrong key. It also says whether the refusal came from Hermes or from something answering in its place, because a proxy that refuses the connection writes its own page and names itself.
-
-Behind a load balancer in front of more than one Hermes, the connection has to land on the same one that signed you in: a ticket is only known to the process that issued it. BlindPilot sends the session its login opened with the connection, which is what a load balancer with cookie affinity, and an authenticating proxy, both place it by.
-
-`websocket-client` is only needed for the remote path. If it is missing, BlindPilot names it as an installable package and keeps running.
-
-## Chat mode
-
-Chat talks to a provider's API directly. No CLI, no agent, no file access.
-
-Set the Mode combo box to Chat, add a provider and key under Chat, Accounts, then Chat, Refresh models and pick one. Supported providers are OpenRouter, OpenAI, Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, Command Code, OpenCode Go, and any OpenAI-compatible endpoint. Keys go in the OS credential store.
-
-Conversation profiles hold a system prompt, default account and model, temperature, token limit, and streaming preference. History view switches between a native list and a read-only edit field. Provider logs are under Chat, Diagnostics.
-
-Every chat account takes attachments: images and PDFs go as the protocol's own content blocks, and any other file goes in as its text. OpenRouter accounts also get cache-aware regeneration, `:batch` model ids, OpenRouter's server-side tools (web search, web fetch, date and time, image generation, apply patch, shell, bash, fusion, advisor, subagent, tool search, model search), and thinking controls. Tools run on OpenRouter's servers, not your computer. Thinking effort sets how long a reasoning model thinks. Send the thinking back decides whether the thinking text is returned. Thinking arrives as its own History entry with a length line first. Read attached PDFs with converts a PDF to text for models that cannot read PDFs.
-
-Chat data lives in `chat.sqlite3` beside the config. An existing AccessibleAI database is imported once and left unmodified.
-
-## Logs
-
-BlindPilot writes a rotating `blindpilot.log` and a `blindpilot-crash.log` for native crashes. Help, Open Log Folder opens the folder. It is `%LOCALAPPDATA%\BlindPilot\Logs` on Windows, `~/Library/Logs/BlindPilot` on macOS, and `$XDG_STATE_HOME/blindpilot` on Linux. The log keeps at most four files of one megabyte.
-
-The level is INFO. Set `BLINDPILOT_LOG_LEVEL=DEBUG` for a bug report. Prompts, answers, file contents, and credentials are never logged at any level. On Windows the crash log also records first-chance COM exceptions from screen-reader interop; those are noise, not crashes.
-
-## Updates
-
-Help, Check for Updates asks GitHub Releases for a newer version, downloads it, verifies the published SHA-256, and restarts into the installer. If a turn is running, or a prompt holds a message you have not sent, it says so and asks first (No is the default). Check for updates at startup does the same quietly and only speaks when there is something new. Builds run from source open the release page instead.
-
-## Run from source
-
-1. Install Python 3.10 or newer. Releases are built with 3.12.
-2. `pip install -r requirements.txt`
-3. `python blind_pilot.py`
-
-`blind_pilot.py` is the entry point; the code is in `blindpilot_app.py`.
-
-## Build
-
-```powershell
-python -m pip install -r requirements-build.txt
-python -m PyInstaller --noconfirm --clean BlindPilot.spec
-```
-
-`BlindPilot.spec` reads the version from `APP_VERSION` and carries the bundle identifier, minimum macOS version, and icon (`tools/make_icon.py` generates the icon files into `packaging/`). The one-directory layout is what lets the updater replace the app after it exits. The Windows installer is `installer/BlindPilot.iss`. Pushing a `v*` tag runs `.github/workflows/release.yml`, which runs the tests and the packaged startup checks, then publishes the Windows installer, the Windows zip, the Apple Silicon macOS zip, and their SHA-256 files.
-
-Before opening a pull request:
-
-```powershell
-python -m pytest -q -W error
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy
-```
-
-Pull requests are welcome.
+- Settings: `config.json` in `%APPDATA%\BlindPilot`, `~/Library/Application Support/BlindPilot`, or `~/.config/blindpilot`. Saved prompts, conversation names and hidden conversations live here. On macOS, settings from older versions are moved once, never overwriting.
+- Chat data: `chat.sqlite3` beside the config. Keys are in the OS credential store.
+- Logs: a rotating `blindpilot.log` (four files of one megabyte) and `blindpilot-crash.log` for native crashes, in `%LOCALAPPDATA%\BlindPilot\Logs`, `~/Library/Logs/BlindPilot`, or `$XDG_STATE_HOME/blindpilot`. Help, Open Log Folder opens it.
+- Log level is INFO. Set `BLINDPILOT_LOG_LEVEL=DEBUG` for a bug report. Prompts, answers, file contents and credentials are never logged at any level. On Windows the crash log also records first-chance COM exceptions from screen-reader interop; those are noise, not crashes.
+- Only one instance runs: on Windows a second launch brings the first forward, setup wizard included; on Linux, and macOS from source, the second copy says so and exits.
 
 ## License and credits
 
-MIT. See [LICENSE](LICENSE). Every source file carries an `SPDX-License-Identifier: MIT` header.
+MIT. See [LICENSE](LICENSE). Use it, change it, share it, or package it, no permission needed. Every source file carries an `SPDX-License-Identifier: MIT` header.
 
-Copyright (c) 2026 doubletaponair and BlindPilot contributors. BlindPilot was written with AI coding assistance. Claude Code Reader is credited in this README, the About dialog, the source headers, [CREDITS.md](CREDITS.md), and the original specification kept at [`original-claude-code-reader-spec.html`](original-claude-code-reader-spec.html).
+Copyright (c) 2026 doubletaponair and BlindPilot contributors. BlindPilot was written with AI coding help. Claude Code Reader is credited here, in the About dialog, in the source headers, in [CREDITS.md](CREDITS.md), and in the original specification kept at [`original-claude-code-reader-spec.html`](original-claude-code-reader-spec.html).
