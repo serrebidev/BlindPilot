@@ -13682,7 +13682,11 @@ class MainFrame(wx.Frame):
         for item in self._chat_menu_items:
             item.Enable(not show_agent)
         for item in self._agent_menu_items:
-            item.Enable(show_agent)
+            # The muse.ai submenu and Permission Mode take turns in the Model
+            # menu, so one is always detached, and wxGTK asserts on enabling a
+            # detached item. _refresh_museai_menu sets it when it goes back in.
+            if item.GetMenu() is not None:
+                item.Enable(show_agent)
         self.mode_combo.SetSelection(0 if show_agent else 1)
         self._refresh_compact_item()
         self._refresh_connect_item()
@@ -14277,6 +14281,7 @@ class MainFrame(wx.Frame):
             position = items.index(other)
             menu.Remove(other)
             menu.Insert(position, wanted)
+            wanted.Enable(self._app_mode == APP_MODE_AGENT)
 
     def _build_museai_menu(self) -> wx.Menu:
         menu = wx.Menu()
