@@ -45,3 +45,9 @@ Feed article links come from `body_md`; social links use `attachment.social_embe
 Read-only account calls verified goal details, article links, and schedule run history. Execution and mutation tests use mocked gateway replies; no real idea, schedule, or suggestion was started and no goal was changed during verification.
 
 These internal endpoints are unversioned. Unsupported or unreadable responses are reported as errors rather than empty lists. Views show the current gateway page; paging through older feed and idea results is deferred. Schedule editing through a dedicated form, persistent grants, and outgoing large-message fragmentation are outside this change.
+
+## Live status
+
+The web client's working line ("Fetching release", "Searching") comes from `agent.status` events on `chat.subscribe`: `activity_code` (`online`, `working`, `responding`, `needs_approval`), `activity_text`, optional `activity_emoji`, and `session_id`. The [web client](https://muse.ai/_next/static/chunks/38ncahz8xtg74.js) subscribes with `{after_stream_seq, after_chat_event_seq, capabilities: ["chat_cancel", "delta_stream", ...], session_id}`, adding `session_id` for side chats. muse-cli 0.3.2's `watch` sends `capabilities: {}` without a session and prints only after the stream ends, so it never showed side-chat activity. Verified live on 2026-10-08: with the web client's parameters, both side chats and the main chat stream their activity text while the agent works.
+
+During a turn, BlindPilot runs `muse-cli watch` with `BLINDPILOT_MUSEAI_WATCH=<chat id>`; the compatibility hook then subscribes as the web client does and prints each event line as it arrives. Activity text for the turn's chat goes on the status line and the live step row; `online` is skipped. If the stream ends early, the history-based step count takes over again. The watcher ends with the turn.
