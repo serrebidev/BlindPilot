@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.0 - 2026-10-09
+
+- Claude Code: when a turn reports that one of your plan's limits (five-hour, weekly, or a model's weekly) has passed its warning level or been reached, BlindPilot says so once, in every narration mode, with how full it is and when it resets ("Claude Code Weekly limit: 92% used, resets Mon 12 Oct 14:00 (in 2 days 22 hours)."). It is said again only for a new window or when the limit is reached. Before, the figures were only in Session Status, so a limit could run out mid-task with no warning.
+- Recent Conversations: a Last exchange box (Alt+T) under the list shows the selected conversation's last message and the answer to it, read in the background a moment after the selection settles, so arrowing stays quick. Long text is cut at about 1,200 characters. Works for every backend Recent Conversations lists.
+- Linux: switching between Agent and Chat mode no longer trips wxGTK's "invalid menu item" assertion on the muse.ai submenu while it is out of the Model menu.
+
 ## v0.42.0 - 2026-10-09
 
 - Saved Prompts (Conversation menu, Ctrl+Shift+P): a library of messages you send often, each with a name. Enter or Use puts the selected prompt into the prompt box at the caret, replacing any selected text, ready to edit and send. New starts from what is already typed in the prompt box, with its first few words as the name, so saving the message you just wrote takes two keystrokes. Edit, Delete (asks first), Move Up and Move Down manage the list, and every change is saved at once in BlindPilot's config. Works with every backend.

@@ -82,6 +82,7 @@ from app_updater import (
 )
 from agent_backends import (
     _tool_use_label,
+    claude_limit_warning,
     BACKEND_ANTIGRAVITY,
     BACKEND_CLAUDE,
     BACKEND_CODEX,
@@ -329,7 +330,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.42.0"
+APP_VERSION = "0.43.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -4794,6 +4795,11 @@ class ClaudeWorker(threading.Thread):
                 if sid:
                     self._on_session(sid)
 
+            elif etype == "rate_limit_event":
+                warning = claude_limit_warning(event.get("rate_limit_info"))
+                if warning:
+                    self._on_activity("notice", warning)
+
             elif etype == "assistant":
                 if not first_assistant_seen:
                     first_assistant_seen = True
@@ -7005,6 +7011,24 @@ def sort_history(entries: List[HistoryEntry], order: str, title) -> List[History
 _HISTORY_ANY_BACKEND = "All backends"
 
 
+def _last_exchange(turns: List[HistoryTurn], limit: int = 1200) -> str:
+    """The last prompt and answer of a conversation, cut short for a preview."""
+
+    def cut(text: str) -> str:
+        text = text.strip()
+        return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "…"
+
+    for turn in reversed(turns):
+        if turn.prompt.strip() or turn.response.strip():
+            parts = []
+            if turn.prompt.strip():
+                parts.append(f"You: {cut(turn.prompt)}")
+            if turn.response.strip():
+                parts.append(f"Answer: {cut(turn.response)}")
+            return "\n\n".join(parts)
+    return "Nothing to show: this conversation has no messages BlindPilot can read."
+
+
 class HistoryDialog(wx.Dialog):
     """Recent Conversations: pick a past conversation and carry on with it.
 
@@ -7063,6 +7087,17 @@ class HistoryDialog(wx.Dialog):
         list_label = wx.StaticText(self, label="&Conversations:")
         self.list_box = make_conversation_list(self, name="Conversations")
         self.list_box.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._accept())
+        self.list_box.Bind(wx.EVT_LISTBOX, lambda _e: self._schedule_preview())
+
+        # How the selected conversation ended, to tell apart ones that began
+        # alike. Read in the background, a moment after the selection settles.
+        preview_label = wx.StaticText(self, label="Las&t exchange:")
+        self.preview = wx.TextCtrl(
+            self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2, name="Last exchange"
+        )
+        self._preview_for: Optional[HistoryEntry] = None
+        self._preview_timer = wx.CallLater(300, self._load_preview)
+        self._preview_timer.Stop()
 
         self.summary = wx.StaticText(self, label="")
         self.summary.SetName("Summary")
@@ -7101,6 +7136,9 @@ class HistoryDialog(wx.Dialog):
         sizer.Add(list_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
         sizer.Add(self.list_box, 1, wx.EXPAND | wx.ALL, pad)
         sizer.Add(self.summary, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        self.preview.SetMinSize(self.FromDIP(wx.Size(560, 100)))
+        sizer.Add(preview_label, 0, wx.LEFT | wx.RIGHT, pad)
+        sizer.Add(self.preview, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         if buttons is not None:
             sizer.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
         self.SetSizerAndFit(sizer)
@@ -7179,6 +7217,38 @@ class HistoryDialog(wx.Dialog):
             message = f"{count} conversations"
         self.summary.SetLabel(message)
         self._set_open_enabled(bool(self._shown))
+        self._schedule_preview()
+
+    # ----- Last exchange -----
+    def _schedule_preview(self) -> None:
+        selection = self.list_box.GetSelection()
+        entry = self._shown[selection] if 0 <= selection < len(self._shown) else None
+        if entry == self._preview_for:
+            return
+        self._preview_for = entry
+        self.preview.ChangeValue("Reading…" if entry else "")
+        if entry is not None:
+            self._preview_timer.Start(300)
+
+    def _load_preview(self) -> None:
+        entry = self._preview_for
+        if entry is None:
+            return
+
+        def work() -> None:
+            try:
+                text = _last_exchange(load_turns(entry))
+            except Exception:
+                text = "Could not read this conversation."
+            wx.CallAfter(self._show_preview, entry, text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_preview(self, entry: HistoryEntry, text: str) -> None:
+        # Arrowing on while it was read leaves a newer entry wanted; and the
+        # dialog may be gone.
+        if self and entry == self._preview_for:
+            self.preview.ChangeValue(text)
 
     def _set_open_enabled(self, enabled: bool) -> None:
         button = self.FindWindowById(wx.ID_OK)

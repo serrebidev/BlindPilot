@@ -26,6 +26,7 @@ BlindPilot started as a fork of [Claude Code Reader](https://github.com/doubleta
 - Keeps a library of messages you send often, by name, to put in the prompt with one keystroke.
 - Searches responses and copies a code block, a response, or the whole conversation, or exports the conversation as Markdown, a web page, or plain text.
 - Lists the models and effort levels the installed CLI reports.
+- Says once, as it happens, when a Claude Code plan limit (five-hour or weekly) passes its warning level or is reached, with how full it is and when it resets.
 - Plays optional sounds for sent, working, received, and failed.
 - Shows a system notification when a turn finishes, fails, or asks you something while BlindPilot is in the background; choosing it brings that tab forward. Turn it off in Preferences.
 - Installs, updates, adds to PATH, and signs in to any backend from a wizard.
@@ -111,7 +112,7 @@ Type `/status` (or Model, Session Status) to hear the backend, model and effort,
 
 Every action is in the menu bar except a few chords. Ctrl+L focuses the prompt, Ctrl+1 to Ctrl+9 jump to a tab, Ctrl+Shift+M cycles permission modes, and F6 and Shift+F6 move between the parts of the window.
 
-Recent Conversations can be sorted newest first, oldest first, by title or by folder (remembered). F2, or Rename, gives a conversation a name of your own, shown here and on its tab; a blank name goes back to the original. Delete, or Hide, takes one out of the list, and Show hidden conversations brings it back. Names and hiding are kept in BlindPilot's own config; no backend's files are changed.
+Recent Conversations can be sorted newest first, oldest first, by title or by folder (remembered). Below the list, Last exchange (Alt+T) shows how the selected conversation ended: your last message and the answer to it, so two conversations that began alike can be told apart before you open one. F2, or Rename, gives a conversation a name of your own, shown here and on its tab; a blank name goes back to the original. Delete, or Hide, takes one out of the list, and Show hidden conversations brings it back. Names and hiding are kept in BlindPilot's own config; no backend's files are changed.
 
 File. New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, shown only when Hermes is the backend), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
 
