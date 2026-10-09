@@ -231,9 +231,11 @@ def _status(code, text, session="chat-9", ts_ms=None):
 
 def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypatch):
     """What muse.ai says it is doing ("Fetching release") replaces the step
-    count on the status line. Coming online, repeats, other chats, statuses
-    replayed from before the watcher started, and anything after the turn has
-    settled say nothing."""
+    count on the status line, and real work also gets a row in the
+    conversation; "is working"/"is responding" stay on the status line, and
+    going back to the same work after one of them adds no second row. Coming
+    online, repeats, other chats, statuses replayed from before the watcher
+    started, and anything after the turn has settled say nothing."""
     worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
     lines = [
         _status("online", "online"),
@@ -245,6 +247,7 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
         _status("working", "Yesterday's work", ts_ms=1_000),
         _status("working", "Just now", ts_ms=time.time() * 1000),
         _status("responding", "is responding"),
+        _status("working", "Just now"),
     ]
     seen = []
 
@@ -257,11 +260,14 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
     assert seen == [
         ("step", "muse.ai is working"),
         ("step", "muse.ai: Fetching release"),
+        ("tool", "muse.ai: Fetching release"),
         ("step", "muse.ai: Just now"),
+        ("tool", "muse.ai: Just now"),
         ("step", "muse.ai is responding"),
+        ("step", "muse.ai: Just now"),
     ]
     assert not worker._live_status
 
     worker._settled.set()
     worker._read_status(SimpleNamespace(stdout=iter([_status("working", "Late")])), "chat-9")
-    assert len(seen) == 4
+    assert len(seen) == 7
