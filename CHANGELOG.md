@@ -5,6 +5,7 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 ## v0.41.0 - 2026-10-08
 
 - muse.ai: the status line and live status row now show what the agent says it is doing while it works ("Searching", "Fetching release", "is responding"), as the muse.ai web app does, instead of only a step count. The compatibility hook for muse-cli 0.3.2 lets `muse-cli watch` subscribe to the conversation's chat the way the web client does and stream each update as it arrives; muse-cli's own watch never saw side-chat activity and printed nothing until it ended. Works for the main chat, side chats, and followed chats. Statuses replayed from before the turn are ignored, and the step count returns if the live stream ends.
+- muse.ai: each real step the agent reports ("Searching", "Fetching issues") is also added to the conversation as a row and read out, while general "is working"/"is responding" notices stay on the status line. Rows start only once the sent message itself comes through the live stream, past the chat as read just before sending, so a job left running after Stop or a quick retry of the same words cannot record old steps under the new reply. Rows are live only; muse.ai history does not keep them.
 
 ## v0.40.0 - 2026-10-08
 
