@@ -186,9 +186,14 @@ class MuseAiWorker(_TurnWorker):
         except (OSError, ValueError):
             return
         self._watcher = proc
-        threading.Thread(target=self._read_status, args=(proc, session), daemon=True).start()
+        threading.Thread(
+            target=self._read_status, args=(proc, session, self._chat_seq), daemon=True
+        ).start()
 
-    def _read_status(self, proc: subprocess.Popen, session: str) -> None:
+    def _read_status(self, proc: subprocess.Popen, session: str, boundary: int = -1) -> None:
+        """`boundary` is the chat's newest event seq read before sending,
+        taken when the watcher starts: later reads in the turn already
+        include the sent message."""
         said = listed = ""
         # The subscription replays from the start of what the server keeps; a
         # status older than this watcher (less a minute for clock skew) is
@@ -216,9 +221,7 @@ class MuseAiWorker(_TurnWorker):
                 sent = body.get("content") or body.get("display_text") or ""
                 seq = int(body.get("chat_event_seq") or event.get("seq") or 0)
                 anchored = (
-                    self._chat_seq >= 0
-                    and seq > self._chat_seq
-                    and " ".join(str(sent).split()) == prompt
+                    boundary >= 0 and seq > boundary and " ".join(str(sent).split()) == prompt
                 )
                 continue
             if name != "agent.status":

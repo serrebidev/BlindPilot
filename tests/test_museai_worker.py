@@ -249,7 +249,6 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
     statuses replayed from long before, and anything after the turn has
     settled say nothing."""
     worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
-    worker._chat_seq = 100
     lines = [
         _status("online", "online"),
         _sent("Check the weather in Vancouver", seq=90),
@@ -274,7 +273,10 @@ def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypa
         assert worker._live_status
 
     worker._on_activity = on_activity
-    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
+    # A history poll during the turn already sees the sent message; the
+    # boundary taken when the watcher started is what counts.
+    worker._chat_seq = 102
+    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9", 100)
     assert seen == [
         ("step", "muse.ai: Old job"),
         ("step", "muse.ai is working"),
