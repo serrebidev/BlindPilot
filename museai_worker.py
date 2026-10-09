@@ -9,7 +9,10 @@ chat's history and prints the agent's reply as JSON once it is complete.
 While it waits, the chat is read every few seconds and each status update the
 agent posts (``## Status ...``, progress notes) goes into the conversation as
 it arrives, so the transcript holds everything the agent said, not only its
-last word. Connection notices are left out.
+last word. Connection notices are left out. Alongside, ``muse-cli watch``
+(patched by ``museai_cli_patch`` to subscribe like the web client) streams the
+chat's live activity, and its text ("Fetching release") goes on the status
+line as the web client shows it.
 
 Never ``--wait 0``: the CLI closes the stream before the message is
 delivered, and the message is lost without an error.
@@ -92,6 +95,11 @@ class MuseAiWorker(_TurnWorker):
         self._step_said = ""
         self._approval_seen: set[str] = set()
         self._approval_error_said = False
+        # `muse-cli watch`, streaming the chat's live status ("Fetching
+        # release") while the turn runs; while it does, the step count is
+        # left alone.
+        self._watcher: Optional[subprocess.Popen] = None
+        self._live_status = False
 
     def _check_approvals(self, binary: str) -> None:
         from museai_backend import (
@@ -150,6 +158,50 @@ class MuseAiWorker(_TurnWorker):
                     "tool",
                     "The muse.ai approval decision could not be sent. Open Model, muse.ai, Approvals to retry.",
                 )
+
+    def _start_status(self, binary: str, session: str) -> None:
+        """Put what muse.ai says it is doing on the status line as it changes."""
+        env = subprocess_env(binary)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["BLINDPILOT_MUSEAI_WATCH"] = session
+        try:
+            proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                [binary, "watch"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **own_group_kwargs(),
+                **no_window_kwargs(),
+            )
+        except (OSError, ValueError):
+            return
+        self._watcher = proc
+        threading.Thread(target=self._read_status, args=(proc, session), daemon=True).start()
+
+    def _read_status(self, proc: subprocess.Popen, session: str) -> None:
+        said = ""
+        for line in proc.stdout or ():
+            event = _json_from(line) or {}
+            raw = event.get("payload")
+            body: dict = raw if isinstance(raw, dict) else {}
+            if (event.get("event") or event.get("type")) != "agent.status":
+                continue
+            if body.get("session_id") not in (None, session):
+                continue
+            text = " ".join(str(body.get("activity_text") or "").split())
+            if not text or body.get("activity_code") == "online" or self._settled.is_set():
+                continue
+            text = f"muse.ai {text}" if text.startswith("is ") else f"muse.ai: {text}"
+            if text != said:
+                said = text
+                self._live_status = True
+                self._on_activity("step", text)
+        # The stream ended early, so the step count takes over again.
+        self._live_status = False
 
     def steer(self, text: str) -> bool:
         # The message is already with the agent; a second one waits its turn.
@@ -234,7 +286,7 @@ class MuseAiWorker(_TurnWorker):
     def _report_steps(self, baseline: int) -> None:
         """Keep the tab's status line on how far muse.ai has got, quietly."""
         newer = [when for seq, when in self._steps if seq > baseline]
-        if not newer:
+        if not newer or self._live_status:
             return
         latest = time.strftime("%I:%M:%S %p", time.localtime(max(newer) / 1000)).lstrip("0")
         count = len(newer)
@@ -278,6 +330,7 @@ class MuseAiWorker(_TurnWorker):
             self._follow(binary, session)
             return
         self._on_started()
+        self._start_status(binary, session)
         self._on_activity("tool", "Sent to muse.ai. Waiting for its reply.")
         # Everything the agent says in this chat from here on is part of the
         # turn: its status updates while it works as well as the answer.
@@ -351,6 +404,7 @@ class MuseAiWorker(_TurnWorker):
         turn ends once it has answered and the chat has gone quiet.
         """
         self._on_started()
+        self._start_status(binary, session)
         self._on_activity("tool", "muse.ai is still working on this. Following it.")
         messages = self._messages(binary, session)
         baseline = (
@@ -403,7 +457,8 @@ class MuseAiWorker(_TurnWorker):
         return answer
 
     def _teardown(self) -> None:
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            end_process_group(proc)
+        for proc in (self._proc, self._watcher):
+            if proc is not None and proc.poll() is None:
+                end_process_group(proc)
         self._proc = None
+        self._watcher = None

@@ -9,6 +9,7 @@ worker runs it, so nothing reaches the user's real cloud agent.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import museai_worker
 from museai_worker import MuseAiWorker
@@ -48,6 +49,7 @@ def _worker(monkeypatch, send, histories=(), start=None, session_id=None, approv
         return send
 
     monkeypatch.setattr(MuseAiWorker, "_run", fake_run)
+    monkeypatch.setattr(MuseAiWorker, "_start_status", lambda self, binary, session: None)
     worker = MuseAiWorker(
         "Check the weather in Vancouver",
         session_id,
@@ -219,3 +221,42 @@ def test_progress_goes_to_the_status_line_not_the_conversation(monkeypatch):
     steps = [e[2] for e in events if e[0] == "activity" and e[1] == "step"]
     assert steps and steps[0].startswith("muse.ai is working: 2 steps so far")
     assert _said(events) == ["All done."]
+
+
+def _status(code, text, session="chat-9"):
+    payload = {"activity_code": code, "activity_text": text, "session_id": session}
+    return json.dumps({"event": "agent.status", "payload": payload}) + "\n"
+
+
+def test_live_activity_goes_to_the_status_line_in_the_web_clients_words(monkeypatch):
+    """What muse.ai says it is doing ("Fetching release") replaces the step
+    count on the status line. Coming online, repeats, other chats and anything
+    after the turn has settled say nothing."""
+    worker, _calls, events = _worker(monkeypatch, send=None, session_id="chat-9")
+    lines = [
+        _status("online", "online"),
+        _status("working", "is working"),
+        json.dumps({"event": "task.status", "payload": {"session_id": "chat-9"}}) + "\n",
+        _status("working", "Fetching release"),
+        _status("working", "Fetching release"),
+        _status("working", "Reading mail", session="other-chat"),
+        _status("responding", "is responding"),
+    ]
+    seen = []
+
+    def on_activity(kind, text):
+        seen.append((kind, text))
+        assert worker._live_status
+
+    worker._on_activity = on_activity
+    worker._read_status(SimpleNamespace(stdout=iter(lines)), "chat-9")
+    assert seen == [
+        ("step", "muse.ai is working"),
+        ("step", "muse.ai: Fetching release"),
+        ("step", "muse.ai is responding"),
+    ]
+    assert not worker._live_status
+
+    worker._settled.set()
+    worker._read_status(SimpleNamespace(stdout=iter([_status("working", "Late")])), "chat-9")
+    assert len(seen) == 3

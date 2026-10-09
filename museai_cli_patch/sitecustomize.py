@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT
 """Receive compatibility for muse-cli 0.3.2, loaded only in its child processes."""
 
+import os
+import sys
 from importlib.metadata import PackageNotFoundError, version
 
 
@@ -59,6 +61,51 @@ def install():
                     return service_frame
 
     gateway.Gateway._read_frame = read_frame
+
+    from muse_cli import cli
+
+    plain_watch = cli.cmd_watch
+
+    # 0.3.2's watch sends capabilities as {} and no session, so it never sees a
+    # side chat's live status, and prints nothing until it ends. With
+    # BLINDPILOT_MUSEAI_WATCH set to a chat id, subscribe the way the web
+    # client does and stream each event as one JSON line while the agent works.
+    def watch(args):
+        session = os.environ.get("BLINDPILOT_MUSEAI_WATCH")
+        if not session:
+            return plain_watch(args)
+        gw = cli.connect(cli.load_config())
+        try:
+            stream = gw._open(
+                "chat.subscribe",
+                body={
+                    "after_stream_seq": 0,
+                    "after_chat_event_seq": 0,
+                    "capabilities": ["chat_cancel", "delta_stream"],
+                    "session_id": session,
+                },
+            )
+            buf = b""
+            while True:
+                frame = gw._read_frame()
+                if frame.stream_id != stream:
+                    continue
+                kind = frame.WhichOneof("kind")
+                if kind == "reset":
+                    return None
+                part = frame.response if kind == "response" else frame.body_chunk
+                buf += bytes(part.body if kind == "response" else part.data)
+                *lines, buf = buf.split(b"\n")
+                for line in lines:
+                    if line.strip():
+                        sys.stdout.write(line.decode("utf-8", "replace") + "\n")
+                sys.stdout.flush()
+                if part.end_body:
+                    return None
+        finally:
+            gw.close()
+
+    cli.cmd_watch = watch
 
 
 install()
