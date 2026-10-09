@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.41.0 - 2026-10-08
+
+- muse.ai: the status line and live status row now show what the agent says it is doing while it works ("Searching", "Fetching release", "is responding"), as the muse.ai web app does, instead of only a step count. The compatibility hook for muse-cli 0.3.2 lets `muse-cli watch` subscribe to the conversation's chat the way the web client does and stream each update as it arrives; muse-cli's own watch never saw side-chat activity and printed nothing until it ended. Works for the main chat, side chats, and followed chats. Statuses replayed from before the turn are ignored, and the step count returns if the live stream ends.
+
 ## v0.40.0 - 2026-10-08
 
 - muse.ai: Feed can open article and social links, prepare a discussion in chat, and run linked ideas. Ideas can run the whole idea or selected parts, then open the execution chat. Discussion drafts include the item's details and stay unsent until you press Send.
