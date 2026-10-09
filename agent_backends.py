@@ -1436,6 +1436,43 @@ _CLAUDE_USAGE_WINDOWS = (
 )
 
 
+# What has been said already, so a warning that every turn repeats is heard
+# once per window: a new window, or the limit being reached, says it again.
+_CLAUDE_LIMITS_SAID: set = set()
+
+
+def claude_limit_warning(info: object) -> str:
+    """The line to say for a stream-json `rate_limit_event`, or "".
+
+    Claude Code sends one with every turn. Only `allowed_warning` (past the
+    plan's warning threshold) and `rejected` (the limit is reached) are worth
+    interrupting for, and each only once per window.
+    """
+    if not isinstance(info, dict):
+        return ""
+    status = info.get("status")
+    if status not in ("allowed_warning", "rejected"):
+        return ""
+    kind = info.get("rateLimitType")
+    labels = {field: label for field, label, _minutes in _CLAUDE_USAGE_WINDOWS}
+    label = labels.get(kind) if isinstance(kind, str) else None
+    resets = _as_number(info.get("resetsAt"))
+    key = (kind, resets, status)
+    if key in _CLAUDE_LIMITS_SAID:
+        return ""
+    _CLAUDE_LIMITS_SAID.add(key)
+    used = _as_number(info.get("utilization"))
+    window = UsageWindow(
+        label or "Usage limit",
+        100.0 if status == "rejected" else (used * 100 if used is not None else None),
+        resets,
+    )
+    line = _usage_window_line(window) or window.label
+    if status == "rejected":
+        return f"Claude Code {line}. The limit is reached."
+    return f"Claude Code {line}."
+
+
 def _claude_usage_windows(payload: Optional[dict]) -> list[UsageWindow]:
     """Read the `get_usage` answer. Anything not reported is left out."""
     if not isinstance(payload, dict):

@@ -1,12 +1,7 @@
-# BlindPilot 0.42.0
+# BlindPilot 0.43.0
 
-BlindPilot can now keep the messages you send often, so you do not have to type or paste them again. Open Saved Prompts from the Conversation menu, or press Ctrl+Shift+P anywhere in a session.
+Two additions that save you from surprises: a spoken warning before a Claude Code plan limit runs out, and a way to see how a past conversation ended before you reopen it.
 
-- The dialog lists your prompts by name. As you arrow through them, the selected prompt's full text is shown in a read-only box below the list (Alt+X), so you can check it before using it.
-- Use, or Enter on a prompt, closes the dialog and puts the prompt into the prompt box where your caret was. If you had text selected, the prompt replaces it; anything else you typed stays. Nothing is sent until you press Enter, so you can finish or change it first.
-- New starts from whatever is in the prompt box, with its first few words offered as the name. To save the message you have just written, press Ctrl+Shift+P, then New, and accept the name and text. If the prompt box is empty, you type both.
-- Edit changes a prompt's name or text. Delete, or the Delete key on the list, removes one after asking, with No as the default. Move Up and Move Down put them in the order you want.
-- Every change is saved straight away and spoken ("Prompt saved: Review", "Prompt deleted: Review"). Prompts live in BlindPilot's own settings file next to your other preferences; no backend's files are touched, and they work the same with every backend.
-- Escape or Close leaves the dialog and returns you to the prompt without changing it.
-
-The shortcut is listed in Help, Keyboard Shortcuts (F1) and in the README.
+- Claude Code limit warnings. Claude Code reports your plan's usage with every turn. When the five-hour limit, the weekly limit, or a model's own weekly limit passes the plan's warning level, BlindPilot now tells you once, as it happens, for example: "Claude Code Weekly limit: 92% used, resets Mon 12 Oct 14:00 (in 2 days 22 hours)." If a limit is reached, you hear that too. The warning is spoken whichever narration mode you use and is added to the conversation as a row, so you can find it again. It is not repeated every turn: you hear it again only once the limit resets and fills up again, or when the limit is actually reached. Until now these numbers were only in Model, Session Status, so a long task could stop on a limit with no warning.
+- Last exchange in Recent Conversations. Under the conversation list there is now a read-only Last exchange box (Alt+T). It shows your last message in the selected conversation and the answer to it, so two conversations that began with the same request can be told apart before you open one. It is read in the background a moment after you stop arrowing, so moving through a long list stays quick; it says "Reading…" until the text arrives. Long messages are cut at about 1,200 characters. It works for every backend the list shows.
+- Linux fix. On Linux, switching between Agent and Chat mode could stop with a wxWidgets "invalid menu item" error because of the muse.ai submenu, which is only in the Model menu while a muse.ai tab needs it. That item is now left alone while it is out of the menu, and set correctly when it goes back in. Windows and macOS were not affected.
