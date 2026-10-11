@@ -330,7 +330,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.43.2"
+APP_VERSION = "0.43.3"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7148,7 +7148,6 @@ class HistoryDialog(wx.Dialog):
 
         self.Bind(wx.EVT_BUTTON, lambda _e: self._accept(), id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
-        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self._reload()
         self.filter_box.SetFocus()
         self.CentreOnParent()
@@ -7190,12 +7189,12 @@ class HistoryDialog(wx.Dialog):
         self._refresh()
         announce(f"Error: {error}" if error else self.summary.GetLabel())
 
-    def _on_destroy(self, event: wx.WindowDestroyEvent) -> None:
-        if event.GetEventObject() is self:
-            self._load_serial += 1
-            self._preview_timer.Stop()
-            self._preview_for = None
-        event.Skip()
+    def Destroy(self) -> bool:
+        # Cocoa may defer native destruction past an already queued callback.
+        self._load_serial += 1
+        self._preview_timer.Stop()
+        self._preview_for = None
+        return super().Destroy()
 
     def _read_own_names(self) -> None:
         """Names and hidden list from config, once per refresh, not per row."""

@@ -2,10 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## v0.43.2 - 2026-10-11
+## v0.43.3 - 2026-10-11
 
 - Recent Conversations (Ctrl+Shift+H): opening the window and changing the backend or folder no longer freeze BlindPilot while history is read. The window opens with a loading message and stays usable while the scan runs in the background, then announces the conversation count or an error. Results from an older folder or backend choice are ignored, and closing during loading is safe. Large history stores can still take time to finish loading.
 - Recent Conversations: arrowing through the list once again tells screen readers which conversation is selected. The Last exchange preview handler had consumed the selection event before the list could send its accessibility notifications. Those notifications now happen before a dialog's selection handler, fixing the same silence in the Hermes conversation picker while keeping the preview and running-turn warning working.
+- Recent Conversations: closing the dialog immediately invalidates pending history and preview results, including on macOS where the native window can remain alive until a later event-loop pass. A result queued before closing cannot announce a conversation count or schedule another preview after closing.
 
 ## v0.43.1 - 2026-10-10
 

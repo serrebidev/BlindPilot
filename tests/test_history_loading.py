@@ -107,3 +107,28 @@ def test_closing_during_loading_discards_the_result(frame, monkeypatch):
     _wait(delivered.is_set)
     # A callback on a destroyed wx object must not update controls or speak.
     assert spoken == []
+
+
+def test_a_queued_result_is_ignored_while_native_destruction_is_deferred(frame, monkeypatch):
+    release = threading.Event()
+
+    def scan(*_a):
+        release.wait(3)
+        return []
+
+    monkeypatch.setattr(app, "list_history", scan)
+    spoken = []
+    monkeypatch.setattr(app, "announce", lambda text, **_k: spoken.append(text))
+    dialog = app.HistoryDialog(frame, "claude", ".")
+    serial = dialog._load_serial
+    try:
+        with monkeypatch.context() as patch:
+            # Cocoa can keep the C++ dialog alive until the next event-loop pass.
+            patch.setattr(wx.Dialog, "Destroy", lambda _self: True)
+            dialog.Destroy()
+            dialog._history_loaded(serial, [], "")
+        assert spoken == []
+        assert dialog._loading
+    finally:
+        release.set()
+        dialog.Destroy()
