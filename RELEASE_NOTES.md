@@ -1,9 +1,9 @@
-# BlindPilot 0.43.2
+# BlindPilot 0.43.3
 
 Recent Conversations (Ctrl+Shift+H) now opens without waiting for your history to finish loading, and arrowing through its list once again tells your screen reader which conversation is selected. Thanks to Kaveinthran for reporting the delays and silent navigation.
 
 - The window stays responsive while history loads. Before, BlindPilot read the selected backend's history on the same thread that handles the interface, so a slow store could hold up the entire window for many seconds. History is now read in the background. You see a loading message while it is being read, can change the backend or folder, and can close the window without waiting. When loading finishes, BlindPilot announces the conversation count or an error. A result from an earlier folder or backend choice never replaces the list you asked for afterwards. Large stores can still take time to load, but that wait no longer freezes the dialog.
 - Conversation selection is announced again. The Last exchange preview added in 0.43.0 handled the selection event before the list could notify the screen reader, leaving arrow-key changes silent. The list now sends its focus and selection notifications before the preview handler runs. The same fix also restores selection announcements in the Hermes conversation picker, while preserving its warning when opening a conversation would move a running turn into this window.
-- Previews stop waiting when they are no longer needed. Changing the folder or closing the dialog stops the pending preview timer, and a late history or preview result cannot update a closed window.
+- Previews stop waiting when they are no longer needed. Changing the folder or closing the dialog stops the pending preview timer, and closing immediately invalidates all pending results. A late history or preview result cannot update a closed window or announce its conversation count, including on macOS where the native window may remain alive briefly after you close it.
 
 The initial conversation count is for the selected backend and current folder. Choose All folders or All backends to widen the list.
