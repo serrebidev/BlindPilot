@@ -286,6 +286,27 @@ def test_moving_the_selection_tells_the_screen_reader_which_row_has_focus(frame,
     assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 3), (wx.ACC_EVENT_OBJECT_SELECTION, 3)]
 
 
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="wx.Accessible is Windows only")
+def test_a_dialog_selection_handler_cannot_silence_the_focused_row(frame, monkeypatch):
+    events = []
+    selected = []
+    monkeypatch.setattr(
+        wx.Accessible,
+        "NotifyEvent",
+        staticmethod(lambda ev, win, objid, child: events.append((ev, child))),
+    )
+    lst = cl.ConversationList(frame)
+    lst.Set(["a", "b", "c"])
+    # History's preview and Hermes' live-turn warning consume this event.
+    lst.Bind(wx.EVT_LISTBOX, lambda ev: selected.append(lst.GetSelection()))
+    lst.SetSelection(1)
+    ev = wx.CommandEvent(wx.wxEVT_LISTBOX, lst.GetId())
+    ev.SetEventObject(lst)
+    lst.GetEventHandler().ProcessEvent(ev)
+    assert selected == [1]
+    assert events == [(wx.ACC_EVENT_OBJECT_FOCUS, 2), (wx.ACC_EVENT_OBJECT_SELECTION, 2)]
+
+
 def test_focus_with_nothing_selected_lands_on_the_first_row_and_stays_quiet(frame, monkeypatch):
     events = []
     monkeypatch.setattr(

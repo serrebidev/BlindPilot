@@ -89,7 +89,6 @@ class ConversationList(wx.VListBox):
         if ACCESSIBLE_AVAILABLE:
             self._accessible = RowsAccessible(self)
             self.SetAccessible(self._accessible)
-        self.Bind(wx.EVT_LISTBOX, self._on_select)
         self.Bind(wx.EVT_SET_FOCUS, self._on_focus)
 
     # ----- rows -----
@@ -243,9 +242,11 @@ class ConversationList(wx.VListBox):
         wx.Accessible.NotifyEvent(wx.ACC_EVENT_OBJECT_FOCUS, self, wx.OBJID_CLIENT, sel + 1)
         wx.Accessible.NotifyEvent(wx.ACC_EVENT_OBJECT_SELECTION, self, wx.OBJID_CLIENT, sel + 1)
 
-    def _on_select(self, event: wx.CommandEvent) -> None:
-        self._announce_selection()
-        event.Skip()
+    def TryBefore(self, event: wx.Event) -> bool:
+        # Notify before a caller's selection handler can consume the event.
+        if event.GetEventType() == wx.wxEVT_LISTBOX and event.GetId() == self.GetId():
+            self._announce_selection()
+        return super().TryBefore(event)
 
     def _on_focus(self, event: wx.FocusEvent) -> None:
         if self.GetSelection() == wx.NOT_FOUND and self._rows:

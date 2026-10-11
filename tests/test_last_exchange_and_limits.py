@@ -7,6 +7,8 @@ the tests call the pieces either side of it.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import agent_backends
@@ -39,11 +41,17 @@ def test_the_box_follows_the_selection_and_ignores_a_late_answer(frame, monkeypa
     try:
         dialog = blindpilot_app.HistoryDialog(frame, backend="claude", cwd=".")
         try:
+            deadline = time.monotonic() + 3
+            while not dialog._shown and time.monotonic() < deadline:
+                app.Yield()
+                time.sleep(0.01)
             first = dialog._shown[0]
             assert dialog._preview_for == first
             assert dialog.preview.GetValue() == "Reading…"
             dialog.list_box.SetSelection(1)
-            dialog._schedule_preview()
+            selection = wx.CommandEvent(wx.wxEVT_LISTBOX, dialog.list_box.GetId())
+            selection.SetEventObject(dialog.list_box)
+            dialog.list_box.GetEventHandler().ProcessEvent(selection)
             dialog._show_preview(first, "stale")
             assert dialog.preview.GetValue() == "Reading…"
             dialog._show_preview(dialog._shown[1], "You: hi")

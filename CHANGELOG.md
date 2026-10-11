@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.2 - 2026-10-11
+
+- Recent Conversations (Ctrl+Shift+H): opening the window and changing the backend or folder no longer freeze BlindPilot while history is read. The window opens with a loading message and stays usable while the scan runs in the background, then announces the conversation count or an error. Results from an older folder or backend choice are ignored, and closing during loading is safe. Large history stores can still take time to finish loading.
+- Recent Conversations: arrowing through the list once again tells screen readers which conversation is selected. The Last exchange preview handler had consumed the selection event before the list could send its accessibility notifications. Those notifications now happen before a dialog's selection handler, fixing the same silence in the Hermes conversation picker while keeping the preview and running-turn warning working.
+
 ## v0.43.1 - 2026-10-10
 
 - muse.ai: the conversation now shows what muse.ai is actually doing, as it happens. BlindPilot follows muse.ai's live Activity feed alongside the chat, so each task it starts ("muse.ai started a task: Check disk and uptime"), what it says it is doing in it, and every tool call (the command it runs, the file it writes or deletes) becomes a row the moment muse.ai reports it, with the command named. Only work by the conversation's own chat agent is shown. A turn also says "Connecting to muse.ai." and "Connected to muse.ai." before it sends.
