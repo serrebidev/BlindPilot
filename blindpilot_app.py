@@ -330,7 +330,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.43.1"
+APP_VERSION = "0.43.2"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7050,6 +7050,9 @@ class HistoryDialog(wx.Dialog):
         self._entries: List[HistoryEntry] = []
         self._shown: List[HistoryEntry] = []
         self.entry: Optional[HistoryEntry] = None
+        self._load_serial = 0
+        self._loading = False
+        self._load_error = ""
 
         backend_label_text = wx.StaticText(self, label="&Backend:")
         self._backend_values = [""] + list(BACKEND_IDS)
@@ -7103,7 +7106,7 @@ class HistoryDialog(wx.Dialog):
         self.summary.SetName("Summary")
 
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
-        open_button = self.FindWindowById(wx.ID_OK)
+        open_button = self.FindWindow(wx.ID_OK)
         if open_button is not None:
             open_button.SetLabel("&Open")
         # Names and hiding are BlindPilot's own: no backend's files change.
@@ -7145,6 +7148,7 @@ class HistoryDialog(wx.Dialog):
 
         self.Bind(wx.EVT_BUTTON, lambda _e: self._accept(), id=wx.ID_OK)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
         self._reload()
         self.filter_box.SetFocus()
         self.CentreOnParent()
@@ -7160,9 +7164,38 @@ class HistoryDialog(wx.Dialog):
 
     def _reload(self) -> None:
         """Re-scan the history stores for the chosen backend and scope."""
-        with wx.BusyCursor():
-            self._entries = list_history(self._selected_backend(), self._selected_cwd())
+        backend, cwd = self._selected_backend(), self._selected_cwd()
+        self._load_serial += 1
+        serial = self._load_serial
+        self._loading = True
+        self._load_error = ""
+        self._entries = []
         self._refresh()
+
+        def work() -> None:
+            try:
+                entries, error = list_history(backend, cwd), ""
+            except Exception as exc:
+                entries, error = [], f"Could not load conversations: {exc}"
+            wx.CallAfter(self._history_loaded, serial, entries, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _history_loaded(self, serial: int, entries: List[HistoryEntry], error: str) -> None:
+        if not self or serial != self._load_serial:
+            return
+        self._loading = False
+        self._load_error = error
+        self._entries = entries
+        self._refresh()
+        announce(f"Error: {error}" if error else self.summary.GetLabel())
+
+    def _on_destroy(self, event: wx.WindowDestroyEvent) -> None:
+        if event.GetEventObject() is self:
+            self._load_serial += 1
+            self._preview_timer.Stop()
+            self._preview_for = None
+        event.Skip()
 
     def _read_own_names(self) -> None:
         """Names and hidden list from config, once per refresh, not per row."""
@@ -7209,7 +7242,11 @@ class HistoryDialog(wx.Dialog):
         if self._shown:
             self.list_box.SetSelection(self._shown.index(keep) if keep in self._shown else 0)
         count = len(self._shown)
-        if not self._entries:
+        if self._loading:
+            message = "Loading conversations…"
+        elif self._load_error:
+            message = self._load_error
+        elif not self._entries:
             message = "No past conversations found here"
         elif count == 1:
             message = "1 conversation"
@@ -7225,12 +7262,15 @@ class HistoryDialog(wx.Dialog):
         entry = self._shown[selection] if 0 <= selection < len(self._shown) else None
         if entry == self._preview_for:
             return
+        self._preview_timer.Stop()
         self._preview_for = entry
         self.preview.ChangeValue("Reading…" if entry else "")
         if entry is not None:
             self._preview_timer.Start(300)
 
     def _load_preview(self) -> None:
+        if not self:
+            return
         entry = self._preview_for
         if entry is None:
             return
@@ -7251,7 +7291,7 @@ class HistoryDialog(wx.Dialog):
             self.preview.ChangeValue(text)
 
     def _set_open_enabled(self, enabled: bool) -> None:
-        button = self.FindWindowById(wx.ID_OK)
+        button = self.FindWindow(wx.ID_OK)
         if button is not None:
             button.Enable(enabled)
 
