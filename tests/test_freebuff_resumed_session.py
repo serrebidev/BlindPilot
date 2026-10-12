@@ -113,10 +113,11 @@ def test_a_resumed_turn_does_not_adopt_a_folder_that_appeared_while_it_ran(monke
 
     assert worker._session_id == "chat-ours", turn.sessions
     assert "chat-theirs" not in turn.sessions
-    assert prewarmed == ["chat-ours"], prewarmed
+    assert prewarmed == []
+    assert turn.failures and "cannot resume" in turn.failures[0]
 
 
-def test_a_new_turn_still_learns_the_conversation_it_created(monkeypatch):
+def test_a_new_turn_still_learns_the_conversation_it_created(monkeypatch, tmp_path):
     """The other half of the rule: with no session to begin with, the folder
     that appears during the turn is this turn's, and is what is resumed."""
     turn = _Turn()
@@ -128,7 +129,12 @@ def test_a_new_turn_still_learns_the_conversation_it_created(monkeypatch):
         return snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
 
     _stub(monkeypatch, worker, dirs, prewarmed)
-    monkeypatch.setattr(agent_backends, "_freebuff_chat_path", lambda _cwd, _sid: None)
+    chat = tmp_path / "chat-ours"
+    chat.mkdir()
+    monkeypatch.setattr(agent_backends, "_freebuff_run_status", lambda *_: "complete")
+    monkeypatch.setattr(
+        agent_backends, "_freebuff_chat_path", lambda _cwd, sid: chat if sid else None
+    )
 
     worker._do_run()
 

@@ -1,5 +1,71 @@
 # Audit: the FreeBuff backend
 
+## Follow-up audit, 2026-10-12
+
+Scope: BlindPilot's FreeBuff launch, prewarm, worker, screen parser, model
+settings, and CLI/Desktop history. Expected load: one desktop application with
+several conversation tabs. The FreeBuff service and upstream implementation
+were inspected only to verify the interface BlindPilot drives.
+
+The following defects were reproduced and repaired for 0.43.6:
+
+1. **Windows launch failures leaked handles.** If creating the child failed,
+   two pipe ends and the pseudoconsole stayed open. Partial initialization now
+   closes every acquired resource. A closed terminal also refuses to inspect
+   its released process handle again.
+2. **Shutdown could hang or leave background children running.** Closing the
+   pseudoconsole before its undrained output pipe can wait indefinitely on
+   older Windows. The output closes first, and stopping kills the launcher's
+   process tree, including MCP children detached from the pseudoconsole.
+   This follows [Microsoft's ClosePseudoConsole requirements](https://learn.microsoft.com/windows/console/closepseudoconsole).
+3. **Batch launchers misread valid paths.** Spaces broke launcher paths;
+   ampersands split commands and percent signs expanded environment variables.
+   Batch arguments now expand once inside quotes, with delayed expansion off.
+   Real Windows launches test spaces, `&`, `%PATH%`, `!`, `^`, and parentheses.
+4. **A new tab could adopt another terminal's chat.** The newest folder was
+   assumed to be this launch's conversation. Discovery now matches the process
+   ID in the boot log to the terminal's process tree and binds the chat before
+   submitting input, while that tree is still alive.
+5. **Invalid resumes silently opened unrelated conversations.** Installed
+   FreeBuff 0.2.26 searches its current working directory's basename bucket
+   and falls back to a recent chat when the requested ID is missing. BlindPilot
+   now refuses missing or other-folder CLI sessions before launch. Desktop
+   thread IDs belong to a different store; those transcripts open in the
+   existing read-only viewer, with that limitation stated in the history list.
+6. **Resumed and replaced terminals used the wrong startup state.** An empty
+   resumed log released input early, prewarmed continuations discarded their
+   own boot milestone by taking the log offset too late, and restarting kept
+   the previous terminal's completed picker state. Readiness now requires this
+   launch's milestone, prewarm retains its starting offset, and replacement
+   picker state resets. A finished fingerprint milestone also clears the
+   disconnect logged during boot; a later disconnect remains a real drop.
+7. **Model failures could crash or erase settings.** Bad cache timestamps
+   raised conversion errors; cyclic compiled aliases recursed indefinitely;
+   unreadable or damaged settings were replaced by a new model-only object;
+   and saving the selected model swallowed write failures. Cache and alias
+   failures now degrade safely, existing settings are preserved, and model
+   save errors are reported. BlindPilot's model choice is replaced atomically.
+8. **Reply reading and saved history lost content.** Repeating prompt words
+   inside an answer moved the screen boundary past earlier paragraphs. Only
+   a matching echo prefix now counts. Global history also omitted the older
+   `projects/chats` folder, and the size limit for a single transcript rejected
+   every small Desktop thread in a large shared database. Both history paths
+   are repaired, with Desktop reads capped by message rows.
+
+Regression cases live in `tests/test_freebuff_audit.py` and the existing
+FreeBuff/history tests. A live fresh turn and prewarmed continuation both
+returned the expected reply in the same conversation, with no worker errors
+and successful workspace cleanup. Ruff, formatting, mypy, and all three
+startup smoke checks passed locally. The full suite passed with warnings
+treated as errors: 2,215 passed and 15 skipped. Release builds are verified
+separately before publishing.
+
+Not checked: a live macOS FreeBuff turn, Windows versions older than this
+machine, or the FreeBuff service itself. FreeBuff still requires a hidden TUI;
+Desktop transcripts are readable here but must be continued in Desktop.
+
+## Earlier audit, 2026-09-21
+
 Read-only audit, 2026-09-21, followed by the fixes listed at the end. Line
 numbers are as of this date. Ruff, `ruff format` and mypy are clean on the
 whole tree before and after, and the FreeBuff test files pass before and after.

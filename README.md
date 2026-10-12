@@ -191,7 +191,7 @@ On a Mac, Ctrl is Cmd. Two keys are different so macOS doesn't eat them: Recent 
 
 - **Claude Code:** warns you before a plan limit runs out, as well as when the conversation gets full.
 - **Codex:** one copy runs for all your tabs. It shuts down after fifteen minutes doing nothing, and starts again with your next message. BlindPilot tells you when.
-- **FreeBuff:** has no proper way for other apps to talk to it, so BlindPilot reads its screen behind the scenes and filters out the ads. If you send before it's ready, BlindPilot holds your message and sends it when it can.
+- **FreeBuff:** has no proper way for other apps to talk to it, so BlindPilot reads its screen behind the scenes and filters out the ads. If you send before it's ready, BlindPilot holds your message and sends it when it can. Continue a CLI conversation from its original folder. FreeBuff Desktop conversations open for reading and copying; continue them in FreeBuff Desktop.
 - **opencode:** one copy runs for all your tabs. Needs a provider connected first.
 - **Hermes:** keeps one connection open for the whole conversation. Its questions, approvals, and password requests come to you as dialogs.
 - **Muse Code:** Meta's coding agent. On Windows it runs inside WSL.

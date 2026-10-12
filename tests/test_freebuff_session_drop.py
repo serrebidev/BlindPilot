@@ -462,6 +462,9 @@ def test_a_dropped_session_logged_mid_turn_gets_patience_then_ends_the_turn(monk
     def spawn(_args):
         def read(_timeout):
             if not state["sent"]:
+                (chat / "log.jsonl").write_text(
+                    '{"msg":"Enhanced CLI fingerprint generated successfully"}\n', encoding="utf-8"
+                )
                 return READY
             state["phase"] += 1
             if state["phase"] == 5:
@@ -538,7 +541,7 @@ def _stub_boot_ready(monkeypatch, ready):
     monkeypatch.setattr(
         agent_backends,
         "_freebuff_boot_ready",
-        lambda _cwd, _before, _chat_path, _offset: ready(),
+        lambda *_args: ready(),
     )
     monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", lambda _cwd: {})
     monkeypatch.setattr(agent_backends, "_freebuff_chat_path", lambda _cwd, _sid: None)
