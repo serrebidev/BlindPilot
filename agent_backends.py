@@ -155,32 +155,6 @@ def _end_windows_tree(pid: int) -> None:
 _CONSOLE_WINDOW_CLASSES = ("ConsoleWindowClass", "PseudoConsoleWindow")
 
 
-def reserve_hidden_console() -> bool:
-    """Take a console for this process now, hidden, and keep it.
-
-    Creating a pseudo-terminal gives a windowed application a console whether
-    it wants one or not, and that console arrives visible. Claiming one up
-    front, before any terminal is created, means there is nothing left to
-    create later: the console already exists and is already hidden.
-    """
-    if platform.system() != "Windows":
-        return False
-    import ctypes
-
-    kernel32 = ctypes.windll.kernel32
-    try:
-        handle = kernel32.GetConsoleWindow()
-        if not handle:
-            if not kernel32.AllocConsole():
-                return False
-            handle = kernel32.GetConsoleWindow()
-        if handle:
-            _banish_window(handle)
-        return bool(handle)
-    except OSError:
-        return False
-
-
 def _banish_window(handle: int) -> None:
     """Make a console unable to take focus, then hide it off-screen.
 
@@ -5618,10 +5592,13 @@ def _spawn_freebuff_pty(
     if platform.system() == "Windows":
         from winpty import PtyProcess
 
-        # Own the console before the terminal asks for one, so none is
-        # created on screen. The watcher below is the safety net for the
-        # consoles FreeBuff's own tools can still raise.
-        reserve_hidden_console()
+        # No console is claimed for this process, on purpose. A
+        # pseudoconsole creates no hosting window (Microsoft's own docs say
+        # so), so the ConPTY below needs none -- and the only way to claim
+        # one, AllocConsole, hands back a window that has already appeared.
+        # That visible frame, titled with BlindPilot's own executable, was
+        # the terminal users kept seeing. The watcher below stays as the
+        # safety net for consoles FreeBuff's own tools can still raise.
         roots = {os.getpid()}
 
         def hide_terminal() -> None:
@@ -5731,12 +5708,10 @@ def _spawn_hidden_console(args: list[str], cwd: str) -> object:
 
     ``CREATE_NEW_CONSOLE`` gives it the real terminal that commands like these
     need, and the startup show flag has Windows create that console hidden
-    rather than hiding it afterwards. The alternative, ``AllocConsole`` -- how
-    FreeBuff's pseudo-terminal reserves a console -- hands back one that has
-    already appeared and hiding it is the next thing that happens: a frame of a
-    console window, titled with our own executable, in front of the user.
-    FreeBuff pays that frame once, when its backend is chosen. A sign-in has no
-    such moment to pay it in, so it creates no window rather than hiding one.
+    rather than hiding it afterwards. The alternative, ``AllocConsole``, hands
+    back a console that has already appeared and hiding it is the next thing
+    that happens: a frame of a console window, titled with our own executable,
+    in front of the user. A sign-in creates no window rather than hiding one.
     """
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -5895,7 +5870,7 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
             set_freebuff_model(key[2])
         except OSError:
             return
-        args = [binary, "--cwd", cwd]
+        args = [binary, "--cwd", cwd, "--trust-agents"]
         if session_id:
             args.extend(["--continue", session_id])
         # A new conversation's chat is created when the terminal starts, not
@@ -5967,10 +5942,14 @@ atexit.register(discard_freebuff_prewarm)
 class FreebuffWorker(_TurnWorker):
     """Drive FreeBuff's interactive TUI through a pseudo-terminal.
 
-    FreeBuff currently has no JSON or headless interface.  A PTY is therefore
-    required so its OpenTUI client behaves exactly as it does in a terminal.
-    The adapter keeps live narration useful by turning visible TUI updates into
-    activity rows and resumes the chat id FreeBuff creates on the next turn.
+    FreeBuff has no JSON or headless interface -- upstream's CLI surface is
+    ``login``, ``--continue``, ``--cwd`` and ``--trust-agents``, and the
+    request for a print mode (CodebuffAI/freebuff#947) is still open. A PTY
+    is therefore required so its OpenTUI client behaves exactly as it does
+    in a terminal. The PTY only drives the TUI: the finished answer and the
+    turn's end come from the chat files FreeBuff itself writes
+    (``chat-messages.json`` and ``log.jsonl``), and the screen is read only
+    for live narration, the model picker, and its question box.
     """
 
     _backend = BACKEND_FREEBUFF
@@ -6073,7 +6052,12 @@ class FreebuffWorker(_TurnWorker):
                 log_offset = (chat_path / "log.jsonl").stat().st_size
             except OSError:
                 pass
-        args = [binary, "--cwd", self._cwd]
+        # --trust-agents is upstream's opt-in for unattended runs: without
+        # it a project carrying .agents or mcp.json stops on a trust prompt
+        # inside a terminal nobody can see, and the turn dies on the
+        # startup-silence timeout. BlindPilot already runs every agent in
+        # this folder without asking, so the prompt is answered here instead.
+        args = [binary, "--cwd", self._cwd, "--trust-agents"]
         if self._session_id:
             args.extend(["--continue", self._session_id])
         waiting = _take_freebuff_prewarm(self._cwd, self._session_id, self._model)

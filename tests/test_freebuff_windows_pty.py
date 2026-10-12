@@ -17,7 +17,6 @@ winpty = pytest.importorskip("winpty")
 @pytest.fixture
 def quiet_console(monkeypatch):
     """Keep the test process's own console out of it."""
-    monkeypatch.setattr(ab, "reserve_hidden_console", lambda: False)
     monkeypatch.setattr(ab, "hide_console_windows", lambda roots=None: 0)
 
 

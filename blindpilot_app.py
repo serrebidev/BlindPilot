@@ -141,7 +141,6 @@ from agent_backends import (
     own_group_kwargs,
     prewarm_freebuff,
     question_summary,
-    reserve_hidden_console,
     set_freebuff_model,
     spawn_hidden_terminal,
     stop_opencode_server,
@@ -330,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.43.3"
+APP_VERSION = "0.43.4"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -13887,9 +13886,6 @@ class MainFrame(wx.Frame):
         self._backend = backend
         cfg = _load_config()
         cfg["backend"] = backend
-        # Now rather than when the next message starts a terminal, so the
-        # console cannot arrive in the middle of a turn.
-        reserve_console_if_needed(backend)
         _save_config(cfg)
         # The visible tab only. Every tab used to follow this one setting, so
         # picking a backend for a new tab quietly moved the others to it too
@@ -15635,36 +15631,6 @@ Escape answers later or denies. Nothing is allowed by closing a dialog.
 _STARTUP_CHECK = False
 
 
-def reserve_console_if_needed(backend: object, startup_check: Optional[bool] = None) -> bool:
-    """Claim a hidden console, but only for the backend that needs one.
-
-    FreeBuff is driven through a pseudo-terminal, and creating one gives a
-    windowed application a console whether it wants one or not. Claiming one
-    up front means there is nothing left to create later, so the console
-    never arrives in the middle of somebody's first message.
-
-    Nobody else needs it. Every other backend is an ordinary subprocess
-    spawned with CREATE_NO_WINDOW, and `_spawn_freebuff_pty` reserves one
-    itself anyway, so this is only about *when* rather than whether.
-
-    That matters because AllocConsole hands back a console that is already
-    visible and hiding it is the next thing that happens - one frame of a
-    window on screen, which Windows offers no way to avoid. Paying it on
-    every launch, for the three backends that will never use it, is the
-    part worth not doing.
-
-    Whether this is a startup check is read from `_STARTUP_CHECK` unless a
-    caller says, for the same reason `focus_prompt` guards itself: `main` has
-    to be told because it calls this before the flag is set, but nothing else
-    should have to know to.
-    """
-    if startup_check is None:
-        startup_check = _STARTUP_CHECK
-    if startup_check or normalize_backend(backend) != BACKEND_FREEBUFF:
-        return False
-    return reserve_hidden_console()
-
-
 def main() -> int:
     if "--startup-smoke" in sys.argv:
         # Importing this module has already loaded wxPython, every backend,
@@ -15739,7 +15705,6 @@ def main() -> int:
             logging.getLogger("blindpilot").info(
                 "appearance %s was not applied, wx returned %s", appearance, result
             )
-    reserve_console_if_needed(cfg.get("backend"), gui_startup_smoke)
     # Installs that predate full-auto still carry the mode an older BlindPilot
     # saved for them. Moving them over here is what makes "nothing stops to
     # ask" true of an upgrade as well as of a fresh install.
