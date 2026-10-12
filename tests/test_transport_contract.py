@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import platform
 import subprocess
 import sys
 import threading
@@ -150,18 +149,14 @@ TRANSPORT_METHODS = frozenset({"send", "receive", "close", "connected", "failure
 # beside a wx dialog, so a wx-gated module is the one place the sweep can afford
 # to miss on a dev box while staying complete where it is enforced.
 #
-# The same mercy is owed to platform-gated modules, for the same reason. The
-# Windows-only pseudo-terminal tests gate on ``platform.system()`` AND then
-# ``pytest.importorskip("winpty")``, so on Linux and macOS their import fails
-# even though nothing in them could hide a fake that Windows would miss;
-# Windows, the only platform where their fakes could hide, sweeps them in
-# full. Naming the package instead of the module keeps the next platform-
-# gated file from re-breaking this guard.
+# The same mercy is owed to platform-gated modules, for the same reason. A
+# Windows-only test module gates on ``platform.system()``, so on Linux and
+# macOS it is skipped before anything in it can be swept; Windows, the only
+# platform where its fakes could hide, sweeps it in full. (This used to name
+# pywinpty, the package the pseudo-terminal tests importorskipped; the
+# terminal is now created directly and no module importorskips it.)
 WX_IS_MISSING = ("wx",)
-# Packages tolerated when the platform they serve is absent: pywinpty drives
-# FreeBuff's pseudo-terminal on Windows only, so elsewhere the Windows-gated
-# module's importorskip fires before anything can be swept.
-MISSING_PLATFORM_PACKAGE = () if platform.system() == "Windows" else ("winpty",)
+MISSING_PLATFORM_PACKAGE: tuple[str, ...] = ()
 
 
 def _is_only_missing_wx(exc: BaseException) -> bool:
@@ -173,9 +168,9 @@ def _is_only_missing_wx(exc: BaseException) -> bool:
     and silently skipped the whole registry guard), and a module that imports
     ``blindpilot_app`` raises ``ModuleNotFoundError(name="wx")``.
 
-    On Linux and macOS the same tolerance covers a Windows-only module that
-    importorskips ``winpty``; on Windows the package is installed, so its fakes
-    are swept exactly as the wx modules are swept on every runner.
+    On Linux and macOS the same tolerance covers a platform-gated module;
+    on Windows such a module imports, so its fakes are swept exactly as the
+    wx modules are swept on every runner.
     """
     if isinstance(exc, ModuleNotFoundError):
         return exc.name in WX_IS_MISSING or exc.name in MISSING_PLATFORM_PACKAGE

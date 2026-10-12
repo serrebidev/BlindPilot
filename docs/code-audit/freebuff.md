@@ -294,3 +294,61 @@ instructions that folder's tree holds, which is what FreeBuff intends.
 
 Tests added: `test_freebuff_model_swap.py`, `test_freebuff_resumed_session.py`,
 `test_freebuff_steer.py`, `test_about_lists_every_backend.py`.
+
+## Continuation, 2026-10-12 (FreeBuff 0.2.26, released in v0.43.5)
+
+Two more defects, both found by running the release, both invisible to the
+suite as it stood. v0.43.4 had removed BlindPilot's own `AllocConsole` claim
+on the theory that a pseudoconsole creates no hosting window. Users still
+heard NVDA announce "terminal" at every backend switch.
+
+### 6. pywinpty allocates the console it was supposed to avoid -- HIGH / high
+
+`PtyProcess.spawn` (pywinpty 3.0.5, winpty-rs) calls `AllocConsole` in the
+host process before `CreatePseudoConsole`: the imports are in the shipped
+`_winpty` binary (`AllocConsole`, `FreeConsole`, `ShowWindow`), and a
+windowless probe measured a `conhost.exe` child of the host plus a
+`ConsoleWindowClass` window owned by the host, titled with the host's own
+executable, for exactly the lifetime of the terminal. The console-hiding
+watcher banished it within milliseconds, which is why window measurements
+after the fact showed nothing -- but NVDA had already taken the focus event.
+The v0.43.4 live verification polled visible windows, the one measurement
+that cannot see this.
+
+Fix: `_ConPtyTerminal` creates the pseudoconsole directly through ctypes
+(`CreatePseudoConsole`, `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`). Nothing is
+allocated in this process; the only console host spawned is OpenConsole in
+headless mode. Two details the library had been hiding: the child needs
+`STARTF_USESTDHANDLES` with no handles named or it inherits the host's
+standard handles instead of the pseudoconsole's (measured with a child that
+reported its own handles both ways), and the output pipe never reports EOF
+while the pseudoconsole lives, so reads poll `PeekNamedPipe` and end on an
+exited process with an empty pipe. pywinpty is removed from
+`requirements.txt` and the PyInstaller spec.
+
+Tests: `test_a_windowless_process_gains_no_console_from_the_terminal`
+(windowless helper process; the host's own `GetConsoleWindow` before/during
+is the assertion, not a window poll) -- it failed on the old path with a
+live console handle. Live: full `FreebuffWorker` turn, console handle 0
+throughout.
+
+### 7. A message sent in FreeBuff's first second is lost -- MEDIUM / high
+
+0.2.26 paints its composer at ~1s but discards keystrokes until ~2.5s
+(measured: submit at 1.3s lost without trace, at 2.6s answered). The boot
+hold that was supposed to prevent exactly this released early twice over:
+a launch whose chat folder had not appeared yet counted as ready, and the
+"Reconnection detected" line the hold waited for is never written by
+0.2.26. The worker submitted at 1.4s, the message vanished, and the turn
+died 30s later with the rejoin message. Every measured boot (0.0.180 and
+0.2.26) writes the same milestone sequence -- "session over", the
+enhanced-fingerprint line, then (older only) "Reconnection detected" -- so
+readiness is now the fingerprint line or a visible reconnection, and a
+launch with no chat yet counts as still starting.
+
+Tests: `test_a_boot_with_only_the_drop_line_is_not_ready`,
+`test_a_boot_that_reached_the_fingerprint_is_ready`,
+`test_a_launch_with_no_chat_yet_is_not_ready`. Harness fixtures in the
+steer/model-swap/resumed welcome tests now stub `_freebuff_boot_ready` as
+already-booted, which is what their fake terminals always represented.
+Live: the turn that died now answers "pong" in ~13s.
