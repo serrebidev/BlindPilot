@@ -9,7 +9,6 @@ markdown-it-py>=4.2.0
 pyobjc-framework-Cocoa>=12.2.2; sys_platform == "darwin"
 accessible-output2>=0.17; sys_platform == "win32"
 pyte>=0.8.2
-pywinpty>=3.0.5; sys_platform == "win32"
 pexpect>=4.9; sys_platform != "win32"
 keyring>=25.7.0; sys_platform != "win32"
 # Only needed to drive a Hermes running on another machine. The local Hermes

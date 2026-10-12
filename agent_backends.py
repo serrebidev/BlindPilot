@@ -5412,6 +5412,26 @@ _FREEBUFF_REJOIN_MESSAGE = (
 )
 
 
+def _freebuff_log_boot_finished(tail: str) -> bool:
+    """Whether a launch's log shows a FreeBuff that can take a message.
+
+    Every measured boot (0.0.180, 2026-09-01; 0.2.26, 2026-10-12) writes the
+    same sequence: "session over", then the enhanced-fingerprint line once
+    sign-in is settled, then -- in the older release -- "Reconnection
+    detected". 0.2.26 never writes the reconnection line, so the fingerprint
+    is the last boot milestone both releases share. A boot is finished when
+    that line is in the log, or when a session that dropped has visibly
+    reconnected. Nothing earlier counts: the MCP-servers line is first, and
+    a tail with no drop yet is a boot that has not reached the drop either.
+    """
+    messages = _freebuff_log_messages(tail)
+    if any("fingerprint" in message.lower() for message in messages):
+        return True
+    return any(
+        message.startswith(("Reconnection detected", "Start agent ")) for message in messages
+    )
+
+
 def _freebuff_boot_ready(
     cwd: str, before: dict[str, float], chat_path: Optional[Path], log_offset: int
 ) -> bool:
@@ -5419,25 +5439,35 @@ def _freebuff_boot_ready(
 
     0.0.168 paints its composer before it has finished starting, and a message
     given to that composer is lost silently: the chat log records no send at
-    all. The recovery is visible only in the chat's own log, which opens with
-    "session over" and gains a "Reconnection detected" line within a second —
-    so a message is held until that line arrives. For a conversation this
-    launch created, the whole log is read and recovery must be seen; for a
-    resumed one, only the lines written since the launch started are read, and
-    nothing new to read means an ordinary continuation rather than a hold. A
-    launch that has created no chat yet is taken as ready, because there is
-    nothing to wait for and never sending would lose the message anyway.
+    all. That is still true in 0.2.26, and worse: measured live, keystrokes
+    sent 1.4 seconds after launch vanish without reaching the composer,
+    while the same send at 2.6 seconds is answered. The recovery used to be
+    visible in the chat's own log -- "session over" answered by
+    "Reconnection detected" within a second -- but 0.2.26 writes no
+    reconnection line, so readiness is the boot's last shared milestone (see
+    :func:`_freebuff_log_boot_finished`). For a conversation this launch
+    created, the whole log is read and the milestone must be seen; for a
+    resumed one, only the lines written since the launch started are read,
+    and nothing new to read means an ordinary continuation rather than a
+    hold. A launch that has created no chat yet cannot be ready either: its
+    chat is created when the terminal starts, so a missing chat is a boot
+    still in progress, and the startup-silence failure is the honest end of
+    a launch that never gets there. Taking it as ready was the hole the
+    1.4-second send fell through.
     """
     if chat_path is not None:
-        return not _freebuff_log_pending_drop(_freebuff_log_tail(chat_path, log_offset))
-    tail = _freebuff_new_chat_log(before, cwd)
-    if tail is None:
-        return True
-    if not tail.strip():
+        tail = _freebuff_log_tail(chat_path, log_offset)
+        if not tail.strip():
+            return True
+        return _freebuff_log_boot_finished(tail)
+    new_tail = _freebuff_new_chat_log(before, cwd)
+    if new_tail is None:
+        return False
+    if not new_tail.strip():
         # A chat folder with nothing logged yet is a boot still in progress;
         # the recovery line arrives moments later.
         return False
-    return not _freebuff_log_pending_drop(tail)
+    return _freebuff_log_boot_finished(new_tail)
 
 
 def _freebuff_new_chat_log(before: dict[str, float], cwd: str) -> Optional[str]:
@@ -5523,11 +5553,11 @@ def _freebuff_startup_silence(visible: str, seconds: float) -> str:
 
 
 class FreebuffTerminal(Protocol):
-    """The pseudo-terminal handle, whichever library produced it.
+    """The pseudo-terminal handle, whichever implementation produced it.
 
-    winpty on Windows and pexpect everywhere else hand back objects with
-    nothing in common but the three calls made on them here. What those calls
-    give back differs too, and none of it is used, so none of it is named.
+    _ConPtyTerminal on Windows and pexpect everywhere else hand back objects
+    with nothing in common but the three calls made on them here. What those
+    calls give back differs too, and none of it is used, so none of it is named.
     """
 
     def write(self, text: str, /) -> object: ...
@@ -5580,6 +5610,330 @@ def _drain_to_queue(
     return read
 
 
+class _ConPtyTerminal:
+    """A process in a pseudoconsole this process created itself.
+
+    pywinpty cannot be used for this: its native module calls AllocConsole
+    in the host process before CreatePseudoConsole (the import is in the
+    shipped ``_winpty`` binary), so a windowless BlindPilot gains a real
+    console window -- hidden again by its own watcher only after it has
+    appeared and taken screen-reader focus, which NVDA announces as
+    "terminal". Calling CreatePseudoConsole directly allocates nothing in
+    this process: the pseudoconsole's hosting window is not created, and
+    the only console host spawned is OpenConsole in headless mode.
+    """
+
+    def __init__(
+        self, args: list[str], cwd: str, env: dict[str, str], rows: int, cols: int
+    ) -> None:
+        import codecs
+        import ctypes
+        import ctypes.wintypes as wintypes
+
+        self._ctypes = ctypes
+
+        class _Coord(ctypes.Structure):
+            _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+        self._coord = _Coord
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self.pid = 0
+        self._closed = False
+        kernel32 = ctypes.windll.kernel32
+        handle = ctypes.c_void_p
+        kernel32.CreatePipe.argtypes = [
+            ctypes.POINTER(handle),
+            ctypes.POINTER(handle),
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.CreatePipe.restype = wintypes.BOOL
+        kernel32.CreatePseudoConsole.argtypes = [
+            self._coord,
+            handle,
+            handle,
+            wintypes.DWORD,
+            ctypes.POINTER(handle),
+        ]
+        kernel32.CreatePseudoConsole.restype = ctypes.c_long
+        kernel32.CreateProcessW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPWSTR,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.BOOL,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.LPCWSTR,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        kernel32.CreateProcessW.restype = wintypes.BOOL
+        kernel32.ReadFile.argtypes = [
+            handle,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.c_void_p,
+        ]
+        kernel32.ReadFile.restype = wintypes.BOOL
+        kernel32.WriteFile.argtypes = kernel32.ReadFile.argtypes
+        kernel32.WriteFile.restype = wintypes.BOOL
+        kernel32.InitializeProcThreadAttributeList.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        kernel32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+        kernel32.UpdateProcThreadAttribute.argtypes = [
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
+        kernel32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [handle]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = [handle, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.TerminateProcess.argtypes = [handle, wintypes.UINT]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [handle, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.ClosePseudoConsole.argtypes = [handle]
+        kernel32.PeekNamedPipe.argtypes = [
+            handle,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.PeekNamedPipe.restype = wintypes.BOOL
+
+        input_read, input_write = handle(), handle()
+        output_read, output_write = handle(), handle()
+        if not kernel32.CreatePipe(ctypes.byref(input_read), ctypes.byref(input_write), None, 0):
+            raise OSError("CreatePipe failed for the terminal's input")
+        if not kernel32.CreatePipe(ctypes.byref(output_read), ctypes.byref(output_write), None, 0):
+            kernel32.CloseHandle(input_read)
+            kernel32.CloseHandle(input_write)
+            raise OSError("CreatePipe failed for the terminal's output")
+        self._input_write = input_write
+        self._output_read = output_read
+        try:
+            pseudo = handle()
+            result = kernel32.CreatePseudoConsole(
+                self._coord(cols, rows), input_read, output_write, 0, ctypes.byref(pseudo)
+            )
+            if result != 0:
+                raise OSError(f"CreatePseudoConsole failed: HRESULT {result & 0xFFFFFFFF:#x}")
+            self._pseudo = pseudo
+            self._process, pid = self._create_process(args, cwd, env, pseudo)
+        finally:
+            # The pseudoconsole keeps its own references to these two ends.
+            kernel32.CloseHandle(input_read)
+            kernel32.CloseHandle(output_write)
+        self.pid = int(pid)
+
+    def _create_process(self, args: list[str], cwd: str, env: dict[str, str], pseudo: object):
+        import ctypes
+        import ctypes.wintypes as wintypes
+
+        kernel32 = ctypes.windll.kernel32
+
+        class _StartupInfo(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR),
+                ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD),
+                ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD),
+                ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD),
+                ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD),
+                ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.POINTER(ctypes.c_byte)),
+                ("hStdInput", ctypes.c_void_p),
+                ("hStdOutput", ctypes.c_void_p),
+                ("hStdError", ctypes.c_void_p),
+            ]
+
+        class _StartupInfoEx(ctypes.Structure):
+            _fields_ = [("StartupInfo", _StartupInfo), ("lpAttributeList", ctypes.c_void_p)]
+
+        class _ProcessInformation(ctypes.Structure):
+            _fields_ = [
+                ("hProcess", ctypes.c_void_p),
+                ("hThread", ctypes.c_void_p),
+                ("dwProcessId", wintypes.DWORD),
+                ("dwThreadId", wintypes.DWORD),
+            ]
+
+        startup = _StartupInfoEx()
+        startup.StartupInfo.cb = ctypes.sizeof(_StartupInfoEx)
+        # STARTF_USESTDHANDLES with no handles named: the kernel then gives
+        # the child the pseudoconsole as its standard handles. Left at the
+        # default, the child inherits this process's standard handles
+        # instead (measured: a python child's prints reached BlindPilot's
+        # own stdout, bypassing the terminal entirely), while through
+        # pywinpty the same child reported proper console handles.
+        startup.StartupInfo.dwFlags = 0x00000100
+        startup.StartupInfo.hStdInput = None
+        startup.StartupInfo.hStdOutput = None
+        startup.StartupInfo.hStdError = None
+        size = ctypes.c_size_t(0)
+        kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
+        buffer = ctypes.create_string_buffer(size.value)
+        startup.lpAttributeList = ctypes.cast(buffer, ctypes.c_void_p)
+        if not kernel32.InitializeProcThreadAttributeList(
+            startup.lpAttributeList, 1, 0, ctypes.byref(size)
+        ):
+            raise OSError("InitializeProcThreadAttributeList failed")
+        try:
+            # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+            if not kernel32.UpdateProcThreadAttribute(
+                startup.lpAttributeList,
+                0,
+                ctypes.c_size_t(0x00020016),
+                pseudo,
+                ctypes.sizeof(ctypes.c_void_p),
+                None,
+                None,
+            ):
+                raise OSError("UpdateProcThreadAttribute failed for the pseudoconsole")
+            argv = list(args)
+            if argv and argv[0].lower().endswith((".cmd", ".bat")):
+                # CreateProcess cannot run a batch file; cmd hosts it, as it
+                # did under pywinpty (its /c invocation is what process
+                # listings of the old path show).
+                comspec = os.environ.get("COMSPEC") or r"C:\Windows\System32\cmd.exe"
+                argv = [comspec, "/c", *argv]
+            command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+            env_block = ctypes.create_unicode_buffer(
+                "\0".join(f"{key}={value}" for key, value in env.items()) + "\0"
+            )
+            info = _ProcessInformation()
+            # EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+            if not kernel32.CreateProcessW(
+                None,
+                command_line,
+                None,
+                None,
+                False,
+                0x00080000 | 0x00000400,
+                env_block,
+                cwd,
+                ctypes.byref(startup),
+                ctypes.byref(info),
+            ):
+                raise OSError(f"CreateProcess failed: {ctypes.get_last_error() or 'unknown error'}")
+        finally:
+            kernel32.DeleteProcThreadAttributeList(startup.lpAttributeList)
+        kernel32.CloseHandle(info.hThread)
+        return info.hProcess, int(info.dwProcessId)
+
+    def read_chunk(self) -> Optional[str]:
+        """One read; None when nothing more will ever arrive.
+
+        The output pipe stays open while the pseudoconsole does, even after
+        the process has exited, so a plain blocking ReadFile would never
+        report the end: bytes are taken only when the pipe says some are
+        waiting, and the end is the exited process with an empty pipe. The
+        host can still be forwarding the last output just after the exit,
+        so an empty pipe has to stay empty briefly before it is believed.
+        """
+        ctypes = self._ctypes
+        kernel32 = ctypes.windll.kernel32
+        empty_since: Optional[float] = None
+        while True:
+            available = ctypes.wintypes.DWORD(0)
+            if not kernel32.PeekNamedPipe(
+                self._output_read, None, 0, None, ctypes.byref(available), None
+            ):
+                return None
+            if available.value:
+                buffer = ctypes.create_string_buffer(min(4096, available.value))
+                read = ctypes.wintypes.DWORD(0)
+                if (
+                    not kernel32.ReadFile(
+                        self._output_read, buffer, len(buffer), ctypes.byref(read), None
+                    )
+                    or not read.value
+                ):
+                    return None
+                return self._decoder.decode(buffer.raw[: read.value])
+            if self.isalive():
+                empty_since = None
+            elif empty_since is None:
+                empty_since = time.monotonic()
+            elif time.monotonic() - empty_since > 0.5:
+                return None
+            time.sleep(0.01)
+
+    def write(self, text: str) -> None:
+        ctypes = self._ctypes
+        kernel32 = ctypes.windll.kernel32
+        data = text.encode("utf-8")
+        view = (ctypes.c_char * len(data)).from_buffer_copy(data)
+        written_total = 0
+        while written_total < len(data):
+            written = ctypes.wintypes.DWORD(0)
+            if not kernel32.WriteFile(
+                self._input_write,
+                ctypes.byref(view, written_total),
+                len(data) - written_total,
+                ctypes.byref(written),
+                None,
+            ):
+                raise OSError("the terminal's input pipe is closed")
+            written_total += written.value
+
+    def isalive(self) -> bool:
+        kernel32 = self._ctypes.windll.kernel32
+        code = self._ctypes.wintypes.DWORD(0)
+        if not kernel32.GetExitCodeProcess(self._process, self._ctypes.byref(code)):
+            return False
+        return code.value == 259  # STILL_ACTIVE
+
+    def terminate(self, force: bool = False) -> None:
+        kernel32 = self._ctypes.windll.kernel32
+        if self.isalive():
+            kernel32.TerminateProcess(self._process, 1)
+
+    def close(self, force: bool = False) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        kernel32 = self._ctypes.windll.kernel32
+        # Closing the pseudoconsole ends every process attached to it --
+        # FreeBuff and the tools it started -- which terminate alone, aimed
+        # only at the first process, would leave running.
+        try:
+            kernel32.ClosePseudoConsole(self._pseudo)
+        except Exception:
+            pass
+        for handle in (self._input_write, self._output_read):
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+        kernel32.WaitForSingleObject(self._process, 2000)
+        if self.isalive():
+            kernel32.TerminateProcess(self._process, 1)
+        kernel32.CloseHandle(self._process)
+
+
 def _spawn_freebuff_pty(
     args: list[str], cwd: str, stream_ended: threading.Event
 ) -> tuple[FreebuffTerminal, Callable[[float], str]]:
@@ -5590,15 +5944,11 @@ def _spawn_freebuff_pty(
     started before anyone asked for its output keeps every byte of it.
     """
     if platform.system() == "Windows":
-        from winpty import PtyProcess
-
-        # No console is claimed for this process, on purpose. A
-        # pseudoconsole creates no hosting window (Microsoft's own docs say
-        # so), so the ConPTY below needs none -- and the only way to claim
-        # one, AllocConsole, hands back a window that has already appeared.
-        # That visible frame, titled with BlindPilot's own executable, was
-        # the terminal users kept seeing. The watcher below stays as the
-        # safety net for consoles FreeBuff's own tools can still raise.
+        # No console is claimed for this process, and none is needed: the
+        # pseudoconsole is created directly (see _ConPtyTerminal), because
+        # the library that used to create it allocated a console in this
+        # process on the way. The watcher below stays as the safety net for
+        # consoles FreeBuff's own tools can still raise.
         roots = {os.getpid()}
 
         def hide_terminal() -> None:
@@ -5627,24 +5977,22 @@ def _spawn_freebuff_pty(
 
         threading.Thread(target=hide_terminal, daemon=True).start()
 
-        # pywinpty accepts an argv list and supplies a real ConPTY console.
         try:
-            pty = PtyProcess.spawn(args, cwd=cwd, env=subprocess_env(args[0]), dimensions=(60, 180))
+            pty = _ConPtyTerminal(args, cwd, subprocess_env(args[0]), rows=60, cols=180)
         except Exception:
             # No pump will ever set this, and the watcher above polls
             # EnumWindows until it is set.
             stream_ended.set()
             raise
-        pty_pid = getattr(pty, "pid", 0)
-        if pty_pid:
-            roots.add(int(pty_pid))
+        if pty.pid:
+            roots.add(int(pty.pid))
 
         def read_one() -> Optional[str]:
             # ConPTY has no timeout of its own: the read blocks until either
             # bytes or the end of the terminal, and anything it raises is
             # the end of it.
             try:
-                return cast(str, pty.read(4096))
+                return pty.read_chunk()
             except Exception:
                 return None
 
@@ -6079,10 +6427,8 @@ class FreebuffWorker(_TurnWorker):
             try:
                 read = self._spawn_pty(args)
             except ImportError:
-                package = "pywinpty" if platform.system() == "Windows" else "pexpect"
-                self._fail(
-                    f"FreeBuff support needs {package} and pyte. Reinstall BlindPilot dependencies."
-                )
+                package = "pyte" if platform.system() == "Windows" else "pexpect and pyte"
+                self._fail(f"FreeBuff support needs {package}. Reinstall BlindPilot dependencies.")
                 return
             except Exception as exc:
                 self._fail(f"Failed to launch FreeBuff: {exc}")

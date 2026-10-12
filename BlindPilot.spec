@@ -53,15 +53,9 @@ binaries += _websocket_binaries
 hiddenimports += _websocket_hidden
 
 if sys.platform == "win32":
-    # pywinpty's ConPTY backend runs the child inside OpenConsole.exe, and a
-    # hidden import collects only the module and its DLLs. Without that
-    # executable no process can start under a pseudo-terminal, so FreeBuff
-    # never runs. accessible_output2 loads its outputs by iterating the
-    # package at runtime.
-    _winpty_datas, _winpty_binaries, _winpty_hidden = collect_all("winpty")
-    datas += _winpty_datas
-    binaries += _winpty_binaries
-    hiddenimports += _winpty_hidden
+    # FreeBuff pseudoconsole is created directly via ctypes; no terminal package ships.
+    # accessible_output2 loads its outputs by iterating the package at
+    # runtime.
     hiddenimports += ["accessible_output2", "accessible_output2.outputs"]
     app_icon = str(spec_dir / "packaging" / "BlindPilot.ico")
 

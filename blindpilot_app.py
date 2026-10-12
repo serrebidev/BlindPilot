@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.43.4"
+APP_VERSION = "0.43.5"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -11381,7 +11381,7 @@ def _first_login_url(text: str) -> str:
 def _terminal_running(terminal: object) -> bool:
     """Whether the command in a hidden terminal is still running.
 
-    winpty and pexpect both answer `isalive`. A handle that cannot say is
+    _ConPtyTerminal and pexpect both answer `isalive`. A handle that cannot say is
     treated as finished, so the wizard settles for asking the CLI whether the
     sign-in landed rather than waiting forever on a terminal it cannot see.
     """

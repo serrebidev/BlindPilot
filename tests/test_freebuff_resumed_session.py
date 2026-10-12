@@ -83,6 +83,7 @@ def _stub(monkeypatch, worker, dirs, prewarmed):
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
     monkeypatch.setattr(agent_backends, "set_freebuff_model", lambda _model: None)
     monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", dirs)
+    monkeypatch.setattr(agent_backends, "_freebuff_boot_ready", lambda *_a: True)
     monkeypatch.setattr(
         agent_backends,
         "prewarm_freebuff",

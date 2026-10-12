@@ -98,6 +98,7 @@ def test_a_model_the_picker_dropped_is_announced_as_a_notice(monkeypatch):
         lambda: (["z-ai/glm-5.3-flash"], "z-ai/glm-5.3-flash", ""),
     )
     monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", lambda _cwd: {})
+    monkeypatch.setattr(agent_backends, "_freebuff_boot_ready", lambda *_a: True)
     monkeypatch.setattr(agent_backends, "_FREEBUFF_PICKER_PATIENCE_SECONDS", 0.05)
     monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", 60)
     worker._write = write

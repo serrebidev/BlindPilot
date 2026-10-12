@@ -102,6 +102,37 @@ def test_prompt_and_answer_text_cannot_end_a_turn(tmp_path, quoted_event):
     assert _freebuff_run_status(tmp_path) == ""
 
 
+def test_a_boot_with_only_the_drop_line_is_not_ready(tmp_path):
+    """0.2.26 writes "session over" at boot and no reconnection line at all."""
+    (tmp_path / "log.jsonl").write_text(REJOIN_LOG, encoding="utf-8")
+    assert not agent_backends._freebuff_boot_ready(".", {}, tmp_path, 0)
+
+
+def test_a_boot_that_reached_the_fingerprint_is_ready(tmp_path):
+    """The fingerprint line is the last boot milestone both releases write.
+
+    Measured live against 0.2.26: keystrokes sent 1.4 seconds after launch
+    (before it) vanish; the same send after it is answered. Older boots gain
+    "Reconnection detected" a moment later, which also releases the hold.
+    """
+    (tmp_path / "log.jsonl").write_text(
+        REJOIN_LOG + json.dumps({"msg": "Enhanced CLI fingerprint generated successfully"}) + "\n",
+        encoding="utf-8",
+    )
+    assert agent_backends._freebuff_boot_ready(".", {}, tmp_path, 0)
+
+
+def test_a_launch_with_no_chat_yet_is_not_ready(monkeypatch):
+    """The chat is created when the terminal starts; none yet means booting.
+
+    Taking a missing chat as ready was the hole a 1.4-second send fell
+    through: the composer was already painted, the runtime behind it was
+    not, and the message was lost with nothing in the log to show for it.
+    """
+    monkeypatch.setattr(agent_backends, "_freebuff_new_chat_log", lambda *_a: None)
+    assert not agent_backends._freebuff_boot_ready(".", {}, None, 0)
+
+
 def test_quoted_reconnection_cannot_release_a_held_message(tmp_path):
     (tmp_path / "log.jsonl").write_text(
         REJOIN_LOG
@@ -303,6 +334,7 @@ def test_a_welcome_turn_still_reaches_its_answer(monkeypatch):
     turn = _Turn()
     worker = _worker(turn, model="openai/gpt-5.6-luna")
     _stub_cli(monkeypatch)
+    _stub_boot_ready(monkeypatch, lambda: True)
     monkeypatch.setattr(
         agent_backends,
         "freebuff_model_options",
@@ -350,6 +382,7 @@ def test_the_chosen_model_is_reached_on_the_marker_less_screen(monkeypatch):
     turn = _Turn()
     worker = _worker(turn, model="z-ai/glm-5.3-flash")
     _stub_cli(monkeypatch)
+    _stub_boot_ready(monkeypatch, lambda: True)
     monkeypatch.setattr(
         agent_backends,
         "freebuff_model_options",

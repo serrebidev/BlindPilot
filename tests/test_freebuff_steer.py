@@ -95,6 +95,9 @@ def _run(monkeypatch, steer: str) -> _Turn:
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "freebuff")
     monkeypatch.setattr(agent_backends, "set_freebuff_model", lambda _model: None)
     monkeypatch.setattr(agent_backends, "_freebuff_chat_dirs", lambda _cwd: {})
+    # The fake terminal is already booted; the hold itself is covered in
+    # test_freebuff_session_drop.py.
+    monkeypatch.setattr(agent_backends, "_freebuff_boot_ready", lambda *_a: True)
     monkeypatch.setattr(agent_backends, "_FREEBUFF_TURN_SECONDS", 60)
     monkeypatch.setattr(FreebuffWorker, "_spawn_pty", staticmethod(spawn))
 

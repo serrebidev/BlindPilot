@@ -139,7 +139,7 @@ def start_logging() -> Optional[Path]:
         faulthandler.enable(file=_crash_file)
     except (OSError, ValueError, RuntimeError):
         # A native crash going unrecorded is a smaller problem than refusing
-        # to start. wxPython, pywinpty and ConPTY are the reason it is tried.
+        # to start. wxPython and ConPTY are the reason it is tried.
         _crash_file = None
 
     _started = True

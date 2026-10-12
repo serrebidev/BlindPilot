@@ -10,8 +10,7 @@ import pytest
 
 import agent_backends as ab
 
-pytestmark = pytest.mark.skipif(platform.system() != "Windows", reason="pywinpty is Windows-only")
-winpty = pytest.importorskip("winpty")
+pytestmark = pytest.mark.skipif(platform.system() != "Windows", reason="ConPTY is Windows-only")
 
 
 @pytest.fixture
@@ -31,10 +30,10 @@ class _Pty:
     def isalive(self) -> bool:
         return False
 
-    def read(self, size: int) -> str:
+    def read_chunk(self):
         if self.frames:
             return self.frames.pop(0)
-        raise EOFError("Pty is closed")
+        return None
 
 
 def test_a_freebuff_console_cannot_be_activated_or_shown(monkeypatch):
@@ -80,16 +79,17 @@ def test_the_terminal_is_started_with_the_environment_every_cli_gets(monkeypatch
     # runs when the agent asks for git.
     seen: dict = {}
 
-    def spawn(args, **kwargs):
-        seen.update(kwargs)
+    def spawn(args, cwd, env, rows, cols):
+        seen.update(args=args, cwd=cwd, env=env, rows=rows, cols=cols)
         return _Pty([])
 
-    monkeypatch.setattr(winpty.PtyProcess, "spawn", spawn)
+    monkeypatch.setattr(ab, "_ConPtyTerminal", spawn)
     ended = threading.Event()
 
     ab._spawn_freebuff_pty(["freebuff", "--cwd", "."], ".", ended)
 
     assert seen["cwd"] == "."
+    assert (seen["rows"], seen["cols"]) == (60, 180)
     assert seen["env"]["NoDefaultCurrentDirectoryInExePath"] == "1"
     assert ended.wait(3)
 
@@ -98,7 +98,7 @@ def test_a_spawn_that_fails_does_not_leave_the_console_watcher_running(monkeypat
     def spawn(*_args, **_kwargs):
         raise FileNotFoundError("freebuff was removed after discovery")
 
-    monkeypatch.setattr(winpty.PtyProcess, "spawn", spawn)
+    monkeypatch.setattr(ab, "_ConPtyTerminal", spawn)
     ended = threading.Event()
 
     with pytest.raises(FileNotFoundError):
@@ -107,12 +107,25 @@ def test_a_spawn_that_fails_does_not_leave_the_console_watcher_running(monkeypat
     assert ended.is_set(), "hide_terminal polls EnumWindows four times a second until this is set"
 
 
+def test_the_real_pseudoconsole_runs_a_command_and_reads_it(quiet_console):
+    """The ctypes ConPTY itself: a command runs, its output is read back."""
+    import os
+
+    ended = threading.Event()
+    pty, read = ab._spawn_freebuff_pty(
+        [os.environ.get("COMSPEC", "cmd.exe"), "/c", "echo", "conpty-hello"], ".", ended
+    )
+    text = ""
+    while not ended.is_set():
+        text += read(5)
+    ab.end_hidden_terminal(pty)
+    assert "conpty-hello" in text
+
+
 def test_what_the_terminal_said_on_its_way_out_is_still_read(monkeypatch, quiet_console):
     # The pump looped on isalive(), so a terminal that died at startup had its
     # last line, the one that says why, left unread.
-    monkeypatch.setattr(
-        winpty.PtyProcess, "spawn", lambda *_a, **_k: _Pty(["env: node: not found\r\n"])
-    )
+    monkeypatch.setattr(ab, "_ConPtyTerminal", lambda *_a, **_k: _Pty(["env: node: not found\r\n"]))
     ended = threading.Event()
 
     _pty, read = ab._spawn_freebuff_pty(["freebuff"], ".", ended)
