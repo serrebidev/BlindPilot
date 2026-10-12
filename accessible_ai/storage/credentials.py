@@ -91,7 +91,7 @@ class CredentialStore:
             raise CredentialStoreError(str(exc)) from exc
 
     @staticmethod
-    def _windows_read(target: str) -> str:
+    def _windows_read(target: str, encoding: str = "utf-16-le") -> str:
         import ctypes
         from ctypes import wintypes
 
@@ -142,7 +142,7 @@ class CredentialStore:
                 return ""
             raw = ctypes.string_at(credential.CredentialBlob, credential.CredentialBlobSize)
             try:
-                return raw.decode("utf-16-le")
+                return raw.decode(encoding)
             except UnicodeDecodeError:
                 return raw.decode("utf-8", errors="replace")
         finally:

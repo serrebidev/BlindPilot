@@ -1,5 +1,49 @@
 # Audit: the FreeBuff backend
 
+## Live recheck for 0.43.7, 2026-10-12
+
+Installed FreeBuff 0.2.27 was checked through the real worker on Windows,
+using a temporary repository and the existing signed-in account. The audit
+covered account and usage detection, model discovery, prompts, questions,
+tool execution, cancellation, continuation, steering, and frontend commands.
+
+Four additional defects were reproduced and repaired:
+
+1. **Current secure-store accounts looked signed out.** FreeBuff moved its
+   token to Bun.secrets and leaves `tokenStore: "keychain"` in the account
+   file. BlindPilot now reads that existing entry on Windows, macOS, and
+   Linux without writing it back to JSON. Current accounts also need not
+   contain the older fingerprint fields. The native credential format was
+   checked against [Bun's secrets implementation](https://github.com/oven-sh/bun/tree/main/src/jsc/bindings).
+2. **Raw terminal input lost newlines and emoji.** Prompts and custom question
+   answers now use bracketed paste, followed by a separate Enter event. A
+   live multiline prompt containing `Café`, `Ω`, and an emoji was saved and
+   answered with its original text intact.
+3. **Busy-terminal steering silently dropped instructions.** A successful
+   pipe write did not mean FreeBuff accepted the message. FreeBuff now uses
+   BlindPilot's existing follow-up queue and stop/resume steering flow. A live
+   cancelled turn resumed the same conversation and saved the new instruction.
+   Independent review also found that paused queues lacked frontend command
+   routing; `/queue list`, `/queue clear`, and `/queue resume` now work here.
+4. **History and usage commands became model prompts.** `/history` and
+   `/usage` now open the existing accessible history and status views.
+
+Live checks passed for multiline Unicode, a single-choice question, terminal
+tool execution, a turn after selecting another available model, cancellation,
+and stop/resume steering. The original model setting was restored. Regression
+tests cover the keychain formats, credential cleanup and legacy decoding,
+paste events, completion races, early steering, paused queues, and command
+routing. Independent final review found no remaining blocker.
+
+Local release checks passed: 2,233 tests passed with warnings treated as
+errors, 15 skipped; Ruff, formatting, mypy, and all three startup smoke checks
+passed. Tagged builds run the packaged startup checks before publishing.
+
+Not checked live: macOS/Linux secure stores, custom or multi-select questions,
+or Windows versions older than this machine. The alternate-model turn passed,
+but its selected model ID was not independently captured from the TUI. FreeBuff
+still requires a hidden terminal and can change that interface upstream.
+
 ## Follow-up audit, 2026-10-12
 
 Scope: BlindPilot's FreeBuff launch, prewarm, worker, screen parser, model

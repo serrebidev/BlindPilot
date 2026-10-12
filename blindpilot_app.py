@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.43.6"
+APP_VERSION = "0.43.7"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1360,7 +1360,7 @@ _NPM_BACKEND_PACKAGES = {
 # runs cannot join it, so it is queued and sent when the turn ends, and Steer
 # stops the turn and resumes with the instruction.
 _QUEUEING_BACKENDS = frozenset(
-    {BACKEND_COMMANDCODE, BACKEND_GEMINI, BACKEND_ANTIGRAVITY, BACKEND_MUSEAI}
+    {BACKEND_COMMANDCODE, BACKEND_GEMINI, BACKEND_ANTIGRAVITY, BACKEND_MUSEAI, BACKEND_FREEBUFF}
 )
 
 
@@ -2416,11 +2416,15 @@ _OPENCODE_SLASH_COMMANDS: list[tuple[str, str]] = [
 ]
 
 _FREEBUFF_SLASH_COMMANDS: list[tuple[str, str]] = [
+    (
+        "/queue [message|list|clear|resume]",
+        "Queue a follow-up, inspect, clear, or resume the queue [BlindPilot]",
+    ),
     ("/new", "Start a new FreeBuff conversation [BlindPilot]"),
-    ("/history", "Open FreeBuff conversation history"),
+    ("/history", "Open FreeBuff conversation history [BlindPilot]"),
     ("/diagnostics", "Show FreeBuff's resource usage and tool processes"),
     ("/init", "Create project instructions"),
-    ("/usage", "Show FreeBuff credit usage"),
+    ("/usage", "Show FreeBuff credit usage [BlindPilot]"),
     ("/review", "Review the current changes"),
     ("/plan", "Plan before making changes"),
     ("/theme:toggle", "Toggle FreeBuff's terminal theme"),
@@ -9617,11 +9621,17 @@ class SessionPanel(wx.Panel):
         # "/btw [message]" opens a new side-chat tab in the same directory
         # instead of sending to this conversation.
         raw = self.prompt.GetValue().strip()
-        if self.selected_backend() == BACKEND_COMMANDCODE:
+        backend = self.selected_backend()
+        command = raw.split(maxsplit=1)[0].lower() if raw else ""
+        if backend == BACKEND_COMMANDCODE or (
+            backend in _QUEUEING_BACKENDS and command == "/queue"
+        ):
             if self._commandcode_command(raw):
                 return
             raw = self.prompt.GetValue().strip()
         low = raw.lower()
+        if self.selected_backend() == BACKEND_FREEBUFF:
+            low = {"/history": "/resume", "/usage": "/status"}.get(low, low)
         if low == "/btw" or low.startswith("/btw "):
             self.prompt.SetValue("")
             self._on_side_chat(self.cwd, raw[4:].strip())

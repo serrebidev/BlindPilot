@@ -3,6 +3,7 @@
 import ctypes
 import json
 import platform
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ import pytest
 
 import agent_backends as ab
 import session_history as history
+from accessible_ai.storage.credentials import CredentialStore
 
 
 def _worker(**callbacks):
@@ -31,6 +33,130 @@ def test_corrupt_catalog_timestamp_is_a_cache_miss(monkeypatch, tmp_path, mtime)
     cache.write_text(json.dumps({"path": "binary", "size": 10, "mtime": mtime, "models": ["a/b"]}))
     monkeypatch.setattr(ab, "_freebuff_catalog_cache_path", lambda: cache)
     assert ab._read_freebuff_catalog_cache(("binary", 1.0, 10)) == []
+
+
+def test_keychain_credentials_count_as_signed_in_without_rewriting_them(monkeypatch, tmp_path):
+    monkeypatch.setattr(ab.Path, "home", classmethod(lambda _: tmp_path))
+    monkeypatch.setattr(ab.platform, "system", lambda: "Windows")
+    credential = tmp_path / ".config/manicode/credentials.json"
+    credential.parent.mkdir(parents=True)
+    contents = json.dumps(
+        {
+            "default": {
+                "email": "test@example.com",
+                "tokenStore": "keychain",
+                "fingerprintId": "id",
+                "fingerprintHash": "hash",
+            }
+        }
+    )
+    credential.write_text(contents)
+    reads = []
+
+    def read(target, encoding="utf-16-le"):
+        reads.append((target, encoding))
+        return "stored-token"
+
+    monkeypatch.setattr(CredentialStore, "_windows_read", staticmethod(read))
+    account = ab._freebuff_account()
+    assert ab._freebuff_signed_in(account)
+    assert account["authToken"] == "stored-token"
+    assert reads == [(f"freebuff-cli/{credential}", "utf-8")]
+    assert credential.read_text() == contents
+
+
+def test_current_credentials_do_not_require_optional_fingerprints():
+    assert ab._freebuff_signed_in({"email": "test@example.com", "authToken": "token"})
+
+
+def test_submitting_multiline_unicode_uses_bracketed_paste_then_enter():
+    worker = _worker()
+    writes = []
+    worker._write = lambda text: writes.append(text) or True
+    text = "FIRST Café Ω 🙂\nSECOND"
+    assert worker._submit_text(text)
+    assert writes == [f"\x1b[200~{text}\x1b[201~", "\r"]
+
+
+def test_freebuff_does_not_claim_a_busy_terminal_accepted_steering():
+    worker = _worker()
+    worker._accepting_input.set()
+    writes = []
+    worker._write = lambda text: writes.append(text) or True
+    assert not worker.steer("changed instruction")
+    assert writes == []
+
+
+def test_macos_keychain_uses_freebuffs_service_and_credential_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(ab.platform, "system", lambda: "Darwin")
+    seen = []
+
+    def read(name, service):
+        seen.append((service, name))
+        return "stored-token"
+
+    monkeypatch.setattr(CredentialStore, "_fallback_read", staticmethod(read))
+    path = tmp_path / "credentials.json"
+    assert ab._freebuff_keychain_token(path) == "stored-token"
+    assert seen == [("freebuff-cli", str(path))]
+
+
+@pytest.mark.parametrize("locked", [False, True])
+def test_linux_secure_store_uses_buns_attributes_and_closes_the_connection(
+    monkeypatch, tmp_path, locked
+):
+    monkeypatch.setattr(ab.platform, "system", lambda: "Linux")
+    seen = []
+    connection = SimpleNamespace(close=lambda: seen.append("closed"))
+    item = SimpleNamespace(is_locked=lambda: locked, get_secret=lambda: b"stored-token")
+
+    def search(conn, attributes):
+        assert conn is connection
+        seen.append(attributes)
+        return [item]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "secretstorage",
+        SimpleNamespace(dbus_init=lambda: connection, search_items=search),
+    )
+    path = tmp_path / "credentials.json"
+    assert ab._freebuff_keychain_token(path) == ("" if locked else "stored-token")
+    assert seen == [{"service": "freebuff-cli", "account": str(path)}, "closed"]
+
+
+def test_a_missing_secure_token_does_not_claim_a_signed_in_account(monkeypatch, tmp_path):
+    monkeypatch.setattr(ab.Path, "home", classmethod(lambda _: tmp_path))
+    monkeypatch.setattr(ab, "_freebuff_keychain_token", lambda _: "")
+    path = tmp_path / ".config/manicode/credentials.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"default": {"email": "test@example.com", "tokenStore": "keychain"}})
+    )
+    assert not ab._freebuff_signed_in(ab._freebuff_account())
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le"])
+def test_windows_reader_preserves_bun_utf8_and_chat_utf16_credentials(monkeypatch, encoding):
+    raw = "stored-token".encode(encoding)
+    buffer = ctypes.create_string_buffer(raw)
+    state = {}
+
+    def read(_target, _kind, _flags, output):
+        credential = output._obj._type_()
+        credential.CredentialBlobSize = len(raw)
+        credential.CredentialBlob = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+        state["credential"] = credential
+        output._obj.contents = credential
+        return 1
+
+    api = SimpleNamespace(CredReadW=_Api(read), CredFree=_Api(lambda _: state.update(freed=True)))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_k: api, raising=False)
+    if encoding == "utf-16-le":
+        assert CredentialStore._windows_read("test") == "stored-token"
+    else:
+        assert CredentialStore._windows_read("test", encoding=encoding) == "stored-token"
+    assert state["freed"]
 
 
 def test_cyclic_model_aliases_are_ignored():
@@ -224,7 +350,7 @@ def test_restarting_a_prewarm_handles_the_replacement_model_picker(monkeypatch):
         if text == "\r":
             state["enters"] += 1
             state["picked"] = True
-        if text == "do the work":
+        if text == "\x1b[200~do the work\x1b[201~":
             state["sent"] = True
         return True
 

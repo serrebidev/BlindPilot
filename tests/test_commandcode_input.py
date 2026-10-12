@@ -8,10 +8,10 @@ import blindpilot_app as app
 from test_send_race import _DeadWorker, _panel
 
 
-def panel():
+def panel(backend=app.BACKEND_COMMANDCODE):
     tab = _panel()
-    tab._session_backend = app.BACKEND_COMMANDCODE
-    tab.selected_backend = lambda: app.BACKEND_COMMANDCODE
+    tab._session_backend = backend
+    tab.selected_backend = lambda: backend
     tab._pending_messages = []
     tab._queue_paused = False
     tab._cli_effort = "high"
@@ -39,8 +39,9 @@ def finish(tab):
     app.SessionPanel._on_worker_finished(tab)
 
 
-def test_enter_in_completion_gap_queues_instead_of_overlapping():
-    tab = panel()
+@pytest.mark.parametrize("backend", [app.BACKEND_COMMANDCODE, app.BACKEND_FREEBUFF])
+def test_enter_in_completion_gap_queues_instead_of_overlapping(backend):
+    tab = panel(backend)
     first = tab._worker
     tab._on_send()
     assert tab._worker is first
@@ -70,8 +71,9 @@ def test_multiple_followups_keep_order_attachments_and_unsent_draft():
     assert tab._pending_messages == []
 
 
-def test_steering_stops_once_and_waits_for_done_before_resuming():
-    tab = panel()
+@pytest.mark.parametrize("backend", [app.BACKEND_COMMANDCODE, app.BACKEND_FREEBUFF])
+def test_steering_stops_once_and_waits_for_done_before_resuming(backend):
+    tab = panel(backend)
     tab._worker.is_alive = lambda: True
     stopped = []
     tab._on_stop = lambda: (stopped.append(True), setattr(tab, "_stopping", True))
@@ -87,8 +89,9 @@ def test_steering_stops_once_and_waits_for_done_before_resuming():
     assert tab._pending_messages[0][0] == "ordinary followup"
 
 
-def test_steering_before_session_arrives_keeps_original_task_and_files():
-    tab = panel()
+@pytest.mark.parametrize("backend", [app.BACKEND_COMMANDCODE, app.BACKEND_FREEBUFF])
+def test_steering_before_session_arrives_keeps_original_task_and_files(backend):
+    tab = panel(backend)
     tab._session_id = None
     tab._active_send_text = "Original task with attached input.txt"
     tab.prompt.SetValue("changed instruction")
@@ -98,8 +101,9 @@ def test_steering_before_session_arrives_keeps_original_task_and_files():
     assert "changed instruction" in tab.sent[0][0]
 
 
-def test_stop_in_completion_gap_pauses_queue_until_explicit_resume():
-    tab = panel()
+@pytest.mark.parametrize("backend", [app.BACKEND_COMMANDCODE, app.BACKEND_FREEBUFF])
+def test_stop_in_completion_gap_pauses_queue_until_explicit_resume(backend):
+    tab = panel(backend)
     tab._on_send()
     app.SessionPanel._on_stop(tab)
     finish(tab)
@@ -107,6 +111,22 @@ def test_stop_in_completion_gap_pauses_queue_until_explicit_resume():
     tab.prompt.SetValue("/queue resume")
     tab._on_send()
     assert len(tab.sent) == 1
+    assert tab.sent[0][0] == "the second question"
+    assert not tab._queue_paused and not tab._pending_messages
+
+
+@pytest.mark.parametrize("backend", [app.BACKEND_COMMANDCODE, app.BACKEND_FREEBUFF])
+def test_paused_queue_can_be_listed_and_cleared_without_sending(backend):
+    tab = panel(backend)
+    tab._on_send()
+    app.SessionPanel._on_stop(tab)
+    finish(tab)
+    tab.prompt.SetValue("/queue list")
+    tab._on_send()
+    assert not tab.sent and len(tab._pending_messages) == 1
+    tab.prompt.SetValue("/queue clear")
+    tab._on_send()
+    assert not tab.sent and not tab._pending_messages and not tab._queue_paused
 
 
 def test_failure_pauses_remaining_messages():

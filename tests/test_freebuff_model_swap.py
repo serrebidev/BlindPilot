@@ -72,7 +72,7 @@ def test_a_model_the_picker_dropped_is_announced_as_a_notice(monkeypatch):
     state = {"sent": False, "enters": 0, "phase": 0}
 
     def write(text):
-        if text == "do the work":
+        if text == "\x1b[200~do the work\x1b[201~":
             state["sent"] = True
         if text == "\r":
             state["enters"] += 1
