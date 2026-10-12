@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.43.5"
+APP_VERSION = "0.43.6"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7216,6 +7216,8 @@ class HistoryDialog(wx.Dialog):
 
     def _label_for(self, entry: HistoryEntry) -> str:
         parts = [self._title(entry) or "(untitled)", describe_age(entry.modified)]
+        if not entry.resumable:
+            parts.append("FreeBuff Desktop, read only")
         if _history_key(entry) in self._hidden():
             parts.append("hidden")
         if self._selected_cwd() is None and entry.folder:
@@ -15227,6 +15229,19 @@ class MainFrame(wx.Frame):
             turns = load_turns(entry)
         if not turns:
             announce(f"Error: {entry.title} could not be read back")
+            return
+        if not entry.resumable:
+            text = "\n\n".join(
+                f"{label}: {value}"
+                for turn in turns
+                for label, value in (("You", turn.prompt), ("Answer", turn.response))
+                if value.strip()
+            )
+            dialog = ReadView(self, text, f"{entry.title} — FreeBuff Desktop, read only")
+            try:
+                dialog.ShowModal()
+            finally:
+                dialog.Destroy()
             return
         cwd = self._history_cwd()
         if entry.cwd:

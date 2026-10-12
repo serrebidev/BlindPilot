@@ -116,6 +116,10 @@ class HistoryEntry:
     cwd: str = ""
     folder: str = ""
 
+    @property
+    def resumable(self) -> bool:
+        return not (self.backend == BACKEND_FREEBUFF and self.path.endswith(_FREEBUFF_DESKTOP_DB))
+
 
 @dataclass
 class HistoryTurn:
@@ -1109,7 +1113,7 @@ def _freebuff_chat_buckets(cwd: Optional[str]) -> List[Path]:
         buckets.append(root / "chats")
         return [path for path in buckets if path.is_dir()]
     try:
-        return sorted(path for path in root.glob("*/chats") if path.is_dir())
+        return sorted(path for path in [root / "chats", *root.glob("*/chats")] if path.is_dir())
     except OSError:
         return []
 
@@ -1233,8 +1237,8 @@ def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
         return []
     try:
         rows = connection.execute(
-            "SELECT role, parts_json FROM messages WHERE thread_id = ? ORDER BY seq",
-            (entry.session_id,),
+            "SELECT role, parts_json FROM messages WHERE thread_id = ? ORDER BY seq LIMIT ?",
+            (entry.session_id, _MAX_TRANSCRIPT_PARTS),
         ).fetchall()
     except Exception:  # noqa: BLE001
         return []
@@ -1575,7 +1579,7 @@ def load_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     # its size is no measure of this one -- and on a machine that has used
     # Hermes for a while the shared store passes this limit, which would hide
     # every conversation at once. Both cap themselves, in rows, while reading.
-    if backend not in (BACKEND_OPENCODE, BACKEND_HERMES):
+    if backend not in (BACKEND_OPENCODE, BACKEND_HERMES) and entry.resumable:
         try:
             path = Path(entry.path)
             if path.is_file() and path.stat().st_size > _MAX_TRANSCRIPT_BYTES:

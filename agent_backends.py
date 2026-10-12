@@ -195,6 +195,23 @@ def _banish_window(handle: int) -> None:
 
 def _descendant_pids(roots: set[int]) -> set[int]:
     """Every process descended from ``roots``, so only our own are touched."""
+    if platform.system() != "Windows":
+        try:
+            result = subprocess.run(
+                ["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=5
+            )
+            posix_parents = {
+                int(pid): int(parent)
+                for pid, parent in (line.split() for line in result.stdout.splitlines())
+            }
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return set(roots)
+        family = set(roots)
+        while (
+            additions := {pid for pid, parent in posix_parents.items() if parent in family} - family
+        ):
+            family.update(additions)
+        return family
     import ctypes
     import ctypes.wintypes as wintypes
 
@@ -2560,11 +2577,10 @@ def _write_freebuff_choice(model: str) -> None:
     user's choice.  This record is what survives.
     """
     path = _freebuff_choice_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"model": model}, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps({"model": model}, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _freebuff_catalog_cache_path() -> Path:
@@ -2587,7 +2603,8 @@ def _read_freebuff_catalog_cache(stamp: tuple[str, float, int]) -> list[str]:
         return []
     if payload.get("path") != stamp[0] or payload.get("size") != stamp[2]:
         return []
-    if abs(float(payload.get("mtime") or 0.0) - stamp[1]) > 0.001:
+    mtime = _as_number(payload.get("mtime"))
+    if mtime is None or abs(mtime - stamp[1]) > 0.001:
         return []
     models = payload.get("models")
     if not isinstance(models, list):
@@ -2628,9 +2645,17 @@ def _freebuff_package_readme(binary: Optional[str]) -> Optional[Path]:
 
 
 def _resolve_minified_string(
-    source: str, expression: str, direct: Optional[dict[str, str]] = None
+    source: str,
+    expression: str,
+    direct: Optional[dict[str, str]] = None,
+    seen: Optional[set[str]] = None,
 ) -> str:
     expression = expression.strip()
+    if seen is None:
+        seen = set()
+    if expression in seen:
+        return ""
+    seen.add(expression)
     if len(expression) >= 2 and expression[0] == expression[-1] == '"':
         return expression[1:-1]
     if direct is None:
@@ -2652,7 +2677,7 @@ def _resolve_minified_string(
         source,
     )
     if alias and alias.group(1) != expression:
-        return _resolve_minified_string(source, alias.group(1), direct)
+        return _resolve_minified_string(source, alias.group(1), direct, seen)
     return ""
 
 
@@ -2871,13 +2896,15 @@ def set_freebuff_model(model: str) -> None:
         selected = current or (models[0] if models else FREEBUFF_PREFERRED_MODEL)
     settings = Path.home() / ".config" / "manicode" / "settings.json"
     with _FREEBUFF_SETTINGS_LOCK:
-        _write_freebuff_choice(selected)
         try:
             payload = json.loads(settings.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             payload = {}
+        except ValueError as exc:
+            raise OSError(f"Could not read FreeBuff settings: {exc}") from exc
         if not isinstance(payload, dict):
-            payload = {}
+            raise OSError("FreeBuff settings must contain a JSON object")
+        _write_freebuff_choice(selected)
         if payload.get("freebuffModel") == selected:
             return
         payload["freebuffModel"] = selected
@@ -4910,7 +4937,16 @@ def _freebuff_chat_path(cwd: str, session_id: str) -> Optional[Path]:
     return None
 
 
+def _freebuff_resume_chat_path(cwd: str, session_id: str) -> Optional[Path]:
+    """The CLI only resumes IDs in this project's bucket; otherwise it falls back."""
+    chat = _freebuff_chat_path(cwd, session_id)
+    project = Path(cwd).resolve().name
+    expected = Path.home() / ".config" / "manicode" / "projects" / project / "chats"
+    return chat if chat is not None and chat.parent == expected else None
+
+
 _FREEBUFF_INTERRUPTED = "[response interrupted]"
+_FREEBUFF_BOOT_FINGERPRINT = "Enhanced CLI fingerprint generated successfully"
 
 # What FreeBuff's start screen says while it is waiting for a model to be
 # chosen. The wording has moved between releases - the card was once labelled
@@ -5388,7 +5424,10 @@ def _freebuff_log_pending_drop(tail: str) -> bool:
     for line in _freebuff_log_messages(tail):
         if line.startswith("[chat-runtime] Freebuff session over;"):
             pending = True
-        elif line.startswith(("Reconnection detected", "Start agent ")):
+        elif (
+            line.startswith(("Reconnection detected", "Start agent "))
+            or line == _FREEBUFF_BOOT_FINGERPRINT
+        ):
             pending = False
     return pending
 
@@ -5425,7 +5464,9 @@ def _freebuff_log_boot_finished(tail: str) -> bool:
     a tail with no drop yet is a boot that has not reached the drop either.
     """
     messages = _freebuff_log_messages(tail)
-    if any("fingerprint" in message.lower() for message in messages):
+    if _freebuff_log_pending_drop(tail):
+        return False
+    if _FREEBUFF_BOOT_FINGERPRINT in messages:
         return True
     return any(
         message.startswith(("Reconnection detected", "Start agent ")) for message in messages
@@ -5433,7 +5474,11 @@ def _freebuff_log_boot_finished(tail: str) -> bool:
 
 
 def _freebuff_boot_ready(
-    cwd: str, before: dict[str, float], chat_path: Optional[Path], log_offset: int
+    cwd: str,
+    before: dict[str, float],
+    chat_path: Optional[Path],
+    log_offset: int,
+    pid: int = 0,
 ) -> bool:
     """Whether FreeBuff's chat runtime has reconnected and can take a message.
 
@@ -5448,8 +5493,8 @@ def _freebuff_boot_ready(
     :func:`_freebuff_log_boot_finished`). For a conversation this launch
     created, the whole log is read and the milestone must be seen; for a
     resumed one, only the lines written since the launch started are read,
-    and nothing new to read means an ordinary continuation rather than a
-    hold. A launch that has created no chat yet cannot be ready either: its
+    and the milestone must appear in those new lines too. A launch that has
+    created no chat yet cannot be ready either: its
     chat is created when the terminal starts, so a missing chat is a boot
     still in progress, and the startup-silence failure is the honest end of
     a launch that never gets there. Taking it as ready was the hole the
@@ -5458,9 +5503,9 @@ def _freebuff_boot_ready(
     if chat_path is not None:
         tail = _freebuff_log_tail(chat_path, log_offset)
         if not tail.strip():
-            return True
+            return False
         return _freebuff_log_boot_finished(tail)
-    new_tail = _freebuff_new_chat_log(before, cwd)
+    new_tail = _freebuff_new_chat_log(before, cwd, pid)
     if new_tail is None:
         return False
     if not new_tail.strip():
@@ -5470,19 +5515,43 @@ def _freebuff_boot_ready(
     return _freebuff_log_boot_finished(new_tail)
 
 
-def _freebuff_new_chat_log(before: dict[str, float], cwd: str) -> Optional[str]:
-    """The whole log of the chat this launch created, or None if it made none."""
+def _freebuff_new_chat_path(before: dict[str, float], cwd: str, pid: int = 0) -> Optional[Path]:
+    """Find this terminal's chat using the process id FreeBuff logs at boot."""
     after = _freebuff_chat_dirs(cwd)
     new_ids = set(after) - set(before)
     if not new_ids:
         return None
-    target = _freebuff_chat_path(cwd, max(new_ids, key=lambda chat_id: after[chat_id]))
+    family = _descendant_pids({pid}) if pid else set()
+    for chat_id in sorted(new_ids, key=lambda chat_id: after[chat_id], reverse=True):
+        target = _freebuff_chat_path(cwd, chat_id)
+        if target is None:
+            continue
+        if not pid:
+            return target
+        try:
+            with (target / "log.jsonl").open("rb") as log:
+                first_lines = log.read(8192).decode("utf-8", "replace")
+        except OSError:
+            continue
+        for line in first_lines.splitlines():
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict) and entry.get("pid") in family:
+                return target
+    return None
+
+
+def _freebuff_new_chat_log(before: dict[str, float], cwd: str, pid: int = 0) -> Optional[str]:
+    """The whole log of the chat this launch created, or None if it made none."""
+    target = _freebuff_new_chat_path(before, cwd, pid)
     if target is None:
         return None
     return _freebuff_log_tail(target, 0)
 
 
-def _freebuff_dropped_new_chat(before: dict[str, float], cwd: str) -> bool:
+def _freebuff_dropped_new_chat(before: dict[str, float], cwd: str, pid: int = 0) -> bool:
     """Whether a chat created during this launch is waiting on a dead session.
 
     "session over" is also the first line of a healthy boot, so the question
@@ -5490,7 +5559,7 @@ def _freebuff_dropped_new_chat(before: dict[str, float], cwd: str) -> bool:
     chats created during this launch are consulted: a drop logged by an
     earlier session must not fail this one.
     """
-    tail = _freebuff_new_chat_log(before, cwd)
+    tail = _freebuff_new_chat_log(before, cwd, pid)
     return bool(tail and tail.strip()) and _freebuff_log_pending_drop(cast(str, tail))
 
 
@@ -5726,6 +5795,8 @@ class _ConPtyTerminal:
             raise OSError("CreatePipe failed for the terminal's output")
         self._input_write = input_write
         self._output_read = output_read
+        self._pseudo = handle()
+        self._process = None
         try:
             pseudo = handle()
             result = kernel32.CreatePseudoConsole(
@@ -5735,6 +5806,9 @@ class _ConPtyTerminal:
                 raise OSError(f"CreatePseudoConsole failed: HRESULT {result & 0xFFFFFFFF:#x}")
             self._pseudo = pseudo
             self._process, pid = self._create_process(args, cwd, env, pseudo)
+        except Exception:
+            self.close()
+            raise
         finally:
             # The pseudoconsole keeps its own references to these two ends.
             kernel32.CloseHandle(input_read)
@@ -5813,13 +5887,24 @@ class _ConPtyTerminal:
             ):
                 raise OSError("UpdateProcThreadAttribute failed for the pseudoconsole")
             argv = list(args)
+            command = subprocess.list2cmdline(argv)
             if argv and argv[0].lower().endswith((".cmd", ".bat")):
                 # CreateProcess cannot run a batch file; cmd hosts it, as it
                 # did under pywinpty (its /c invocation is what process
                 # listings of the old path show).
                 comspec = os.environ.get("COMSPEC") or r"C:\Windows\System32\cmd.exe"
-                argv = [comspec, "/c", *argv]
-            command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+                # Expand each argument once inside quotes: literal % and shell
+                # operators in a folder name must never become cmd commands.
+                if any('"' in arg for arg in argv):
+                    raise OSError("Batch launcher arguments cannot contain double quotes")
+                env = dict(env)
+                for index, arg in enumerate(argv):
+                    env[f"BLINDPILOT_PTY_ARG_{index}"] = arg
+                arguments = " ".join(
+                    f'"%BLINDPILOT_PTY_ARG_{index}%"' for index in range(len(argv))
+                )
+                command = f'{subprocess.list2cmdline([comspec])} /d /v:off /s /c "{arguments}"'
+            command_line = ctypes.create_unicode_buffer(command)
             env_block = ctypes.create_unicode_buffer(
                 "\0".join(f"{key}={value}" for key, value in env.items()) + "\0"
             )
@@ -5837,7 +5922,7 @@ class _ConPtyTerminal:
                 ctypes.byref(startup),
                 ctypes.byref(info),
             ):
-                raise OSError(f"CreateProcess failed: {ctypes.get_last_error() or 'unknown error'}")
+                raise ctypes.WinError(kernel32.GetLastError())
         finally:
             kernel32.DeleteProcThreadAttributeList(startup.lpAttributeList)
         kernel32.CloseHandle(info.hThread)
@@ -5857,6 +5942,8 @@ class _ConPtyTerminal:
         kernel32 = ctypes.windll.kernel32
         empty_since: Optional[float] = None
         while True:
+            if self._closed:
+                return None
             available = ctypes.wintypes.DWORD(0)
             if not kernel32.PeekNamedPipe(
                 self._output_read, None, 0, None, ctypes.byref(available), None
@@ -5882,6 +5969,8 @@ class _ConPtyTerminal:
             time.sleep(0.01)
 
     def write(self, text: str) -> None:
+        if self._closed:
+            raise OSError("the terminal's input pipe is closed")
         ctypes = self._ctypes
         kernel32 = ctypes.windll.kernel32
         data = text.encode("utf-8")
@@ -5900,6 +5989,8 @@ class _ConPtyTerminal:
             written_total += written.value
 
     def isalive(self) -> bool:
+        if self._closed:
+            return False
         kernel32 = self._ctypes.windll.kernel32
         code = self._ctypes.wintypes.DWORD(0)
         if not kernel32.GetExitCodeProcess(self._process, self._ctypes.byref(code)):
@@ -5909,6 +6000,9 @@ class _ConPtyTerminal:
     def terminate(self, force: bool = False) -> None:
         kernel32 = self._ctypes.windll.kernel32
         if self.isalive():
+            # MCP servers can be detached from the pseudoconsole; closing it
+            # alone leaves those children running and holding the workspace.
+            _end_windows_tree(self.pid)
             kernel32.TerminateProcess(self._process, 1)
 
     def close(self, force: bool = False) -> None:
@@ -5919,17 +6013,18 @@ class _ConPtyTerminal:
         # Closing the pseudoconsole ends every process attached to it --
         # FreeBuff and the tools it started -- which terminate alone, aimed
         # only at the first process, would leave running.
-        try:
-            kernel32.ClosePseudoConsole(self._pseudo)
-        except Exception:
-            pass
         for handle in (self._input_write, self._output_read):
             try:
                 kernel32.CloseHandle(handle)
             except Exception:
                 pass
-        kernel32.WaitForSingleObject(self._process, 2000)
-        if self.isalive():
+        # Close output first: a stopped pump cannot drain the shutdown frame,
+        # and ClosePseudoConsole waits forever for it on older Windows.
+        if self._pseudo:
+            kernel32.ClosePseudoConsole(self._pseudo)
+        if self._process is None:
+            return
+        if kernel32.WaitForSingleObject(self._process, 2000) == 258:  # WAIT_TIMEOUT
             kernel32.TerminateProcess(self._process, 1)
         kernel32.CloseHandle(self._process)
 
@@ -6211,6 +6306,9 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
             launch()
 
     def launch() -> None:
+        chat = _freebuff_resume_chat_path(cwd, session_id) if session_id else None
+        if session_id and chat is None:
+            return
         # FreeBuff reads the selected model once, at launch, and rewrites the
         # setting to its own recommendation after a turn. Applying the choice
         # before the terminal starts is what makes a waiting one usable.
@@ -6227,6 +6325,12 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
         # this one, and the message would finish without ever learning the id of
         # the conversation it had just had.
         before = _freebuff_chat_dirs(cwd)
+        log_offset = 0
+        if chat is not None:
+            try:
+                log_offset = (chat / "log.jsonl").stat().st_size
+            except OSError:
+                pass
         ended = threading.Event()
         try:
             pty, read = _spawn_freebuff_pty(args, cwd, ended)
@@ -6238,6 +6342,7 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
             "read": read,
             "ended": ended,
             "before": before,
+            "log_offset": log_offset,
             "expires": time.monotonic() + _FREEBUFF_PREWARM_TTL,
         }
 
@@ -6393,7 +6498,19 @@ class FreebuffWorker(_TurnWorker):
             return
         models: list[str] = []
         before = _freebuff_chat_dirs(self._cwd)
-        chat_path = _freebuff_chat_path(self._cwd, self._session_id or "")
+        chat_path = (
+            _freebuff_resume_chat_path(self._cwd, self._session_id)
+            if self._session_id
+            else _freebuff_chat_path(self._cwd, "")
+        )
+        if self._session_id and chat_path is None:
+            self._fail(
+                "FreeBuff cannot resume this conversation in its CLI. "
+                "Desktop conversations must be continued in FreeBuff Desktop; "
+                "For a CLI conversation, open its original project folder; "
+                "if it was deleted, start a new conversation."
+            )
+            return
         log_offset = 0
         if chat_path is not None:
             try:
@@ -6423,6 +6540,7 @@ class FreebuffWorker(_TurnWorker):
             read = waiting["read"]
             self._stream_ended = waiting["ended"]
             before = waiting["before"]
+            log_offset = waiting.get("log_offset", log_offset)
         else:
             try:
                 read = self._spawn_pty(args)
@@ -6515,7 +6633,7 @@ class FreebuffWorker(_TurnWorker):
             hour, and can have died or moved on in that time. Starting again
             costs the usual wait; refusing to would cost the message.
             """
-            nonlocal before
+            nonlocal before, log_offset
             end_hidden_terminal(self._pty)
             # The terminal being replaced had a whole FreeBuff in it, and one
             # rewrites the model setting to its own recommendation as it goes.
@@ -6526,6 +6644,11 @@ class FreebuffWorker(_TurnWorker):
             except OSError:
                 pass
             before = _freebuff_chat_dirs(self._cwd)
+            if chat_path is not None:
+                try:
+                    log_offset = (chat_path / "log.jsonl").stat().st_size
+                except OSError:
+                    log_offset = 0
             self._stream_ended = threading.Event()
             try:
                 return self._spawn_pty(args)
@@ -6561,6 +6684,11 @@ class FreebuffWorker(_TurnWorker):
                 # The replacement has painted nothing yet, and nothing is what
                 # the startup wait is measured in, so start it again here.
                 screen_changed_at = time.monotonic()
+                accepted_recommended_model = False
+                picker_expanded = False
+                picker_expanded_at = 0.0
+                boot_hold_started = None
+                ready_since = None
                 continue
             if not chunk and self._stream_ended.is_set():
                 if not sent:
@@ -6568,7 +6696,7 @@ class FreebuffWorker(_TurnWorker):
                     # composer just never arrives. FreeBuff's log is the only
                     # place the drop is written down, and it is more use than
                     # any inference from an empty screen.
-                    if _freebuff_dropped_new_chat(before, self._cwd):
+                    if _freebuff_dropped_new_chat(before, self._cwd, getattr(self._pty, "pid", 0)):
                         self._fail(_FREEBUFF_REJOIN_MESSAGE)
                         return
                     # Whatever killed it said so on the terminal before dying —
@@ -6673,7 +6801,9 @@ class FreebuffWorker(_TurnWorker):
                 # silently: the chat log records no send at all. The boot is
                 # readable in that log, so the message is held here — typed
                 # nowhere — until the log says the session is live.
-                if not _freebuff_boot_ready(self._cwd, before, chat_path, log_offset):
+                if not _freebuff_boot_ready(
+                    self._cwd, before, chat_path, log_offset, getattr(self._pty, "pid", 0)
+                ):
                     if boot_hold_started is None:
                         boot_hold_started = time.monotonic()
                         self._on_activity(
@@ -6684,6 +6814,12 @@ class FreebuffWorker(_TurnWorker):
                         self._fail(_FREEBUFF_REJOIN_MESSAGE)
                         return
                     continue
+                if chat_path is None:
+                    discovered = self._adopt_new_chat(before)
+                    if discovered:
+                        self._session_id = discovered
+                        chat_path = _freebuff_chat_path(self._cwd, discovered)
+                        log_offset = 0
                 if not self._submit_text(self._prompt):
                     self._fail("Could not send the prompt to FreeBuff")
                     return
@@ -6703,7 +6839,7 @@ class FreebuffWorker(_TurnWorker):
 
             now = time.monotonic()
             if not sent and now - screen_changed_at >= _FREEBUFF_STARTUP_SILENCE_SECONDS:
-                if _freebuff_dropped_new_chat(before, self._cwd):
+                if _freebuff_dropped_new_chat(before, self._cwd, getattr(self._pty, "pid", 0)):
                     self._fail(_FREEBUFF_REJOIN_MESSAGE)
                     return
                 self._fail(
@@ -6879,9 +7015,9 @@ class FreebuffWorker(_TurnWorker):
     def _adopt_new_chat(self, before: dict[str, float]) -> Optional[str]:
         """The id of a chat this launch created, or None if this turn has one.
 
-        FreeBuff creates a new conversation's folder when its terminal starts,
-        so the id that conversation belongs to is whatever appeared under
-        FreeBuff's projects since the turn began. A turn that was *resumed*
+        FreeBuff creates a new conversation's folder when its terminal starts.
+        Its boot log names the terminal process, so another tab's newer chat
+        cannot be adopted instead. A turn that was *resumed*
         already knows which conversation it is, and the folders that appear
         while it runs are somebody else's: adopting the newest is how a tab
         ends up resuming a conversation nobody opened -- the id is overwritten
@@ -6889,11 +7025,8 @@ class FreebuffWorker(_TurnWorker):
         """
         if self._session_id:
             return None
-        after = _freebuff_chat_dirs(self._cwd)
-        new_ids = set(after) - set(before)
-        if not new_ids:
-            return None
-        return max(new_ids, key=lambda chat_id: after[chat_id])
+        chat = _freebuff_new_chat_path(before, self._cwd, getattr(self._pty, "pid", 0))
+        return chat.name if chat is not None else None
 
     def _press(self, key: str, times: int = 1) -> None:
         """Send one of the box's keys, giving OpenTUI time to repaint."""
@@ -7064,7 +7197,7 @@ class FreebuffWorker(_TurnWorker):
                 continue
             found = -1
             for index, raw in enumerate(raw_lines):
-                if needle in raw:
+                if needle in raw and key.startswith(_keyed(raw, letters_only=True)[0]):
                     found = index
             if found < 0:
                 continue
@@ -7091,10 +7224,13 @@ class FreebuffWorker(_TurnWorker):
         # A resumed conversation paints the turn before it above that, reasoning
         # and all, and none of that is an answer to what was just asked.
         prompt_needle = self._echoes[0][0]
+        prompt_key = self._echoes[0][1]
         prompt_index = -1
         if prompt_needle:
             for index, raw in enumerate(raw_lines):
-                if prompt_needle in raw:
+                if prompt_needle in raw and prompt_key.startswith(
+                    _keyed(raw, letters_only=True)[0]
+                ):
                     prompt_index = index
         start = prompt_index + 1 if prompt_index >= 0 else 0
 

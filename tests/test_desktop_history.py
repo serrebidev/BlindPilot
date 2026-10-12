@@ -81,7 +81,7 @@ def test_codex_conversations_come_from_its_databases(home):
     assert [(t.prompt, t.response) for t in turns] == [("Fix the build", "Looking.\n\nFixed.")]
 
 
-def test_freebuff_desktop_threads_are_listed_and_read(home):
+def test_freebuff_desktop_threads_are_listed_and_read(home, monkeypatch):
     project = home / ".config" / "freebuff-desktop" / "projects" / "app-1234"
     project.mkdir(parents=True)
     db = sqlite3.connect(project / "desktop-v2.db")
@@ -113,5 +113,7 @@ def test_freebuff_desktop_threads_are_listed_and_read(home):
     entries = [e for e in session_history.list_history("freebuff") if e.session_id == "th1"]
 
     assert len(entries) == 1 and entries[0].title == "Tidy the README"
+    # The whole shared store's size says nothing about this short thread.
+    monkeypatch.setattr(session_history, "_MAX_TRANSCRIPT_BYTES", 1)
     turns = session_history.load_turns(entries[0])
     assert [(t.prompt, t.response) for t in turns] == [("Tidy the README", "Done.")]
