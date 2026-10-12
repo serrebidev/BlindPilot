@@ -71,7 +71,7 @@ def _run(monkeypatch, steer: str) -> _Turn:
 
     def write(text):
         turn.written.append(text)
-        if text == "do the work":
+        if text == "\x1b[200~do the work\x1b[201~":
             state["sent"] = True
         return True
 
@@ -84,7 +84,9 @@ def _run(monkeypatch, steer: str) -> _Turn:
             state["phase"] += 1
             if not state["steered"]:
                 state["steered"] = True
-                worker.steer(steer)
+                # Replay the echo a legacy FreeBuff terminal would have drawn.
+                worker._echoes.append(agent_backends._freebuff_echo(steer))
+                worker._submit_text(steer)
             painted = AFTER if state["phase"] <= 5 else DONE
             return _frame(painted.format(steer=steer))
 
@@ -108,7 +110,7 @@ def _run(monkeypatch, steer: str) -> _Turn:
 def test_a_steered_message_is_not_read_out_as_the_answer(monkeypatch):
     turn = _run(monkeypatch, "please run the tests")
 
-    assert "please run the tests" in turn.written, "the steer was never sent"
+    assert "\x1b[200~please run the tests\x1b[201~" in turn.written, "the steer was never sent"
     assert "please run the tests" not in turn.spoken, turn.activity
     assert "please run the tests" not in turn.answer, turn.answer
 

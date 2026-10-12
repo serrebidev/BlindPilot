@@ -1,9 +1,8 @@
-# BlindPilot 0.43.6
+# BlindPilot 0.43.7
 
-This release repairs the FreeBuff integration after an audit of launching, starting and continuing conversations, reading replies, stopping terminals, model settings, and saved history.
+This release fixes issues found by live testing FreeBuff 0.2.27 after the previous integration audit.
 
-- A new conversation is matched to the FreeBuff process that created it. Another tab's newer chat cannot become this tab's conversation. A missing CLI chat or one from a different folder is refused before launch, because FreeBuff otherwise falls back silently to an unrelated recent chat. Open the original folder to continue a CLI conversation. FreeBuff Desktop transcripts open for reading and copying; continue those conversations in FreeBuff Desktop.
-- Startup waits for this terminal's own boot milestone. A terminal started ahead of time remembers where its launch began in the resumed chat's log, and a replacement terminal answers its own model picker. The disconnect written during a normal boot no longer looks like a fresh mid-turn failure after sign-in finishes.
-- Windows launch failures release every terminal handle. Shutdown closes the output pipe before the pseudoconsole, preventing a hang on older Windows versions, and stops detached background children as well as the CLI. Paths containing spaces, ampersands, percent signs, and other shell characters are passed literally to batch launchers.
-- Damaged or unreadable FreeBuff settings are preserved, and model-save failures are reported. Malformed catalog-cache timestamps and cyclic model aliases no longer crash model selection.
-- Replies that repeat prompt words keep their earlier paragraphs. Recent Conversations includes older unbucketed CLI chats and reads small Desktop conversations even when their shared database is large.
+- Sign-in and credit usage recognize FreeBuff accounts whose tokens are in the system's secure credential store. Tokens stay there; BlindPilot does not copy them into the account file. Older file-based accounts remain supported.
+- Multiline prompts, accented characters, and emoji reach FreeBuff intact. Custom question answers use the same terminal paste handling.
+- Messages sent while FreeBuff works wait in BlindPilot's queue. Steer stops the current turn and resumes the conversation with your new instruction, avoiding instructions lost by a busy terminal. Stop pauses the queue; use /queue list, /queue clear, or /queue resume to manage pending messages.
+- /history opens Recent Conversations and /usage shows FreeBuff credit usage in BlindPilot.

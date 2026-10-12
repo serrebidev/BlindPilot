@@ -1130,13 +1130,49 @@ def _freebuff_account() -> Optional[dict]:
     except (OSError, ValueError):
         return None
     account = payload.get("default") if isinstance(payload, dict) else None
+    if (
+        isinstance(account, dict)
+        and not account.get("authToken")
+        and account.get("tokenStore") == "keychain"
+    ):
+        account["authToken"] = _freebuff_keychain_token(credential)
     return account if isinstance(account, dict) else None
 
 
+def _freebuff_keychain_token(credential: Path) -> str:
+    """Read Bun.secrets' FreeBuff entry, without migrating it back to JSON."""
+    from accessible_ai.storage.credentials import CredentialStore
+
+    try:
+        if platform.system() == "Windows":
+            return CredentialStore._windows_read(f"freebuff-cli/{credential}", encoding="utf-8")
+        if platform.system() == "Darwin":
+            return CredentialStore._fallback_read(str(credential), "freebuff-cli")
+        import secretstorage
+
+        connection = secretstorage.dbus_init()
+        try:
+            for item in secretstorage.search_items(
+                connection, {"service": "freebuff-cli", "account": str(credential)}
+            ):
+                if not item.is_locked():
+                    return item.get_secret().decode("utf-8")
+        finally:
+            connection.close()
+    except Exception:
+        # A locked or unavailable secure store cannot confirm a sign-in.
+        return ""
+    return ""
+
+
 def _freebuff_signed_in(account: Optional[dict]) -> bool:
+    fields = (
+        ("authToken", "email")
+        if account and account.get("email")
+        else ("authToken", "fingerprintId", "fingerprintHash")
+    )
     return account is not None and all(
-        isinstance(account.get(field), str) and account[field].strip()
-        for field in ("authToken", "fingerprintId", "fingerprintHash")
+        isinstance(account.get(field), str) and account[field].strip() for field in fields
     )
 
 
@@ -6438,24 +6474,21 @@ class FreebuffWorker(_TurnWorker):
         self._pending_frame: dict[str, str] = {}
 
     def steer(self, text: str) -> bool:
-        if not self.accepting_input():
-            return False
-        if not self._submit_text(text):
-            return False
-        # FreeBuff echoes this into the transcript like the prompt, so the
-        # lines it lands on have to be recognised and left out of the reading.
-        # Appended rather than replaced: the prompt's echo is still the
-        # boundary, and this one sits below it.
-        self._echoes.append(_freebuff_echo(text))
-        return True
+        # A successful pipe write does not confirm input while FreeBuff is busy.
+        # The window stops and resumes this backend with the new instruction.
+        return False
 
     def _submit_text(self, text: str) -> bool:
         # OpenTUI handles paste and Enter as separate input events. Sending
         # both in one ConPTY write fills the composer but does not submit it.
-        if not self._write(text):
+        if not self._paste_text(text):
             return False
         time.sleep(0.05)
         return self._write("\r")
+
+    def _paste_text(self, text: str) -> bool:
+        # Raw key events discard newlines and some Unicode; paste preserves them.
+        return self._write(f"\x1b[200~{text}\x1b[201~")
 
     def _write(self, text: str) -> bool:
         if self._pty is None:
@@ -7115,7 +7148,7 @@ class FreebuffWorker(_TurnWorker):
             if target == custom:
                 # Choosing "Custom" opens a text field with the cursor in it;
                 # Enter closes it and moves on to the next question.
-                self._write(answer)
+                self._paste_text(answer)
                 time.sleep(_FREEBUFF_KEY_SETTLE)
                 self._press(_KEY_ENTER)
             # A chosen answer moves the box on by itself.
@@ -7128,7 +7161,7 @@ class FreebuffWorker(_TurnWorker):
         if typed:
             self._press(_KEY_DOWN, custom - position)
             self._press(_KEY_ENTER)
-            self._write(", ".join(typed))
+            self._paste_text(", ".join(typed))
             time.sleep(_FREEBUFF_KEY_SETTLE)
             self._press(_KEY_ENTER)
             position = custom

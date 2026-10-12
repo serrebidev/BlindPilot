@@ -344,7 +344,7 @@ def test_a_welcome_turn_still_reaches_its_answer(monkeypatch):
     state = {"sent": False, "enters": 0, "downs": 0, "phase": 0}
 
     def write(text):
-        if text == "do the work":
+        if text == "\x1b[200~do the work\x1b[201~":
             state["sent"] = True
         if text == "\r":
             state["enters"] += 1
@@ -392,7 +392,7 @@ def test_the_chosen_model_is_reached_on_the_marker_less_screen(monkeypatch):
     state = {"sent": False, "enters": 0, "downs": 0, "phase": 0}
 
     def write(text):
-        if text == "do the work":
+        if text == "\x1b[200~do the work\x1b[201~":
             state["sent"] = True
         if text == "\r":
             state["enters"] += 1
@@ -515,7 +515,7 @@ def _hold_spawn(worker, state):
     paints it before the boot behind it is finished."""
 
     def write(text):
-        if text == "do the work":
+        if text == "\x1b[200~do the work\x1b[201~":
             state["sent"] = True
         return True
 

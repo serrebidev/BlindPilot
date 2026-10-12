@@ -63,7 +63,7 @@ def _stub(monkeypatch, worker, dirs, prewarmed):
     state = {"sent": False, "phase": 0}
 
     def write(text):
-        if text == "do the work":
+        if text == "\x1b[200~do the work\x1b[201~":
             state["sent"] = True
         return True
 

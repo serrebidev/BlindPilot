@@ -2085,7 +2085,7 @@ def test_freebuff_typed_answer_walks_past_the_options_to_its_own_entry():
 
     down = agent_backends._KEY_DOWN
     enter = agent_backends._KEY_ENTER
-    assert keys == [down, down, enter, "four spaces, always", enter]
+    assert keys == [down, down, enter, "\x1b[200~four spaces, always\x1b[201~", enter]
 
 
 def test_freebuff_a_question_nobody_answered_closes_the_box():

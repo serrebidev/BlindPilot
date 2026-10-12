@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.7 - 2026-10-12
+
+- FreeBuff 0.2.27 sign-in and credit usage work when its token lives in the system's secure credential store rather than `credentials.json`. BlindPilot reads the existing token without copying it into the file and still supports older file-based accounts.
+- FreeBuff prompts and custom question answers use terminal paste events, preserving newlines, accented characters, and emoji that raw keystrokes discarded.
+- FreeBuff follow-ups wait in BlindPilot's queue while a turn runs. Steer stops the current turn and resumes the same conversation with the new instruction, because writing into a busy terminal could report success while losing the instruction. Stop pauses pending messages; `/queue list`, `/queue clear`, and `/queue resume` manage them.
+- FreeBuff `/history` and `/usage` open BlindPilot's conversation history and credit status instead of being sent as model prompts.
+
 ## v0.43.6 - 2026-10-12
 
 - FreeBuff conversations stay with the terminal that created them. BlindPilot now checks the process ID in FreeBuff's own boot log rather than taking whichever new chat folder appeared most recently, so another tab cannot take over a new conversation. Resuming a missing chat or one from another folder is refused before the CLI starts: current FreeBuff silently falls back to a different recent conversation when it cannot find the requested ID. FreeBuff Desktop conversations therefore open in a read-only viewer, where the transcript can still be read and copied, instead of being passed to the CLI as though it could continue them.

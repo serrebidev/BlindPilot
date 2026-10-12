@@ -21,6 +21,9 @@ from agent_backends import (
     BACKEND_MUSE,
 )
 from blindpilot_app import SessionPanel, _slash_commands_for_backend
+import blindpilot_app as app
+from doubles import Prompt, panel_stub
+import pytest
 
 
 def _names(backend: str) -> list[str]:
@@ -59,6 +62,32 @@ def test_status_is_offered_for_every_backend():
     """
     for backend in BACKEND_IDS:
         assert "/status" in _names(backend), backend
+
+
+@pytest.mark.parametrize("command,expected", [("/history", "history"), ("/usage", "status")])
+def test_freebuff_history_and_usage_open_accessible_frontend_views(monkeypatch, command, expected):
+    opened = []
+    panel = panel_stub(
+        prompt=Prompt(command),
+        selected_backend=lambda: BACKEND_FREEBUFF,
+        open_status_dialog=lambda: opened.append("status"),
+        _attachments=[],
+        _build_send_text=lambda text: text,
+        _session_backend=BACKEND_FREEBUFF,
+        _session_id=None,
+        _on_title=lambda *_: pytest.fail("command became a model prompt"),
+        _add_your_message=lambda *_a, **_k: pytest.fail("command became a model prompt"),
+        _launch_turn=lambda *_: pytest.fail("terminal-only command was sent as an agent turn"),
+    )
+    monkeypatch.setattr(
+        app.wx,
+        "GetTopLevelParent",
+        lambda _: SimpleNamespace(_open_history=lambda: opened.append("history")),
+    )
+    monkeypatch.setattr(app.wx, "CallAfter", lambda fn, *a: fn(*a))
+    SessionPanel._on_send(panel)
+    assert opened == [expected]
+    assert panel.prompt.GetValue() == ""
 
 
 def test_status_is_listed_once_for_claude():
