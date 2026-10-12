@@ -108,8 +108,8 @@ def test_the_sign_in_console_is_created_hidden_rather_than_hidden_after(monkeypa
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="CREATE_NEW_CONSOLE is Windows-only")
 def test_windows_sign_in_goes_through_the_hidden_console(monkeypatch):
-    """The pty path is not used on Windows: it is the one that needs
-    AllocConsole, and that is the console window the user sees."""
+    """The pty path is not used on Windows: a sign-in gets a console created
+    hidden (above), not a pseudoconsole built for driving a TUI."""
     calls: list[tuple] = []
     monkeypatch.setattr(
         ab, "_spawn_hidden_console", lambda args, cwd: calls.append((args, cwd)) or "handle"
