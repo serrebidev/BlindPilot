@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## Unreleased
+
+- Command Code task routing is off by default: leave Model blank to preserve the CLI's configured model and its privacy choice. Select “Auto (choose for each task)” under Model, or type `/model auto`, to opt a tab in; a hand-picked model and effort still override it. A short lookup or small text/label edit runs on the cheapest eligible model (free included); security, accessibility, migration, release or refactor work runs on a stronger one. Prices come from the installed CLI's bundled catalog, with a hand-picked table only when that cannot be read. The route is spoken only when it changes and remains in Status. The terminal router's usage-cooldown awareness is not ported yet -- Command Code's own limit handling still applies.
+
 ## v0.43.9 - 2026-10-14
 
 - The packaged macOS icon's Retina entries now match the dimensions the icon generator declares for each ICNS type; a test verifies every packaged entry against the generator's size table.
