@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## Unreleased
+
+- Command Code task routing is off by default: leave Model blank to preserve the CLI's configured model and its privacy choice. Select “Auto (choose for each task)” under Model, or type `/model auto`, to opt a tab in; a hand-picked model and effort still override it. A short lookup or small text/label edit runs on the cheapest eligible model (free included); security, accessibility, migration, release or refactor work runs on a stronger one. Prices come from the installed CLI's bundled catalog, with a hand-picked table only when that cannot be read. The route is spoken only when it changes and remains in Status. The terminal router's usage-cooldown awareness is not ported yet -- Command Code's own limit handling still applies.
+
 ## v0.43.8 - 2026-10-14
 
 - Command Code turns no longer fail with `No session "<id>" found to resume` when the saved conversation is gone -- cleaned up, or saved in a different folder. The prompt runs once more as a fresh conversation, the new session id is adopted by the tab, and the old conversation's history is said to be lost rather than the turn dying. A retry that also dies on the model's effort level is still retried bare; the two retries now work in whatever order Command Code refuses them.
