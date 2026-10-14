@@ -134,17 +134,60 @@ def test_route_uses_the_catalog_when_present():
     assert chosen.model == "inclusionai/ling-3.1-flash:free"
 
 
+def test_best_free_model_uses_current_catalog_and_skips_current_model():
+    catalog = router.parse_prices(CATALOG)
+    catalog["poolside/laguna-s-2.1-free"] = {
+        "input": 0.0,
+        "output": 0.0,
+        "cacheRead": 0.0,
+        "minPlan": "go and above",
+        "efforts": [],
+        "free": True,
+    }
+    chosen = router.best_free_model(catalog=catalog)
+    assert chosen is not None and chosen.model == "inclusionai/ling-3.1-flash:free"
+    alternate = router.best_free_model(
+        catalog=catalog, exclude_model="inclusionai/ling-3.1-flash:free"
+    )
+    assert alternate is not None and alternate.model == "poolside/laguna-s-2.1-free"
+
+
+def test_best_free_model_never_guesses_when_price_or_plan_is_unconfirmed():
+    catalog = router.parse_prices(CATALOG)
+    catalog["inclusionai/ling-3.1-flash:free"]["free"] = False
+    assert router.best_free_model(catalog=catalog) is None
+    assert router.best_free_model(catalog={}) is None
+
+
 def test_catalog_prefers_the_worker_cli_over_path(monkeypatch, tmp_path):
     worker_cli = tmp_path / "managed" / "command-code.cmd"
     worker_cli.parent.mkdir()
     worker_cli.write_text("", encoding="utf-8")
-    worker_catalog = worker_cli.parent / "node_modules" / "command-code" / "dist" / "bundled" / "command-code-knowledge" / "reference" / "models.md"
+    worker_catalog = (
+        worker_cli.parent
+        / "node_modules"
+        / "command-code"
+        / "dist"
+        / "bundled"
+        / "command-code-knowledge"
+        / "reference"
+        / "models.md"
+    )
     worker_catalog.parent.mkdir(parents=True)
     worker_catalog.write_text("worker", encoding="utf-8")
     path_cli = tmp_path / "path" / "command-code.cmd"
     path_cli.parent.mkdir()
     path_cli.write_text("", encoding="utf-8")
-    path_catalog = path_cli.parent / "node_modules" / "command-code" / "dist" / "bundled" / "command-code-knowledge" / "reference" / "models.md"
+    path_catalog = (
+        path_cli.parent
+        / "node_modules"
+        / "command-code"
+        / "dist"
+        / "bundled"
+        / "command-code-knowledge"
+        / "reference"
+        / "models.md"
+    )
     path_catalog.parent.mkdir(parents=True)
     path_catalog.write_text("path", encoding="utf-8")
 

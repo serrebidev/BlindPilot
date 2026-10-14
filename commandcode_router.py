@@ -75,6 +75,13 @@ _TIER_CANDIDATES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Current coding-focused free offers, in preference order. The installed CLI's
+# price catalog must still confirm zero cost before either can be selected.
+_FREE_FALLBACK_CANDIDATES = (
+    "inclusionai/ling-3.1-flash:free",
+    "poolside/laguna-s-2.1-free",
+)
+
 # The hand-picked model per tier, used when the price catalog cannot be read.
 # It matches the terminal router's static table so the two never disagree.
 _STATIC_ROUTES: dict[str, dict[str, str]] = {
@@ -303,6 +310,23 @@ def route(
         return Route(model="", effort="", tier=tier)
     fallback = _STATIC_ROUTES[tier]
     return Route(model=fallback["model"], effort=fallback["effort"], tier=tier)
+
+
+def best_free_model(
+    *, catalog: Optional[dict] = None, exclude_model: str = "", max_plan: str = "go"
+) -> Optional[Route]:
+    """A coding-focused free fallback confirmed by the installed CLI catalog."""
+    active_catalog = catalog if catalog is not None else price_catalog()
+    for model_id in _FREE_FALLBACK_CANDIDATES:
+        entry = active_catalog.get(model_id)
+        if (
+            model_id != exclude_model.lower()
+            and entry
+            and entry.get("free") is True
+            and plan_eligible(entry.get("minPlan", ""), max_plan)
+        ):
+            return Route(model=model_id, effort="", tier="free", cost=0.0, priced=True)
+    return None
 
 
 def parse_prices(text: str) -> dict:
