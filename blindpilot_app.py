@@ -10530,16 +10530,21 @@ class SessionPanel(wx.Panel):
 
         ``kind == "you"`` is the user's own message in a replayed Hermes
         conversation, and ``kind == "subagent"`` is a subagent's commentary.
+        A notice is BlindPilot's own status, never assistant answer text.
 
-        With live activity switched off in Options, none of this happens and the
-        whole response lands at the end instead. A replayed conversation is the
-        exception: its rows are the transcript, not live activity, and without
-        them a reopened conversation would show nothing at all.
+        With live activity switched off in Options, the response lands at the
+        end; notices still reach speech and status. A replayed conversation is
+        the exception: its rows are the transcript, not live activity, and
+        without them a reopened conversation would show nothing at all.
         """
         if kind == "replay_end":
             # The transcript a reopened Hermes conversation replays is over;
             # whatever follows is the attached turn itself.
             self._replay_done = True
+            return
+        if kind == "notice":
+            if text.strip():
+                self._say(text.strip(), "notice")
             return
         if kind == "step":
             # Where a long turn has got to (muse.ai's step count): the last row
@@ -10815,7 +10820,7 @@ class SessionPanel(wx.Panel):
             self._last_turn_seconds = time.monotonic() - started
             self._turn_started_at = None
         fallback_model = getattr(self._worker, "fallback_model", "")
-        if self.model == AUTO_MODEL and fallback_model:
+        if getattr(self, "model", "") == AUTO_MODEL and fallback_model:
             self._auto_route = f"Free fallback {fallback_model} after a Command Code limit."
         self._replay_done = False
         SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
