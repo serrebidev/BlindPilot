@@ -17,18 +17,22 @@ store writes; the refresh token is about 200. A new process refreshes once.
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import secrets
+import socket
 import threading
 import time
 import uuid
 import webbrowser
-from collections.abc import Callable, Iterator
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from collections.abc import Callable, Generator, Iterator
 from html import escape
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import PurePath
 from threading import Event
 from typing import Any
@@ -38,7 +42,6 @@ import httpx
 
 from accessible_ai.models import (
     REASONING_EFFORT_LABELS,
-    SERVER_TOOL_WEB_SEARCH,
     GenerationSettings,
     OpenRouterFeatures,
     StreamEvent,
@@ -654,13 +657,177 @@ def plan_reasoning(features: OpenRouterFeatures) -> dict[str, Any] | None:
 
 
 def plan_tools(features: OpenRouterFeatures) -> list[dict[str, Any]]:
-    """Web search is the one hosted tool plan usage runs; the others are refused."""
-    if SERVER_TOOL_WEB_SEARCH not in features.server_tools:
-        return []
+    """Web search at the profile's depth.
+
+    A plan account always has it, as ChatGPT itself does, and the model decides
+    when to search: a profile written for OpenRouter's tool list must not leave
+    the plan unable to look anything up. Web search is the one hosted tool plan
+    usage runs; image generation, code interpreter and the rest are refused.
+    """
     tool: dict[str, Any] = {"type": "web_search"}
     if features.search_context:
         tool["search_context_size"] = features.search_context
     return [tool]
+
+
+# ----- Tools BlindPilot runs itself -----
+#
+# Plan usage accepts developer-defined function tools. These two are read-only
+# and need no permission prompt: reading a page lets the model open what it
+# found and keep researching, and the clock is this computer's own.
+
+LOCAL_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "name": "fetch_url",
+        "description": (
+            "Read a public web page and return its text. Use it to open search results "
+            "or links and read them in full."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "The http or https address."}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "current_time",
+        "description": "The user's current local date, time and time zone.",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        "strict": True,
+    },
+]
+# Rounds of tool calls in one answer before the model must answer with what it has.
+MAX_TOOL_ROUNDS = 8
+FETCH_LIMIT_BYTES = 2_000_000
+FETCH_TEXT_CHARS = 30_000
+FETCH_TIMEOUT = 20.0
+
+
+class _PageText(HTMLParser):
+    """The readable text of an HTML page, without scripts, styles or markup."""
+
+    SKIP = {"script", "style", "noscript", "template", "svg"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self.skipping = 0
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag in self.SKIP:
+            self.skipping += 1
+        elif tag in {"p", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "div"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self.SKIP and self.skipping:
+            self.skipping -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self.skipping:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        lines = (" ".join(line.split()) for line in "".join(self.parts).splitlines())
+        return "\n".join(line for line in lines if line)
+
+
+def _public_address(url: str) -> str:
+    """Why ``url`` may not be read, or "" when it is a public http(s) address.
+
+    A page the model reads can tell it to read another, so without this a
+    hostile page could have it read this computer or the home network.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return "Only http and https addresses can be read."
+    try:
+        infos = socket.getaddrinfo(parts.hostname, parts.port or None)
+    except OSError as exc:
+        return f"Could not find {parts.hostname}: {exc}"
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if not address.is_global:
+            # ponytail: checked before connecting, so DNS rebinding between the
+            # check and the request is not covered; pin the address if that matters.
+            return f"{parts.hostname} is a private or local address, which is not read."
+    return ""
+
+
+def fetch_url(url: str) -> str:
+    """The text of a public page, for the model to read."""
+    for _hop in range(6):
+        refused = _public_address(url)
+        if refused:
+            return refused
+        try:
+            with httpx.stream(
+                "GET",
+                url,
+                timeout=FETCH_TIMEOUT,
+                follow_redirects=False,
+                headers={"User-Agent": "Mozilla/5.0 BlindPilot", "Accept": "text/html,*/*;q=0.8"},
+            ) as response:
+                if response.is_redirect and response.headers.get("location"):
+                    url = str(response.url.join(response.headers["location"]))
+                    continue
+                if response.status_code >= 400:
+                    return f"The page answered HTTP {response.status_code}."
+                content_type = response.headers.get("content-type", "").lower()
+                body = b""
+                for chunk in response.iter_bytes():
+                    body += chunk
+                    if len(body) >= FETCH_LIMIT_BYTES:
+                        break
+        except httpx.HTTPError as exc:
+            return f"Could not read the page: {exc}"
+        text = body.decode(response.encoding or "utf-8", errors="replace")
+        if "html" in content_type or text.lstrip()[:15].lower().startswith(("<!doctype", "<html")):
+            parser = _PageText()
+            parser.feed(text)
+            text = parser.text()
+        elif not (
+            content_type.startswith("text/") or "json" in content_type or "xml" in content_type
+        ):
+            return f"The page is not text ({content_type or 'unknown type'})."
+        if len(text) > FETCH_TEXT_CHARS:
+            text = text[:FETCH_TEXT_CHARS] + "\n[The rest of the page was cut off.]"
+        return f"Address: {url}\n\n{text}"
+    return "The page redirected too many times."
+
+
+def _search_said(action: dict[str, Any]) -> str:
+    """What one step of OpenAI's web search did: a search, opening a page, or
+    looking for words in it."""
+    kind = action.get("type")
+    if kind == "open_page" and action.get("url"):
+        return f"Opened {urlsplit(str(action['url'])).hostname or action['url']}"
+    if kind in {"find", "find_in_page"} and action.get("pattern"):
+        return f"Looked in the page for {action['pattern']}"
+    query = action.get("query") or ", ".join(action.get("queries") or [])
+    return f"Searched the web for {query}" if query else "Searched the web"
+
+
+def run_local_tool(name: str, arguments: str) -> tuple[str, str]:
+    """Run one of LOCAL_TOOLS. Returns (output for the model, what to announce)."""
+    try:
+        args = json.loads(arguments or "{}")
+    except ValueError:
+        args = {}
+    if name == "fetch_url":
+        url = str(args.get("url") or "")
+        parts = urlsplit(url)
+        return fetch_url(
+            url
+        ), f"Reading {parts.hostname or url}{parts.path if parts.path != '/' else ''}"
+    if name == "current_time":
+        now = datetime.datetime.now().astimezone()
+        return now.strftime("%A %d %B %Y, %H:%M:%S %Z (UTC%z)"), "Checked the date and time"
+    return f"There is no tool named {name}.", f"The model asked for an unknown tool, {name}"
 
 
 # The plan's model catalogue by slug: thinking levels, length support and
@@ -800,26 +967,75 @@ class ChatGPTProvider(BaseProvider):
             body["reasoning"] = reasoning
         if verbosity:
             body["text"] = {"verbosity": verbosity}
-        if settings.tools:
-            body["tools"] = settings.tools
+        body["tools"] = list(settings.tools or plan_tools(OpenRouterFeatures())) + LOCAL_TOOLS
+        # With nothing stored at OpenAI, the thinking behind a tool call comes
+        # back sealed so the next round can carry it.
+        body["include"] = ["reasoning.encrypted_content"]
         url = self.build_url(self.account.responses_endpoint)
+        sources = SourceCollector()
+        received_text = False
         with self.client() as client:
-            for attempt in (0, 1):
-                headers = self._headers(force=attempt == 1)
-                with client.stream("POST", url, headers=headers, json=body) as response:
-                    # One 401 may only mean the access token was just rotated.
-                    if response.status_code == 401 and attempt == 0:
-                        continue
-                    self._raise_for_status(response)
-                    yield StreamEvent("headers", metadata=dict(response.headers))
-                    yield from self._read_stream(response, cancel)
-                    return
+            for round_number in range(MAX_TOOL_ROUNDS + 1):
+                if round_number == MAX_TOOL_ROUNDS:
+                    body["tool_choice"] = "none"  # answer with what has been found
+                items, got_text = yield from self._post(client, url, body, cancel, sources)
+                received_text = received_text or got_text
+                calls = [item for item in items if item.get("type") == "function_call"]
+                if cancel.is_set() or not calls:
+                    break
+                # The turn's own items go back as they came, searches included:
+                # leave a search out and the model runs it again.
+                outputs: list[dict[str, Any]] = []
+                for call in calls:
+                    output, said = run_local_tool(
+                        str(call.get("name") or ""), str(call.get("arguments") or "")
+                    )
+                    yield StreamEvent("tool", text=said)
+                    outputs.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call.get("call_id"),
+                            "output": output,
+                        }
+                    )
+                body["input"] = body["input"] + items + outputs
+        if cancel.is_set():
+            yield StreamEvent("done")
+            return
+        if not received_text:
+            raise ProviderError("The provider completed the request without returning any text.")
+        listed = sources.listing()
+        if listed:
+            yield StreamEvent("sources", text=listed, metadata={"sources": sources.as_list()})
+        yield StreamEvent("done")
+
+    def _post(
+        self,
+        client: httpx.Client,
+        url: str,
+        body: dict[str, Any],
+        cancel: Event,
+        sources: SourceCollector,
+    ) -> Generator[StreamEvent, None, tuple[list[dict[str, Any]], bool]]:
+        """One Responses request. Returns the output items and whether text came."""
+        for attempt in (0, 1):
+            headers = self._headers(force=attempt == 1)
+            with client.stream("POST", url, headers=headers, json=body) as response:
+                # One 401 may only mean the access token was just rotated.
+                if response.status_code == 401 and attempt == 0:
+                    continue
+                self._raise_for_status(response)
+                yield StreamEvent("headers", metadata=dict(response.headers))
+                return (yield from self._read_stream(response, cancel, sources))
+        return [], False
 
     @staticmethod
-    def _read_stream(response: httpx.Response, cancel: Event) -> Iterator[StreamEvent]:
+    def _read_stream(
+        response: httpx.Response, cancel: Event, sources: SourceCollector
+    ) -> Generator[StreamEvent, None, tuple[list[dict[str, Any]], bool]]:
         received_text = False
         finished = False
-        sources = SourceCollector()
+        items: list[dict[str, Any]] = []
         for data in iter_sse_json(response, cancel):
             kind = data.get("type")
             if kind == "response.output_text.delta":
@@ -838,11 +1054,10 @@ class ChatGPTProvider(BaseProvider):
                 sources.absorb({"annotations": [data.get("annotation")]})
             elif kind == "response.output_item.done":
                 item = data.get("item") or {}
+                if isinstance(item, dict):
+                    items.append(item)
                 if item.get("type") == "web_search_call":
-                    action = item.get("action") or {}
-                    query = action.get("query") or ", ".join(action.get("queries") or [])
-                    said = f"Searched the web for {query}" if query else "Searched the web"
-                    yield StreamEvent("tool", text=said)
+                    yield StreamEvent("tool", text=_search_said(item.get("action") or {}))
             elif kind == "response.completed":
                 finished = True
             elif kind == "response.incomplete":
@@ -860,14 +1075,6 @@ class ChatGPTProvider(BaseProvider):
                 raise plan_error((data.get("response") or {}).get("error"))
             elif kind == "error":
                 raise plan_error(data)
-        if cancel.is_set():
-            yield StreamEvent("done")
-            return
-        if not finished:
+        if not finished and not cancel.is_set():
             raise ProviderError("The ChatGPT answer stopped before it was complete. Try again.")
-        if not received_text:
-            raise ProviderError("The provider completed the request without returning any text.")
-        listed = sources.listing()
-        if listed:
-            yield StreamEvent("sources", text=listed, metadata={"sources": sources.as_list()})
-        yield StreamEvent("done")
+        return items, received_text

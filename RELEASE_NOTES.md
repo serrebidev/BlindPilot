@@ -1,8 +1,8 @@
-# BlindPilot 0.45.0
+# BlindPilot 0.46.0
 
-This release gives ChatGPT plan accounts in Chat mode the same controls the conversation profile already gave OpenRouter: how hard the model thinks, whether you hear its thinking, web search, and how long its answers are. Everything below was checked live against a signed-in ChatGPT plan.
+This release makes a ChatGPT plan account in Chat mode search and research the way ChatGPT itself does.
 
-- Thinking effort. The profile's Thinking effort is now sent to ChatGPT plan models, and there is a new Extra high level between High and Maximum. Each plan model offers its own set of levels; the current ones take Low through Maximum but refuse No thinking and Minimal. When you pick a level the chosen model does not offer, BlindPilot uses that model's default instead and tells you, rather than failing the request.
-- Hearing the thinking. With "Read the thinking as it arrives" ticked, BlindPilot asks for OpenAI's thinking summary and reads it as it streams, with each part starting on its own heading. Short questions that need little thought may not produce a summary at all.
-- Web search. Tick Web search in the profile's tool list and plan models can search the web, using the profile's Web search depth. Each search is announced with what was searched for, and the pages the answer cites are listed at the end. Web search is the only server tool ChatGPT plan usage runs; OpenAI refuses image generation, code interpreter and the rest, so the tool list now says so.
-- Answer length. A new Answer length setting in the profile, Short, Standard or Long, sets how long ChatGPT plan answers are. Other providers ignore it.
+- Web search is always on for ChatGPT plan accounts, and the model decides when to use it. In 0.45.0 it searched only when the conversation profile had OpenRouter's Web search ticked, so a profile set up for other tools left the model saying it could not search the web. The profile's Web search depth still applies.
+- The model can now read the pages it finds, and check your local date and time, through two tools BlindPilot runs on your computer. It can search, read a page, and search again, for up to eight rounds in one answer, which is enough for "look at ten results and find me..." requests.
+- Page reading only opens public web addresses. It refuses your own computer and your local network, so a web page cannot steer it towards them.
+- Every step is spoken as it happens: each search and what it searched for, each page opened or read, and checking the clock. The sources the answer cites are listed at the end.
