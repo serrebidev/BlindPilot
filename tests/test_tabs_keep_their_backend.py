@@ -62,6 +62,14 @@ def test_tabs_keep_their_backend_and_say_it_once_mixed(monkeypatch, tmp_path):
 
 
 def test_send_cue_is_pitched_per_backend(tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    with wave.open(str(other / "send.wav"), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(44100)
+        out.writeframes(b"\0\0" * 22050)
+    blindpilot_app._faster_wav(str(other / "send.wav"), 2 ** (2 / 12))
     source = tmp_path / "send.wav"
     with wave.open(str(source), "wb") as out:
         out.setnchannels(1)

@@ -444,7 +444,9 @@ def test_commandcode_auto_is_a_keyboard_picker_choice():
 def test_commandcode_default_keeps_the_cli_model_without_routing(monkeypatch):
     stub = types.SimpleNamespace(model="", effort="medium", spoken=[])
     stub._announce = lambda text: stub.spoken.append(text)
-    monkeypatch.setitem(sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text: None))
+    monkeypatch.setitem(
+        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text: None)
+    )
 
     assert blindpilot_app.SessionPanel._turn_model(stub, "Fix a typo", BACKEND_COMMANDCODE) == (
         "",
@@ -469,7 +471,9 @@ def test_commandcode_auto_announces_only_a_changed_route(monkeypatch):
         "model-a",
         "xhigh",
     )
-    assert blindpilot_app.SessionPanel._turn_model(stub, "Fix another typo", BACKEND_COMMANDCODE) == (
+    assert blindpilot_app.SessionPanel._turn_model(
+        stub, "Fix another typo", BACKEND_COMMANDCODE
+    ) == (
         "model-a",
         "xhigh",
     )
