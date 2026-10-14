@@ -442,7 +442,9 @@ def test_failed_atomic_state_replacement_keeps_original(monkeypatch, tmp_path):
     assert router.record_limit_hit(5) is False
 
     assert state.read_text(encoding="utf-8") == '{"other": "preserved"}'
-    assert sorted(path.name for path in tmp_path.iterdir()) == [".usage.json.lock", "usage.json"]
+    # The sidecar lock is removed after release, so only the untouched state
+    # file and nothing else are left behind.
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["usage.json"]
 
 
 def test_other_exit_codes_are_not_limit_hits(monkeypatch, tmp_path):
@@ -463,3 +465,284 @@ def test_describe_names_a_cooldown_pick():
         model="inclusionai/ling-3.1-flash:free", effort="", tier=router.QUICK, cooldown=True
     ).describe()
     assert "cools down" in line
+
+
+# --------------------------------------------------------------------------
+# Tier-scoped effort
+# --------------------------------------------------------------------------
+
+
+def test_tier_effort_prefers_the_tiers_level_from_the_models_own_list():
+    entry = {"efforts": ["low", "medium", "high", "max"]}
+    assert router.tier_effort(router.QUICK, entry) == "low"
+    assert router.tier_effort(router.STANDARD, entry) == "high"
+    assert router.tier_effort(router.DEEP, entry) == "max"
+    # xhigh counts as strong for a deep task when the model lists no max.
+    assert router.tier_effort(router.DEEP, {"efforts": ["low", "xhigh"]}) == "xhigh"
+    # No listed level the tier prefers: the strongest own level answers.
+    assert router.tier_effort(router.STANDARD, {"efforts": ["low", "max"]}) == "max"
+    assert router.tier_effort(router.QUICK, {"efforts": ["off"]}) == ""
+    assert router.tier_effort(router.QUICK, {}) == ""
+    assert router.tier_effort(router.QUICK, {"efforts": ["LOW", " High "]}) == "low"
+
+
+def test_select_and_the_static_path_use_the_tiers_effort():
+    catalog = router.parse_prices(CATALOG)
+    quick = router.select(router.QUICK, catalog)  # ling offers low, medium, high
+    assert quick is not None and quick.effort == "low"
+    standard = router.select(router.STANDARD, catalog)  # v4-pro offers off, high, max
+    assert standard is not None and standard.effort == "high"
+    # The static table keeps its own "max" when the catalog cannot name levels.
+    assert router.route("Fix the small typo", catalog={}).effort == "max"
+
+
+# --------------------------------------------------------------------------
+# classify: new risky terms, and the small-edit exemption
+# --------------------------------------------------------------------------
+
+
+def test_classify_sends_new_high_risk_domains_to_deep():
+    assert router.classify("Add a database index and update the schema") == router.DEEP
+    assert router.classify("Review the billing plan picker") == router.DEEP
+    assert router.classify("Fix the login password reset flow") == router.DEEP
+    assert router.classify("Rotate the encryption secrets in the deploy config") == router.DEEP
+    assert router.classify("Restore the backup and drop the stale table") == router.DEEP
+    assert router.classify("Find the performance regression in the worker") == router.DEEP
+    assert router.classify("Investigate the deadlock in the pool") == router.DEEP
+
+
+def test_classify_a_small_note_about_a_risky_topic_stays_quick():
+    # Naming a risky word in a pure text/label/note job does not make the job
+    # deep; the risky work itself still is.
+    assert router.classify("Add a note about the payment flow") == router.QUICK
+    assert router.classify("Add a label for the password field") == router.QUICK
+    assert router.classify("Change the comment text about the token") == router.QUICK
+    assert router.classify("Implement the payment flow") == router.DEEP
+    assert router.classify("Migrate the billing tables") == router.DEEP
+
+
+def test_classify_review_inspect_and_look_are_lookups():
+    assert router.classify("review the markdown renderer") == router.QUICK
+    assert router.classify("inspect the tab strip layout") == router.QUICK
+    assert router.classify("look at the focus order") == router.QUICK
+
+
+# --------------------------------------------------------------------------
+# Defensive parsing
+# --------------------------------------------------------------------------
+
+
+def test_model_cost_skips_a_non_numeric_catalog_price():
+    assert router.model_cost({"input": "n/a", "output": None, "cacheRead": ""}) == 0.0
+    # A non-numeric peak cell falls back to the base rate rather than crashing.
+    peak = router.model_cost({"input": 1, "output": 1, "cacheRead": 0, "peak": {"input": "oops"}})
+    assert peak == pytest.approx((800 * 1 + 160 * 1 + 50000 * 0) / 1_000_000)
+    priced = router.model_cost({"input": 0.5, "output": 1, "cacheRead": "0.01"})
+    assert priced == pytest.approx((800 * 0.5 + 160 * 1 + 50000 * 0.01) / 1_000_000)
+
+
+def test_plan_matching_is_whole_words_not_substrings():
+    assert router.plan_eligible("  GOAT  ", "go") is False
+    assert router.plan_eligible("  goat  ", "goat") is True
+    assert router.plan_eligible("Pro and above", "pro") is True
+    # A plan name inside a longer word is not a plan name.
+    assert router.plan_eligible("promax and above", "go") is True
+    assert router.plan_eligible("maxplan", "go") is True
+
+
+def test_model_cost_scales_the_cache_weight_with_the_conversation():
+    entry = {"input": 1, "output": 1, "cacheRead": 0.1}
+    default = router.model_cost(entry)
+    short = router.model_cost(entry, context_tokens=1_000)
+    long = router.model_cost(entry, context_tokens=200_000)
+    assert short < default < long
+    # The default is the fixed typical session: 50000 cache-read tokens.
+    assert default == pytest.approx((800 + 160 + 50000 * 0.1) / 1_000_000)
+
+
+# --------------------------------------------------------------------------
+# Capacity cooldowns
+# --------------------------------------------------------------------------
+
+
+def test_capacity_hit_withholds_only_that_model_and_expires(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+    model = "deepseek/deepseek-v4-flash"
+
+    assert router.record_capacity_hit(model, now=moment) is True
+    assert router.capacity_cooling_down(model, now=moment) is True
+    assert router.capacity_cooling_down(model, now=moment + timedelta(minutes=11)) is False
+    # Another model, and the account-wide cooldown, are untouched.
+    assert router.capacity_cooling_down("deepseek/deepseek-v4-pro", now=moment) is False
+    assert router.cooling_down(now=moment) is False
+
+    catalog = router.parse_prices(CATALOG)
+    # With the cooled model withheld, no paid quick candidate remains.
+    assert router.select(router.QUICK, catalog, include_free=False, now=moment) is None
+    assert (
+        router.select(router.QUICK, catalog, include_free=False, now=moment + timedelta(minutes=11))
+        is not None
+    )
+
+
+def test_capacity_record_never_shortens_a_longer_one(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+    model = "deepseek/deepseek-v4-flash"
+
+    assert router.record_capacity_hit(model, now=moment)
+    assert router.record_capacity_hit(model, now=moment + timedelta(minutes=1))
+    assert router.capacity_cooling_down(model, now=moment + timedelta(minutes=9)) is True
+    assert router.capacity_cooling_down(model, now=moment + timedelta(minutes=11)) is False
+
+
+def test_an_empty_model_is_not_recorded_as_at_capacity(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    assert router.record_capacity_hit("") is False
+    assert router.capacity_cooling_down("") is False
+
+
+def test_select_excludes_named_models():
+    catalog = router.parse_prices(CATALOG)
+    assert (
+        router.select(
+            router.QUICK, catalog, include_free=False, exclude_models={"deepseek/deepseek-v4-flash"}
+        )
+        is None
+    )
+    deep = router.select(router.DEEP, catalog, exclude_models={"deepseek/deepseek-v4-pro"})
+    assert deep is not None and deep.model == "moonshotai/kimi-k3"
+
+
+def test_route_excludes_the_model_that_just_failed():
+    catalog = router.parse_prices(CATALOG)
+    chosen = router.route(
+        "Refactor the authentication flow",
+        catalog=catalog,
+        exclude_models={"deepseek/deepseek-v4-pro"},
+    )
+    assert chosen.model == "moonshotai/kimi-k3"
+
+
+# --------------------------------------------------------------------------
+# The credit cooldown override
+# --------------------------------------------------------------------------
+
+
+def test_credit_cooldown_env_overrides_the_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("COMMANDCODE_CREDIT_COOLDOWN_MINUTES", "90")
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+
+    assert router.record_limit_hit(10, now=moment)
+    assert router.cooling_down(now=moment + timedelta(minutes=89)) is True
+    assert router.cooling_down(now=moment + timedelta(minutes=91)) is False
+
+
+@pytest.mark.parametrize("junk", ["soon", "0", "-5", ""])
+def test_an_unusable_credit_cooldown_env_falls_back_to_thirty_minutes(monkeypatch, tmp_path, junk):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    monkeypatch.setenv("COMMANDCODE_CREDIT_COOLDOWN_MINUTES", junk)
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+
+    assert router.record_limit_hit(10, now=moment)
+    assert router.cooling_down(now=moment + timedelta(minutes=29)) is True
+    assert router.cooling_down(now=moment + timedelta(minutes=31)) is False
+
+
+# --------------------------------------------------------------------------
+# Cache invalidation
+# --------------------------------------------------------------------------
+
+
+def _catalog_rows(count: int) -> str:
+    header = (
+        "| Id (use EXACTLY this) | Name | Context | Efforts | "
+        "$/1M in/out · cache read | Min plan | Best for |\n"
+        "|---|---|---|---|---|---|---|\n"
+    )
+    rows = "".join(
+        f"| `vendor/model-{i}` | M{i} | 1M | low, max | $1/$2 · cache $0.1 | Go and above | x |\n"
+        for i in range(count)
+    )
+    return header + rows
+
+
+def test_price_catalog_rereads_when_its_source_file_changes(monkeypatch, tmp_path):
+    source = tmp_path / "models.md"
+    source.write_text(_catalog_rows(router._MIN_CATALOG), encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_MODELS_MD", str(source))
+    monkeypatch.setattr(
+        router, "_CATALOG_CACHE", {"data": None, "path": None, "mtime": None, "at": 0.0}
+    )
+
+    assert "vendor/model-0" in router.price_catalog()
+    source.write_text(
+        _catalog_rows(router._MIN_CATALOG)
+        + "| `vendor/new-model` | N | 1M | low | $1/$2 · cache $0.1 | Go and above | x |\n",
+        encoding="utf-8",
+    )
+    later = source.stat().st_mtime + 10
+    os.utime(source, (later, later))
+
+    assert "vendor/new-model" in router.price_catalog()
+
+
+def test_usage_state_reads_are_cached_but_a_write_takes_effect(monkeypatch, tmp_path):
+    state = tmp_path / "usage.json"
+    state.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+    reads: list = []
+    original = router._read_usage_state
+
+    def counting_read(path):
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(router, "_read_usage_state", counting_read)
+
+    assert router.cooling_down() is False
+    before = len(reads)
+    assert router.cooling_down() is False
+    assert len(reads) == before  # served from the short-lived cache
+
+    assert router.record_limit_hit(5)
+    assert router.cooling_down() is True  # the write refreshed the cache
+    assert len(reads) == before + 2  # the record's own unlocked check + locked re-read
+
+    monkeypatch.setattr(router, "_STATE_CACHE_TTL_SECONDS", 0.0)
+    assert router.cooling_down() is True  # expired TTL re-reads
+    assert len(reads) == before + 3
+
+
+# --------------------------------------------------------------------------
+# A lock that never releases
+# --------------------------------------------------------------------------
+
+
+def test_a_lock_held_too_long_fails_the_record_instead_of_hanging(monkeypatch, tmp_path):
+    state = tmp_path / "usage.json"
+    state.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+    monkeypatch.setattr(router, "_LOCK_TIMEOUT_SECONDS", 0.2)
+    context = multiprocessing.get_context("spawn")
+    acquired = context.Event()
+    release = context.Event()
+    holder = context.Process(target=_hold_usage_state_lock, args=(str(state), acquired, release))
+    holder.start()
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+    try:
+        assert acquired.wait(10)
+        # The caller must learn the cooldown was NOT recorded.
+        assert router.record_limit_hit(5, now=moment) is False
+    finally:
+        release.set()
+        holder.join(10)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join()
+
+    assert router.cooling_down(now=moment + timedelta(minutes=29)) is False
+    # The lock sidecar is cleaned up even on the failure path.
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["usage.json"]
