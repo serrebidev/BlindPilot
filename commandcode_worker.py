@@ -1141,6 +1141,10 @@ class CommandcodeWorker(threading.Thread):
                 self._free_fallback = fallback
                 self._free_fallback_code = code or 0
                 return
+            self._on_activity("notice", "Auto free retry unavailable: no confirmed free model.")
+        elif self._auto_free_fallback and code in (5, 10) and not self._free_fallback_retried:
+            reason = "already ran a tool" if self._tool_ran else "already produced an answer"
+            self._on_activity("notice", f"Auto free retry skipped: this turn {reason}.")
         message = _EXIT_MESSAGES.get(code) if code is not None else None
         if self._result_error:
             message = f"{message} {self._result_error}" if message else self._result_error

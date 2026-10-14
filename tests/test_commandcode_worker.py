@@ -463,6 +463,16 @@ def test_a_preferred_free_model_is_not_retried(worker_env, monkeypatch):
     assert any("rate limited" in text for text in rec.texts("failed"))
 
 
+def test_a_limit_without_a_confirmed_free_model_explains_no_retry(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(lines=[], returncode=5)
+    monkeypatch.setattr(commandcode_worker, "best_free_model", lambda **_kwargs: None)
+
+    _worker, rec = _run(auto_free_fallback=True)
+
+    assert any("no confirmed free model" in text for text in rec.activity("notice"))
+    assert any("rate limited" in text for text in rec.texts("failed"))
+
+
 def test_a_limited_free_model_tries_the_next_confirmed_free_model(worker_env, monkeypatch):
     argv_log: list = []
     _two_runs(
@@ -507,6 +517,7 @@ def test_a_rate_limit_after_partial_output_is_not_retried(worker_env, monkeypatc
     _worker, rec = _run(auto_free_fallback=True)
 
     assert any("limit reached" in text for text in rec.texts("failed"))
+    assert any("already produced an answer" in text for text in rec.activity("notice"))
 
 
 @pytest.mark.parametrize(
@@ -534,6 +545,7 @@ def test_a_rate_limit_after_a_started_tool_is_not_retried(worker_env, monkeypatc
     _worker, rec = _run(auto_free_fallback=True)
 
     assert any("rate limited" in text for text in rec.texts("failed"))
+    assert any("already ran a tool" in text for text in rec.activity("notice"))
 
 
 def test_a_missing_cli_is_reported(monkeypatch):
