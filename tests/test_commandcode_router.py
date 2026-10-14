@@ -8,7 +8,7 @@ tying the router to nothing.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import commandcode_router as router
 
@@ -51,6 +51,20 @@ def test_classify_tiers():
     assert router.classify("Explain the auth flow") == router.DEEP  # risk beats lookup
     assert router.classify("Fix a concurrency bug") == router.DEEP
     assert router.classify("Add a caching layer to the media index service") == router.STANDARD
+
+
+def test_classify_question_forms_are_lookups():
+    assert router.classify("How does the router pick a model") == router.QUICK
+    assert router.classify("why is the export empty") == router.QUICK
+    assert router.classify("does the worker retry on its own") == router.QUICK
+    assert router.classify("is the markdown renderer slow today") == router.QUICK
+
+
+def test_classify_questions_about_risky_work_stay_deep():
+    # The high-risk scan runs before the lookup match, so a question
+    # about risky work still lands on the safer tier.
+    assert router.classify("should I refactor the authentication flow") == router.DEEP
+    assert router.classify("can you check the screen reader output") == router.DEEP
 
 
 def test_plan_eligibility():
@@ -219,3 +233,102 @@ def test_describe_names_the_model_and_tier():
     line = chosen.describe()
     assert "deepseek/deepseek-v4-flash" in line
     assert "quick" in line
+
+
+def test_select_withholds_paid_models_while_cooling_down():
+    catalog = router.parse_prices(CATALOG)
+    quick = router.select(router.QUICK, catalog, cooldown=True)
+    assert quick is not None
+    assert quick.model == "inclusionai/ling-3.1-flash:free"
+    assert quick.cooldown is True
+    assert router.select(router.QUICK, catalog, cooldown=True, include_free=False) is None
+    assert router.select(router.STANDARD, catalog, cooldown=True) is None
+    assert router.select(router.DEEP, catalog, cooldown=True) is None
+
+
+def test_route_runs_quick_on_free_while_cooling_down(monkeypatch, tmp_path):
+    state = tmp_path / "commandcode-usage.json"
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+    assert router.cooling_down() is False
+    assert router.record_limit_hit(5)
+    assert router.cooling_down() is True
+    catalog = router.parse_prices(CATALOG)
+    quick = router.route("Find the setting that controls focus return", catalog=catalog)
+    assert quick.model == "inclusionai/ling-3.1-flash:free"
+    assert quick.cooldown is True
+    assert "cools down" in quick.describe()
+    forced = router.route(
+        "Find the setting that controls focus return", catalog=catalog, static=True
+    )
+    assert forced.model == quick.model
+    # A heavier task keeps the CLI's configured model: no paid model may run.
+    standard = router.route("Add a caching layer to the media index service", catalog=catalog)
+    assert standard.model == ""
+    assert standard.tier == router.STANDARD
+
+
+def test_route_without_catalog_keeps_configured_model_during_cooldown(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    moment = datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc)
+    assert router.record_limit_hit(5, now=moment)
+
+    for static in (False, True):
+        for task in ("Fix the small typo", "Add a caching layer to the media index service"):
+            chosen = router.route(task, catalog={}, now=moment, static=static)
+            assert chosen.model == ""
+            assert chosen.effort == ""
+
+
+def test_recorded_cooldown_expires(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    moment = datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc)
+    assert router.record_limit_hit(10, now=moment)
+    assert router.cooling_down(now=moment) is True
+    assert router.cooling_down(now=moment + timedelta(minutes=29)) is True
+    assert router.cooling_down(now=moment + timedelta(minutes=31)) is False
+
+
+def test_short_rate_limit_does_not_shorten_credit_cooldown(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    moment = datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc)
+
+    assert router.record_limit_hit(10, now=moment)
+    assert router.record_limit_hit(5, now=moment + timedelta(minutes=1))
+
+    assert router.cooling_down(now=moment + timedelta(minutes=29)) is True
+
+
+def test_failed_atomic_state_replacement_keeps_original(monkeypatch, tmp_path):
+    state = tmp_path / "usage.json"
+    state.write_text('{"other": "preserved"}', encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+
+    def fail_replace(*_args):
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr(router.os, "replace", fail_replace)
+
+    assert router.record_limit_hit(5) is False
+
+    assert state.read_text(encoding="utf-8") == '{"other": "preserved"}'
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["usage.json"]
+
+
+def test_other_exit_codes_are_not_limit_hits(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    assert router.record_limit_hit(1) is False
+    assert router.cooling_down() is False
+
+
+def test_a_state_file_that_cannot_be_parsed_is_no_cooldown(monkeypatch, tmp_path):
+    state = tmp_path / "usage.json"
+    state.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+    assert router.cooling_down() is False
+
+
+def test_describe_names_a_cooldown_pick():
+    line = router.Route(
+        model="inclusionai/ling-3.1-flash:free", effort="", tier=router.QUICK, cooldown=True
+    ).describe()
+    assert "cools down" in line

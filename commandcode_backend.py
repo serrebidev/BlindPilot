@@ -348,10 +348,16 @@ def _fetch_agent_commands(cwd: str) -> list[tuple[str, str]]:
     lines: "queue.Queue[str]" = queue.Queue()
 
     def pump() -> None:
-        for line in proc.stdout or []:
-            lines.put(line)
+        try:
+            for line in proc.stdout or []:
+                lines.put(line)
+        except ValueError:
+            # A process that survives the bounded shutdown has its pipe
+            # closed to release this reader.
+            return
 
-    threading.Thread(target=pump, daemon=True).start()
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
 
     def send(request_id: int, method: str, params: dict) -> None:
         message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
@@ -367,30 +373,56 @@ def _fetch_agent_commands(cwd: str) -> list[tuple[str, str]]:
     send(1, "initialize", {"protocolVersion": 1, "clientCapabilities": {}})
     send(2, "session/new", {"cwd": cwd or str(Path.home()), "mcpServers": []})
     deadline = time.monotonic() + 45
-    while commands is None and time.monotonic() < deadline:
-        try:
-            line = lines.get(timeout=1)
-        except queue.Empty:
-            continue
-        try:
-            message = json.loads(line)
-        except ValueError:
-            continue
-        if message.get("id") == 2:
-            session = str((message.get("result") or {}).get("sessionId") or "")
-        update = (message.get("params") or {}).get("update") or {}
-        if update.get("sessionUpdate") == "available_commands_update":
-            commands = [
-                ("/" + str(c.get("name")), str(c.get("description") or "").strip())
-                for c in update.get("availableCommands") or []
-                if isinstance(c, dict) and c.get("name")
-            ]
-    if session:
-        send(3, "session/close", {"sessionId": session})
     try:
-        proc.terminate()
-    except OSError:
-        pass
+        while commands is None and time.monotonic() < deadline:
+            try:
+                line = lines.get(timeout=1)
+            except queue.Empty:
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if message.get("id") == 2:
+                session = str((message.get("result") or {}).get("sessionId") or "")
+            update = (message.get("params") or {}).get("update") or {}
+            if update.get("sessionUpdate") == "available_commands_update":
+                commands = [
+                    ("/" + str(c.get("name")), str(c.get("description") or "").strip())
+                    for c in update.get("availableCommands") or []
+                    if isinstance(c, dict) and c.get("name")
+                ]
+        if session:
+            send(3, "session/close", {"sessionId": session})
+    finally:
+        # However the lookup ends, the ACP server it started goes with
+        # it: a leaked `command-code acp` is a Node process per lookup.
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except OSError:
+                pass
+            except subprocess.TimeoutExpired:
+                pass
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+        if proc.stdout is not None:
+            reader.join(timeout=5)
+            if reader.is_alive():
+                try:
+                    proc.stdout.close()
+                except (OSError, ValueError):
+                    pass
+                reader.join(timeout=5)
+            elif not proc.stdout.closed:
+                proc.stdout.close()
     found = commands or []
     if commands is not None:
         with _AGENT_COMMANDS_LOCK:
