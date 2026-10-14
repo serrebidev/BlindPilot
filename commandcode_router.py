@@ -85,9 +85,9 @@ _FREE_FALLBACK_CANDIDATES = (
 # The hand-picked model per tier, used when the price catalog cannot be read.
 # It matches the terminal router's static table so the two never disagree.
 _STATIC_ROUTES: dict[str, dict[str, str]] = {
-    QUICK: {"model": "deepseek/deepseek-v4-flash", "effort": "xhigh"},
-    STANDARD: {"model": "deepseek/deepseek-v4-pro", "effort": "xhigh"},
-    DEEP: {"model": "deepseek/deepseek-v4-pro", "effort": "xhigh"},
+    QUICK: {"model": "deepseek/deepseek-v4-flash", "effort": "max"},
+    STANDARD: {"model": "deepseek/deepseek-v4-pro", "effort": "max"},
+    DEEP: {"model": "deepseek/deepseek-v4-pro", "effort": "max"},
 }
 
 # Upstreams whose terms allow training on the prompt. Never chosen, whatever
@@ -197,22 +197,39 @@ def model_cost(entry: dict, peak: bool = False) -> float:
     ) / 1_000_000
 
 
+# Effort levels strongest first. The CLI validates a level against the
+# model's OWN list -- the same labels the catalog prints (measured live:
+# kimi-k3 refuses "xhigh" with "Supported: low, high, max") -- so a level is
+# only ever sent verbatim from such a list, never translated. An earlier
+# build of the CLI had one global vocabulary (low, medium, xhigh); that is
+# gone, and translating max or high into xhigh now gets the turn refused.
+_EFFORT_STRENGTH = ("max", "xhigh", "high", "medium", "low")
+
+
+def strongest_effort(efforts) -> str:
+    """The strongest level in a model's own list, or "" when there is none.
+
+    "off" is a level only in the sense that the model takes none, so it never
+    wins; a list of nothing but "off" (or nothing) yields "".
+    """
+    if not isinstance(efforts, (list, tuple)) or not efforts:
+        return ""
+    lowered = [str(e).strip().lower() for e in efforts]
+    for want in _EFFORT_STRENGTH:
+        if want in lowered:
+            return want
+    return ""
+
+
 def resolve_effort(entry: dict) -> str:
     """The best effort a model actually accepts, or "" to omit it.
 
     Several cheap models take no effort at all (their catalog column is "—"),
     and an effort sent to one ends the run before it starts, so omission is the
-    safe answer rather than a guess.
+    safe answer rather than a guess. The answer is the strongest name in the
+    model's own catalog list, spelled exactly as the catalog spells it.
     """
-    efforts = entry.get("efforts")
-    if not isinstance(efforts, list) or not efforts:
-        return ""
-    # Catalog labels predate the CLI's names: it only accepts low, medium, or
-    # xhigh, with both high and max meaning xhigh.
-    for want in ("xhigh", "max", "high", "medium", "low"):
-        if want in efforts:
-            return "xhigh" if want in ("xhigh", "max", "high") else want
-    return ""
+    return strongest_effort(entry.get("efforts"))
 
 
 def plan_eligible(min_plan: str, max_plan: str = "go") -> bool:

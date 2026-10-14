@@ -62,11 +62,17 @@ def test_plan_eligibility():
     assert router.plan_eligible("max", "go") is False
 
 
-def test_resolve_effort_uses_only_cli_effort_names():
-    assert router.resolve_effort({"efforts": ["low", "medium", "high"]}) == "xhigh"
-    assert router.resolve_effort({"efforts": ["max"]}) == "xhigh"
-    assert router.resolve_effort({"efforts": ["xhigh"]}) == "xhigh"
+def test_resolve_effort_uses_the_models_own_names():
+    # The CLI validates against the model's own list, spelled as the catalog
+    # spells it (measured live: kimi-k3 refuses "xhigh" with "Supported:
+    # low, high, max"). The strongest name on the model's list wins, verbatim.
+    assert router.resolve_effort({"efforts": ["low", "high", "max"]}) == "max"
+    assert router.resolve_effort({"efforts": ["off", "high", "max"]}) == "max"
+    assert router.resolve_effort({"efforts": ["low", "medium", "high"]}) == "high"
+    assert router.resolve_effort({"efforts": ["low", "medium", "xhigh", "max"]}) == "max"
+    assert router.resolve_effort({"efforts": ["low", "medium", "xhigh"]}) == "xhigh"
     assert router.resolve_effort({"efforts": ["low", "medium"]}) == "medium"
+    assert router.resolve_effort({"efforts": ["off"]}) == ""
     assert router.resolve_effort({"efforts": []}) == ""
     assert router.resolve_effort({}) == ""
 
@@ -117,7 +123,7 @@ def test_select_filters_plan_restricted_models():
 def test_route_falls_back_to_the_static_table():
     chosen = router.route("Fix the small typo", catalog={})
     assert chosen.model == router._STATIC_ROUTES[router.QUICK]["model"]
-    assert chosen.effort == "xhigh"
+    assert chosen.effort == "max"
 
 
 def test_route_declines_a_present_catalog_without_an_eligible_model():

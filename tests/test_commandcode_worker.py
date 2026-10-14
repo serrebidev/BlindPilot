@@ -1095,15 +1095,39 @@ def test_a_level_the_model_does_not_take_runs_again_bare(worker_env, monkeypatch
     assert any("no adjustable reasoning effort" in line for line in rec.activity("tool"))
 
 
-def test_an_effort_the_cli_no_longer_knows_runs_again_bare(worker_env, monkeypatch):
-    # A stale level from an older vocabulary -- `high` went away at 1.69.0 --
-    # is the same shape: exit 1, empty stdout, 'Unknown effort' on stderr.
+def test_an_unknown_effort_retries_with_the_strongest_supported_level(worker_env, monkeypatch):
+    # Measured live: the CLI validates against the model's own levels --
+    # kimi-k3 refuses the "xhigh" this worker sends with "Supported: low,
+    # high, max". The retry carries the strongest level the CLI named
+    # instead of dropping the effort altogether.
     argv_log: list = []
     _two_runs(
         monkeypatch,
         _FakeProcess(
             lines=[],
-            stderr=['Unknown effort "high". Supported: low, medium, xhigh.'],
+            stderr=['Unknown effort "xhigh". Supported: low, high, max.'],
+            returncode=1,
+        ),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done at max")]),
+        argv_log,
+    )
+
+    _worker, rec = _run()
+
+    assert argv_log[1][argv_log[1].index("--effort") + 1] == "max"
+    assert rec.texts("complete") == ["done at max"]
+    assert any("with max instead" in line for line in rec.activity("tool"))
+
+
+def test_an_unknown_effort_without_a_supported_list_runs_again_bare(worker_env, monkeypatch):
+    # A refusal that names no levels leaves nothing to substitute, so the
+    # retry is the bare one, as before.
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(
+            lines=[],
+            stderr=['Unknown effort "xhigh".'],
             returncode=1,
         ),
         _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done bare")]),
@@ -1112,6 +1136,7 @@ def test_an_effort_the_cli_no_longer_knows_runs_again_bare(worker_env, monkeypat
 
     _worker, rec = _run()
 
+    assert "--effort" not in argv_log[1]
     assert rec.texts("complete") == ["done bare"]
     assert any("Unknown effort" in line for line in rec.activity("tool"))
 

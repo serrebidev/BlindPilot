@@ -39,13 +39,17 @@ from typing import Optional
 import agent_backends
 from agent_backends import BACKEND_COMMANDCODE
 
-# The reasoning levels the catalog advertises. Measured at 1.69.0: the CLI
-# answers `--effort bogus` with "Supported: low, medium, xhigh", and both
-# `high` and `max` are refused as unknown, on the default model and on a named
-# one alike. Whether a model takes any effort at all is still per-model --
-# Kimi K2.7 Code answers that it has no adjustable reasoning effort -- and a
-# level sent to such a model ends the run, so the worker retries without it.
-COMMANDCODE_EFFORTS = ("low", "medium", "xhigh")
+# The reasoning levels the picker can offer. At 1.69.0 the CLI had one
+# global vocabulary ("Supported: low, medium, xhigh"); the current CLI
+# validates per model against the model's own levels -- the same labels the
+# bundled catalog prints (kimi-k3: "Supported: low, high, max", and "xhigh"
+# is refused there). So this list is now just the union of names a model may
+# take: the router picks from the chosen model's own list, and the worker
+# heals a refused pick from the CLI's own "Supported:" line. Whether a
+# model takes any effort at all is still per-model -- Kimi K2.7 Code
+# answers that it has no adjustable reasoning effort -- and a level sent to
+# such a model ends the run, so the worker retries without it.
+COMMANDCODE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 # How long a short CLI probe may take. Command Code is a Node program, so
 # every check pays a start-up; it is quick once running, and the wizard's

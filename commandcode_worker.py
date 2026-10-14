@@ -51,7 +51,7 @@ from agent_backends import (
     subagent_line,
     subprocess_env,
 )
-from commandcode_router import Route, best_free_model
+from commandcode_router import Route, best_free_model, strongest_effort
 from hermes_backend import STDERR_KEEP_LINES
 from markdown_rows import release_finished, release_remainder
 
@@ -372,6 +372,10 @@ class CommandcodeWorker(threading.Thread):
         self._effort_refused = False
         self._effort_retried = False
         self._effort_note = ""
+        # The levels the CLI said the model does take, parsed out of an
+        # "Unknown effort" refusal ("Supported: low, high, max"), so the
+        # retry can run with the strongest of them instead of none.
+        self._effort_supported: list[str] = []
         # The session this run tried to resume is gone, and whether the fresh
         # retry has already been spent.
         self._session_lost = False
@@ -551,12 +555,24 @@ class CommandcodeWorker(threading.Thread):
             if self._effort_refused and not self._effort_retried:
                 # The level died on this model before the turn started;
                 # nothing was persisted server-side, so the same prompt runs
-                # again bare.
+                # again. When the refusal named the levels the model does
+                # take, the retry carries the strongest of them; a model
+                # that takes none is rerun bare, as before.
                 self._effort_retried = True
-                self._on_activity("tool", f"{self._effort_note} Running the turn without one.")
+                retry_effort = strongest_effort(self._effort_supported)
+                if retry_effort and retry_effort != self._run_effort:
+                    self._on_activity(
+                        "tool",
+                        f"{self._effort_note} Running the turn with {retry_effort} instead.",
+                    )
+                else:
+                    retry_effort = ""
+                    self._on_activity(
+                        "tool", f"{self._effort_note} Running the turn without one."
+                    )
                 self._close_process()
                 self._reset_run_state()
-                self._run_turn(binary, "", self._run_model)
+                self._run_turn(binary, retry_effort, self._run_model)
                 continue
             if self._session_lost and not self._session_retried:
                 # The saved conversation is gone; nothing was persisted, so
@@ -633,6 +649,7 @@ class CommandcodeWorker(threading.Thread):
         kept by the retry loop, not here: the session retry preserves the
         effort retry's one shot, since its run still carries the effort."""
         self._effort_refused = False
+        self._effort_supported = []
         self._free_fallback = None
         self._result_error = ""
         with self._error_lock:
@@ -698,12 +715,13 @@ class CommandcodeWorker(threading.Thread):
     def _effort_refusal_line(self) -> str:
         """The stderr line refusing this run's effort, or "" when it did not.
 
-        A level sent to a model that takes none -- or one the CLI no longer
-        knows -- ends the run before it starts: exit 1, empty stdout, and
-        either "X has no adjustable reasoning effort." or 'Unknown effort "y"'
-        on stderr (measured at 1.69.0). The line is kept as the announcement
-        for the bare retry, and only a run that produced nothing qualifies,
-        so a mid-turn mention of effort can never trigger a second run.
+        A level sent to a model that takes none -- or one outside the
+        model's own levels -- ends the run before it starts: exit 1, empty
+        stdout, and either "X has no adjustable reasoning effort." or
+        'Unknown effort "y". Supported: a, b, c' on stderr. The line is kept
+        as the announcement for the retry, and only a run that produced
+        nothing qualifies, so a mid-turn mention of effort can never trigger
+        a second run.
         """
         if not self._run_effort or self._session_seen or self._assistant_parts:
             return ""
@@ -715,6 +733,17 @@ class CommandcodeWorker(threading.Thread):
                 "unknown effort"
             ):
                 self._effort_note = line.strip().rstrip(".")
+                if lowered.startswith("unknown effort"):
+                    # 'Unknown effort "xhigh". Supported: low, high, max' --
+                    # the levels this model takes, in the CLI's own words.
+                    marker = lowered.find("supported:")
+                    if marker >= 0:
+                        rest = lowered[marker + len("supported:"):]
+                        self._effort_supported = [
+                            name.strip().strip(".")
+                            for name in rest.split(",")
+                            if name.strip().strip(".")
+                        ]
                 return self._effort_note
         return ""
 
