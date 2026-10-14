@@ -2,7 +2,7 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## Unreleased
+## v0.43.10 - 2026-10-14
 
 - Pitched send cues now keep separate cache files for different source paths, so a cue from another session cannot replace the current one.
 
