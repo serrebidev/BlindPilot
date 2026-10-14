@@ -190,12 +190,13 @@ class ConversationList(wx.VListBox):
             return cached
         dc = wx.ClientDC(self)
         text = self._wrapped(dc, n) or " "
-        _w, h = dc.GetMultiLineTextExtent(text)
-        height = h + 2 * self._pad()
+        height = dc.GetMultiLineTextExtent(text).height + 2 * self._pad()
         self._measured[key] = height
         return height
 
-    def OnDrawBackground(self, dc: wx.DC, rect: wx.Rect, n: int) -> None:
+    def OnDrawBackground(
+        self, dc: wx.DC, rect: wx.Rect | tuple[int, int, int, int], n: int
+    ) -> None:
         if self.IsSelected(n):
             super().OnDrawBackground(dc, rect, n)
             return
@@ -207,7 +208,7 @@ class ConversationList(wx.VListBox):
         else:
             super().OnDrawBackground(dc, rect, n)
 
-    def OnDrawItem(self, dc: wx.DC, rect: wx.Rect, n: int) -> None:
+    def OnDrawItem(self, dc: wx.DC, rect: wx.Rect | tuple[int, int, int, int], n: int) -> None:
         style = style_for(self._rows[n].kind)
         text = self._wrapped(dc, n)
         if self.IsSelected(n):
@@ -217,7 +218,11 @@ class ConversationList(wx.VListBox):
         else:
             colour = wx.SYS_COLOUR_WINDOWTEXT
         dc.SetTextForeground(wx.SystemSettings.GetColour(colour))
-        inner = wx.Rect(rect)
+        inner = (
+            wx.Rect(rect.x, rect.y, rect.width, rect.height)
+            if isinstance(rect, wx.Rect)
+            else wx.Rect(*rect)
+        )
         inner.Deflate(self._side(), self._pad())
         if style.indented:
             inner.x += self._indent()
