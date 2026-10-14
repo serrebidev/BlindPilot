@@ -9865,6 +9865,18 @@ class SessionPanel(wx.Panel):
             extra["auto_free_fallback"] = self.model == AUTO_MODEL
         self._launch_turn(send_text, selected_backend, extra)
 
+    def _set_auto_route(self, note: str) -> None:
+        """Say an Auto-routing note once, until the route says something else.
+
+        Called unbound (``SessionPanel._set_auto_route(self, ...)``) from
+        ``_turn_model``, the way ``_turn_model`` itself is driven, so a caller
+        that supplies its own panel-shaped object needs nothing but
+        ``_announce`` and an ``_auto_route`` slot.
+        """
+        if note != getattr(self, "_auto_route", ""):
+            self._auto_route = note
+            self._announce(note)
+
     def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
         """The model and effort for one turn.
 
@@ -9873,7 +9885,10 @@ class SessionPanel(wx.Panel):
         eligible model and heavier work on a stronger one (see
         ``commandcode_router``). A late turn (nothing sent) and a slash command
         are left alone -- they are not work to price. Any failure to route
-        leaves the model unset, preserving the CLI configuration.
+        leaves the model unset, preserving the CLI configuration. The context
+        size last reported for this conversation, when there is one, is passed
+        along so pricing compares models over this conversation rather than a
+        fixed typical session.
         """
         if selected_backend != BACKEND_COMMANDCODE or self.model != AUTO_MODEL:
             return self.model, self.effort
@@ -9882,24 +9897,21 @@ class SessionPanel(wx.Panel):
         try:
             from commandcode_router import route
 
-            chosen = route(send_text)
+            context_tokens = SessionPanel._known_context(self)[0] or None
+            chosen = route(send_text, context_tokens=context_tokens)
         except Exception:  # noqa: BLE001 - routing must never stop a turn
-            note = "Auto routing unavailable; using the Command Code default."
-            if note != getattr(self, "_auto_route", ""):
-                self._auto_route = note
-                self._announce(note)
+            SessionPanel._set_auto_route(
+                self, "Auto routing unavailable; using the Command Code default."
+            )
             return "", self.effort
         if not chosen.model:
             if getattr(chosen, "cooldown", False):
-                note = "Auto could not confirm a free model during cooldown; using the Command Code default."
-                if note != getattr(self, "_auto_route", ""):
-                    self._auto_route = note
-                    self._announce(note)
+                SessionPanel._set_auto_route(
+                    self,
+                    "Auto could not confirm a free model during cooldown; using the Command Code default.",
+                )
             return "", self.effort
-        description = chosen.describe()
-        if description != getattr(self, "_auto_route", ""):
-            self._auto_route = description
-            self._announce(description)
+        SessionPanel._set_auto_route(self, chosen.describe())
         return chosen.model, self.effort or chosen.effort
 
     def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
@@ -10880,7 +10892,7 @@ class SessionPanel(wx.Panel):
             self._turn_started_at = None
         fallback_model = getattr(self._worker, "fallback_model", "")
         if getattr(self, "model", "") == AUTO_MODEL and fallback_model:
-            self._auto_route = f"Free fallback {fallback_model} after a Command Code limit."
+            self._auto_route = f"Switched to {fallback_model} after a Command Code stop."
         self._replay_done = False
         SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
         SessionPanel._drop_step_rows(self)
