@@ -1347,3 +1347,176 @@ def test_the_newest_withheld_tool_is_named_as_withheld(worker_env):
     _worker, rec = _run()
 
     assert any("withholds this tool from a headless run" in t for t in rec.activity("tool"))
+
+
+# --------------------------------------------------------------------------
+# A provider-capacity stop
+# --------------------------------------------------------------------------
+
+# Measured from the installed CLI dist: exit 1, raw server text on stderr.
+_CAPACITY_TEXT = (
+    "Error: 429 The request limited providers for this model and they are "
+    "currently at capacity. Add more providers or remove restrictions for "
+    "automatic fallback. Providers considered: poolside."
+)
+
+
+def _capacity_worker():
+    return CommandcodeWorker(
+        "hi",
+        None,
+        ".",
+        "default",
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _t: None,
+        on_complete=lambda _t: None,
+        on_failed=lambda _m: None,
+        on_done=lambda: None,
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        _CAPACITY_TEXT,
+        "error: providers considered: poolside",
+        "The request LIMITED PROVIDERS for this model",
+        "429 too many requests",
+    ],
+)
+def test_capacity_stop_recognises_the_servers_own_words(line):
+    worker = _capacity_worker()
+    worker._error_lines = [line]
+    assert worker._capacity_stop(1) is True
+    # Only a non-zero exit counts, and other exit-1 refusals are not capacity.
+    assert worker._capacity_stop(0) is False
+    assert worker._capacity_stop(None) is False
+
+    other = _capacity_worker()
+    other._error_lines = ['No session "gone" found to resume.']
+    assert other._capacity_stop(1) is False
+
+
+def test_a_capacity_stop_records_the_model_and_retries_on_the_next_paid(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="paid done")]),
+        argv_log,
+    )
+    recorded: list = []
+    monkeypatch.setattr(
+        commandcode_worker, "record_capacity_hit", lambda model: recorded.append(model) or True
+    )
+    routed: list = []
+
+    def fake_route(_task, **kwargs):
+        routed.append(kwargs)
+        return commandcode_worker.Route("paid/next", "high", "standard", cost=0.5, priced=True)
+
+    monkeypatch.setattr(commandcode_worker, "route", fake_route)
+
+    worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    assert recorded == ["paid/first"]
+    assert routed and routed[0]["exclude_models"] == {"paid/first"}
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "paid/next"
+    assert argv_log[1][argv_log[1].index("--effort") + 1] == "high"
+    assert rec.texts("complete") == ["paid done"]
+    assert worker.fallback_model == "paid/next"
+    assert any(
+        "at capacity for paid/first. Retrying with paid/next" in text
+        for text in rec.activity("notice")
+    )
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [_event({"type": "text_delta", "delta": "half an answer"})],
+        [_event({"type": "tool_running", "toolCallId": "c1", "toolName": "write_file"})],
+    ],
+)
+def test_a_capacity_stop_after_output_or_a_tool_is_not_retried(worker_env, monkeypatch, lines):
+    worker_env["proc"] = _FakeProcess(lines=lines, stderr=[_CAPACITY_TEXT], returncode=1)
+    recorded: list = []
+    monkeypatch.setattr(
+        commandcode_worker, "record_capacity_hit", lambda model: recorded.append(model) or True
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda *_a, **_k: pytest.fail("a half-run turn must not replay"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    # The stop is still recorded: the next turn must not re-pick the model.
+    assert recorded == ["paid/first"]
+    assert rec.texts("complete") == []
+    assert any("at capacity" in text for text in rec.texts("failed"))
+
+
+def test_a_capacity_stop_falls_back_to_free_when_no_paid_model_remains(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="free done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(commandcode_worker, "record_capacity_hit", lambda _model: True)
+    # The router knows the tier but no other paid candidate is eligible.
+    monkeypatch.setattr(
+        commandcode_worker, "route", lambda _task, **_k: commandcode_worker.Route("", "", "")
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_k: commandcode_worker.Route("free/code", "", "free", cost=0.0, priced=True),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "free/code"
+    assert "--effort" not in argv_log[1]
+    assert rec.texts("complete") == ["free done"]
+    assert any(
+        "provider capacity reached. Retrying with free model free/code" in text
+        for text in rec.activity("notice")
+    )
+
+
+def test_a_capacity_stop_is_recorded_but_not_retried_when_auto_fallback_is_off(
+    worker_env, monkeypatch
+):
+    worker_env["proc"] = _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1)
+    recorded: list = []
+    monkeypatch.setattr(
+        commandcode_worker, "record_capacity_hit", lambda model: recorded.append(model) or True
+    )
+    monkeypatch.setattr(
+        commandcode_worker, "route", lambda *_a, **_k: pytest.fail("no retry without Auto")
+    )
+
+    _worker, rec = _run(auto_free_fallback=False, model="paid/first")
+
+    # The stop is recorded like a limit stop is: Auto or not, the next turn
+    # must not re-pick a model whose providers are full.
+    assert recorded == ["paid/first"]
+    assert rec.texts("complete") == []
+    assert any("at capacity" in text for text in rec.texts("failed"))
+
+
+def test_a_limit_that_cannot_be_recorded_says_so(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(lines=[], returncode=10)
+    monkeypatch.setattr(commandcode_worker, "record_limit_hit", lambda _code: False)
+
+    _worker, rec = _run(auto_free_fallback=False)
+
+    assert any("could not be recorded" in text for text in rec.activity("notice"))
+    assert any("insufficient credits" in text for text in rec.texts("failed"))

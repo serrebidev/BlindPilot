@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import threading
 import urllib.parse
@@ -51,7 +52,14 @@ from agent_backends import (
     subagent_line,
     subprocess_env,
 )
-from commandcode_router import Route, best_free_model, record_limit_hit, strongest_effort
+from commandcode_router import (
+    Route,
+    best_free_model,
+    record_capacity_hit,
+    record_limit_hit,
+    route,
+    strongest_effort,
+)
 from hermes_backend import STDERR_KEEP_LINES
 from markdown_rows import release_finished, release_remainder
 
@@ -246,6 +254,15 @@ _EXIT_MESSAGES = {
     130: "Command Code was interrupted.",
 }
 
+# A provider-capacity stop, as the CLI surfaces it: exit 1 with the raw server
+# text on stderr. "at capacity" and "Providers considered" are the server's own
+# words and "Error: " the CLI's prefix (measured from the installed dist); the
+# same stderr can name several providers, so any one marker is enough.
+_CAPACITY_MARKERS = re.compile(r"(?i)(\b429\b|at capacity|limited providers|providers considered)")
+
+# What a free-fallback retry is retrying after, in the notice that announces it.
+_LIMIT_LABELS = {5: "rate limit", 10: "credit limit"}
+
 
 def build_command(
     binary: str,
@@ -386,6 +403,11 @@ class CommandcodeWorker(threading.Thread):
         self._free_fallback: Optional[Route] = None
         self._free_fallback_retried = False
         self._free_fallback_code = 0
+        # The same shape for a provider-capacity stop: one retry on the next
+        # paid model of the same tier, excluding the model that just failed.
+        self._capacity_retry: Optional[Route] = None
+        self._capacity_retried = False
+        self._capacity_failed_model = ""
         self._run_model = model
         self._result_error = ""
 
@@ -548,8 +570,9 @@ class CommandcodeWorker(threading.Thread):
         # Each recoverable pre-start failure is retried once, in whatever
         # order they arrive: the CLI resolves --resume before it checks
         # effort, so a lost session still leaves the effort to refuse, and a
-        # refused effort still leaves the session to lose.
-        for _ in range(3):
+        # refused effort still leaves the session to lose. Four slots, one
+        # per retry kind: effort, session, capacity model, free model.
+        for _ in range(4):
             if self._cancelled or self._failed:
                 break
             if self._effort_refused and not self._effort_retried:
@@ -583,11 +606,24 @@ class CommandcodeWorker(threading.Thread):
                 self._session_id = None
                 self._run_turn(binary, self._run_effort, self._run_model)
                 continue
+            if self._capacity_retry is not None and not self._capacity_retried:
+                target = self._capacity_retry
+                self._capacity_retried = True
+                self.fallback_model = target.model
+                self._on_activity(
+                    "notice",
+                    f"Command Code providers at capacity for {self._capacity_failed_model}. "
+                    f"Retrying with {target.model}.",
+                )
+                self._close_process()
+                self._reset_run_state()
+                self._run_turn(binary, target.effort, target.model)
+                continue
             if self._free_fallback is not None and not self._free_fallback_retried:
                 fallback = self._free_fallback
                 self._free_fallback_retried = True
                 self.fallback_model = fallback.model
-                limit = "rate limit" if self._free_fallback_code == 5 else "credit limit"
+                limit = _LIMIT_LABELS.get(self._free_fallback_code, "provider capacity")
                 self._on_activity(
                     "notice",
                     f"Command Code {limit} reached. Retrying with free model {fallback.model}.",
@@ -649,6 +685,7 @@ class CommandcodeWorker(threading.Thread):
         self._effort_refused = False
         self._effort_supported = []
         self._free_fallback = None
+        self._capacity_retry = None
         self._result_error = ""
         with self._error_lock:
             self._error_lines = []
@@ -906,7 +943,12 @@ class CommandcodeWorker(threading.Thread):
     def _remember_session(self, session: str) -> None:
         if session and session != self._session_seen:
             self._session_seen = session
-            if self._session_retried or self._compact or self._free_fallback_retried:
+            if (
+                self._session_retried
+                or self._compact
+                or self._free_fallback_retried
+                or self._capacity_retried
+            ):
                 # A retry may replace the failed run's id; compaction replaces
                 # the conversation. The caller must adopt the new id.
                 self.session_replaced = True
@@ -1112,7 +1154,15 @@ class CommandcodeWorker(threading.Thread):
         if code in (5, 10):
             # Record every real limit stop, even when replay is unsafe because
             # the turn already produced output or Auto fallback is disabled.
-            record_limit_hit(code)
+            if not record_limit_hit(code):
+                # The lock timed out or the state file could not be written:
+                # paid models are NOT withheld, and pretending otherwise
+                # would walk straight back into the same stop.
+                self._on_activity(
+                    "notice",
+                    "Command Code's cooldown could not be recorded; paid models "
+                    "may be chosen again before the limit actually resets.",
+                )
         if self._completed or self._failed:
             return
         # Whatever is decided next reads stderr, so the reader is joined
@@ -1135,6 +1185,31 @@ class CommandcodeWorker(threading.Thread):
             self._session_lost = True
             self.lost_session = True
             return
+        if self._capacity_stop(code):
+            # The upstream is out of providers for this model. The stop is
+            # recorded whether or not the turn may be replayed, the same way
+            # a rate or credit stop is, so the next turn picks a model whose
+            # providers are still up.
+            record_capacity_hit(self._run_model)
+            if self._can_retry_after_capacity():
+                target = self._paid_capacity_retry()
+                if target is not None:
+                    self._capacity_retry = target
+                    self._capacity_failed_model = self._run_model
+                    return
+                # No other paid model in the tier: the confirmed-free path,
+                # the same one a rate or credit stop falls back to.
+                if not self._free_fallback_retried:
+                    fallback = self._free_fallback_model()
+                    if fallback is not None:
+                        self._free_fallback = fallback
+                        self._free_fallback_code = code or 0
+                        return
+                    self._on_activity(
+                        "notice", "Auto free retry unavailable: no confirmed free model."
+                    )
+            # Otherwise fall through: the stop is reported like any other
+            # non-zero exit, with the server's own text on its tail.
         if self._can_retry_with_free_model(code):
             fallback = self._free_fallback_model()
             if fallback is not None:
@@ -1169,6 +1244,46 @@ class CommandcodeWorker(threading.Thread):
             and not self._assistant_parts
             and not self._tool_ran
         )
+
+    def _capacity_stop(self, code: Optional[int]) -> bool:
+        """Whether this run died on a provider-capacity stop.
+
+        Exit 1 with the server's own capacity text on stderr -- the CLI does
+        not have an exit code of its own for it, so the text is the signal.
+        """
+        if code in (None, 0):
+            return False
+        with self._error_lock:
+            lines = list(self._error_lines)
+        return any(_CAPACITY_MARKERS.search(line) for line in lines)
+
+    def _can_retry_after_capacity(self) -> bool:
+        """Whether a capacity stop is safe to replay once on another model.
+
+        The same guard as the free-model retry: Auto routing must be on, the
+        shot must be unspent, and the turn must have produced no answer and
+        run no tool -- a mid-turn capacity stop keeps whatever it made.
+        """
+        return (
+            self._auto_free_fallback
+            and not self._capacity_retried
+            and not self._assistant_parts
+            and not self._tool_ran
+        )
+
+    def _paid_capacity_retry(self) -> Optional[Route]:
+        """The next paid model of the same tier, excluding the one that failed."""
+        try:
+            chosen = route(self._prompt, exclude_models={self._run_model})
+        except Exception:  # noqa: BLE001 - optional routing must not mask the CLI failure
+            return None
+        # A free answer (or none at all) is the free fallback's job, not a
+        # paid retry.
+        if not chosen.model or not chosen.cost:
+            return None
+        if chosen.model.casefold() == self._run_model.casefold():
+            return None
+        return chosen
 
     def _free_fallback_model(self) -> Optional[Route]:
         """The best confirmed free model other than this run's model."""
