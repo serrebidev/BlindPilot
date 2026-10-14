@@ -22,6 +22,7 @@ from agent_backends import (
 )
 from blindpilot_app import SessionPanel, _slash_commands_for_backend
 import blindpilot_app as app
+import commandcode_backend
 from doubles import Prompt, panel_stub
 import pytest
 
@@ -52,7 +53,7 @@ def _tab(backend: str, **overrides):
     return state
 
 
-def test_status_is_offered_for_every_backend():
+def test_status_is_offered_for_every_backend(monkeypatch):
     """/status is BlindPilot's own, and every backend can answer it.
 
     None of them answers it themselves in the headless mode they are driven in
@@ -60,6 +61,7 @@ def test_status_is_offered_for_every_backend():
     status command at all — so BlindPilot asks each one the way it can answer
     and reports all four the same way.
     """
+    monkeypatch.setattr(commandcode_backend, "commandcode_agent_commands", lambda _cwd: [])
     for backend in BACKEND_IDS:
         assert "/status" in _names(backend), backend
 
@@ -95,8 +97,9 @@ def test_status_is_listed_once_for_claude():
     assert _names(BACKEND_CLAUDE).count("/status") == 1
 
 
-def test_status_is_marked_as_handled_by_blindpilot():
+def test_status_is_marked_as_handled_by_blindpilot(monkeypatch):
     """The tag is how the picker says which commands never reach the provider."""
+    monkeypatch.setattr(commandcode_backend, "commandcode_agent_commands", lambda _cwd: [])
     for backend in BACKEND_IDS:
         descriptions = [
             description

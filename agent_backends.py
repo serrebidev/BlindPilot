@@ -1119,7 +1119,9 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
             return bool(_opencode_providers())
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return True
+    # A backend with no branch above was never checked, and an
+    # unchecked backend must not be reported as signed in.
+    return False
 
 
 def _freebuff_account() -> Optional[dict]:
@@ -1885,7 +1887,11 @@ def _freebuff_usage_payload(timeout: int) -> Optional[dict]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=max(1, min(timeout, 10))) as response:
+        # The packaged trust store, not OpenSSL's guess: a frozen
+        # build's empty store would fail this call like any other.
+        from certificates import open_url
+
+        with open_url(request, timeout=max(1, min(timeout, 10))) as response:
             payload = json.loads(response.read().decode("utf-8", "replace"))
     except (OSError, ValueError, urllib.error.HTTPError):
         return None

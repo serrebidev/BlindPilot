@@ -369,6 +369,46 @@ def test_a_limit_error_retries_once_with_a_free_model(worker_env, monkeypatch, e
     )
 
 
+@pytest.mark.parametrize("exit_code", [5, 10])
+def test_a_limit_error_records_the_usage_cooldown(worker_env, monkeypatch, exit_code):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], returncode=exit_code),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: commandcode_worker.Route("free/code", "", "free"),
+    )
+    recorded: list = []
+    monkeypatch.setattr(
+        commandcode_worker,
+        "record_limit_hit",
+        lambda code: recorded.append(code) or True,
+    )
+
+    _worker, rec = _run(auto_free_fallback=True)
+
+    assert recorded == [exit_code]
+
+
+def test_a_limit_error_records_cooldown_without_free_fallback(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(lines=[], returncode=10)
+    recorded: list[int] = []
+    monkeypatch.setattr(
+        commandcode_worker,
+        "record_limit_hit",
+        lambda code: recorded.append(code) or True,
+    )
+
+    _worker, _rec = _run(auto_free_fallback=False)
+
+    assert recorded == [10]
+
+
 def test_a_free_fallback_never_retries_twice(worker_env, monkeypatch):
     argv_log: list = []
     _two_runs(

@@ -456,7 +456,13 @@ class MuseAiWorker(_TurnWorker):
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             end_process_group(proc)
-            out, err = proc.communicate()
+            # A child that survives the kill cannot be reaped here, and
+            # waiting on it forever would keep the turn -- and Send --
+            # stuck, so the second wait is bounded too.
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
         finally:
             if track:
                 self._proc = None

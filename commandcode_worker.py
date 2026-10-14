@@ -51,7 +51,7 @@ from agent_backends import (
     subagent_line,
     subprocess_env,
 )
-from commandcode_router import Route, best_free_model, strongest_effort
+from commandcode_router import Route, best_free_model, record_limit_hit, strongest_effort
 from hermes_backend import STDERR_KEEP_LINES
 from markdown_rows import release_finished, release_remainder
 
@@ -698,13 +698,18 @@ class CommandcodeWorker(threading.Thread):
         stderr = proc.stderr
         if stderr is None:
             return
-        for line in stderr:
-            text = line.strip()
-            if not text:
-                continue
-            with self._error_lock:
-                self._error_lines.append(text)
-                del self._error_lines[:-STDERR_KEEP_LINES]
+        try:
+            for line in stderr:
+                text = line.strip()
+                if not text:
+                    continue
+                with self._error_lock:
+                    self._error_lines.append(text)
+                    del self._error_lines[:-STDERR_KEEP_LINES]
+        except ValueError:
+            # _close_process closed the pipe under this reader: nothing
+            # is left to read, and the lines already read are kept.
+            return
 
     def _error_tail(self) -> str:
         with self._error_lock:
@@ -1021,9 +1026,11 @@ class CommandcodeWorker(threading.Thread):
         if session:
             self._remember_session(session)
         self._release_all()
-        if subtype == "error":
+        if subtype not in ("success", "max_turns"):
             # Exit code decides whether an empty pre-start error can use the
             # one automatic free-model retry. Do not fail until _finish.
+            # An unknown subtype lands here too: the protocol naming
+            # something new must not be read as a finished answer.
             self._result_error = self._error_text(frame) or "Command Code reported an error."
             return
         if subtype == "max_turns":
@@ -1102,6 +1109,10 @@ class CommandcodeWorker(threading.Thread):
                 text = "".join(self._assistant_parts).strip()
                 self._on_complete(text or "Stopped")
             return
+        if code in (5, 10):
+            # Record every real limit stop, even when replay is unsafe because
+            # the turn already produced output or Auto fallback is disabled.
+            record_limit_hit(code)
         if self._completed or self._failed:
             return
         # Whatever is decided next reads stderr, so the reader is joined

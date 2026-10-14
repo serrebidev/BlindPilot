@@ -14,11 +14,19 @@ choice is two layers, both in this file:
    (see ``_COST_PROFILE``), so cache-read price dominates, as it does in a real
    long session.
 
+A rate or credit stop (the CLI's exit codes 5 and 10) is recorded to a
+small state file, and while the stop is in effect paid models are
+withheld: a quick task still runs on a free model, but a standard or
+deep task keeps the CLI's configured model rather than picking one that
+cannot run. This is the same handling the terminal router applies, so
+the two routers keep choosing alike.
+
 This is the BlindPilot-side twin of the ``work``/``agent-task`` router in
-``~/Documents/Codex/tools``: the tiers and the candidate shortlists match, so a
-BlindPilot turn and a terminal ``work`` run choose alike. Prices are read from
-the installed CLI at runtime; the hand-picked table is the fallback when that
-cannot be read, and is what tests exercise directly.
+``~/Documents/Codex/tools``: the tiers, the candidate shortlists and the
+usage-cooldown handling match, so a BlindPilot turn and a terminal ``work``
+run choose alike. Prices are read from the installed CLI at runtime; the
+hand-picked table is the fallback when that cannot be read, and is what
+tests exercise directly.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 Based on the original Claude Code Reader application by doubletaponair:
@@ -28,11 +36,14 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import tempfile
+import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -114,14 +125,20 @@ _DEEPSEEK_PEAK: dict[str, dict[str, float]] = {
 # filtered out, so a Go-tier account never picks a Pro/GOAT/Max-only model.
 _PLAN_RANK = {"go": 1, "goat": 2, "pro": 3, "max": 4}
 
-# The task text that makes a tier, ported from the terminal router so the two
-# classify alike.
+# The task text that makes a tier, ported from the terminal router so the
+# two classify alike. A lookup phrased as a question ("how does the
+# router pick") reads as a lookup too; the high-risk scan runs first, so
+# a question about risky work still lands on deep.
 _HIGH_RISK = re.compile(
     r"(?i)\b(security|auth(?:entication|orization)?|permission|privacy|accessibility|"
     r"screen.?reader|migration|architecture|release|deploy|payment|data.?loss|"
     r"race.?condition|concurren\w*|multi.?agent|multiple repos|cross.?repo|refactor)\b"
 )
-_LOOKUP = re.compile(r"(?i)^\s*(explain|summari[sz]e|find|locate|list|show|what|where|check)\b")
+_LOOKUP = re.compile(
+    r"(?i)^\s*(explain|summari[sz]e|find|locate|list|show|what|where|check|"
+    r"how|why|which|who|whose|is|are|does|do|did|can|could|will|would|"
+    r"should|may|might)\b"
+)
 _SMALL_EDIT = re.compile(
     r"(?i)^\s*(fix|change|rename|update|remove|add)\b.*\b"
     r"(typo|label|wording|text|string|comment|one file|single file|small)\b"
@@ -143,6 +160,7 @@ class Route:
     tier: str
     cost: Optional[float] = None
     priced: bool = False
+    cooldown: bool = False
 
     def describe(self) -> str:
         """One line, for reading back: what the next turn will run as."""
@@ -151,6 +169,8 @@ class Route:
             parts.append(f"{self.effort} effort")
         if self.priced and self.cost is not None:
             parts.append(f"about ${self.cost:.5f} a request")
+        if self.cooldown:
+            parts.append("while Command Code cools down")
         return ", ".join(parts) + "."
 
 
@@ -255,12 +275,15 @@ def select(
     max_plan: str = "go",
     include_free: bool = True,
     now: Optional[datetime] = None,
+    cooldown: bool = False,
 ) -> Optional[Route]:
     """The cheapest eligible model for a tier, or None when none qualifies.
 
     Free models are only ever used for the ``quick`` tier: a standard or deep
     task never lands on one, whatever the price, and a model whose upstream may
-    train on the prompt is filtered out entirely.
+    train on the prompt is filtered out entirely. While a recorded rate or
+    credit stop is in effect (``cooldown``), paid models are withheld the same
+    way, so only a free model can answer a quick task.
     """
     if not catalog:
         return None
@@ -275,6 +298,8 @@ def select(
         if is_free and tier != QUICK:
             continue
         if is_free and not include_free:
+            continue
+        if cooldown and not is_free:
             continue
         if model_id in _TRAINING_MODELS:
             continue
@@ -293,6 +318,7 @@ def select(
         tier=tier,
         cost=best_cost,
         priced=True,
+        cooldown=cooldown,
     )
 
 
@@ -310,20 +336,27 @@ def route(
     With a price catalog (read from the CLI unless one is passed), the cheapest
     eligible model for the task's tier wins. A catalog with no eligible model
     returns an empty route so the caller keeps its existing choice. Without a
-    catalog -- or with ``static`` -- the hand-picked table answers.
+    catalog -- or with ``static`` outside cooldown -- the hand-picked table
+    answers. While a recorded rate or credit stop is in effect, paid models
+    are withheld. A quick task runs on a free model; a heavier task keeps the
+    CLI's configured model.
     """
     tier = classify(task)
     active_catalog = catalog if catalog is not None else price_catalog()
-    if not static and active_catalog:
+    cooldown = cooling_down(now)
+    if active_catalog and (not static or cooldown):
         chosen = select(
             tier,
             active_catalog,
             max_plan=max_plan,
             include_free=include_free,
             now=now,
+            cooldown=cooldown,
         )
         if chosen is not None:
             return chosen
+        return Route(model="", effort="", tier=tier)
+    if cooldown:
         return Route(model="", effort="", tier=tier)
     fallback = _STATIC_ROUTES[tier]
     return Route(model=fallback["model"], effort=fallback["effort"], tier=tier)
@@ -462,3 +495,115 @@ def price_catalog() -> dict:
         _CATALOG_CACHE["data"] = data
         return data
     return {}
+
+
+# --------------------------------------------------------------------------
+# Usage state
+#
+# Command Code credits CANNOT be read headlessly: /usage is interactive-only
+# and the plan is not readable from disk. The only automatic signal is the
+# CLI's own limit exit codes, so when a turn hits one its reset window is
+# recorded here and paid models are withheld until it passes. Read the live
+# number with /usage in a session, or https://commandcode.ai/usage.
+# --------------------------------------------------------------------------
+
+# The CLI's exit codes for a spent window, and how long paid models stay
+# withheld afterwards. Code 5 is a transient rate limit ("wait a moment");
+# code 10 is the credit window, whose real 5-hour reset cannot be read
+# headlessly, so the recorded wait is a conservative bet and the worker's
+# per-turn free retry covers the tail.
+_LIMIT_COOLDOWN_MINUTES: dict[int, int] = {5: 2, 10: 30}
+
+# Where the state lives. The env override is the seam tests use; otherwise
+# the file sits beside the app's own per-user data.
+_USAGE_STATE_ENV = "COMMANDCODE_USAGE_JSON"
+_USAGE_STATE_LOCK = threading.Lock()
+
+
+def _usage_state_path() -> Path:
+    override = os.environ.get(_USAGE_STATE_ENV)
+    if override:
+        return Path(override)
+    try:
+        from accessible_ai.storage.paths import app_data_dir
+
+        return app_data_dir() / "commandcode-usage.json"
+    except Exception:  # noqa: BLE001 - state is best-effort, never fatal
+        return Path.home() / ".blindpilot" / "commandcode-usage.json"
+
+
+def record_limit_hit(code: int, now: Optional[datetime] = None) -> bool:
+    """Note a rate (5) or credit (10) stop so routing avoids paid models.
+
+    Best-effort: a state file that cannot be written or read is the same as
+    no state, and routing carries on priced as before.
+    """
+    minutes = _LIMIT_COOLDOWN_MINUTES.get(code)
+    if minutes is None:
+        return False
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    path = _usage_state_path()
+    deadline = moment + timedelta(minutes=minutes)
+    with _USAGE_STATE_LOCK:
+        state: dict = {}
+        try:
+            if path.is_file():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    state = loaded
+        except (OSError, ValueError):
+            state = {}
+        try:
+            existing = datetime.fromisoformat(state.get("commandcode", {}).get("cooldownUntil", ""))
+            if existing.tzinfo is None:
+                existing = existing.replace(tzinfo=timezone.utc)
+            if existing > deadline:
+                return True
+        except (ValueError, AttributeError):
+            pass
+        state["commandcode"] = {
+            "cooldownUntil": deadline.isoformat(),
+            "reason": "rate limit" if code == 5 else "credit limit",
+            "recordedAt": moment.isoformat(),
+        }
+        temporary_path: Optional[Path] = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                json.dump(state, temporary, indent=2)
+            os.replace(temporary_path, path)
+        except OSError:
+            return False
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    return True
+
+
+def cooling_down(now: Optional[datetime] = None) -> bool:
+    """Whether a recorded rate or credit stop is still in effect."""
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    try:
+        raw = json.loads(_usage_state_path().read_text(encoding="utf-8"))
+        until = raw.get("commandcode", {}).get("cooldownUntil", "")
+        deadline = datetime.fromisoformat(until)
+    except (OSError, ValueError, AttributeError):
+        return False
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return deadline > moment.astimezone(timezone.utc)

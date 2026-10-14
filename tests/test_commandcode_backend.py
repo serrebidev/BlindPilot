@@ -9,7 +9,9 @@ on. No Node start-up, no network, no account.
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
+import subprocess
 
 import agent_backends
 import commandcode_backend
@@ -19,6 +21,73 @@ from agent_backends import BACKEND_COMMANDCODE, BACKEND_IDS, BACKENDS
 from commandcode_worker import CommandcodeWorker
 
 STATUS_SIGNED_IN = "\u221a Authenticated as person\n  Provider: Command Code\n"
+
+
+def test_agent_command_discovery_closes_its_pipes(monkeypatch):
+    class Process:
+        stdin = io.StringIO()
+        stdout = io.StringIO(
+            json.dumps(
+                {
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [{"name": "help", "description": "Show help"}],
+                        }
+                    }
+                }
+            )
+            + "\n"
+        )
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout):
+            return 0
+
+    process = Process()
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    assert commandcode_backend._fetch_agent_commands("") == [("/help", "Show help")]
+    assert process.stdin.closed
+    assert process.stdout.closed
+
+
+def test_agent_command_discovery_reaps_after_forced_kill(monkeypatch):
+    class Process:
+        stdin = io.StringIO()
+        stdout = io.StringIO("{}\n")
+
+        def __init__(self):
+            self.waits = 0
+            self.killed = False
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("command-code", timeout)
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    times = iter((0, 46))
+    monkeypatch.setattr(commandcode_backend.time, "monotonic", lambda: next(times))
+
+    assert commandcode_backend._fetch_agent_commands("") == []
+    assert process.killed is True
+    assert process.waits == 2
+    assert process.stdin.closed
+    assert process.stdout.closed
+
 
 CATALOG = """Available models  \u00b7  4 models
 
