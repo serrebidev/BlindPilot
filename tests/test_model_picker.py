@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -20,6 +23,7 @@ import blindpilot_app  # noqa: E402
 import claude_session  # noqa: E402
 from blindpilot_app import (  # noqa: E402
     BACKEND_CODEX,
+    BACKEND_COMMANDCODE,
     BACKEND_FREEBUFF,
     _npm_update_argv,
     _repair_claude_native_update,
@@ -412,3 +416,103 @@ def test_the_model_box_shows_each_alias_with_its_version():
         app.ProcessPendingEvents()
         if owns_app:
             app.Destroy()
+
+
+def test_commandcode_auto_is_a_keyboard_picker_choice():
+    wx = pytest.importorskip("wx")
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    frame = wx.Frame(None)
+    try:
+        options = blindpilot_app.ModelOptions(["model-a"], ["medium"])
+        dlg = blindpilot_app.ModelDialog(
+            frame, options, "", "", "Command Code", allow_auto_model=True
+        )
+        try:
+            assert blindpilot_app.AUTO_MODEL_CHOICE in dlg.model_box.GetStrings()
+            dlg.model_box.SetStringSelection(blindpilot_app.AUTO_MODEL_CHOICE)
+            assert dlg.selection() == (blindpilot_app.AUTO_MODEL, "")
+        finally:
+            dlg.Destroy()
+    finally:
+        frame.Destroy()
+        app.ProcessPendingEvents()
+        if owns_app:
+            app.Destroy()
+
+
+def test_commandcode_default_keeps_the_cli_model_without_routing(monkeypatch):
+    stub = types.SimpleNamespace(model="", effort="medium", spoken=[])
+    stub._announce = lambda text: stub.spoken.append(text)
+    monkeypatch.setitem(
+        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text: None)
+    )
+
+    assert blindpilot_app.SessionPanel._turn_model(stub, "Fix a typo", BACKEND_COMMANDCODE) == (
+        "",
+        "medium",
+    )
+    assert stub.spoken == []
+
+
+def test_commandcode_auto_announces_only_a_changed_route(monkeypatch):
+    chosen = types.SimpleNamespace(
+        model="model-a", effort="low", describe=lambda: "Auto model model-a, quick task."
+    )
+    stub = types.SimpleNamespace(
+        model=blindpilot_app.AUTO_MODEL, effort="xhigh", spoken=[], _auto_route=""
+    )
+    stub._announce = lambda text: stub.spoken.append(text)
+    monkeypatch.setitem(
+        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text: chosen)
+    )
+
+    assert blindpilot_app.SessionPanel._turn_model(stub, "Fix a typo", BACKEND_COMMANDCODE) == (
+        "model-a",
+        "xhigh",
+    )
+    assert blindpilot_app.SessionPanel._turn_model(
+        stub, "Fix another typo", BACKEND_COMMANDCODE
+    ) == (
+        "model-a",
+        "xhigh",
+    )
+    assert stub.spoken == ["Auto model model-a, quick task."]
+
+
+def test_commandcode_auto_never_passes_its_marker_to_the_cli(monkeypatch):
+    stub = types.SimpleNamespace(model=blindpilot_app.AUTO_MODEL, effort="", spoken=[])
+    stub._announce = stub.spoken.append
+    monkeypatch.setitem(
+        sys.modules,
+        "commandcode_router",
+        types.SimpleNamespace(route=lambda _text: types.SimpleNamespace(model="")),
+    )
+
+    assert blindpilot_app.SessionPanel._turn_model(stub, "/help", BACKEND_COMMANDCODE) == ("", "")
+    assert blindpilot_app.SessionPanel._turn_model(stub, "Find a caller", BACKEND_COMMANDCODE) == (
+        "",
+        "",
+    )
+    assert stub.spoken == []
+
+
+def test_auto_command_is_opt_in_and_other_backends_keep_literal_auto():
+    for backend, expected in (
+        (BACKEND_COMMANDCODE, blindpilot_app.AUTO_MODEL),
+        (BACKEND_CODEX, "auto"),
+    ):
+        stub = types.SimpleNamespace(
+            model="", effort="", _cli_model="", _cli_effort="", spoken=[], _auto_route="old"
+        )
+        stub.selected_backend = lambda backend=backend: backend
+        stub._announce = stub.spoken.append
+        stub._model_summary = lambda stub=stub: blindpilot_app.SessionPanel._model_summary(stub)
+        stub.prompt = types.SimpleNamespace(SetFocus=lambda: None)
+
+        blindpilot_app.SessionPanel.set_model(stub, "auto")
+
+        assert stub.model == expected
+        assert stub._auto_route == ""
+        if backend == BACKEND_COMMANDCODE:
+            assert "may switch providers" in stub.spoken[-1]

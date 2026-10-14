@@ -1981,6 +1981,8 @@ _FALLBACK_MODELS = ["default", "opus", "sonnet", "haiku", "fable", "opusplan"]
 _FALLBACK_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 # Shown first in both combo boxes: leave the flag off and let the CLI decide.
 DEFAULT_CHOICE = "(CLI default)"
+AUTO_MODEL = "<BlindPilot auto>"
+AUTO_MODEL_CHOICE = "Auto (choose for each task)"
 # Probing costs a CLI start-up, so results are reused for a while. Catalogs are
 # deliberately loaded only when /model or /models is opened, keeping normal
 # application startup fast and quiet.
@@ -3842,7 +3844,10 @@ def _faster_wav(path: str, factor: float) -> str:
     Only the header's sample rate changes; the player does the resampling.
     Written once to the temp folder and reused.
     """
-    out = os.path.join(tempfile.gettempdir(), f"blindpilot-{Path(path).stem}-{factor:.3f}.wav")
+    source_key = hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:12]
+    out = os.path.join(
+        tempfile.gettempdir(), f"blindpilot-{Path(path).stem}-{source_key}-{factor:.3f}.wav"
+    )
     if os.path.isfile(out):
         return out
     with wave.open(path, "rb") as src:
@@ -5955,6 +5960,7 @@ class ModelDialog(wx.Dialog):
         selected_model: str,
         selected_effort: str,
         backend_name: str = "CLI",
+        allow_auto_model: bool = False,
     ):
         super().__init__(parent, title="Model")
 
@@ -5965,11 +5971,13 @@ class ModelDialog(wx.Dialog):
         if selected_model or selected_effort:
             lines.append(
                 "This tab overrides that with: "
-                f"model {selected_model or 'unchanged'}, "
+                f"model {'automatic routing' if selected_model == AUTO_MODEL else selected_model or 'unchanged'}, "
                 f"effort {selected_effort or 'unchanged'}."
             )
         if options.error:
             lines.append(options.error)
+        if allow_auto_model:
+            lines.append("Auto may switch providers, including free models, for each task.")
         summary = wx.StaticText(self, label="\n".join(lines))
         summary.Wrap(self.FromDIP(520))
 
@@ -5979,6 +5987,8 @@ class ModelDialog(wx.Dialog):
         # Each alias is shown with the version it resolves to, "opus: Opus 5.5",
         # and mapped back to the bare alias when picked.
         self._model_by_choice = {_model_choice(m, options.labels): m for m in options.models}
+        if allow_auto_model:
+            self._model_by_choice[AUTO_MODEL_CHOICE] = AUTO_MODEL
         self._effort_keep = _keep_choice(options.current_effort)
 
         model_label = wx.StaticText(self, label="&Model:")
@@ -5989,7 +5999,13 @@ class ModelDialog(wx.Dialog):
         )
         self.model_box.SetName("Model")
         self.model_box.SetValue(
-            _model_choice(selected_model, options.labels) if selected_model else self._model_keep
+            (
+                AUTO_MODEL_CHOICE
+                if selected_model == AUTO_MODEL and allow_auto_model
+                else _model_choice(selected_model, options.labels)
+                if selected_model
+                else self._model_keep
+            )
         )
 
         efforts = list(options.efforts)
@@ -7997,6 +8013,7 @@ class SessionPanel(wx.Panel):
         # Empty means "don't pass the flag" — the CLI picks its own default.
         self.model = ""
         self.effort = ""
+        self._auto_route = ""
         # What the CLI last reported it is using, for when we pass no flag.
         self._cli_model = ""
         self._cli_effort = ""
@@ -8403,8 +8420,14 @@ class SessionPanel(wx.Panel):
     def _model_summary(self) -> str:
         """What the next message will run as: this tab's override where it has
         one, otherwise whatever the selected backend last reported."""
-        model = self.model or self._cli_model or "CLI default"
-        effort = self.effort or self._cli_effort or "CLI default"
+        model = (
+            "automatic routing"
+            if self.model == AUTO_MODEL
+            else self.model or self._cli_model or "CLI default"
+        )
+        effort = self.effort or (
+            "automatic per task" if self.model == AUTO_MODEL else self._cli_effort or "CLI default"
+        )
         return f"model {model}, effort {effort}"
 
     def warm_model_probe(self) -> None:
@@ -8461,7 +8484,14 @@ class SessionPanel(wx.Panel):
             return
         provider = normalize_backend(backend or self.selected_backend())
         self._remember_cli_model(options, provider)
-        dlg = ModelDialog(self, options, self.model, self.effort, backend_label(provider))
+        dlg = ModelDialog(
+            self,
+            options,
+            self.model,
+            self.effort,
+            backend_label(provider),
+            allow_auto_model=provider == BACKEND_COMMANDCODE,
+        )
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 self._announce(f"Model unchanged. Still using {self._model_summary()}.")
@@ -8554,9 +8584,15 @@ class SessionPanel(wx.Panel):
             # The picker is disabled for these, so reporting the remembered
             # value would name a setting that has no effect on this backend.
             mode = "not offered by this backend"
+        model = self.model or self._cli_model or "CLI default"
+        if self.model == AUTO_MODEL:
+            model = f"Automatic routing ({self._auto_route or 'no route selected yet'})"
+        effort = self.effort or (
+            "automatic per task" if self.model == AUTO_MODEL else self._cli_effort or "CLI default"
+        )
         return [
-            f"Model: {self.model or self._cli_model or 'CLI default'}",
-            f"Effort: {self.effort or self._cli_effort or 'CLI default'}",
+            f"Model: {model}",
+            f"Effort: {effort}",
             f"Permission mode: {mode}",
             # A remote Hermes session may have no folder on this machine at all,
             # and "Folder: " followed by nothing reads as a missing value rather
@@ -8666,6 +8702,8 @@ class SessionPanel(wx.Panel):
 
     def set_model(self, model: str, effort: str = "") -> None:
         """Apply the model / effort to every message sent from here on."""
+        if model == "auto" and self.selected_backend() == BACKEND_COMMANDCODE:
+            model = AUTO_MODEL
         if self.selected_backend() == BACKEND_FREEBUFF and model != self.model:
             self._session_id = None
             self._drop_held_backends()
@@ -8677,6 +8715,7 @@ class SessionPanel(wx.Panel):
         effort_changed = self.selected_backend() == BACKEND_HERMES and effort != self.effort
         self.model = model
         self.effort = effort
+        self._auto_route = ""
         note = ""
         if effort_changed:
             # Hermes fixes the reasoning level when the conversation is created
@@ -8689,6 +8728,8 @@ class SessionPanel(wx.Panel):
             self._session_id = None
             self._drop_held_backends()
             note = " Hermes fixes the reasoning level per conversation, so this starts a new one."
+        if model == AUTO_MODEL:
+            note += " Auto may switch providers, including free models, for each task."
         self._announce(f"Using {self._model_summary()} from your next message.{note}")
         self.prompt.SetFocus()
 
@@ -9720,6 +9761,7 @@ class SessionPanel(wx.Panel):
             self._session_backend = selected_backend
             self.model = ""
             self.effort = ""
+            self._auto_route = ""
             self._cli_model = ""
             self._cli_effort = ""
             self.backend_status.SetLabel(f"Backend: {backend_label(selected_backend)}")
@@ -9775,7 +9817,36 @@ class SessionPanel(wx.Panel):
             extra.update(self._claude_worker_extra())
         elif selected_backend == BACKEND_COMMANDCODE:
             extra["additional_dirs"] = getattr(self, "_commandcode_dirs", ())
+            extra["auto_free_fallback"] = self.model == AUTO_MODEL
         self._launch_turn(send_text, selected_backend, extra)
+
+    def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
+        """The model and effort for one turn.
+
+        A Command Code tab set to automatic routing is routed by the task: a
+        lookup or a small edit runs on the cheapest
+        eligible model and heavier work on a stronger one (see
+        ``commandcode_router``). A late turn (nothing sent) and a slash command
+        are left alone -- they are not work to price. Any failure to route
+        leaves the model unset, preserving the CLI configuration.
+        """
+        if selected_backend != BACKEND_COMMANDCODE or self.model != AUTO_MODEL:
+            return self.model, self.effort
+        if not send_text or send_text.lstrip().startswith("/"):
+            return "", self.effort
+        try:
+            from commandcode_router import route
+
+            chosen = route(send_text)
+        except Exception:  # noqa: BLE001 - routing must never stop a turn
+            return "", self.effort
+        if not chosen.model:
+            return "", self.effort
+        description = chosen.describe()
+        if description != getattr(self, "_auto_route", ""):
+            self._auto_route = description
+            self._announce(description)
+        return chosen.model, self.effort or chosen.effort
 
     def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
         """Start the worker for one turn. `send_text` is None for a late turn,
@@ -9790,13 +9861,14 @@ class SessionPanel(wx.Panel):
         # them.
         self._prune_subagents()
         self._subagents_outlive_turn = bool(getattr(worker_type, "subagents_outlive_turn", False))
+        model, effort = SessionPanel._turn_model(self, send_text, selected_backend)
         self._worker = worker_type(
             send_text,
             self._session_id,
             self.cwd,
             self.mode,
-            model=self.model,
-            effort=self.effort,
+            model=model,
+            effort=effort,
             on_session=lambda sid: self._queue_worker_event("session", sid),
             on_started=lambda: self._queue_worker_event("started"),
             on_activity=lambda kind, text: self._queue_worker_event("activity", kind, text),
@@ -10421,9 +10493,8 @@ class SessionPanel(wx.Panel):
     def _on_session_started(self, session_id: str) -> None:
         # Normally the held id wins, so a worker's incidental ids never move
         # the tab. One a worker that REPLACED the conversation reports must be
-        # adopted even though an id is held: Command Code after a fresh retry
-        # (the held one is gone) and a compaction's summarized replacement
-        # (the held one is no longer the conversation) are the two cases.
+        # adopted even though an id is held: Command Code after a fresh or
+        # free-model retry, or a compaction's summarized replacement.
         if self._session_id and not getattr(self._worker, "session_replaced", False):
             return
         self._session_id = session_id
@@ -10462,16 +10533,21 @@ class SessionPanel(wx.Panel):
 
         ``kind == "you"`` is the user's own message in a replayed Hermes
         conversation, and ``kind == "subagent"`` is a subagent's commentary.
+        A notice is BlindPilot's own status, never assistant answer text.
 
-        With live activity switched off in Options, none of this happens and the
-        whole response lands at the end instead. A replayed conversation is the
-        exception: its rows are the transcript, not live activity, and without
-        them a reopened conversation would show nothing at all.
+        With live activity switched off in Options, the response lands at the
+        end; notices still reach speech and status. A replayed conversation is
+        the exception: its rows are the transcript, not live activity, and
+        without them a reopened conversation would show nothing at all.
         """
         if kind == "replay_end":
             # The transcript a reopened Hermes conversation replays is over;
             # whatever follows is the attached turn itself.
             self._replay_done = True
+            return
+        if kind == "notice":
+            if text.strip():
+                self._say(text.strip(), "notice")
             return
         if kind == "step":
             # Where a long turn has got to (muse.ai's step count): the last row
@@ -10746,6 +10822,9 @@ class SessionPanel(wx.Panel):
         if started is not None:
             self._last_turn_seconds = time.monotonic() - started
             self._turn_started_at = None
+        fallback_model = getattr(self._worker, "fallback_model", "")
+        if getattr(self, "model", "") == AUTO_MODEL and fallback_model:
+            self._auto_route = f"Free fallback {fallback_model} after a Command Code limit."
         self._replay_done = False
         SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
         SessionPanel._drop_step_rows(self)
