@@ -87,15 +87,16 @@ def worker_env(monkeypatch):
     return state
 
 
-def _run(session_id=None):
+def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5"):
     rec = _Recorder()
     worker = CommandcodeWorker(
         "do the thing",
         session_id,
         "C:\\work",
         "plan",
-        model="gpt-5.5",
+        model=model,
         effort="xhigh",
+        auto_free_fallback=auto_free_fallback,
         on_session=rec.callback("session"),
         on_started=rec.callback("started"),
         on_activity=rec.callback("activity"),
@@ -335,6 +336,166 @@ def test_a_nonzero_exit_without_a_result_is_explained(worker_env):
     assert any("rate limited" in text for text in rec.texts("failed"))
 
 
+@pytest.mark.parametrize("exit_code", [5, 10])
+def test_a_limit_error_retries_once_with_a_free_model(worker_env, monkeypatch, exit_code):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(
+            lines=[_result(subtype="error", error={"message": "limit reached"})],
+            returncode=exit_code,
+        ),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="free done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: commandcode_worker.Route("free/code", "", "free"),
+    )
+
+    _worker, rec = _run(session_id="keep", auto_free_fallback=True)
+
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "free/code"
+    assert "--effort" not in argv_log[1]
+    assert argv_log[1][argv_log[1].index("--resume") + 1] == "keep"
+    assert rec.texts("complete") == ["free done"]
+    assert _worker.fallback_model == "free/code"
+    assert any("Retrying with free model free/code" in text for text in rec.activity("notice"))
+    assert any(
+        ("rate limit" if exit_code == 5 else "credit limit") in text
+        for text in rec.activity("notice")
+    )
+
+
+def test_a_free_fallback_never_retries_twice(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], returncode=5),
+        _FakeProcess(lines=[], returncode=5),
+        argv_log,
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: commandcode_worker.Route("free/code", "", "free"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True)
+
+    assert len(argv_log) == 2
+    assert any("free fallback free/code also failed" in text for text in rec.texts("failed"))
+
+
+def test_a_free_fallback_replaces_the_failed_runs_session(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[_event({"type": "run_start", "sessionId": "failed"})], returncode=5),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="saved", finalText="done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: commandcode_worker.Route("free/code", "", "free"),
+    )
+
+    worker, rec = _run(auto_free_fallback=True)
+
+    assert rec.texts("session") == ["failed", "saved"]
+    assert worker.session_replaced is True
+    assert rec.texts("complete") == ["done"]
+
+
+def test_a_preferred_free_model_is_not_retried(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(lines=[], returncode=5)
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: commandcode_worker.Route("free/code", "", "free"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="free/code")
+
+    assert any("rate limited" in text for text in rec.texts("failed"))
+
+
+def test_a_limited_free_model_tries_the_next_confirmed_free_model(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], returncode=5),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **kwargs: commandcode_worker.Route(
+            "free/alternate"
+            if kwargs.get("exclude_model") == "free/preferred"
+            else "free/preferred",
+            "",
+            "free",
+        ),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="free/preferred")
+
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "free/alternate"
+    assert rec.texts("complete") == ["done"]
+
+
+def test_a_rate_limit_after_partial_output_is_not_retried(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "text_delta", "delta": "half an answer"}),
+            _result(subtype="error", error={"message": "limit reached"}),
+        ],
+        returncode=5,
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: pytest.fail("partial output must not be replayed"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True)
+
+    assert any("limit reached" in text for text in rec.texts("failed"))
+
+
+@pytest.mark.parametrize(
+    "tool_event",
+    [
+        {"type": "tool_running", "toolCallId": "c1", "toolName": "write_file"},
+        {"type": "tool_errored", "toolCallId": "c1", "toolName": "write_file"},
+        {"type": "tool_update", "toolCallId": "c1", "toolName": "write_file"},
+        {"type": "subagent_start", "toolCallId": "c1", "subagentType": "general"},
+    ],
+)
+def test_a_rate_limit_after_a_started_tool_is_not_retried(worker_env, monkeypatch, tool_event):
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event(tool_event),
+        ],
+        returncode=5,
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: pytest.fail("a started tool must not be replayed"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True)
+
+    assert any("rate limited" in text for text in rec.texts("failed"))
+
+
 def test_a_missing_cli_is_reported(monkeypatch):
     monkeypatch.setattr(commandcode_worker, "find_backend_cli", lambda _backend: None)
     rec = _Recorder()
@@ -507,6 +668,46 @@ def test_compaction_saves_summary_in_new_session_before_switching(worker_env, mo
     assert len(rec.texts("complete")) == 1
     assert rec.kinds().count("done") == 1
     assert "failed" not in rec.kinds()
+
+
+def test_compaction_announces_free_fallback_and_uses_it_for_both_stages(worker_env, monkeypatch):
+    rec = _Recorder()
+    processes = iter(
+        [
+            _FakeProcess(lines=[], returncode=5),
+            _FakeProcess(
+                lines=[_result(subtype="success", sessionId="original", finalText="Summary")]
+            ),
+            _FakeProcess(
+                lines=[_result(subtype="success", sessionId="compacted", finalText="Ready")]
+            ),
+        ]
+    )
+    commands = []
+
+    def popen(argv, **_kwargs):
+        commands.append(argv)
+        return next(processes)
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_kwargs: commandcode_worker.Route("free/code", "", "free"),
+    )
+    worker = _worker(rec, compact=True, model="gpt-5.5", auto_free_fallback=True)
+    worker.run()
+
+    assert [argv[argv.index("--model") + 1] for argv in commands] == [
+        "gpt-5.5",
+        "free/code",
+        "free/code",
+    ]
+    assert rec.activity("notice") == [
+        "Command Code rate limit reached. Retrying with free model free/code."
+    ]
+    assert worker.fallback_model == "free/code"
+    assert rec.texts("session") == ["compacted"]
 
 
 def test_failed_compaction_does_not_switch_from_original(worker_env, monkeypatch):

@@ -51,6 +51,7 @@ from agent_backends import (
     subagent_line,
     subprocess_env,
 )
+from commandcode_router import Route, best_free_model
 from hermes_backend import STDERR_KEEP_LINES
 from markdown_rows import release_finished, release_remainder
 
@@ -305,6 +306,7 @@ class CommandcodeWorker(threading.Thread):
         compact: bool = False,
         additional_dirs: tuple[str, ...] = (),
         allow_session_retry: bool = True,
+        auto_free_fallback: bool = False,
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -330,13 +332,17 @@ class CommandcodeWorker(threading.Thread):
         # compaction child must not: summarizing an empty conversation would
         # "succeed" with a content-free replacement session.
         self._allow_session_retry = allow_session_retry
+        self._auto_free_fallback = auto_free_fallback
         # Public flags the window reads. session_replaced says the id this
-        # worker reports has replaced the one the caller held (a fresh retry,
-        # or a compaction's summarized replacement) and must be adopted.
+        # worker reports has replaced the one the caller held (a fresh or free
+        # retry, or a compaction's summarized replacement) and must be adopted.
         # lost_session says the id the caller held could not be resumed, so a
         # failed turn should drop it rather than fail the same way again.
         self.session_replaced = False
         self.lost_session = False
+        # Set only after the free retry starts, so the window can report the
+        # model that actually handled this turn.
+        self.fallback_model = ""
         self._on_session = on_session
         self._on_started = on_started
         self._on_activity = on_activity
@@ -370,6 +376,14 @@ class CommandcodeWorker(threading.Thread):
         # retry has already been spent.
         self._session_lost = False
         self._session_retried = False
+        # A rate or credit failure before the model has said or done anything
+        # may use one catalog-confirmed free model. The resumed conversation
+        # stays the same; only the model and model-specific effort change.
+        self._free_fallback: Optional[Route] = None
+        self._free_fallback_retried = False
+        self._free_fallback_code = 0
+        self._run_model = model
+        self._result_error = ""
 
         # Named for what it holds, not `_stderr`: threading.Thread keeps its
         # own attribute under that name.
@@ -384,6 +398,7 @@ class CommandcodeWorker(threading.Thread):
         self._tool_names: dict[str, str] = {}
         self._tool_subjects: dict[str, str] = {}
         self._tool_inputs: dict[str, dict] = {}
+        self._tool_ran = False
         # The last tool Command Code refused, as the sentence _tool_denied or
         # _tool_refused already built. A stop that comes from a refusal has no
         # stderr to read and no reason on the stream, so this is the only place
@@ -444,6 +459,7 @@ class CommandcodeWorker(threading.Thread):
             "Do not run tools or change files.",
         ]
         session: Optional[str] = self._session_id
+        model, effort = self._model, self._effort
         for stage in range(2):
             if self._cancelled:
                 return
@@ -458,16 +474,19 @@ class CommandcodeWorker(threading.Thread):
                 session,
                 self._cwd,
                 "plan",
-                model=self._model,
-                effort=self._effort,
+                model=model,
+                effort=effort,
                 additional_dirs=self._additional_dirs,
                 # Summarizing an empty conversation would "succeed" with a
                 # content-free replacement session, so a lost session fails
                 # the compaction instead of being retried fresh.
                 allow_session_retry=False,
+                auto_free_fallback=self._auto_free_fallback,
                 on_session=sessions.append,
                 on_started=self._notify_started,
-                on_activity=lambda _kind, _text: None,
+                on_activity=lambda kind, text: (
+                    self._on_activity(kind, text) if kind == "notice" else None
+                ),
                 on_complete=answers.append,
                 on_failed=self._compaction_child_failed,
                 on_done=lambda: None,
@@ -477,6 +496,9 @@ class CommandcodeWorker(threading.Thread):
                 child.cancel()
             child.run()
             self._compact_child = None
+            if child.fallback_model:
+                self.fallback_model = model = child.fallback_model
+                effort = ""
             if self._failed or self._cancelled:
                 return
             if not answers or not sessions:
@@ -518,12 +540,12 @@ class CommandcodeWorker(threading.Thread):
         if not binary:
             self._fail("Command Code is not installed. Run: npm install -g command-code")
             return
-        self._run_turn(binary, self._effort)
+        self._run_turn(binary, self._effort, self._model)
         # Each recoverable pre-start failure is retried once, in whatever
         # order they arrive: the CLI resolves --resume before it checks
         # effort, so a lost session still leaves the effort to refuse, and a
         # refused effort still leaves the session to lose.
-        for _ in range(2):
+        for _ in range(3):
             if self._cancelled or self._failed:
                 break
             if self._effort_refused and not self._effort_retried:
@@ -534,7 +556,7 @@ class CommandcodeWorker(threading.Thread):
                 self._on_activity("tool", f"{self._effort_note} Running the turn without one.")
                 self._close_process()
                 self._reset_run_state()
-                self._run_turn(binary, "")
+                self._run_turn(binary, "", self._run_model)
                 continue
             if self._session_lost and not self._session_retried:
                 # The saved conversation is gone; nothing was persisted, so
@@ -545,18 +567,32 @@ class CommandcodeWorker(threading.Thread):
                 self._close_process()
                 self._reset_run_state()
                 self._session_id = None
-                self._run_turn(binary, self._run_effort)
+                self._run_turn(binary, self._run_effort, self._run_model)
+                continue
+            if self._free_fallback is not None and not self._free_fallback_retried:
+                fallback = self._free_fallback
+                self._free_fallback_retried = True
+                self.fallback_model = fallback.model
+                limit = "rate limit" if self._free_fallback_code == 5 else "credit limit"
+                self._on_activity(
+                    "notice",
+                    f"Command Code {limit} reached. Retrying with free model {fallback.model}.",
+                )
+                self._close_process()
+                self._reset_run_state()
+                self._run_turn(binary, "", fallback.model)
                 continue
             break
         self._clean_end = True
 
-    def _run_turn(self, binary: str, effort: str) -> None:
+    def _run_turn(self, binary: str, effort: str, model: str) -> None:
         """One process for the prompt: started, streamed, and finished."""
         self._run_effort = effort
+        self._run_model = model
         command = build_command(
             binary,
             self._permission_mode,
-            self._model,
+            model,
             effort,
             self._session_id,
             self._additional_dirs,
@@ -597,6 +633,8 @@ class CommandcodeWorker(threading.Thread):
         kept by the retry loop, not here: the session retry preserves the
         effort retry's one shot, since its run still carries the effort."""
         self._effort_refused = False
+        self._free_fallback = None
+        self._result_error = ""
         with self._error_lock:
             self._error_lines = []
         self._assistant_parts = []
@@ -606,6 +644,7 @@ class CommandcodeWorker(threading.Thread):
         self._tool_names = {}
         self._tool_subjects = {}
         self._tool_inputs = {}
+        self._tool_ran = False
         self._last_refusal = ""
         self._gap_note_said = False
 
@@ -766,6 +805,8 @@ class CommandcodeWorker(threading.Thread):
         elif etype in ("subagent_start", "subagent_progress", "subagent_stop"):
             self._subagent_event(etype, event)
         elif etype in ("tool_errored", "tool_hook_blocked"):
+            if etype == "tool_errored":
+                self._tool_ran = True
             call_id = str(event.get("toolCallId") or "")
             if call_id in self._subagent_calls:
                 self._subagent_calls.discard(call_id)
@@ -774,12 +815,12 @@ class CommandcodeWorker(threading.Thread):
             self._tool_refused(event)
         elif etype == "message_end":
             self._end_message(event)
+        elif etype == "tool_update":
+            self._tool_ran = True
         elif etype in (
             "turn_start",
             "message_start",
             "message_update",
-            # Partial output of a running tool; tool_completed carries all of it.
-            "tool_update",
             "model_request_start",
             "model_request_end",
             "model_trace",
@@ -804,6 +845,8 @@ class CommandcodeWorker(threading.Thread):
         call_id = str(event.get("toolCallId") or "")
         if not call_id:
             return
+        if etype in ("subagent_start", "subagent_progress"):
+            self._tool_ran = True
         params = self._tool_inputs.get(call_id, {})
         kind = str(event.get("subagentType") or "agent")
         if etype == "subagent_start":
@@ -831,10 +874,9 @@ class CommandcodeWorker(threading.Thread):
     def _remember_session(self, session: str) -> None:
         if session and session != self._session_seen:
             self._session_seen = session
-            if self._session_retried or self._compact:
-                # The id the caller held is either gone (fresh retry) or no
-                # longer the conversation (compaction's replacement), so the
-                # caller must adopt this one rather than keep theirs.
+            if self._session_retried or self._compact or self._free_fallback_retried:
+                # A retry may replace the failed run's id; compaction replaces
+                # the conversation. The caller must adopt the new id.
                 self.session_replaced = True
             self._on_session(session)
 
@@ -852,9 +894,11 @@ class CommandcodeWorker(threading.Thread):
         description = str(event.get("description") or "").strip()
         if description:
             params["description"] = description
+        self._tool_ran = True
         self._on_activity("tool", _tool_label(name, params))
 
     def _tool_completed(self, event: dict) -> None:
+        self._tool_ran = True
         result = _result_text(event.get("result")).strip()
         if result:
             # The output alone, as Claude and Codex show it: the step row above
@@ -951,9 +995,9 @@ class CommandcodeWorker(threading.Thread):
             self._remember_session(session)
         self._release_all()
         if subtype == "error":
-            self._fail(
-                self._error_text(frame) or self._error_tail() or "Command Code reported an error."
-            )
+            # Exit code decides whether an empty pre-start error can use the
+            # one automatic free-model retry. Do not fail until _finish.
+            self._result_error = self._error_text(frame) or "Command Code reported an error."
             return
         if subtype == "max_turns":
             # Out of turns, which is not the same as a failed turn: print mode
@@ -1053,7 +1097,15 @@ class CommandcodeWorker(threading.Thread):
             self._session_lost = True
             self.lost_session = True
             return
+        if self._can_retry_with_free_model(code):
+            fallback = self._free_fallback_model()
+            if fallback is not None:
+                self._free_fallback = fallback
+                self._free_fallback_code = code or 0
+                return
         message = _EXIT_MESSAGES.get(code) if code is not None else None
+        if self._result_error:
+            message = f"{message} {self._result_error}" if message else self._result_error
         if message is None:
             message = "Command Code stopped before the turn completed"
             # A missing code and a clean exit 0 with no result line say
@@ -1062,7 +1114,29 @@ class CommandcodeWorker(threading.Thread):
         detail = self._error_tail()
         if detail:
             message = f"{message} {detail}"
+        if self._free_fallback_retried:
+            message = f"Command Code's free fallback {self._run_model} also failed: {message}"
         self._fail(message[:600])
+
+    def _can_retry_with_free_model(self, code: Optional[int]) -> bool:
+        """Whether a rate or credit stop is safe to replay once on free."""
+        return (
+            self._auto_free_fallback
+            and not self._free_fallback_retried
+            and code in (5, 10)
+            and not self._assistant_parts
+            and not self._tool_ran
+        )
+
+    def _free_fallback_model(self) -> Optional[Route]:
+        """The best confirmed free model other than this run's model."""
+        try:
+            candidate = best_free_model(exclude_model=self._run_model)
+        except Exception:  # noqa: BLE001 - optional routing must not mask the CLI failure
+            return None
+        if candidate is None or candidate.model.casefold() == self._run_model.casefold():
+            return None
+        return candidate
 
     def _close_process(self) -> None:
         proc = self._proc

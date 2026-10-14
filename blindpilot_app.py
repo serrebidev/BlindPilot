@@ -9814,6 +9814,7 @@ class SessionPanel(wx.Panel):
             extra.update(self._claude_worker_extra())
         elif selected_backend == BACKEND_COMMANDCODE:
             extra["additional_dirs"] = getattr(self, "_commandcode_dirs", ())
+            extra["auto_free_fallback"] = self.model == AUTO_MODEL
         self._launch_turn(send_text, selected_backend, extra)
 
     def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
@@ -10489,9 +10490,8 @@ class SessionPanel(wx.Panel):
     def _on_session_started(self, session_id: str) -> None:
         # Normally the held id wins, so a worker's incidental ids never move
         # the tab. One a worker that REPLACED the conversation reports must be
-        # adopted even though an id is held: Command Code after a fresh retry
-        # (the held one is gone) and a compaction's summarized replacement
-        # (the held one is no longer the conversation) are the two cases.
+        # adopted even though an id is held: Command Code after a fresh or
+        # free-model retry, or a compaction's summarized replacement.
         if self._session_id and not getattr(self._worker, "session_replaced", False):
             return
         self._session_id = session_id
@@ -10814,6 +10814,9 @@ class SessionPanel(wx.Panel):
         if started is not None:
             self._last_turn_seconds = time.monotonic() - started
             self._turn_started_at = None
+        fallback_model = getattr(self._worker, "fallback_model", "")
+        if self.model == AUTO_MODEL and fallback_model:
+            self._auto_route = f"Free fallback {fallback_model} after a Command Code limit."
         self._replay_done = False
         SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
         SessionPanel._drop_step_rows(self)
