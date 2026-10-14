@@ -497,6 +497,29 @@ def test_commandcode_auto_never_passes_its_marker_to_the_cli(monkeypatch):
     assert stub.spoken == []
 
 
+def test_commandcode_auto_explains_missing_free_route_during_cooldown(monkeypatch):
+    stub = types.SimpleNamespace(
+        model=blindpilot_app.AUTO_MODEL, effort="", spoken=[], _auto_route=""
+    )
+    stub._announce = stub.spoken.append
+    monkeypatch.setitem(
+        sys.modules,
+        "commandcode_router",
+        types.SimpleNamespace(route=lambda _text: types.SimpleNamespace(model="", cooldown=True)),
+    )
+
+    for _ in range(2):
+        assert blindpilot_app.SessionPanel._turn_model(
+            stub, "Continue work", BACKEND_COMMANDCODE
+        ) == (
+            "",
+            "",
+        )
+    assert stub.spoken == [
+        "Auto could not confirm a free model during cooldown; using the Command Code default."
+    ]
+
+
 def test_auto_command_is_opt_in_and_other_backends_keep_literal_auto():
     for backend, expected in (
         (BACKEND_COMMANDCODE, blindpilot_app.AUTO_MODEL),

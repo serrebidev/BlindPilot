@@ -16,17 +16,15 @@ choice is two layers, both in this file:
 
 A rate or credit stop (the CLI's exit codes 5 and 10) is recorded to a
 small state file, and while the stop is in effect paid models are
-withheld: a quick task still runs on a free model, but a standard or
-deep task keeps the CLI's configured model rather than picking one that
-cannot run. This is the same handling the terminal router applies, so
-the two routers keep choosing alike.
+withheld. Any task uses a catalog-confirmed free model when available and
+eligible for the account plan.
 
 This is the BlindPilot-side twin of the ``work``/``agent-task`` router in
 ``~/Documents/Codex/tools``: the tiers, the candidate shortlists and the
-usage-cooldown handling match, so a BlindPilot turn and a terminal ``work``
-run choose alike. Prices are read from the installed CLI at runtime; the
-hand-picked table is the fallback when that cannot be read, and is what
-tests exercise directly.
+normal routing match. During a cooldown BlindPilot may run heavier work on
+free, so a terminal ``work`` run can choose differently. Prices are read from
+the installed CLI at runtime; the hand-picked table is the fallback when that
+cannot be read, and is what tests exercise directly.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 Based on the original Claude Code Reader application by doubletaponair:
@@ -168,6 +166,8 @@ class Route:
     def describe(self) -> str:
         """One line, for reading back: what the next turn will run as."""
         parts = [f"Auto model {self.model}", f"{self.tier} task"]
+        if self.cooldown and self.cost == 0:
+            parts.append("free model during cooldown")
         if self.effort:
             parts.append(f"{self.effort} effort")
         if self.priced and self.cost is not None:
@@ -341,8 +341,7 @@ def route(
     returns an empty route so the caller keeps its existing choice. Without a
     catalog -- or with ``static`` outside cooldown -- the hand-picked table
     answers. While a recorded rate or credit stop is in effect, paid models
-    are withheld. A quick task runs on a free model; a heavier task keeps the
-    CLI's configured model.
+    are withheld and a catalog-confirmed free model handles any tier.
     """
     tier = classify(task)
     active_catalog = catalog if catalog is not None else price_catalog()
@@ -358,9 +357,13 @@ def route(
         )
         if chosen is not None:
             return chosen
-        return Route(model="", effort="", tier=tier)
+        if cooldown and include_free:
+            free = best_free_model(catalog=active_catalog, max_plan=max_plan)
+            if free is not None:
+                return Route(free.model, free.effort, tier, free.cost, free.priced, True)
+        return Route(model="", effort="", tier=tier, cooldown=cooldown)
     if cooldown:
-        return Route(model="", effort="", tier=tier)
+        return Route(model="", effort="", tier=tier, cooldown=True)
     fallback = _STATIC_ROUTES[tier]
     return Route(model=fallback["model"], effort=fallback["effort"], tier=tier)
 
