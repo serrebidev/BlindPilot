@@ -445,7 +445,7 @@ def test_commandcode_default_keeps_the_cli_model_without_routing(monkeypatch):
     stub = types.SimpleNamespace(model="", effort="medium", spoken=[])
     stub._announce = lambda text: stub.spoken.append(text)
     monkeypatch.setitem(
-        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text: None)
+        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text, **_k: None)
     )
 
     assert blindpilot_app.SessionPanel._turn_model(stub, "Fix a typo", BACKEND_COMMANDCODE) == (
@@ -464,7 +464,7 @@ def test_commandcode_auto_announces_only_a_changed_route(monkeypatch):
     )
     stub._announce = lambda text: stub.spoken.append(text)
     monkeypatch.setitem(
-        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text: chosen)
+        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text, **_k: chosen)
     )
 
     assert blindpilot_app.SessionPanel._turn_model(stub, "Fix a typo", BACKEND_COMMANDCODE) == (
@@ -486,7 +486,7 @@ def test_commandcode_auto_never_passes_its_marker_to_the_cli(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "commandcode_router",
-        types.SimpleNamespace(route=lambda _text: types.SimpleNamespace(model="")),
+        types.SimpleNamespace(route=lambda _text, **_k: types.SimpleNamespace(model="")),
     )
 
     assert blindpilot_app.SessionPanel._turn_model(stub, "/help", BACKEND_COMMANDCODE) == ("", "")
@@ -505,7 +505,9 @@ def test_commandcode_auto_explains_missing_free_route_during_cooldown(monkeypatc
     monkeypatch.setitem(
         sys.modules,
         "commandcode_router",
-        types.SimpleNamespace(route=lambda _text: types.SimpleNamespace(model="", cooldown=True)),
+        types.SimpleNamespace(
+            route=lambda _text, **_k: types.SimpleNamespace(model="", cooldown=True)
+        ),
     )
 
     for _ in range(2):
@@ -526,7 +528,7 @@ def test_commandcode_auto_explains_router_error_without_blocking_turn(monkeypatc
     )
     stub._announce = stub.spoken.append
 
-    def fail_route(_text):
+    def fail_route(_text, **_kwargs):
         raise ValueError("bad catalog")
 
     monkeypatch.setitem(sys.modules, "commandcode_router", types.SimpleNamespace(route=fail_route))
