@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.44.0 - 2026-10-14
+
+- Chat mode has a new account type, ChatGPT plan, that pays for chats with your ChatGPT subscription instead of an API key. In Chat, Accounts, add an account, pick ChatGPT plan, and choose Continue with ChatGPT: your browser opens OpenAI's sign-in, you allow BlindPilot to use your plan, and the browser hands the answer back to BlindPilot on a listener that only accepts connections from this computer. It follows OpenAI's guide for open-source apps: PKCE, a fresh state and nonce on every attempt, the ID token checked against OpenAI's published signing keys, the issued client id kept and reused, a returning sign-in refused if it comes back for another registration or another person, and the refresh token rotated on every refresh and revoked on Sign out or when the account is deleted. Only the client id, e-mail, ChatGPT account id and refresh token are stored, in the system password store; the access token stays in memory. Requests go to the Responses API unstored and streamed, system prompts become instructions, images, PDFs and text files can be attached, and audio and video are refused before anything is sent. A usage-limit answer names the limit and points at chatgpt.com/settings/usage, where you can review it. The first sign-in on an account says, once, that chats now use your plan.
+
 ## v0.43.12 - 2026-10-14
 
 - Command Code task routing now treats a lookup phrased as a question ("how does the router pick") as a quick task. A rate or credit stop (the CLI's exit 5 or 10) is recorded, and while it is in effect paid models are withheld: a quick task runs on a free model, a heavier task keeps the CLI's configured model, and the spoken route says Command Code is cooling down.

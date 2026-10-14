@@ -1,8 +1,8 @@
-# BlindPilot 0.43.12
+# BlindPilot 0.44.0
 
-This release hardens Command Code routing and backend failure handling, contributed by Farhan Khan.
+This release lets Chat mode use your ChatGPT plan instead of an API key, modelled on the Continue with ChatGPT feature of the NVDAIAs add-on.
 
-- When Command Code reports a rate or credit stop, BlindPilot records a cooldown and withholds paid models while it is in effect: a quick task runs on a free model, a heavier task keeps the CLI's configured model, and the spoken route says Command Code is cooling down. A lookup phrased as a question now counts as a quick task.
-- Hermes "Don't ask" mode now declines approval prompts instead of approving them, and a Hermes turn that crashes says so instead of silently ending. Cancelling a turn no longer risks closing the connection the next turn has adopted.
-- Failed writes no longer lose agent data: agent files are written atomically, backend processes that survive a kill are reaped, unknown result frames fail the turn instead of being announced as finished answers, and update downloads write through the temporary file's own descriptor.
-- wxPython 4.3.2 callback and drawing types are aligned, with focused tests covering the changed paths.
+- New Chat account type, ChatGPT plan. In Chat, Accounts, add an account, pick ChatGPT plan, and choose Continue with ChatGPT. Your browser opens OpenAI's sign-in; allow BlindPilot to use your plan and come back. Chats on that account then count toward your ChatGPT plan's usage limits instead of costing API credit. The first sign-in says so once, and the account note links to chatgpt.com/settings/usage, where you can review and limit that usage.
+- The sign-in follows OpenAI's guide for open-source apps. The browser answers on a listener that only accepts connections from this computer, every attempt uses fresh PKCE, state and nonce values, the ID token is checked against OpenAI's signing keys, and a returning sign-in that comes back for another registration or another ChatGPT account is refused. Sign out revokes the session at OpenAI and tells you if OpenAI did not confirm it; deleting the account revokes it too.
+- Only the client id, e-mail, ChatGPT account id and refresh token are stored, in your system's password store. The access token stays in memory and is refreshed when it nears expiry; the rotating refresh token is saved on every refresh. If the session ends, the error says to edit the account and choose Continue with ChatGPT again.
+- Plan chats use OpenAI's Responses API, unstored and streamed, with the profile's system prompt as instructions. Images, PDFs and text files can be attached. Audio and video are not supported on this route and are refused before anything is sent. Temperature and output-length settings are not accepted by plan usage and are left out. A usage-limit answer says which limit was hit and where to review it.

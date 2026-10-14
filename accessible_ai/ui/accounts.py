@@ -15,6 +15,7 @@ from accessible_ai.models import (
     API_MODE_MESSAGES,
     API_MODE_RESPONSES,
     Account,
+    PROVIDER_CHATGPT,
     PROVIDER_CLAUDE,
     PROVIDER_COMMAND_CODE,
     PROVIDER_DEEPSEEK,
@@ -28,6 +29,7 @@ from accessible_ai.models import (
     PROVIDER_OPENROUTER,
     PROVIDER_Z_AI,
 )
+from accessible_ai.providers import chatgpt
 from accessible_ai.providers.config import apply_builtin_provider_defaults, is_builtin_provider
 from accessible_ai.services.model_service import ModelService
 from accessible_ai.storage.credentials import CredentialStore, CredentialStoreError
@@ -47,6 +49,7 @@ LIST_DIALOG_SIZE = wx.Size(650, 480)
 PROVIDER_ORDER = [
     PROVIDER_OPENROUTER,
     PROVIDER_OPENAI,
+    PROVIDER_CHATGPT,
     PROVIDER_CLAUDE,
     PROVIDER_GEMINI,
     PROVIDER_Z_AI,
@@ -69,6 +72,12 @@ BUILTIN_PROVIDER_NOTES = {
     PROVIDER_OPENAI: (
         "OpenAI connection addresses are built in. Enter an account name and your OpenAI API key. "
         "You do not need to enter or verify any URL."
+    ),
+    PROVIDER_CHATGPT: (
+        "Uses your ChatGPT plan instead of an API key. Choose Continue with ChatGPT, sign in in your "
+        "browser, and allow BlindPilot to use your plan. Chats count toward your plan's usage limits, "
+        f"which you can review at {chatgpt.USAGE_URL}. Images, PDFs and text files can be attached; "
+        "audio and video cannot."
     ),
     PROVIDER_CLAUDE: (
         "Claude connection addresses are built in. Enter an account name and your Anthropic API key. "
@@ -189,6 +198,22 @@ class AccountEditorDialog(wx.Dialog):
         self.provider_note.Wrap(self.FromDIP(NOTE_WRAP))
         outer.Add(self.provider_note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
+        # Shown instead of the API key for a ChatGPT plan account.
+        self.chatgpt_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.chatgpt_button = wx.Button(panel, label="&Continue with ChatGPT")
+        self.chatgpt_sign_out = wx.Button(panel, label="Sign &out of ChatGPT")
+        self.chatgpt_status = wx.StaticText(panel, label="")
+        self.chatgpt_status.SetName("ChatGPT sign-in status")
+        self.chatgpt_row.Add(self.chatgpt_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        self.chatgpt_row.Add(self.chatgpt_sign_out, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        self.chatgpt_row.Add(self.chatgpt_status, 1, wx.ALIGN_CENTER_VERTICAL)
+        outer.Add(self.chatgpt_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
+        # The stored session, a fresh sign-in not yet saved, and the cancel
+        # switch of a sign-in still waiting on the browser.
+        self.chatgpt_session: dict = {}
+        self.chatgpt_pending: dict | None = None
+        self.chatgpt_cancel: threading.Event | None = None
+
         # A wxStaticBoxSizer's contents must be children of its wxStaticBox, not
         # of the surrounding panel, or wxWidgets warns and the box does not
         # reliably hide its contents with itself.
@@ -280,7 +305,10 @@ class AccountEditorDialog(wx.Dialog):
         panel.SetSizer(outer)
 
         self.provider.Bind(wx.EVT_CHOICE, self.on_provider_changed)
+        self.chatgpt_button.Bind(wx.EVT_BUTTON, self.on_chatgpt_sign_in)
+        self.chatgpt_sign_out.Bind(wx.EVT_BUTTON, self.on_chatgpt_sign_out)
         self.Bind(wx.EVT_BUTTON, self.on_ok, id=wx.ID_OK)
+        self.Bind(wx.EVT_BUTTON, self.on_cancel, id=wx.ID_CANCEL)
         self._load()
         self.CentreOnParent()
 
@@ -315,7 +343,14 @@ class AccountEditorDialog(wx.Dialog):
         )
         self.provider.SetSelection(provider_index)
 
-        if self.account.id is not None:
+        if self.account.id is not None and self.account.provider == PROVIDER_CHATGPT:
+            # The credential slot holds the ChatGPT session, not a key; it
+            # must never land in the key field.
+            try:
+                self.chatgpt_session = chatgpt.load_session(self.credentials, int(self.account.id))
+            except CredentialStoreError:
+                self.chatgpt_session = {}
+        elif self.account.id is not None:
             # An empty field on OK leaves the stored key as it is (see on_ok),
             # so the label has to say so; the field itself gives nothing away.
             self.api_key_label.SetLabel("API key, blank keeps the stored key:")
@@ -356,7 +391,131 @@ class AccountEditorDialog(wx.Dialog):
 
         self.provider_note.SetLabel(BUILTIN_PROVIDER_NOTES.get(provider, CUSTOM_PROVIDER_NOTE))
         self.provider_note.Wrap(self.FromDIP(NOTE_WRAP))
+        is_chatgpt = provider == PROVIDER_CHATGPT
+        self.api_key_label.Show(not is_chatgpt)
+        self.api_key.Show(not is_chatgpt)
+        self.chatgpt_row.ShowItems(is_chatgpt)
+        self._update_chatgpt_status()
         self.Layout()
+
+    def _chatgpt_signed_in(self) -> dict:
+        """The session OK would keep: a fresh sign-in, else the stored one."""
+        session = self.chatgpt_pending or self.chatgpt_session
+        return session if chatgpt.is_signed_in(session) else {}
+
+    def _update_chatgpt_status(self) -> None:
+        running = self.chatgpt_cancel is not None
+        session = self._chatgpt_signed_in()
+        if running:
+            status = "Waiting for you to finish signing in in your browser."
+        elif session:
+            status = f"Signed in as {session.get('email') or 'your ChatGPT account'}."
+        else:
+            status = "Not signed in."
+        self.chatgpt_status.SetLabel(status)
+        self.chatgpt_button.SetLabel("&Cancel sign-in" if running else "&Continue with ChatGPT")
+        self.chatgpt_sign_out.Enable(bool(session) and not running)
+
+    def on_chatgpt_sign_in(self, event: wx.CommandEvent) -> None:
+        if self.chatgpt_cancel is not None:
+            self.chatgpt_cancel.set()
+            return
+        cancel = threading.Event()
+        self.chatgpt_cancel = cancel
+        previous = dict(self.chatgpt_session)
+        self._update_chatgpt_status()
+
+        def work() -> None:
+            result: dict | None = None
+            error: Exception | None = None
+            try:
+                result = chatgpt.sign_in(previous, cancel)
+            except Exception as exc:
+                error = exc
+            wx.CallAfter(self._chatgpt_sign_in_done, previous, result, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _chatgpt_sign_in_done(
+        self, previous: dict, result: dict | None, error: Exception | None
+    ) -> None:
+        if not self:
+            # The dialog closed while the browser was open: keep nothing.
+            if result:
+                threading.Thread(target=chatgpt.revoke, args=(result,), daemon=True).start()
+            return
+        cancelled = self.chatgpt_cancel is None or self.chatgpt_cancel.is_set()
+        self.chatgpt_cancel = None
+        if result is not None and cancelled:
+            threading.Thread(target=chatgpt.revoke, args=(result,), daemon=True).start()
+        elif result is not None:
+            self.chatgpt_pending = result
+        self._update_chatgpt_status()
+        self.chatgpt_button.SetFocus()
+        if result is not None and not cancelled:
+            if previous.get("client_id"):
+                wx.MessageBox(
+                    f"Signed in to ChatGPT as {result.get('email') or 'your account'}.",
+                    "ChatGPT",
+                    wx.OK | wx.ICON_INFORMATION,
+                    self,
+                )
+            else:
+                # Once, on this account's first sign-in, as OpenAI's guidelines ask.
+                dialog = wx.MessageDialog(
+                    self,
+                    "Chats on this account now use your ChatGPT plan and count toward its usage "
+                    f"limits. You can review and manage that usage at {chatgpt.USAGE_URL}. "
+                    "Choose OK in Account Settings to keep this sign-in.",
+                    "You're using your ChatGPT plan",
+                    wx.OK | wx.ICON_INFORMATION,
+                )
+                dialog.SetOKLabel("&Got it")
+                dialog.ShowModal()
+                dialog.Destroy()
+        elif error is not None and getattr(error, "code", "") != "cancelled":
+            logger.warning("ChatGPT sign-in failed: %s", error)
+            wx.MessageBox(str(error), "ChatGPT sign-in", wx.OK | wx.ICON_ERROR, self)
+
+    def on_chatgpt_sign_out(self, event: wx.CommandEvent) -> None:
+        pending, self.chatgpt_pending = self.chatgpt_pending, None
+        account_id = self.account.id
+        stored = chatgpt.is_signed_in(self.chatgpt_session) and account_id is not None
+        self.chatgpt_sign_out.Disable()
+
+        def work() -> None:
+            confirmed = chatgpt.revoke(pending) if pending else True
+            if stored:
+                try:
+                    confirmed = chatgpt.sign_out(self.credentials, int(account_id)) and confirmed  # type: ignore[arg-type]
+                except CredentialStoreError:
+                    logger.exception("Could not clear the stored ChatGPT session")
+            wx.CallAfter(self._chatgpt_signed_out, confirmed)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _chatgpt_signed_out(self, confirmed: bool) -> None:
+        if not self:
+            return
+        self.chatgpt_session.pop("refresh_token", None)
+        self._update_chatgpt_status()
+        self.chatgpt_button.SetFocus()
+        text = "Signed out of ChatGPT."
+        if not confirmed:
+            text += (
+                " OpenAI did not confirm the sign-out. To be sure, disconnect BlindPilot in "
+                "ChatGPT's settings."
+            )
+        wx.MessageBox(text, "ChatGPT", wx.OK | wx.ICON_INFORMATION, self)
+
+    def on_cancel(self, event: wx.CommandEvent) -> None:
+        if self.chatgpt_cancel is not None:
+            self.chatgpt_cancel.set()
+        pending, self.chatgpt_pending = self.chatgpt_pending, None
+        if pending:
+            # A sign-in the user chose not to keep is ended at OpenAI too.
+            threading.Thread(target=chatgpt.revoke, args=(pending,), daemon=True).start()
+        event.Skip()
 
     def on_ok(self, event: wx.CommandEvent) -> None:
         name = self.name.GetValue().strip()
@@ -369,7 +528,18 @@ class AccountEditorDialog(wx.Dialog):
 
         provider = self._selected_provider()
         api_key = self.api_key.GetValue().strip()
-        if is_builtin_provider(provider) and not api_key:
+        if provider == PROVIDER_CHATGPT:
+            api_key = ""
+            if not self._chatgpt_signed_in():
+                wx.MessageBox(
+                    "Choose Continue with ChatGPT and finish signing in before saving this account.",
+                    "Account Settings",
+                    wx.OK | wx.ICON_ERROR,
+                    self,
+                )
+                self.chatgpt_button.SetFocus()
+                return
+        elif is_builtin_provider(provider) and not api_key:
             wx.MessageBox(
                 f"An API key is required for {PROVIDER_LABELS[provider]}.",
                 "Account Settings",
@@ -441,6 +611,9 @@ class AccountEditorDialog(wx.Dialog):
             # Blank means keep whatever key is stored, as the field's label says.
             if api_key:
                 self.credentials.set_api_key(account_id, api_key)
+            if provider == PROVIDER_CHATGPT and self.chatgpt_pending:
+                chatgpt.store_sign_in(self.credentials, account_id, self.chatgpt_pending)
+                self.chatgpt_pending = None
         except sqlite3.IntegrityError:
             logger.warning("Could not save account because its name is already in use: %s", name)
             wx.MessageBox(
@@ -639,6 +812,12 @@ class AccountsDialog(wx.Dialog):
         )
         if answer != wx.YES:
             return
+        if account.provider == PROVIDER_CHATGPT:
+            try:
+                session = chatgpt.load_session(self.credentials, int(account.id))
+            except CredentialStoreError:
+                session = {}
+            threading.Thread(target=chatgpt.revoke, args=(session,), daemon=True).start()
         try:
             self.credentials.delete_api_key(int(account.id))
         except CredentialStoreError:

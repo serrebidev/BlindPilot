@@ -6,6 +6,7 @@ from typing import Any
 
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_OPENAI = "openai"
+PROVIDER_CHATGPT = "chatgpt"
 PROVIDER_CLAUDE = "claude"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_Z_AI = "z_ai"
@@ -19,6 +20,7 @@ PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 PROVIDER_LABELS = {
     PROVIDER_OPENROUTER: "OpenRouter",
     PROVIDER_OPENAI: "OpenAI",
+    PROVIDER_CHATGPT: "ChatGPT plan",
     PROVIDER_CLAUDE: "Claude",
     PROVIDER_GEMINI: "Gemini",
     PROVIDER_Z_AI: "Z.AI",
