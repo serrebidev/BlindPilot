@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.11 - 2026-10-14
+
+- Command Code effort levels now come from each model's own list, spelled as the model spells them. Auto routing (and the static fallback routes) translated levels into one vocabulary -- "max" and "high" became "xhigh" -- but the current CLI validates per model, so a level many models do not take (Kimi K3 takes low, high, max) was refused and the turn rerun with no effort. The router now sends the strongest name on the chosen model's own list; across the bundled catalog it never names a level the model does not list.
+- A turn whose effort the CLI refuses now retries with the strongest level from the CLI's own "Supported:" list instead of dropping the effort; only a refusal that names no levels (a model with no adjustable effort) still retries bare. The model picker's effort list again offers the full union of names (low, medium, high, xhigh, max).
+
 ## v0.43.10 - 2026-10-14
 
 - Pitched send cues now keep separate cache files for different source paths, so a cue from another session cannot replace the current one.

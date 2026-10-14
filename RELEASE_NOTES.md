@@ -1,8 +1,7 @@
-# BlindPilot 0.43.10
+# BlindPilot 0.43.11
 
-This release adds opt-in task-based model routing for Command Code tabs, contributed by Farhan Khan. It is off by default: leave Model blank and the tab keeps using the model your Command Code CLI is configured with.
+This release fixes Command Code effort levels, which could be refused by the model and leave the turn running with no effort at all.
 
-- Choose "Auto (choose for each task)" under Model, or type /model auto, to opt a tab in. Each turn is then routed by the task itself: a short lookup or a small text or label edit runs on the cheapest eligible model, free models included, while anything touching security, accessibility, migration, a release, a deploy, payment, data loss, race conditions, concurrency, multi-agent work, or refactoring runs on a stronger one.
-- Prices come from the price catalog bundled with your installed Command Code CLI, so routing follows the prices your CLI actually charges; a hand-picked table is used only when that catalog cannot be read. Models are also filtered by your plan, and a model whose upstream may train on the prompt is never chosen.
-- The chosen route is announced when it changes and is shown in Model, Session Status. A hand-picked model and effort still override routing at any time.
-- If an Auto turn hits a rate limit or runs out of credits before it has answered or run a tool, BlindPilot announces one retry on a model the installed catalog confirms is free. A turn that has already produced output or run a tool is never replayed.
+- BlindPilot sent some Command Code turns with the effort "xhigh" translated from the model's own top level. The current Command Code CLI checks the level against the chosen model's own list -- Kimi K3, for example, takes low, high, max -- so those turns were refused with 'Unknown effort "xhigh"' and rerun bare. Auto routing now picks the strongest level from the chosen model's own list, spelled exactly as that model spells it, and the fallback routes do the same.
+- If a level is still refused -- say, one picked by hand from an older BlindPilot -- the retry now uses the strongest level from the CLI's own "Supported:" list instead of dropping the effort. Only a model with no adjustable effort at all still retries without one.
+- The Model picker's effort list for Command Code again offers every level a model may take: low, medium, high, xhigh, max.
