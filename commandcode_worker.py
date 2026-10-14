@@ -567,9 +567,7 @@ class CommandcodeWorker(threading.Thread):
                     )
                 else:
                     retry_effort = ""
-                    self._on_activity(
-                        "tool", f"{self._effort_note} Running the turn without one."
-                    )
+                    self._on_activity("tool", f"{self._effort_note} Running the turn without one.")
                 self._close_process()
                 self._reset_run_state()
                 self._run_turn(binary, retry_effort, self._run_model)
@@ -738,7 +736,7 @@ class CommandcodeWorker(threading.Thread):
                     # the levels this model takes, in the CLI's own words.
                     marker = lowered.find("supported:")
                     if marker >= 0:
-                        rest = lowered[marker + len("supported:"):]
+                        rest = lowered[marker + len("supported:") :]
                         self._effort_supported = [
                             name.strip().strip(".")
                             for name in rest.split(",")
