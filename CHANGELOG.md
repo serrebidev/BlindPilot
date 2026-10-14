@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.9 - 2026-10-14
+
+- The packaged macOS icon's Retina entries now match the dimensions the icon generator declares for each ICNS type; a test verifies every packaged entry against the generator's size table.
+
 ## v0.43.8 - 2026-10-14
 
 - Command Code turns no longer fail with `No session "<id>" found to resume` when the saved conversation is gone -- cleaned up, or saved in a different folder. The prompt runs once more as a fresh conversation, the new session id is adopted by the tab, and the old conversation's history is said to be lost rather than the turn dying. A retry that also dies on the model's effort level is still retried bare; the two retries now work in whatever order Command Code refuses them.
