@@ -9,8 +9,12 @@ tying the router to nothing.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import multiprocessing
+import os
+from pathlib import Path
 
 import commandcode_router as router
+import pytest
 
 CATALOG = """| Id (use EXACTLY this) | Name | Context | Efforts | $/1M in/out · cache read | Min plan | Best for |
 |---|---|---|---|---|---|---|
@@ -20,6 +24,41 @@ CATALOG = """| Id (use EXACTLY this) | Name | Context | Efforts | $/1M in/out ·
 | `moonshotai/kimi-k3` | Kimi K3 | 1M | low, high, max | $3/$15 · cache $0.3 | Go and above | long |
 | `claude-sonnet-5` | Claude Sonnet 5 | 1M | low, medium, high | $2/$10 · cache $0.2 (write $2.5) | Pro and above | smart |
 """
+
+
+def _record_limit_after_read(state_path: str, read_ready, continue_write) -> None:
+    """Write a short cooldown after another process has reached the same state."""
+    path = Path(state_path)
+    original_read_text = Path.read_text
+    paused = False
+
+    def pause_after_read(self, *args, **kwargs):
+        nonlocal paused
+        result = original_read_text(self, *args, **kwargs)
+        if self == path and not paused:
+            paused = True
+            read_ready.set()
+            assert continue_write.wait(10)
+        return result
+
+    Path.read_text = pause_after_read
+    try:
+        assert router.record_limit_hit(5, now=datetime(2026, 10, 14, 2, tzinfo=timezone.utc))
+    finally:
+        Path.read_text = original_read_text
+
+
+def _hold_usage_state_lock(state_path: str, acquired, release) -> None:
+    with router._usage_state_file_lock(Path(state_path)):
+        acquired.set()
+        assert release.wait(10)
+
+
+def _record_limit_in_process(state_path: str, code: int, attempting, completed) -> None:
+    os.environ[router._USAGE_STATE_ENV] = state_path
+    attempting.set()
+    assert router.record_limit_hit(code, now=datetime(2026, 10, 14, 2, tzinfo=timezone.utc))
+    completed.set()
 
 
 def test_parse_prices_reads_the_table_shape():
@@ -298,6 +337,73 @@ def test_short_rate_limit_does_not_shorten_credit_cooldown(monkeypatch, tmp_path
     assert router.cooling_down(now=moment + timedelta(minutes=29)) is True
 
 
+def test_short_cooldown_cannot_overwrite_longer_cooldown_from_another_process(
+    monkeypatch, tmp_path
+):
+    state = tmp_path / "usage.json"
+    state.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+    context = multiprocessing.get_context("spawn")
+    read_ready = context.Event()
+    continue_write = context.Event()
+    writer = context.Process(
+        target=_record_limit_after_read,
+        args=(str(state), read_ready, continue_write),
+    )
+    writer.start()
+    try:
+        assert read_ready.wait(10)
+        moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+        assert router.record_limit_hit(10, now=moment)
+        continue_write.set()
+        writer.join(10)
+        assert writer.exitcode == 0
+    finally:
+        continue_write.set()
+        if writer.is_alive():
+            writer.terminate()
+            writer.join()
+
+    assert router.cooling_down(now=moment + timedelta(minutes=29)) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="uses Windows msvcrt locking")
+def test_windows_usage_state_lock_blocks_a_competing_process(monkeypatch, tmp_path):
+    state = tmp_path / "usage.json"
+    state.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+    context = multiprocessing.get_context("spawn")
+    acquired = context.Event()
+    release = context.Event()
+    attempting = context.Event()
+    completed = context.Event()
+    holder = context.Process(target=_hold_usage_state_lock, args=(str(state), acquired, release))
+    writer = context.Process(
+        target=_record_limit_in_process,
+        args=(str(state), 10, attempting, completed),
+    )
+    holder.start()
+    try:
+        assert acquired.wait(10)
+        writer.start()
+        assert attempting.wait(10)
+        assert completed.wait(0.25) is False
+        release.set()
+        holder.join(10)
+        writer.join(10)
+        assert holder.exitcode == 0
+        assert writer.exitcode == 0
+    finally:
+        release.set()
+        for process in (holder, writer):
+            if process.is_alive():
+                process.terminate()
+                process.join()
+
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+    assert router.cooling_down(now=moment + timedelta(minutes=29)) is True
+
+
 def test_failed_atomic_state_replacement_keeps_original(monkeypatch, tmp_path):
     state = tmp_path / "usage.json"
     state.write_text('{"other": "preserved"}', encoding="utf-8")
@@ -311,7 +417,7 @@ def test_failed_atomic_state_replacement_keeps_original(monkeypatch, tmp_path):
     assert router.record_limit_hit(5) is False
 
     assert state.read_text(encoding="utf-8") == '{"other": "preserved"}'
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["usage.json"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == [".usage.json.lock", "usage.json"]
 
 
 def test_other_exit_codes_are_not_limit_hits(monkeypatch, tmp_path):
