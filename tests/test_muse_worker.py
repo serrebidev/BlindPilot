@@ -1653,6 +1653,7 @@ def test_a_truncated_answer_is_completed_from_the_session_log(monkeypatch):
         {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
     ]
     _with_script(monkeypatch, frames)
+    monkeypatch.setattr(muse_worker, "muse_session_access_error", lambda _path: "")
     monkeypatch.setattr(muse_worker, "muse_session_log_text", lambda _path: "log")
     monkeypatch.setattr(
         muse_worker,

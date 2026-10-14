@@ -114,10 +114,13 @@ def _how_long(seconds: float) -> str:
 # Hermes advertises its permission surface as slash commands and config rather
 # than per-turn flags, so BlindPilot's picker maps onto the closest Hermes
 # behaviour: whether this session may act without asking.
+# "dontAsk" is deliberately absent: the picker's text for it is
+# "Approval prompts are declined instead of interrupting the run",
+# so it must not set the gateway's yolo either -- _answer_approval
+# declines the request itself, the way Codex's dontAsk does.
 _MODE_TO_YOLO = {
     "bypassPermissions": True,
     "auto": True,
-    "dontAsk": True,
     "acceptEdits": False,
     "default": False,
     "plan": False,
@@ -674,7 +677,13 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             # remote Hermes is not left working on an answer nobody will read.
             # Addressed by the live id -- see steer() for why the stored one
             # cannot be used.
-            for agent_id, status in list(self._subagents.items()):
+            try:
+                snapshot = list(self._subagents.items())
+            except RuntimeError:
+                # The worker thread resized the map mid-snapshot; the
+                # session interrupt below still reaches every subagent.
+                snapshot = []
+            for agent_id, status in snapshot:
                 if status == SUBAGENT_RUNNING and not agent_id.startswith("goal:"):
                     self._request(
                         "subagent.interrupt", {"session_id": target, "subagent_id": agent_id}
@@ -682,8 +691,11 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             self._request("session.interrupt", {"session_id": target})
         # A cancelled turn leaves the connection mid-conversation: the interrupt
         # is answered by frames this worker will not read. Reusing it would hand
-        # those to the next turn, so the connection goes with the cancellation.
-        if self._held is not None:
+        # those to the next turn, so the connection goes with the cancellation --
+        # but only while the turn did not end cleanly. A clean end hands the
+        # connection back for the next turn, and a late cancel must not
+        # close it out from under that turn.
+        if self._held is not None and not self._clean_end:
             self._held.drop()
         transport = self._transport
         # Closing a local gateway can wait two seconds on the process. While
@@ -695,6 +707,11 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
     def run(self) -> None:
         try:
             self._do_run()
+        except Exception as exc:
+            # A crash has to be said, not silent: the shared turn
+            # scaffold reports one, and a screen reader left with
+            # nothing announced is the worst outcome there is.
+            self._on_failed(f"Hermes turn failed: {exc}")
         finally:
             self._accepting_input.clear()
             transport = self._transport
@@ -1750,7 +1767,17 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         command = _first_text(payload.get("command"), payload.get("summary"))
         allowed = _MODE_TO_YOLO.get(self._permission_mode, False)
         choice = ""
-        if allowed:
+        if self._permission_mode == "dontAsk":
+            # The picker's text for this mode: prompts are declined
+            # instead of interrupting the run, the same answer Codex
+            # gives. Asking here would interrupt it.
+            self._on_activity(
+                "tool",
+                f"Declined {command or 'a command'} — the permission mode "
+                "does not allow it. Switch the permission mode to allow it.",
+            )
+            choice = "deny"
+        elif allowed:
             self._on_activity("tool", f"Approved automatically: {command or 'a command'}")
             choice = "once"
         elif self._on_question is not None:

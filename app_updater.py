@@ -266,29 +266,33 @@ def download_update(
     # Keep the published extension: an installer has to stay a .exe to be run.
     suffix = ".exe" if release.asset_name.casefold().endswith(".exe") else ".zip"
     fd, temporary_name = tempfile.mkstemp(prefix=TEMPORARY_PREFIX, suffix=suffix)
-    os.close(fd)
     temporary = Path(temporary_name)
     digest = hashlib.sha256()
     received = 0
     try:
-        with opener(_request(release.asset_url, current_version), timeout=60) as response:
+        # The mkstemp descriptor is written through, not reopened by
+        # name: a by-name reopen in the shared temp folder can be won
+        # by a local rename race between the close and the reopen.
+        with (
+            os.fdopen(fd, "wb") as handle,
+            opener(_request(release.asset_url, current_version), timeout=60) as response,
+        ):
             final_url = getattr(response, "geturl", lambda: release.asset_url)()
             if not _allowed_download_url(final_url):
                 raise UpdateError("GitHub redirected the update to an untrusted host.")
-            with temporary.open("wb") as handle:
-                while True:
-                    if cancel is not None and cancel.is_set():
-                        raise UpdateCancelled("The update download was cancelled.")
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    received += len(chunk)
-                    if received > MAX_UPDATE_BYTES or received > release.asset_size:
-                        raise UpdateError("The update download exceeded its published size.")
-                    digest.update(chunk)
-                    handle.write(chunk)
-                    if progress:
-                        progress(received, release.asset_size)
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise UpdateCancelled("The update download was cancelled.")
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > MAX_UPDATE_BYTES or received > release.asset_size:
+                    raise UpdateError("The update download exceeded its published size.")
+                digest.update(chunk)
+                handle.write(chunk)
+                if progress:
+                    progress(received, release.asset_size)
         if cancel is not None and cancel.is_set():
             raise UpdateCancelled("The update download was cancelled.")
         if received != release.asset_size:
