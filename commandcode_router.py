@@ -119,7 +119,7 @@ _PLAN_RANK = {"go": 1, "goat": 2, "pro": 3, "max": 4}
 _HIGH_RISK = re.compile(
     r"(?i)\b(security|auth(?:entication|orization)?|permission|privacy|accessibility|"
     r"screen.?reader|migration|architecture|release|deploy|payment|data.?loss|"
-    r"race.?condition|concurren|multi.?agent|multiple repos|cross.?repo|refactor)\b"
+    r"race.?condition|concurren\w*|multi.?agent|multiple repos|cross.?repo|refactor)\b"
 )
 _LOOKUP = re.compile(r"(?i)^\s*(explain|summari[sz]e|find|locate|list|show|what|where|check)\b")
 _SMALL_EDIT = re.compile(

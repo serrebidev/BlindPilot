@@ -49,6 +49,7 @@ def test_classify_tiers():
     assert router.classify("Find the setting that controls focus return") == router.QUICK
     assert router.classify("Refactor the authentication flow") == router.DEEP
     assert router.classify("Explain the auth flow") == router.DEEP  # risk beats lookup
+    assert router.classify("Fix a concurrency bug") == router.DEEP
     assert router.classify("Add a caching layer to the media index service") == router.STANDARD
 
 
