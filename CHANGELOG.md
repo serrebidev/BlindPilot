@@ -4,7 +4,7 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 
 ## Unreleased
 
-- Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when no free route is confirmed or a limit cannot be retried safely.
+- Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely.
 
 ## v0.46.0 - 2026-10-14
 

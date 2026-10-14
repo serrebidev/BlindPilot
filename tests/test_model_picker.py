@@ -520,6 +520,24 @@ def test_commandcode_auto_explains_missing_free_route_during_cooldown(monkeypatc
     ]
 
 
+def test_commandcode_auto_explains_router_error_without_blocking_turn(monkeypatch):
+    stub = types.SimpleNamespace(
+        model=blindpilot_app.AUTO_MODEL, effort="", spoken=[], _auto_route=""
+    )
+    stub._announce = stub.spoken.append
+
+    def fail_route(_text):
+        raise ValueError("bad catalog")
+
+    monkeypatch.setitem(sys.modules, "commandcode_router", types.SimpleNamespace(route=fail_route))
+
+    for _ in range(2):
+        assert blindpilot_app.SessionPanel._turn_model(
+            stub, "Continue work", BACKEND_COMMANDCODE
+        ) == ("", "")
+    assert stub.spoken == ["Auto routing unavailable; using the Command Code default."]
+
+
 def test_auto_command_is_opt_in_and_other_backends_keep_literal_auto():
     for backend, expected in (
         (BACKEND_COMMANDCODE, blindpilot_app.AUTO_MODEL),
