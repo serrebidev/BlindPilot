@@ -36,12 +36,15 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -532,6 +535,61 @@ def _usage_state_path() -> Path:
         return Path.home() / ".blindpilot" / "commandcode-usage.json"
 
 
+@contextmanager
+def _usage_state_file_lock(path: Path):
+    """Serialize usage-state updates across router processes."""
+    lock_path = path.with_name(f".{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        lock_file.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            timeout = time.monotonic() + 5
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= timeout:
+                        raise
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _read_usage_state(path: Path) -> dict:
+    try:
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                return loaded
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _has_longer_cooldown(state: dict, deadline: datetime) -> bool:
+    try:
+        existing = datetime.fromisoformat(state.get("commandcode", {}).get("cooldownUntil", ""))
+        if existing.tzinfo is None:
+            existing = existing.replace(tzinfo=timezone.utc)
+        return existing > deadline
+    except (ValueError, AttributeError):
+        return False
+
+
 def record_limit_hit(code: int, now: Optional[datetime] = None) -> bool:
     """Note a rate (5) or credit (10) stop so routing avoids paid models.
 
@@ -547,49 +605,39 @@ def record_limit_hit(code: int, now: Optional[datetime] = None) -> bool:
     path = _usage_state_path()
     deadline = moment + timedelta(minutes=minutes)
     with _USAGE_STATE_LOCK:
-        state: dict = {}
         try:
-            if path.is_file():
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    state = loaded
-        except (OSError, ValueError):
-            state = {}
-        try:
-            existing = datetime.fromisoformat(state.get("commandcode", {}).get("cooldownUntil", ""))
-            if existing.tzinfo is None:
-                existing = existing.replace(tzinfo=timezone.utc)
-            if existing > deadline:
+            if _has_longer_cooldown(_read_usage_state(path), deadline):
                 return True
-        except (ValueError, AttributeError):
-            pass
-        state["commandcode"] = {
-            "cooldownUntil": deadline.isoformat(),
-            "reason": "rate limit" if code == 5 else "credit limit",
-            "recordedAt": moment.isoformat(),
-        }
-        temporary_path: Optional[Path] = None
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=path.parent,
-                prefix=f".{path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temporary:
-                temporary_path = Path(temporary.name)
-                json.dump(state, temporary, indent=2)
-            os.replace(temporary_path, path)
+            with _usage_state_file_lock(path):
+                state = _read_usage_state(path)
+                if _has_longer_cooldown(state, deadline):
+                    return True
+                state["commandcode"] = {
+                    "cooldownUntil": deadline.isoformat(),
+                    "reason": "rate limit" if code == 5 else "credit limit",
+                    "recordedAt": moment.isoformat(),
+                }
+                temporary_path: Optional[Path] = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w",
+                        encoding="utf-8",
+                        dir=path.parent,
+                        prefix=f".{path.name}.",
+                        suffix=".tmp",
+                        delete=False,
+                    ) as temporary:
+                        temporary_path = Path(temporary.name)
+                        json.dump(state, temporary, indent=2)
+                    os.replace(temporary_path, path)
+                finally:
+                    if temporary_path is not None:
+                        try:
+                            temporary_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
         except OSError:
             return False
-        finally:
-            if temporary_path is not None:
-                try:
-                    temporary_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
     return True
 
 
