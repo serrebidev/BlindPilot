@@ -2,6 +2,14 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+- Command Code task routing now treats a lookup phrased as a question ("how does the router pick") as a quick task. A rate or credit stop (the CLI's exit 5 or 10) is recorded, and while it is in effect paid models are withheld: a quick task runs on a free model, a heavier task keeps the CLI's configured model, and the spoken route says Command Code is cooling down.
+
+- Hermes "Don't ask" mode now declines an approval prompt instead of approving it: the picker's text for the mode is "Approval prompts are declined instead of interrupting the run", and the mode no longer tells the gateway to bypass approvals either. A Hermes turn that crashes now says so instead of ending with Send re-enabled and nothing announced. Cancelling a Hermes turn drops the held connection only while the turn did not end cleanly, so a late cancel cannot close the connection the next turn has already adopted, and a subagent list resized mid-cancel can no longer kill the interrupt before it is sent.
+
+- A Command Code result frame the protocol does not name as success or max-turns now fails the turn instead of being announced as a finished answer. The slash-command lookup shuts its `command-code acp` process down on every path, including the unexpected ones, and a stderr reader whose pipe is closed under it is tolerated rather than dying mid-turn.
+
+- A muse.ai child process that survives a kill is reaped with a second bounded wait, so a wedged turn cannot leave Send disabled with no error. FreeBuff's usage probe verifies against the packaged trust store like every other outbound call, an unknown backend is no longer reported as signed in without a check, and a chat API key saved on Windows persists to the per-machine store the code names rather than the broader enterprise one. Update downloads write through the temporary file's own descriptor instead of reopening it by name.
+
 ## v0.43.11 - 2026-10-14
 
 - Command Code effort levels now come from each model's own list, spelled as the model spells them. Auto routing (and the static fallback routes) translated levels into one vocabulary -- "max" and "high" became "xhigh" -- but the current CLI validates per model, so a level many models do not take (Kimi K3 takes low, high, max) was refused and the turn rerun with no effort. The router now sends the strongest name on the chosen model's own list; across the bundled catalog it never names a level the model does not list.
