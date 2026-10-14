@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## Unreleased
+
+- Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when no free route is confirmed or a limit cannot be retried safely.
+
 ## v0.46.0 - 2026-10-14
 
 - A ChatGPT plan account can now look things up the way ChatGPT does. Web search is always available to it, and the model decides when to search. Before, it searched only when the conversation profile had OpenRouter's Web search ticked, so a profile set up for OpenRouter's other tools left it answering that it could not search. The model can also read the pages it finds and check the local date and time, through two tools BlindPilot runs itself. A turn can search, read and search again for up to eight rounds before it must answer. Page reading only reads public http and https addresses, never this computer or the local network, so a page cannot steer it inward. Every step is announced: each search with what it searched for, each page opened or read, and the clock. The sources are listed at the end, as before.
