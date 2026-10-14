@@ -586,7 +586,7 @@ def _has_longer_cooldown(state: dict, deadline: datetime) -> bool:
         if existing.tzinfo is None:
             existing = existing.replace(tzinfo=timezone.utc)
         return existing > deadline
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return False
 
 
