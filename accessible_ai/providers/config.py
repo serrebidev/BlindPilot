@@ -4,7 +4,9 @@ from accessible_ai.models import (
     API_MODE_AUTO,
     API_MODE_CHAT,
     API_MODE_MESSAGES,
+    API_MODE_RESPONSES,
     Account,
+    PROVIDER_CHATGPT,
     PROVIDER_CLAUDE,
     PROVIDER_COMMAND_CODE,
     PROVIDER_DEEPSEEK,
@@ -30,6 +32,9 @@ _ENDPOINTS = {
 _BUILTIN_PROVIDERS: dict[str, tuple[str, str]] = {
     PROVIDER_OPENROUTER: ("https://openrouter.ai/api/v1", API_MODE_AUTO),
     PROVIDER_OPENAI: ("https://api.openai.com/v1", API_MODE_AUTO),
+    # Signed in with ChatGPT rather than a key: plan usage is served on the
+    # Responses API only.
+    PROVIDER_CHATGPT: ("https://api.openai.com/v1", API_MODE_RESPONSES),
     PROVIDER_OPENCODE_GO: ("https://opencode.ai/zen/go/v1", API_MODE_AUTO),
     # Command Code serves both protocols from one host: the OpenAI shape for
     # every model except Claude, which it only serves on the Messages shape.
