@@ -18,6 +18,9 @@ from accessible_ai.models import (
     SEARCH_CONTEXT_DEFAULT,
     SEARCH_CONTEXT_LABELS,
     SEARCH_CONTEXT_SIZES,
+    VERBOSITY_DEFAULT,
+    VERBOSITY_LABELS,
+    VERBOSITY_LEVELS,
 )
 from accessible_ai.storage.database import Database
 
@@ -25,7 +28,7 @@ from accessible_ai.storage.database import Database
 PAD = 8
 PAD_DIALOG = 12
 
-EDITOR_SIZE = wx.Size(760, 700)
+EDITOR_SIZE = wx.Size(760, 740)
 SERVER_TOOLS_HEIGHT = 150
 LIST_DIALOG_SIZE = wx.Size(620, 460)
 
@@ -35,6 +38,7 @@ LIST_DIALOG_SIZE = wx.Size(620, 460)
 _REASONING_VALUES = (REASONING_DEFAULT, *REASONING_EFFORTS)
 _SEARCH_CONTEXT_VALUES = (SEARCH_CONTEXT_DEFAULT, *SEARCH_CONTEXT_SIZES)
 _PDF_ENGINE_VALUES = (PDF_ENGINE_OFF, *PDF_ENGINES)
+_VERBOSITY_VALUES = (VERBOSITY_DEFAULT, *VERBOSITY_LEVELS)
 
 
 def _index_of(values: tuple[str, ...], wanted: str) -> int:
@@ -121,7 +125,8 @@ class ProfileEditorDialog(wx.Dialog):
         self.reasoning_effort.SetName("Thinking effort")
         self.reasoning_effort.SetToolTip(
             "How long a reasoning model thinks before it answers. Models that do not think "
-            "ignore this."
+            "ignore this. On a ChatGPT plan account, a level the model does not offer falls "
+            "back to the model's default, and you are told."
         )
         grid.Add(self.reasoning_effort, 1, wx.EXPAND)
 
@@ -142,6 +147,16 @@ class ProfileEditorDialog(wx.Dialog):
             "keeps the response shorter and cheaper to read."
         )
         grid.Add(self.show_reasoning, 1, wx.EXPAND)
+
+        grid.Add(wx.StaticText(panel, label="Answer length:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.verbosity = wx.Choice(
+            panel, choices=[VERBOSITY_LABELS[value] for value in _VERBOSITY_VALUES]
+        )
+        self.verbosity.SetName("Answer length")
+        self.verbosity.SetToolTip(
+            "How long the answers are. Used by ChatGPT plan accounts; other providers ignore it."
+        )
+        grid.Add(self.verbosity, 1, wx.EXPAND)
 
         grid.Add(
             wx.StaticText(panel, label="Web search results per search:"),
@@ -176,7 +191,10 @@ class ProfileEditorDialog(wx.Dialog):
         outer.Add(grid, 0, wx.EXPAND | wx.ALL, pad_dialog)
 
         outer.Add(
-            wx.StaticText(panel, label="OpenRouter tools the model may call:"),
+            wx.StaticText(
+                panel,
+                label="Server tools the model may call (a ChatGPT plan account uses Web search only):",
+            ),
             0,
             wx.LEFT | wx.RIGHT,
             pad_dialog,
@@ -188,11 +206,12 @@ class ProfileEditorDialog(wx.Dialog):
             ],
             size=wx.Size(-1, panel.FromDIP(SERVER_TOOLS_HEIGHT)),
         )
-        self.server_tools.SetName("OpenRouter tools")
+        self.server_tools.SetName("Server tools")
         self.server_tools.SetToolTip(
-            "OpenRouter runs each of these itself and gives the model the result. Nothing here "
-            "runs on this computer, and nothing stops to ask permission. They apply to "
-            "OpenRouter accounts; other providers ignore them."
+            "The provider runs each of these itself and gives the model the result. Nothing here "
+            "runs on this computer, and nothing stops to ask permission. OpenRouter accounts "
+            "offer all of them; a ChatGPT plan account offers Web search, with the web search "
+            "depth above; other providers ignore them."
         )
         outer.Add(self.server_tools, 0, wx.EXPAND | wx.ALL, pad_dialog)
         outer.Add(wx.StaticText(panel, label="System prompt:"), 0, wx.LEFT | wx.RIGHT, pad_dialog)
@@ -253,6 +272,7 @@ class ProfileEditorDialog(wx.Dialog):
         )
         self.search_context.SetSelection(_index_of(_SEARCH_CONTEXT_VALUES, features.search_context))
         self.pdf_engine.SetSelection(_index_of(_PDF_ENGINE_VALUES, features.pdf_engine))
+        self.verbosity.SetSelection(_index_of(_VERBOSITY_VALUES, features.verbosity))
         for index, (name, _label, _description) in enumerate(OPENROUTER_SERVER_TOOLS):
             self.server_tools.Check(index, name in features.server_tools)
 
@@ -334,6 +354,7 @@ class ProfileEditorDialog(wx.Dialog):
             reasoning_max_tokens=reasoning_tokens,
             show_reasoning=self.show_reasoning.GetValue(),
             pdf_engine=_PDF_ENGINE_VALUES[max(self.pdf_engine.GetSelection(), 0)],
+            verbosity=_VERBOSITY_VALUES[max(self.verbosity.GetSelection(), 0)],
         )
 
         try:

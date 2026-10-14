@@ -20,6 +20,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import threading
 import time
@@ -35,12 +36,24 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import httpx
 
-from accessible_ai.models import GenerationSettings, StreamEvent
+from accessible_ai.models import (
+    REASONING_EFFORT_LABELS,
+    SERVER_TOOL_WEB_SEARCH,
+    GenerationSettings,
+    OpenRouterFeatures,
+    StreamEvent,
+)
 from accessible_ai.providers.base import BaseProvider, ProviderError, iter_sse_json
-from accessible_ai.providers.protocols import LENGTH_LIMIT_NOTICE, TEXT_EXTENSIONS
+from accessible_ai.providers.protocols import (
+    LENGTH_LIMIT_NOTICE,
+    TEXT_EXTENSIONS,
+    SourceCollector,
+)
 from accessible_ai.storage.credentials import CredentialStore
 from accessible_ai.storage.paths import app_data_dir
 
+
+logger = logging.getLogger(__name__)
 
 ISSUER = "https://auth.openai.com"
 AUTHORIZE_URL = ISSUER + "/api/accounts/authorize"
@@ -626,6 +639,72 @@ def responses_input(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str,
     return "\n\n".join(instructions), items
 
 
+def plan_reasoning(features: OpenRouterFeatures) -> dict[str, Any] | None:
+    """The profile's thinking choices as a Responses ``reasoning`` object.
+
+    Plan models think whatever is asked; "Read the thinking" asks for the
+    summary OpenAI streams back, which is all of the thinking it shares.
+    """
+    reasoning: dict[str, Any] = {}
+    if features.reasoning_effort:
+        reasoning["effort"] = features.reasoning_effort
+    if features.show_reasoning and features.reasoning_effort != "none":
+        reasoning["summary"] = "auto"
+    return reasoning or None
+
+
+def plan_tools(features: OpenRouterFeatures) -> list[dict[str, Any]]:
+    """Web search is the one hosted tool plan usage runs; the others are refused."""
+    if SERVER_TOOL_WEB_SEARCH not in features.server_tools:
+        return []
+    tool: dict[str, Any] = {"type": "web_search"}
+    if features.search_context:
+        tool["search_context_size"] = features.search_context
+    return [tool]
+
+
+# The plan's model catalogue by slug: thinking levels, length support and
+# display names, read whenever the model list is fetched.
+_catalog: dict[str, dict[str, Any]] = {}
+# Set once a chat has tried to read the catalogue, so a failure costs one try.
+_catalog_tried = Event()
+
+
+def fit_to_model(
+    model: str, reasoning: dict[str, Any] | None, verbosity: str
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Drop what the chosen model does not take, and say so.
+
+    A plan model rejects a thinking level it does not offer with a 400, and
+    the profile is shared by every model, so an unknown level falls back to the
+    model's own default rather than failing the request.
+    """
+    entry = _catalog.get(model)
+    if not entry:
+        return reasoning, verbosity, ""
+    notice = ""
+    reasoning = dict(reasoning) if reasoning else None
+    levels = [
+        str(level.get("effort"))
+        for level in entry.get("supported_reasoning_levels") or []
+        if isinstance(level, dict)
+    ]
+    effort = (reasoning or {}).get("effort")
+    if reasoning and effort and levels and effort not in levels:
+        reasoning.pop("effort")
+        name = entry.get("display_name") or model
+        default = entry.get("default_reasoning_level") or "its default"
+        notice = (
+            f"{name} does not offer the thinking effort {REASONING_EFFORT_LABELS.get(effort, effort)}, "
+            f"so it used its default, {default}."
+        )
+    if reasoning and not entry.get("supports_reasoning_summary_parameter", True):
+        reasoning.pop("summary", None)
+    if verbosity and not entry.get("support_verbosity", True):
+        verbosity = ""
+    return reasoning or None, verbosity, notice
+
+
 def plan_error(error: Any, status: int | None = None) -> ChatGPTError:
     """The sentence for a plan-usage failure, from its error object or status."""
     error = error if isinstance(error, dict) else {}
@@ -689,6 +768,7 @@ class ChatGPTProvider(BaseProvider):
                     and item.get("visibility", "list") == "list"
                 ):
                     models.append(str(item["slug"]))
+                    _catalog[str(item["slug"])] = item
         elif isinstance(payload, dict):
             for item in payload.get("data", []):
                 if isinstance(item, dict) and isinstance(item.get("id"), str):
@@ -703,6 +783,25 @@ class ChatGPTProvider(BaseProvider):
         body.update({"model": settings.model, "input": items, "store": False, "stream": True})
         if instructions:
             body["instructions"] = instructions
+        if not _catalog and not _catalog_tried.is_set():
+            # Read once per run, so the thinking level can be fitted to the model.
+            # Best effort: the request below reports any real failure itself.
+            _catalog_tried.set()
+            try:
+                self.list_models()
+            except Exception:
+                logger.info("Could not read the ChatGPT plan model catalogue", exc_info=True)
+        reasoning, verbosity, notice = fit_to_model(
+            settings.model, settings.reasoning, settings.verbosity
+        )
+        if notice:
+            yield StreamEvent("status", text=notice)
+        if reasoning:
+            body["reasoning"] = reasoning
+        if verbosity:
+            body["text"] = {"verbosity": verbosity}
+        if settings.tools:
+            body["tools"] = settings.tools
         url = self.build_url(self.account.responses_endpoint)
         with self.client() as client:
             for attempt in (0, 1):
@@ -720,6 +819,7 @@ class ChatGPTProvider(BaseProvider):
     def _read_stream(response: httpx.Response, cancel: Event) -> Iterator[StreamEvent]:
         received_text = False
         finished = False
+        sources = SourceCollector()
         for data in iter_sse_json(response, cancel):
             kind = data.get("type")
             if kind == "response.output_text.delta":
@@ -731,6 +831,18 @@ class ChatGPTProvider(BaseProvider):
                 delta = data.get("delta")
                 if isinstance(delta, str) and delta:
                     yield StreamEvent("reasoning", text=delta)
+            elif kind == "response.reasoning_summary_part.added" and data.get("summary_index"):
+                # Each summary part opens with its own bold heading.
+                yield StreamEvent("reasoning", text="\n\n")
+            elif kind == "response.output_text.annotation.added":
+                sources.absorb({"annotations": [data.get("annotation")]})
+            elif kind == "response.output_item.done":
+                item = data.get("item") or {}
+                if item.get("type") == "web_search_call":
+                    action = item.get("action") or {}
+                    query = action.get("query") or ", ".join(action.get("queries") or [])
+                    said = f"Searched the web for {query}" if query else "Searched the web"
+                    yield StreamEvent("tool", text=said)
             elif kind == "response.completed":
                 finished = True
             elif kind == "response.incomplete":
@@ -755,4 +867,7 @@ class ChatGPTProvider(BaseProvider):
             raise ProviderError("The ChatGPT answer stopped before it was complete. Try again.")
         if not received_text:
             raise ProviderError("The provider completed the request without returning any text.")
+        listed = sources.listing()
+        if listed:
+            yield StreamEvent("sources", text=listed, metadata={"sources": sources.as_list()})
         yield StreamEvent("done")

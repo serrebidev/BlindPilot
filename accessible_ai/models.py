@@ -143,7 +143,7 @@ class Message:
 # is the separate request to turn thinking off on a model that would otherwise
 # do it.
 REASONING_DEFAULT = ""
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "max")
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 REASONING_EFFORT_LABELS = {
     REASONING_DEFAULT: "Model default",
     "none": "No thinking",
@@ -151,7 +151,19 @@ REASONING_EFFORT_LABELS = {
     "low": "Low",
     "medium": "Medium",
     "high": "High",
+    "xhigh": "Extra high",
     "max": "Maximum",
+}
+
+# How long an answer is, for the models that take a length hint. Only a
+# ChatGPT plan account sends it; "" leaves each model at its own default.
+VERBOSITY_DEFAULT = ""
+VERBOSITY_LEVELS = ("low", "medium", "high")
+VERBOSITY_LABELS = {
+    VERBOSITY_DEFAULT: "Model default",
+    "low": "Short",
+    "medium": "Standard",
+    "high": "Long",
 }
 
 # How much of each search result the web-search tool feeds back to the model.
@@ -221,6 +233,9 @@ class OpenRouterFeatures:
     # the model think; it just does not send the thinking back.
     show_reasoning: bool = True
     pdf_engine: str = PDF_ENGINE_OFF
+    # Kept here, though only the ChatGPT plan reads it, so the one JSON
+    # column still holds every per-conversation request choice.
+    verbosity: str = VERBOSITY_DEFAULT
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +246,7 @@ class OpenRouterFeatures:
             "reasoning_max_tokens": self.reasoning_max_tokens,
             "show_reasoning": bool(self.show_reasoning),
             "pdf_engine": self.pdf_engine,
+            "verbosity": self.verbosity,
         }
 
     @classmethod
@@ -252,6 +268,7 @@ class OpenRouterFeatures:
         effort = str(payload.get("reasoning_effort") or "")
         context = str(payload.get("search_context") or "")
         engine = str(payload.get("pdf_engine") or "")
+        verbosity = str(payload.get("verbosity") or "")
         return cls(
             server_tools=tools,
             search_max_results=_positive_int(payload.get("search_max_results")),
@@ -260,6 +277,7 @@ class OpenRouterFeatures:
             reasoning_max_tokens=_positive_int(payload.get("reasoning_max_tokens")),
             show_reasoning=payload.get("show_reasoning", True) is not False,
             pdf_engine=engine if engine in PDF_ENGINES else PDF_ENGINE_OFF,
+            verbosity=verbosity if verbosity in VERBOSITY_LEVELS else VERBOSITY_DEFAULT,
         )
 
     def request_tools(self) -> list[dict[str, Any]]:
@@ -324,6 +342,8 @@ class GenerationSettings:
     reasoning: dict[str, Any] | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     plugins: list[dict[str, Any]] = field(default_factory=list)
+    # Answer length, "" for the model's default. Only the ChatGPT plan sends it.
+    verbosity: str = ""
 
 
 @dataclass(slots=True)

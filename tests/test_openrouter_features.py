@@ -506,7 +506,8 @@ def test_the_profile_editor_shows_and_saves_every_openrouter_choice(tmp_path):
                 (dialog.search_max_results, "Web search results per search"),
                 (dialog.search_context, "Web search depth"),
                 (dialog.pdf_engine, "Read attached PDFs with"),
-                (dialog.server_tools, "OpenRouter tools"),
+                (dialog.server_tools, "Server tools"),
+                (dialog.verbosity, "Answer length"),
             ):
                 assert control.GetName() == name
 
