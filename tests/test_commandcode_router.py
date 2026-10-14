@@ -327,6 +327,16 @@ def test_recorded_cooldown_expires(monkeypatch, tmp_path):
     assert router.cooling_down(now=moment + timedelta(minutes=31)) is False
 
 
+def test_malformed_cooldown_value_does_not_block_new_limit(monkeypatch, tmp_path):
+    state = tmp_path / "usage.json"
+    state.write_text('{"commandcode": {"cooldownUntil": 123}}', encoding="utf-8")
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(state))
+    moment = datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc)
+
+    assert router.record_limit_hit(10, now=moment)
+    assert router.cooling_down(now=moment + timedelta(minutes=29)) is True
+
+
 def test_short_rate_limit_does_not_shorten_credit_cooldown(monkeypatch, tmp_path):
     monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
     moment = datetime(2026, 10, 14, 2, 0, tzinfo=timezone.utc)
