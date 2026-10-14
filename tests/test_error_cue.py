@@ -235,6 +235,41 @@ def test_an_ordinary_failure_keeps_the_session(monkeypatch):
     assert panel._session_id == "thread-1"
 
 
+def test_a_replaced_session_is_adopted_even_though_one_is_held(monkeypatch):
+    """Command Code ran out of session to resume and continued fresh; the tab
+    must follow the new id or every later message repeats the dead resume and
+    the conversation remembers nothing."""
+    panel = _panel(monkeypatch)
+    panel._session_id = "gone"
+    panel._worker = SimpleNamespace(session_replaced=True)
+
+    app.SessionPanel._on_session_started(panel, "fresh")
+
+    assert panel._session_id == "fresh"
+
+
+def test_a_compacted_session_replaces_the_held_one(monkeypatch):
+    panel = _panel(monkeypatch)
+    panel._session_id = "original"
+    panel._worker = SimpleNamespace(session_replaced=True)
+
+    app.SessionPanel._on_session_started(panel, "compacted")
+
+    assert panel._session_id == "compacted"
+
+
+def test_an_incidental_session_id_does_not_move_the_tab(monkeypatch):
+    """A worker whose id is the same conversation -- Claude reporting the
+    resumed id, Hermes reopening one -- must not be able to move the tab."""
+    panel = _panel(monkeypatch)
+    panel._session_id = "held"
+    panel._worker = SimpleNamespace(session_replaced=False)
+
+    app.SessionPanel._on_session_started(panel, "other")
+
+    assert panel._session_id == "held"
+
+
 def test_the_working_indicator_runs_with_the_progress_cue():
     import blindpilot_app
 

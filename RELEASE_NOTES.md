@@ -1,8 +1,9 @@
-# BlindPilot 0.43.7
+# BlindPilot 0.43.8
 
-This release fixes issues found by live testing FreeBuff 0.2.27 after the previous integration audit.
+This release repairs how Command Code conversations survive a missing session, found by auditing the Command Code integration end to end.
 
-- Sign-in and credit usage recognize FreeBuff accounts whose tokens are in the system's secure credential store. Tokens stay there; BlindPilot does not copy them into the account file. Older file-based accounts remain supported.
-- Multiline prompts, accented characters, and emoji reach FreeBuff intact. Custom question answers use the same terminal paste handling.
-- Messages sent while FreeBuff works wait in BlindPilot's queue. Steer stops the current turn and resumes the conversation with your new instruction, avoiding instructions lost by a busy terminal. Stop pauses the queue; use /queue list, /queue clear, or /queue resume to manage pending messages.
-- /history opens Recent Conversations and /usage shows FreeBuff credit usage in BlindPilot.
+- A Command Code turn no longer dies with "No session ... found to resume". When the saved conversation is gone -- Command Code cleans old sessions up, or the conversation was saved in a different folder -- the prompt runs once more as a fresh conversation. BlindPilot says the old conversation could not be found and that the new one starts fresh, and continues from there. You no longer have to start a new conversation by hand after the error.
+- The tab follows the conversation's new session id, so the fresh start keeps working on every later message instead of repeating the failure, and /compact now takes effect: the compacted replacement session is what your next message continues, rather than the uncompacted original.
+- Restoring a conversation from Recent Conversations whose session no longer exists continues as a fresh conversation from the first message.
+- Compacting a conversation that no longer exists says so -- "The conversation to compact could not be found ... Nothing was changed" -- instead of saving an empty summary and reporting success.
+- Two smaller reporting repairs: a Command Code run that ends cleanly without a result names its exit code, and an error result with no message falls back to Command Code's own error output.

@@ -211,6 +211,26 @@ _PERMISSION_STOP_FAILURE = (
     "has nobody to give it."
 )
 
+# A resume whose session is gone. Command Code keeps sessions per project
+# folder and cleans old ones up, so a saved id can point at nothing by the
+# time the next turn runs (measured at 1.69.0: print mode then ends the run
+# with `No session "<id>" found to resume.` on stderr and nothing on stdout).
+# The turn is rerun as a fresh conversation rather than failed, and the new
+# session id is reported through on_session like any other.
+_SESSION_LOST_NOTE = (
+    "Command Code could not find the saved conversation to continue - it may "
+    "have been cleaned up or was saved in a different folder. Running the "
+    "prompt as a fresh conversation."
+)
+
+# The same loss during a compaction, said in compaction's own words: the one
+# thing being compacted is not there, so there is nothing to summarize and
+# nothing was changed.
+_COMPACT_SESSION_LOST = (
+    "The conversation to compact could not be found - it may have been "
+    "cleaned up or was saved in a different folder. Nothing was changed."
+)
+
 # Command Code's documented print-mode exit codes, said as something a listener
 # can act on rather than a number.
 _EXIT_MESSAGES = {
@@ -284,6 +304,7 @@ class CommandcodeWorker(threading.Thread):
         effort: str = "",
         compact: bool = False,
         additional_dirs: tuple[str, ...] = (),
+        allow_session_retry: bool = True,
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -305,6 +326,17 @@ class CommandcodeWorker(threading.Thread):
         # Headless compaction summarizes into a fresh persisted session.
         self._compact = compact
         self._compact_child: Optional[CommandcodeWorker] = None
+        # Whether a lost --resume may be retried as a fresh conversation. A
+        # compaction child must not: summarizing an empty conversation would
+        # "succeed" with a content-free replacement session.
+        self._allow_session_retry = allow_session_retry
+        # Public flags the window reads. session_replaced says the id this
+        # worker reports has replaced the one the caller held (a fresh retry,
+        # or a compaction's summarized replacement) and must be adopted.
+        # lost_session says the id the caller held could not be resumed, so a
+        # failed turn should drop it rather than fail the same way again.
+        self.session_replaced = False
+        self.lost_session = False
         self._on_session = on_session
         self._on_started = on_started
         self._on_activity = on_activity
@@ -334,6 +366,10 @@ class CommandcodeWorker(threading.Thread):
         self._effort_refused = False
         self._effort_retried = False
         self._effort_note = ""
+        # The session this run tried to resume is gone, and whether the fresh
+        # retry has already been spent.
+        self._session_lost = False
+        self._session_retried = False
 
         # Named for what it holds, not `_stderr`: threading.Thread keeps its
         # own attribute under that name.
@@ -425,11 +461,15 @@ class CommandcodeWorker(threading.Thread):
                 model=self._model,
                 effort=self._effort,
                 additional_dirs=self._additional_dirs,
+                # Summarizing an empty conversation would "succeed" with a
+                # content-free replacement session, so a lost session fails
+                # the compaction instead of being retried fresh.
+                allow_session_retry=False,
                 on_session=sessions.append,
                 on_started=self._notify_started,
                 on_activity=lambda _kind, _text: None,
                 on_complete=answers.append,
-                on_failed=self._fail,
+                on_failed=self._compaction_child_failed,
                 on_done=lambda: None,
             )
             self._compact_child = child
@@ -457,6 +497,20 @@ class CommandcodeWorker(threading.Thread):
                     "Conversation compacted into a new session. The original remains in Recent Conversations."
                 )
 
+    def _compaction_child_failed(self, message: str) -> None:
+        """A compaction child failed; say why in compaction's own words.
+
+        The only child failure with its own wording is the one thing being
+        compacted not being there, which Command Code reports as a bare
+        resume error. Either way nothing was changed, and the dead id is
+        dropped so the next message does not fail the same way.
+        """
+        if "found to resume" in message:
+            self.lost_session = True
+            self._fail(_COMPACT_SESSION_LOST)
+        else:
+            self._fail(message)
+
     def _do_run(self) -> None:
         if self._cancelled:
             return
@@ -465,13 +519,35 @@ class CommandcodeWorker(threading.Thread):
             self._fail("Command Code is not installed. Run: npm install -g command-code")
             return
         self._run_turn(binary, self._effort)
-        if self._effort_refused and not self._cancelled and not self._failed:
-            # The level died on this model before the turn started; nothing
-            # was persisted server-side, so the same prompt runs again bare.
-            self._on_activity("tool", f"{self._effort_note} Running the turn without one.")
-            self._close_process()
-            self._reset_run_state()
-            self._run_turn(binary, "")
+        # Each recoverable pre-start failure is retried once, in whatever
+        # order they arrive: the CLI resolves --resume before it checks
+        # effort, so a lost session still leaves the effort to refuse, and a
+        # refused effort still leaves the session to lose.
+        for _ in range(2):
+            if self._cancelled or self._failed:
+                break
+            if self._effort_refused and not self._effort_retried:
+                # The level died on this model before the turn started;
+                # nothing was persisted server-side, so the same prompt runs
+                # again bare.
+                self._effort_retried = True
+                self._on_activity("tool", f"{self._effort_note} Running the turn without one.")
+                self._close_process()
+                self._reset_run_state()
+                self._run_turn(binary, "")
+                continue
+            if self._session_lost and not self._session_retried:
+                # The saved conversation is gone; nothing was persisted, so
+                # the same prompt runs as a fresh conversation and its new
+                # session id is reported through on_session as any other.
+                self._session_retried = True
+                self._on_activity("tool", _SESSION_LOST_NOTE)
+                self._close_process()
+                self._reset_run_state()
+                self._session_id = None
+                self._run_turn(binary, self._run_effort)
+                continue
+            break
         self._clean_end = True
 
     def _run_turn(self, binary: str, effort: str) -> None:
@@ -517,9 +593,10 @@ class CommandcodeWorker(threading.Thread):
         self._finish(proc)
 
     def _reset_run_state(self) -> None:
-        """Forget the refused run before the bare retry, keeping the session."""
+        """Forget the refused run before a retry. Which retries are spent is
+        kept by the retry loop, not here: the session retry preserves the
+        effort retry's one shot, since its run still carries the effort."""
         self._effort_refused = False
-        self._effort_retried = True
         with self._error_lock:
             self._error_lines = []
         self._assistant_parts = []
@@ -600,6 +677,24 @@ class CommandcodeWorker(threading.Thread):
             ):
                 self._effort_note = line.strip().rstrip(".")
                 return self._effort_note
+        return ""
+
+    def _session_lost_line(self) -> str:
+        """The stderr line saying the session to resume is gone, or "".
+
+        A --resume whose session no longer exists -- cleaned up, or saved in a
+        different project folder -- ends the run before it starts (measured at
+        1.69.0: `No session "<id>" found to resume.` on stderr, empty stdout).
+        Only a run that produced nothing qualifies, so a mid-turn mention can
+        never spend the prompt on a second run.
+        """
+        if self._session_seen or self._assistant_parts:
+            return ""
+        with self._error_lock:
+            lines = list(self._error_lines)
+        for line in lines:
+            if "No session" in line and "found to resume" in line:
+                return line.strip()
         return ""
 
     def _read_stdout(self, proc: subprocess.Popen) -> None:
@@ -736,6 +831,11 @@ class CommandcodeWorker(threading.Thread):
     def _remember_session(self, session: str) -> None:
         if session and session != self._session_seen:
             self._session_seen = session
+            if self._session_retried or self._compact:
+                # The id the caller held is either gone (fresh retry) or no
+                # longer the conversation (compaction's replacement), so the
+                # caller must adopt this one rather than keep theirs.
+                self.session_replaced = True
             self._on_session(session)
 
     def _notify_started(self) -> None:
@@ -851,7 +951,9 @@ class CommandcodeWorker(threading.Thread):
             self._remember_session(session)
         self._release_all()
         if subtype == "error":
-            self._fail(self._error_text(frame) or "Command Code reported an error.")
+            self._fail(
+                self._error_text(frame) or self._error_tail() or "Command Code reported an error."
+            )
             return
         if subtype == "max_turns":
             # Out of turns, which is not the same as a failed turn: print mode
@@ -945,10 +1047,18 @@ class CommandcodeWorker(threading.Thread):
             # only a run that produced nothing may be rerun silently.
             self._effort_refused = True
             return
+        if self._allow_session_retry and self._session_lost_line() and not self._session_retried:
+            # The saved conversation is gone; the turn is retried fresh the
+            # same way, by _do_run. The caller's id is dead either way.
+            self._session_lost = True
+            self.lost_session = True
+            return
         message = _EXIT_MESSAGES.get(code) if code is not None else None
         if message is None:
             message = "Command Code stopped before the turn completed"
-            message += f" (exit code {code})." if code else "."
+            # A missing code and a clean exit 0 with no result line say
+            # different things to whoever debugs them, so both are named.
+            message += f" (exit code {code})." if code is not None else "."
         detail = self._error_tail()
         if detail:
             message = f"{message} {detail}"

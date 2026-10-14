@@ -532,6 +532,52 @@ def test_failed_compaction_does_not_switch_from_original(worker_env, monkeypatch
     assert rec.kinds().count("done") == 1
 
 
+def test_compacting_a_gone_session_fails_instead_of_faking_a_summary(worker_env, monkeypatch):
+    # Measured at 1.69.0: the compaction child's --resume dies the same way
+    # any resume does. Summarizing the fresh, empty conversation it would
+    # otherwise fall back to would save a content-free session and call the
+    # compaction a success, so the loss is said plainly instead.
+    rec = _Recorder()
+    monkeypatch.setattr(
+        commandcode_worker.subprocess,
+        "Popen",
+        lambda *_a, **_k: _FakeProcess(
+            lines=[], stderr=['No session "gone" found to resume.'], returncode=1
+        ),
+    )
+    worker = _worker(rec, compact=True)
+    worker.run()
+
+    assert rec.texts("session") == []
+    assert rec.texts("complete") == []
+    assert rec.texts("failed") == [
+        "The conversation to compact could not be found - it may have been "
+        "cleaned up or was saved in a different folder. Nothing was changed."
+    ]
+    assert worker.lost_session is True
+    assert rec.kinds().count("done") == 1
+
+
+def test_a_successful_compaction_says_its_session_was_replaced(worker_env, monkeypatch):
+    rec = _Recorder()
+    processes = iter(
+        [
+            _FakeProcess(
+                lines=[_result(subtype="success", sessionId="original", finalText="Summary")]
+            ),
+            _FakeProcess(
+                lines=[_result(subtype="success", sessionId="compacted", finalText="Ready")]
+            ),
+        ]
+    )
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda *_a, **_k: next(processes))
+    worker = _worker(rec, compact=True)
+    worker.run()
+
+    assert rec.texts("session") == ["compacted"]
+    assert worker.session_replaced is True
+
+
 # --------------------------------------------------------------------------
 # Refusals
 # --------------------------------------------------------------------------
@@ -905,6 +951,108 @@ def test_a_failed_retry_fails_like_any_other_run(worker_env, monkeypatch):
     assert len(argv_log) == 2
     assert rec.texts("complete") == []
     assert any("boom" in line for line in rec.texts("failed"))
+
+
+# --------------------------------------------------------------------------
+# A session that is no longer there
+# --------------------------------------------------------------------------
+
+
+def test_a_lost_session_runs_again_as_a_fresh_conversation(worker_env, monkeypatch):
+    # Measured at 1.69.0: a --resume whose session is gone -- cleaned up, or
+    # saved in a different project folder -- ends the run before it starts,
+    # with `No session "<id>" found to resume.` on stderr.
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], stderr=['No session "gone" found to resume.'], returncode=1),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done fresh")]),
+        argv_log,
+    )
+
+    _worker, rec = _run(session_id="gone")
+
+    assert "--resume" in argv_log[0] and "gone" in argv_log[0]
+    assert "--resume" not in argv_log[1]
+    assert rec.texts("complete") == ["done fresh"]
+    assert rec.texts("session") == ["s1"]
+    assert any("fresh conversation" in line for line in rec.activity("tool"))
+    # The tab held the dead id; it must adopt the replacement.
+    assert _worker.session_replaced is True
+
+
+def test_a_lost_session_retry_still_gets_the_bare_effort_retry(worker_env, monkeypatch):
+    # The CLI resolves --resume before it checks effort (measured at 1.69.0),
+    # so the fresh retry runs with the effort still set -- and must still be
+    # retried bare when that model refuses the level, instead of the ordering
+    # turning one recoverable failure into two hard ones.
+    argv_log: list = []
+    runs = iter(
+        [
+            _FakeProcess(lines=[], stderr=['No session "gone" found to resume.'], returncode=1),
+            _FakeProcess(
+                lines=[],
+                stderr=["Kimi K2.7 Code has no adjustable reasoning effort."],
+                returncode=1,
+            ),
+            _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="done")]),
+        ]
+    )
+
+    def _launch(*args, **kwargs):
+        argv_log.append(args[0])
+        return next(runs)
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", _launch)
+
+    rec = _Recorder()
+    worker = CommandcodeWorker(
+        "do the thing",
+        "gone",
+        "C:\\work",
+        "plan",
+        effort="xhigh",
+        on_session=rec.callback("session"),
+        on_started=rec.callback("started"),
+        on_activity=rec.callback("activity"),
+        on_complete=rec.callback("complete"),
+        on_failed=rec.callback("failed"),
+        on_done=rec.callback("done"),
+    )
+    worker.start()
+    worker.join(20)
+
+    assert len(argv_log) == 3
+    assert "--resume" in argv_log[0] and "--effort" in argv_log[0]
+    assert "--resume" not in argv_log[1] and "--effort" in argv_log[1]
+    assert "--resume" not in argv_log[2] and "--effort" not in argv_log[2]
+    assert rec.texts("complete") == ["done"]
+
+
+def test_a_clean_exit_without_a_result_names_the_exit_code(worker_env):
+    worker_env["proc"] = _FakeProcess(lines=[], returncode=0)
+
+    _worker, rec = _run()
+
+    assert any("exit code 0" in line for line in rec.texts("failed"))
+
+
+def test_a_session_lost_after_output_is_not_rerun(worker_env):
+    # Only a run that produced nothing qualifies: a mid-turn mention of the
+    # session on stderr must not spend the prompt twice.
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event({"type": "text_delta", "delta": "half an answer. "}),
+        ],
+        stderr=['No session "gone" found to resume.'],
+        returncode=1,
+    )
+
+    _worker, rec = _run(session_id="gone")
+
+    assert rec.texts("complete") == []
+    assert any("exit code 1" in line for line in rec.texts("failed"))
 
 
 def test_the_newest_withheld_tool_is_named_as_withheld(worker_env):

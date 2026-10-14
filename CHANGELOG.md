@@ -2,6 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.8 - 2026-10-14
+
+- Command Code turns no longer fail with `No session "<id>" found to resume` when the saved conversation is gone -- cleaned up, or saved in a different folder. The prompt runs once more as a fresh conversation, the new session id is adopted by the tab, and the old conversation's history is said to be lost rather than the turn dying. A retry that also dies on the model's effort level is still retried bare; the two retries now work in whatever order Command Code refuses them.
+- The tab adopts a Command Code session id that replaces the one it held, which also makes `/compact` take effect: the compacted replacement session is resumed instead of the uncompacted original. Restoring a conversation whose session no longer exists continues as fresh from the first message instead of forking a new orphan session per message.
+- Compacting a conversation that no longer exists fails with "The conversation to compact could not be found ... Nothing was changed" instead of saving a content-free summary and reporting success.
+- A clean exit with no result reports its exit code, and an error result with no message falls back to Command Code's stderr.
+
 ## v0.43.7 - 2026-10-12
 
 - FreeBuff 0.2.27 sign-in and credit usage work when its token lives in the system's secure credential store rather than `credentials.json`. BlindPilot reads the existing token without copying it into the file and still supports older file-based accounts.

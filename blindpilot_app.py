@@ -329,7 +329,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.43.7"
+APP_VERSION = "0.43.8"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -10419,8 +10419,14 @@ class SessionPanel(wx.Panel):
         self._claude_generation = getattr(self, "_claude_generation", 0) + 1
 
     def _on_session_started(self, session_id: str) -> None:
-        if not self._session_id:
-            self._session_id = session_id
+        # Normally the held id wins, so a worker's incidental ids never move
+        # the tab. One a worker that REPLACED the conversation reports must be
+        # adopted even though an id is held: Command Code after a fresh retry
+        # (the held one is gone) and a compaction's summarized replacement
+        # (the held one is no longer the conversation) are the two cases.
+        if self._session_id and not getattr(self._worker, "session_replaced", False):
+            return
+        self._session_id = session_id
 
     def _begin_stream_response(self) -> int:
         """Open a new response (header row) the first time a turn produces output.
@@ -10712,9 +10718,10 @@ class SessionPanel(wx.Panel):
             # takes the same one and the two prompts copy as one response.
             self._response_count = max(self._response_count, self._rows[-1].response_number)
         if getattr(self._worker, "lost_session", False):
-            # Codex could not resume this conversation, so the id names
-            # nothing. The next message starts a fresh one, as the worker
-            # has already said, rather than failing the same way again.
+            # The backend could not resume this conversation -- Codex says so
+            # on its failure, Command Code on a lost --resume -- so the id
+            # names nothing. The next message starts a fresh one, as the
+            # worker has already said, rather than failing the same way again.
             self._session_id = None
         # The failure stays in the list as a row of its own. The status bar
         # line is overwritten by the next event, and a list that looks the
