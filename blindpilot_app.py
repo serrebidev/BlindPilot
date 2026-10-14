@@ -9886,6 +9886,11 @@ class SessionPanel(wx.Panel):
         except Exception:  # noqa: BLE001 - routing must never stop a turn
             return "", self.effort
         if not chosen.model:
+            if getattr(chosen, "cooldown", False):
+                note = "Auto could not confirm a free model during cooldown; using the Command Code default."
+                if note != getattr(self, "_auto_route", ""):
+                    self._auto_route = note
+                    self._announce(note)
             return "", self.effort
         description = chosen.describe()
         if description != getattr(self, "_auto_route", ""):

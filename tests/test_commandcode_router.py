@@ -300,10 +300,24 @@ def test_route_runs_quick_on_free_while_cooling_down(monkeypatch, tmp_path):
         "Find the setting that controls focus return", catalog=catalog, static=True
     )
     assert forced.model == quick.model
-    # A heavier task keeps the CLI's configured model: no paid model may run.
-    standard = router.route("Add a caching layer to the media index service", catalog=catalog)
-    assert standard.model == ""
-    assert standard.tier == router.STANDARD
+    for task, tier in (
+        ("Add a caching layer to the media index service", router.STANDARD),
+        ("Refactor the authentication flow", router.DEEP),
+    ):
+        chosen = router.route(task, catalog=catalog)
+        assert chosen.model == "inclusionai/ling-3.1-flash:free"
+        assert chosen.tier == tier
+        assert chosen.cooldown is True
+        assert "free model during cooldown" in chosen.describe()
+        assert "cools down" in chosen.describe()
+    assert (
+        router.route("Refactor the authentication flow", catalog=catalog, include_free=False).model
+        == ""
+    )
+    catalog["inclusionai/ling-3.1-flash:free"]["minPlan"] = "max"
+    unavailable = router.route("Refactor the authentication flow", catalog=catalog)
+    assert unavailable.model == ""
+    assert unavailable.cooldown is True
 
 
 def test_route_without_catalog_keeps_configured_model_during_cooldown(monkeypatch, tmp_path):
@@ -314,6 +328,7 @@ def test_route_without_catalog_keeps_configured_model_during_cooldown(monkeypatc
     for static in (False, True):
         for task in ("Fix the small typo", "Add a caching layer to the media index service"):
             chosen = router.route(task, catalog={}, now=moment, static=static)
+            assert chosen.cooldown is True
             assert chosen.model == ""
             assert chosen.effort == ""
 
