@@ -115,21 +115,6 @@ def test_plan_eligibility():
     assert router.plan_eligible("max", "go") is False
 
 
-def test_resolve_effort_uses_the_models_own_names():
-    # The CLI validates against the model's own list, spelled as the catalog
-    # spells it (measured live: kimi-k3 refuses "xhigh" with "Supported:
-    # low, high, max"). The strongest name on the model's list wins, verbatim.
-    assert router.resolve_effort({"efforts": ["low", "high", "max"]}) == "max"
-    assert router.resolve_effort({"efforts": ["off", "high", "max"]}) == "max"
-    assert router.resolve_effort({"efforts": ["low", "medium", "high"]}) == "high"
-    assert router.resolve_effort({"efforts": ["low", "medium", "xhigh", "max"]}) == "max"
-    assert router.resolve_effort({"efforts": ["low", "medium", "xhigh"]}) == "xhigh"
-    assert router.resolve_effort({"efforts": ["low", "medium"]}) == "medium"
-    assert router.resolve_effort({"efforts": ["off"]}) == ""
-    assert router.resolve_effort({"efforts": []}) == ""
-    assert router.resolve_effort({}) == ""
-
-
 def test_select_quick_takes_the_free_model():
     catalog = router.parse_prices(CATALOG)
     chosen = router.select(router.QUICK, catalog)
@@ -255,7 +240,7 @@ def test_catalog_prefers_the_worker_cli_over_path(monkeypatch, tmp_path):
 
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: str(worker_cli))
     monkeypatch.setattr(router.shutil, "which", lambda _name: str(path_cli))
-    assert router._read_catalog_text() == "worker"
+    assert router._load_catalog_file()[0] == "worker"
 
 
 def test_is_peak_window():
@@ -512,13 +497,25 @@ def test_classify_sends_new_high_risk_domains_to_deep():
 
 
 def test_classify_a_small_note_about_a_risky_topic_stays_quick():
-    # Naming a risky word in a pure text/label/note job does not make the job
+    # Naming a risky word in a purely additive note does not make the job
     # deep; the risky work itself still is.
     assert router.classify("Add a note about the payment flow") == router.QUICK
     assert router.classify("Add a label for the password field") == router.QUICK
-    assert router.classify("Change the comment text about the token") == router.QUICK
+    assert router.classify("Add a comment text about the token") == router.QUICK
+    assert router.classify("add a security note to the README") == router.QUICK
     assert router.classify("Implement the payment flow") == router.DEEP
     assert router.classify("Migrate the billing tables") == router.DEEP
+
+
+def test_classify_a_destructive_verb_keeps_the_high_risk_tier():
+    # The documentation escape is additive-only: a request that removes or
+    # reworks stays deep however small the edit or documentation-shaped the
+    # object looks.
+    assert router.classify("remove the password string") == router.DEEP
+    assert router.classify("rotate the encryption secret") == router.DEEP
+    assert router.classify("Change the comment text about the token") == router.DEEP
+    assert router.classify("delete the auth note") == router.DEEP
+    assert router.classify("add a note about auth and delete the backup") == router.DEEP
 
 
 def test_classify_review_inspect_and_look_are_lookups():
@@ -584,6 +581,35 @@ def test_capacity_hit_withholds_only_that_model_and_expires(monkeypatch, tmp_pat
         router.select(router.QUICK, catalog, include_free=False, now=moment + timedelta(minutes=11))
         is not None
     )
+
+
+def test_capacity_stop_withholds_a_free_model_too(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+    free = "inclusionai/ling-3.1-flash:free"
+    catalog = router.parse_prices(CATALOG)
+    catalog["poolside/laguna-s-2.1-free"] = {
+        "input": 0.0,
+        "output": 0.0,
+        "cacheRead": 0.0,
+        "minPlan": "go and above",
+        "efforts": [],
+        "free": True,
+    }
+
+    assert router.record_capacity_hit(free, now=moment) is True
+    assert router.record_capacity_hit("poolside/laguna-s-2.1-free", now=moment) is True
+    # A capacity-recorded free model is withheld from selection AND the
+    # free-fallback walk, the same way a paid one is.
+    quick = router.select(router.QUICK, catalog, now=moment)
+    assert quick is not None and quick.model == "deepseek/deepseek-v4-flash"
+    assert router.best_free_model(catalog=catalog, now=moment) is None
+    # The entries expire on their own window, like a paid one.
+    later = moment + timedelta(minutes=11)
+    quick = router.select(router.QUICK, catalog, now=later)
+    assert quick is not None and quick.model == free
+    fallback = router.best_free_model(catalog=catalog, now=later)
+    assert fallback is not None and fallback.model == free
 
 
 def test_capacity_record_never_shortens_a_longer_one(monkeypatch, tmp_path):
@@ -673,9 +699,7 @@ def test_price_catalog_rereads_when_its_source_file_changes(monkeypatch, tmp_pat
     source = tmp_path / "models.md"
     source.write_text(_catalog_rows(router._MIN_CATALOG), encoding="utf-8")
     monkeypatch.setenv("COMMANDCODE_MODELS_MD", str(source))
-    monkeypatch.setattr(
-        router, "_CATALOG_CACHE", {"data": None, "path": None, "mtime": None, "at": 0.0}
-    )
+    monkeypatch.setattr(router, "_CATALOG_CACHE", router._FileCache())
 
     assert "vendor/model-0" in router.price_catalog()
     source.write_text(

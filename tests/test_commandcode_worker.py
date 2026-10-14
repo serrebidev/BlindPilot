@@ -87,10 +87,10 @@ def worker_env(monkeypatch):
     return state
 
 
-def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5"):
+def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5", prompt="do the thing"):
     rec = _Recorder()
     worker = CommandcodeWorker(
-        "do the thing",
+        prompt,
         session_id,
         "C:\\work",
         "plan",
@@ -1422,6 +1422,9 @@ def test_a_capacity_stop_records_the_model_and_retries_on_the_next_paid(worker_e
 
     assert recorded == ["paid/first"]
     assert routed and routed[0]["exclude_models"] == {"paid/first"}
+    # The retry asks without free candidates, so a QUICK task cannot prefer one.
+    assert routed[0]["include_free"] is False
+    assert routed[0]["context_tokens"] is None
     assert len(argv_log) == 2
     assert argv_log[1][argv_log[1].index("--model") + 1] == "paid/next"
     assert argv_log[1][argv_log[1].index("--effort") + 1] == "high"
@@ -1520,3 +1523,117 @@ def test_a_limit_that_cannot_be_recorded_says_so(worker_env, monkeypatch):
 
     assert any("could not be recorded" in text for text in rec.activity("notice"))
     assert any("insufficient credits" in text for text in rec.texts("failed"))
+
+
+# Measured from the installed CLI dist, in the same table shape the router
+# parses: a QUICK task's cheapest pick is free, and a paid candidate remains
+# beside it.
+_QUICK_CATALOG = """| Id (use EXACTLY this) | Name | Context | Efforts | $/1M in/out · cache read | Min plan | Best for |
+|---|---|---|---|---|---|---|
+| `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash | 1M | off, high, max | $0.15/$0.6 · cache $0.003 | Go and above | fast |
+| `deepseek/deepseek-v4.1-flash` | DeepSeek V4.1 Flash | 1M | low, medium | $0.16/$0.58 · cache $0.003 | Go and above | fast |
+| `inclusionai/ling-3.1-flash:free` | Ling 3.1 Flash | 262K | low, medium, high | $0/$0 · cache $0 | Go and above | cheap |
+"""
+
+
+def test_a_quick_capacity_retry_prefers_a_paid_candidate_over_free(
+    worker_env, monkeypatch, tmp_path
+):
+    # A QUICK task's normal pick is the free model, so the capacity retry
+    # must ask without free candidates or it would "switch" to the model it
+    # would have chosen anyway while paid candidates remain.
+    import commandcode_router as router
+
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    catalog = router.parse_prices(_QUICK_CATALOG)
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda task, **kwargs: router.route(task, catalog=catalog, **kwargs),
+    )
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="paid done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(commandcode_worker, "record_capacity_hit", lambda _model: True)
+
+    _worker, rec = _run(
+        auto_free_fallback=True, model="deepseek/deepseek-v4-flash", prompt="fix the typo"
+    )
+
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
+    assert rec.texts("complete") == ["paid done"]
+
+
+def test_a_capacity_stop_that_cannot_switch_models_announces_it_once(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(
+        lines=[_event({"type": "text_delta", "delta": "half an answer"})],
+        stderr=[_CAPACITY_TEXT],
+        returncode=1,
+    )
+    monkeypatch.setattr(commandcode_worker, "record_capacity_hit", lambda _model: True)
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda *_a, **_k: pytest.fail("a half-run turn must not replay"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    assert rec.activity("notice") == [
+        "Command Code providers were at capacity; this turn cannot switch models."
+    ]
+    assert any("at capacity" in text for text in rec.texts("failed"))
+
+
+def test_the_turns_context_size_is_exposed_for_pricing_and_the_tab(worker_env):
+    # Measured from the installed CLI dist: model_request_end carries the
+    # request's usage, and the request's input side is the context the next
+    # turn re-reads.
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event(
+                {
+                    "type": "model_request_end",
+                    "model": "gpt-5.5",
+                    "usage": {
+                        "inputTokens": 1_000,
+                        "outputTokens": 200,
+                        "cacheReadTokens": 50_000,
+                        "cacheWriteTokens": 300,
+                    },
+                    "stopReason": "end_turn",
+                }
+            ),
+            _event({"type": "text_delta", "delta": "done. "}),
+            _result(subtype="success", sessionId="s1", finalText="done."),
+        ]
+    )
+
+    worker, _rec = _run()
+
+    assert worker.context_tokens == (51_300, 0)
+
+
+def test_a_result_that_reports_usage_alone_still_exposes_the_context_size(worker_env):
+    # The result's usage totals are one request's usage when the stream
+    # carried no model_request_end.
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _result(
+                subtype="success",
+                sessionId="s1",
+                finalText="done",
+                usage={"inputTokens": 10, "outputTokens": 5, "cacheReadTokens": 40},
+            )
+        ]
+    )
+
+    worker, _rec = _run()
+
+    assert worker.context_tokens == (50, 0)
