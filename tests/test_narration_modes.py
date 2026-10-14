@@ -121,6 +121,28 @@ def test_a_notice_is_how_blindpilot_speaks_for_itself(monkeypatch, _capture):
     assert _capture == ["Waiting for 3 background agents to finish."]
 
 
+def test_fallback_notice_does_not_silence_a_final_only_answer(monkeypatch, _capture):
+    panel = _panel(monkeypatch, app.NARRATION_EVERYTHING)
+    panel._session_backend = app.BACKEND_COMMANDCODE
+
+    app.SessionPanel._on_activity(panel, "notice", "Retrying with a free model.")
+    app.SessionPanel._narrate_completed_response(panel, "Finished cleanly.")
+
+    assert _capture == ["Retrying with a free model.", "Command Code. Finished cleanly."]
+
+
+def test_fallback_notice_is_spoken_with_live_rows_off(monkeypatch, _capture):
+    panel = _panel(monkeypatch, app.NARRATION_EVERYTHING)
+    panel._session_backend = app.BACKEND_COMMANDCODE
+    panel._replaying = False
+    monkeypatch.setattr(app.SETTINGS, "live_rows", False)
+
+    app.SessionPanel._on_activity(panel, "notice", "Retrying with a free model.")
+
+    assert _capture == ["Retrying with a free model."]
+    assert panel._assistant_narrated_this_turn is False
+
+
 # ----- the rows are never affected -----
 @pytest.mark.parametrize("mode", [app.NARRATION_EVERYTHING, app.NARRATION_KEEP_UP])
 def test_every_step_is_still_a_row_in_both_modes(monkeypatch, mode):

@@ -204,6 +204,15 @@ def test_add_dir_is_passed_to_next_turn_without_splitting_spaces(tmp_path):
     assert tab.sent[0][3]["additional_dirs"] == (str(directory.resolve()),)
 
 
+def test_only_auto_model_turns_enable_free_limit_fallback():
+    for model, expected in (("", False), (app.AUTO_MODEL, True)):
+        tab = panel()
+        tab.model = model
+        tab._on_send()
+        finish(tab)
+        assert tab.sent[0][3]["auto_free_fallback"] is expected
+
+
 @pytest.fixture
 def offered(monkeypatch):
     """What Command Code's agent advertises over ACP, without starting it."""
