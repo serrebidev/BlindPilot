@@ -3844,7 +3844,10 @@ def _faster_wav(path: str, factor: float) -> str:
     Only the header's sample rate changes; the player does the resampling.
     Written once to the temp folder and reused.
     """
-    out = os.path.join(tempfile.gettempdir(), f"blindpilot-{Path(path).stem}-{factor:.3f}.wav")
+    source_key = hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:12]
+    out = os.path.join(
+        tempfile.gettempdir(), f"blindpilot-{Path(path).stem}-{source_key}-{factor:.3f}.wav"
+    )
     if os.path.isfile(out):
         return out
     with wave.open(path, "rb") as src:
@@ -9858,7 +9861,7 @@ class SessionPanel(wx.Panel):
         # them.
         self._prune_subagents()
         self._subagents_outlive_turn = bool(getattr(worker_type, "subagents_outlive_turn", False))
-        model, effort = self._turn_model(send_text, selected_backend)
+        model, effort = SessionPanel._turn_model(self, send_text, selected_backend)
         self._worker = worker_type(
             send_text,
             self._session_id,

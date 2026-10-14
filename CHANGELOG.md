@@ -4,6 +4,8 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 
 ## Unreleased
 
+- Pitched send cues now keep separate cache files for different source paths, so a cue from another session cannot replace the current one.
+
 - Free-model retry notices are spoken without hiding the completed answer, including when live activity rows are off. Concurrency tasks now route to the deep tier.
 
 - An Auto-routed Command Code turn that hits a rate or credit limit before producing an answer or running a tool gets one announced retry on a coding-focused free model. The installed CLI catalog must confirm the model is free; Ling 3.1 Flash is preferred, with Laguna S 2.1 as the alternate. Manual model choices are not switched.
