@@ -2915,6 +2915,29 @@ def memory_folders(cwd: Optional[str]) -> list[Path]:
     return folders
 
 
+def _replace_agent_file(path: Path, text: str) -> None:
+    """Keep the original agent file if writing its replacement fails."""
+    path = path.resolve()
+    temporary = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            temporary.write(text)
+        if path.exists():
+            shutil.copymode(path, temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def add_memory(folder: Path, name: str, description: str, kind: str, body: str) -> Path:
     """Write a memory as Claude Code does and list it in MEMORY.md.
 
@@ -2933,8 +2956,7 @@ def add_memory(folder: Path, name: str, description: str, kind: str, body: str) 
     )
     index = folder / "MEMORY.md"
     old = index.read_text(encoding="utf-8") if index.exists() else "# Memory index\n"
-    with open(index, "w", encoding="utf-8", newline="") as fh:
-        fh.write(f"{old.rstrip()}\n- [{slug}]({slug}.md) — {description}\n")
+    _replace_agent_file(index, f"{old.rstrip()}\n- [{slug}]({slug}.md) — {description}\n")
     return path
 
 
@@ -2951,8 +2973,7 @@ def delete_memory(path: Path) -> None:
         if f"({path.name})" not in line and not line.startswith(f"- {path.stem}:")
     ]
     if kept != lines:
-        with open(index, "w", encoding="utf-8", newline="") as fh:
-            fh.writelines(kept)
+        _replace_agent_file(index, "".join(kept))
 
 
 @dataclass
@@ -3024,8 +3045,7 @@ def add_taste(home: Path, category: str, text: str) -> Path:
     if not old.strip():
         old = f"# {(category or 'general').capitalize()} taste\n\n"
     folder.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as fh:
-        fh.write(f"{old}- {' '.join(text.split())}\n")
+    _replace_agent_file(path, f"{old}- {' '.join(text.split())}\n")
     return path
 
 
@@ -3050,8 +3070,7 @@ def hermes_memories(home: Path) -> list[tuple[str, str]]:
 def add_hermes_memory(path: Path, text: str) -> None:
     entries = [e for e in hermes_entries(path) if e] if path.exists() else []
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="") as fh:
-        fh.write("\n§\n".join([*entries, text.strip()]))
+    _replace_agent_file(path, "\n§\n".join([*entries, text.strip()]))
 
 
 def entry_text(key: str, editable: str) -> tuple[str, str]:
@@ -3080,8 +3099,7 @@ def delete_entry(key: str, editable: str) -> None:
         lines = file.read_text(encoding="utf-8").splitlines(keepends=True)
         del lines[int(at)]
         text = "".join(lines)
-    with open(file, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
+    _replace_agent_file(file, text)
 
 
 def save_entry(key: str, editable: str, text: str) -> None:
@@ -3089,8 +3107,7 @@ def save_entry(key: str, editable: str, text: str) -> None:
     path, _, at = key.partition("\n")
     file = Path(path)
     if not at:
-        with open(file, "w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
+        _replace_agent_file(file, text)
         return
     if not text.strip():
         raise ValueError("it would be empty; Delete removes it instead")
@@ -3103,8 +3120,7 @@ def save_entry(key: str, editable: str, text: str) -> None:
         end = "\n" if lines[int(at)].endswith("\n") else ""
         lines[int(at)] = f"- {' '.join(text.split())}{end}"
         new = "".join(lines)
-    with open(file, "w", encoding="utf-8", newline="") as fh:
-        fh.write(new)
+    _replace_agent_file(file, new)
 
 
 def agent_files(cwd: Optional[str]) -> list[AgentFiles]:

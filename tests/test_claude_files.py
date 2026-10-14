@@ -233,3 +233,19 @@ def test_an_edit_saves_back_to_just_what_was_edited(tmp_path):
 
     with pytest.raises(ValueError):
         app.save_entry(f"{hermes}\n0", "hermes", "  ")
+
+
+def test_failed_memory_replacement_keeps_original(tmp_path, monkeypatch):
+    memory = tmp_path / "memory.md"
+    memory.write_text("original instructions", encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise OSError("replacement failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(app.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="replacement failed"):
+            app.save_entry(str(memory), "memory", "new instructions")
+
+    assert memory.read_text(encoding="utf-8") == "original instructions"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["memory.md"]
