@@ -51,7 +51,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -136,11 +136,13 @@ _DEEPSEEK_PEAK: dict[str, dict[str, float]] = {
 _PLAN_RANK = {"go": 1, "goat": 2, "pro": 3, "max": 4}
 
 # The task text that makes a tier, ported from the terminal router so the
-# two classify alike. A lookup phrased as a question ("how does the
-# router pick") reads as a lookup too; the high-risk scan runs first, so
-# a question about risky work still lands on deep -- except for a pure
-# small text/label edit, which classify() checks before this: naming a
-# risky word in a note is still a note.
+# two classify alike. The high-risk scan runs first, so a question about
+# risky work lands on deep even when it reads as a lookup ("explain the
+# auth flow"), and a small edit naming a risky word stays deep too ("remove
+# the password string"). The one exception is a purely additive
+# documentation request that only NAMES a risky word, which
+# _documentation_only lets through: naming the word in a note is still a
+# note.
 _HIGH_RISK = re.compile(
     r"(?i)\b(security|auth(?:entication|orization)?|permission|privacy|accessibility|"
     r"screen.?reader|migration|architecture|release|deploy|payment|billing|data.?loss|"
@@ -158,11 +160,49 @@ _SMALL_EDIT = re.compile(
     r"(typo|label|wording|text|string|comment|note|one file|single file|small)\b"
 )
 
+# The documentation escape from the high-risk scan, deliberately narrow: an
+# ADDITIVE verb, a documentation noun, and every risky word sitting inside a
+# documentation phrase ("a security note", "a note about the payment flow",
+# "text in the README"). A verb that edits, removes or implements never takes
+# it -- "remove the password string" is deep however small the edit looks.
+_DOC_VERBS = re.compile(r"(?i)^\s*(add|write|draft|note|mention)\b")
+_DOC_NOUNS = re.compile(
+    r"(?i)\b(note|comment|text|label|wording|string|readme|docs?|documentation)\b"
+)
+# One documentation phrase: optionally a word before the noun ("security
+# note"), the noun, an optional link ("about", "for", "in"), an optional
+# determiner, then the few words it names -- stopping at a clause boundary,
+# so "a note about auth and delete the backup" is not read as one phrase.
+_DOC_PHRASE = re.compile(
+    r"(?i)(?:\b\w+\s+)?\b(?:note|comment|text|label|wording|string|readme|docs?|documentation)\b"
+    r"(?:\s+(?:about|on|for|titled|called|entitled|in|to|regarding))?"
+    r"(?:\s+(?:the|a|an|this|that|these|those|my|our|your))?"
+    r"(?:\s+(?!(?:and|or|but|then|so)\b)[\w./-]+){0,4}"
+)
+
 # A price catalog parses to at least this many rows, or the read is treated as
 # a failure (a format change) rather than trusted.
 _MIN_CATALOG = 20
 
-_CATALOG_CACHE: dict = {"data": None, "path": None, "mtime": None, "at": 0.0}
+
+@dataclass(frozen=True)
+class _FileCache:
+    """One cached file read: its source, the source's mtime, and when it was read."""
+
+    source: str = ""
+    mtime: Optional[float] = None
+    cached_at: float = 0.0
+    data: dict = field(default_factory=dict)
+
+
+def _cache_fresh(cache: _FileCache, source: str, mtime: Optional[float], ttl: float) -> bool:
+    """Whether a cached read still matches its source and its TTL has not run out."""
+    return (
+        time.monotonic() - cache.cached_at < ttl and cache.source == source and cache.mtime == mtime
+    )
+
+
+_CATALOG_CACHE = _FileCache()
 
 
 @dataclass(frozen=True)
@@ -190,21 +230,36 @@ class Route:
         return ", ".join(parts) + "."
 
 
+def _documentation_only(task: str) -> bool:
+    """Whether a task only adds documentation that NAMES a risky word.
+
+    Every risky word must sit inside a documentation phrase and the request
+    must open with an additive verb; anything else keeps the high-risk
+    classification, so "add a security note to the README" is a note while
+    "remove the password string" is still deep work.
+    """
+    if not _DOC_VERBS.search(task) or not _DOC_NOUNS.search(task):
+        return False
+    return _HIGH_RISK.search(_DOC_PHRASE.sub(" ", task)) is None
+
+
 def classify(task: str) -> str:
     """The capability tier a task belongs to.
 
-    A pure small text/label/note edit is ``quick`` even when it names a risky
-    word -- "add a note about the payment flow" is still a note, not deep work
-    -- before the high-risk scan sends anything else touching security, a
-    database, billing or a release to ``deep``. A short lookup is ``quick``;
-    everything else is ``standard``. The order matters: "explain the auth
-    flow" reads as a lookup but names auth, so it lands on ``deep``, which is
-    the safer default for a wrong guess.
+    The high-risk scan runs first, so anything touching security, a
+    database, billing or a release is ``deep`` -- except a purely additive
+    documentation request that only names a risky word
+    (``_documentation_only``), which falls through to the small-edit and
+    lookup rules rather than the deep tier. A pure small text/label/note
+    edit is ``quick``; a short lookup is ``quick``; everything else is
+    ``standard``. The order matters: "explain the auth flow" reads as a
+    lookup but names auth, so it lands on ``deep``, and "remove the
+    password string" stays deep however small the edit looks.
     """
+    if _HIGH_RISK.search(task) and not _documentation_only(task):
+        return DEEP
     if len(task) <= 180 and _SMALL_EDIT.search(task):
         return QUICK
-    if _HIGH_RISK.search(task):
-        return DEEP
     if len(task) <= 180 and _LOOKUP.search(task):
         return QUICK
     return STANDARD
@@ -310,17 +365,6 @@ def tier_effort(tier: str, model_entry: dict) -> str:
     return strongest_effort(efforts)
 
 
-def resolve_effort(entry: dict) -> str:
-    """The best effort a model actually accepts, or "" to omit it.
-
-    Several cheap models take no effort at all (their catalog column is "—"),
-    and an effort sent to one ends the run before it starts, so omission is the
-    safe answer rather than a guess. The answer is the strongest name in the
-    model's own catalog list, spelled exactly as the catalog spells it.
-    """
-    return strongest_effort(entry.get("efforts"))
-
-
 def plan_eligible(min_plan: str, max_plan: str = "go") -> bool:
     """Whether an account at ``max_plan`` may use a model needing ``min_plan``."""
     needed = 1
@@ -354,9 +398,9 @@ def select(
     train on the prompt is filtered out entirely. While a recorded rate or
     credit stop is in effect (``cooldown``), paid models are withheld the same
     way, so only a free model can answer a quick task. A model whose providers
-    were just recorded at capacity is withheld the way a cooldown withholds a
-    paid model, and ``exclude_models`` withholds the models the caller names --
-    the one that just failed a turn, for a retry.
+    were just recorded at capacity is withheld the same way, free or paid, and
+    ``exclude_models`` withholds the models the caller names -- the one that
+    just failed a turn, for a retry.
     """
     if not catalog:
         return None
@@ -379,7 +423,7 @@ def select(
             continue
         if model_id.casefold() in excluded:
             continue
-        if not is_free and capacity_cooling_down(model_id, now):
+        if capacity_cooling_down(model_id, now):
             continue
         if not plan_eligible(entry.get("minPlan", ""), max_plan):
             continue
@@ -439,7 +483,7 @@ def route(
         if chosen is not None:
             return chosen
         if cooldown and include_free:
-            free = best_free_model(catalog=active_catalog, max_plan=max_plan)
+            free = best_free_model(catalog=active_catalog, max_plan=max_plan, now=now)
             if free is not None:
                 return Route(free.model, free.effort, tier, free.cost, free.priced, True)
         return Route(model="", effort="", tier=tier, cooldown=cooldown)
@@ -455,9 +499,18 @@ def route(
 
 
 def best_free_model(
-    *, catalog: Optional[dict] = None, exclude_model: str = "", max_plan: str = "go"
+    *,
+    catalog: Optional[dict] = None,
+    exclude_model: str = "",
+    max_plan: str = "go",
+    now: Optional[datetime] = None,
 ) -> Optional[Route]:
-    """A coding-focused free fallback confirmed by the installed CLI catalog."""
+    """A coding-focused free fallback confirmed by the installed CLI catalog.
+
+    A free model whose providers were just recorded at capacity is skipped
+    the same way ``select`` skips one, so the fallback never lands on the
+    model that just refused the turn.
+    """
     active_catalog = catalog if catalog is not None else price_catalog()
     for model_id in _FREE_FALLBACK_CANDIDATES:
         entry = active_catalog.get(model_id)
@@ -465,6 +518,7 @@ def best_free_model(
             model_id != exclude_model.lower()
             and entry
             and entry.get("free") is True
+            and not capacity_cooling_down(model_id, now)
             and plan_eligible(entry.get("minPlan", ""), max_plan)
         ):
             return Route(model=model_id, effort="", tier="free", cost=0.0, priced=True)
@@ -588,22 +642,16 @@ def _load_catalog_file() -> tuple[str, Optional[Path], Optional[float]]:
     return "", None, None
 
 
-def _read_catalog_text() -> str:
-    return _load_catalog_file()[0]
-
-
 def _catalog_cache_fresh() -> bool:
     """Keep the parsed catalog until its source changes or the TTL runs out."""
-    cached_at = _CATALOG_CACHE["at"]
-    if not isinstance(cached_at, float) or time.monotonic() - cached_at >= _CATALOG_TTL_SECONDS:
-        return False
-    path, mtime = _CATALOG_CACHE["path"], _CATALOG_CACHE["mtime"]
-    if not isinstance(path, Path) or not isinstance(mtime, float):
+    cache = _CATALOG_CACHE
+    if not cache.source:
         return False
     try:
-        return path.stat().st_mtime == mtime
+        mtime = Path(cache.source).stat().st_mtime
     except OSError:
         return False
+    return _cache_fresh(cache, cache.source, mtime, _CATALOG_TTL_SECONDS)
 
 
 def price_catalog() -> dict:
@@ -614,16 +662,13 @@ def price_catalog() -> dict:
     still take over. A cached catalog is re-read when its source file's mtime
     changes, and after ``_CATALOG_TTL_SECONDS`` regardless.
     """
-    cached = _CATALOG_CACHE["data"]
-    if cached is not None and _catalog_cache_fresh():
-        return cached
+    global _CATALOG_CACHE
+    if _CATALOG_CACHE.data and _catalog_cache_fresh():
+        return _CATALOG_CACHE.data
     text, path, mtime = _load_catalog_file()
     data = parse_prices(text) if text else {}
     if len(data) >= _MIN_CATALOG:
-        _CATALOG_CACHE["data"] = data
-        _CATALOG_CACHE["path"] = path
-        _CATALOG_CACHE["mtime"] = mtime
-        _CATALOG_CACHE["at"] = time.monotonic()
+        _CATALOG_CACHE = _FileCache(str(path) if path else "", mtime, time.monotonic(), data)
         return data
     return {}
 
@@ -644,6 +689,11 @@ def price_catalog() -> dict:
 # headlessly, so the recorded wait is a conservative bet and the worker's
 # per-turn free retry covers the tail.
 _LIMIT_COOLDOWN_MINUTES: dict[int, int] = {5: 2, 10: 30}
+
+# What a limit exit code means, said in the recorded reason and in the
+# notice that announces a retry. Both live here so the router and the
+# worker never phrase the same stop two ways.
+LIMIT_LABELS = {5: "rate limit", 10: "credit limit"}
 
 # The code-10 window above is the default; this env var overrides it (parsed
 # defensively -- anything unusable falls back to the default).
@@ -667,7 +717,13 @@ _STATE_CACHE_TTL_SECONDS = 5.0
 _USAGE_STATE_ENV = "COMMANDCODE_USAGE_JSON"
 _USAGE_STATE_LOCK = threading.Lock()
 
-_USAGE_STATE_CACHE: dict = {"path": "", "mtime": None, "at": 0.0, "data": {}}
+_USAGE_STATE_CACHE = _FileCache()
+
+
+def _remember_usage_state(path: Path, mtime: Optional[float], data: dict) -> None:
+    """Refresh the read cache, so a recorded stop is read straight back."""
+    global _USAGE_STATE_CACHE
+    _USAGE_STATE_CACHE = _FileCache(str(path), mtime, time.monotonic(), data)
 
 
 def _usage_state_path() -> Path:
@@ -763,17 +819,11 @@ def _read_usage_state_cached() -> dict:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = None
-    cached_at = _USAGE_STATE_CACHE["at"]
-    fresh = (
-        _USAGE_STATE_CACHE["path"] == str(path)
-        and _USAGE_STATE_CACHE["mtime"] == mtime
-        and isinstance(cached_at, float)
-        and time.monotonic() - cached_at < _STATE_CACHE_TTL_SECONDS
-    )
-    if fresh:
-        return _USAGE_STATE_CACHE["data"]
+    cache = _USAGE_STATE_CACHE
+    if _cache_fresh(cache, str(path), mtime, _STATE_CACHE_TTL_SECONDS):
+        return cache.data
     data = _read_usage_state(path)
-    _USAGE_STATE_CACHE.update(path=str(path), mtime=mtime, at=time.monotonic(), data=data)
+    _remember_usage_state(path, mtime, data)
     return data
 
 
@@ -787,20 +837,17 @@ def _parse_deadline(raw: object) -> Optional[datetime]:
     return deadline
 
 
-def _has_longer_cooldown(state: dict, deadline: datetime) -> bool:
-    try:
-        existing = _parse_deadline(state.get("commandcode", {}).get("cooldownUntil", ""))
-    except AttributeError:
-        # The section is there but is not an object; nothing to compare.
-        return False
-    return existing is not None and existing > deadline
+def _has_longer_stop(state: dict, deadline: datetime, *path: str) -> bool:
+    """Whether the stop recorded at this state path outlasts the new deadline.
 
-
-def _has_longer_capacity(state: dict, model: str, deadline: datetime) -> bool:
-    try:
-        raw = state.get("capacity", {}).get(model, {}).get("until", "")
-    except AttributeError:
-        return False
+    A section that is there but is not an object has nothing to compare, so
+    the new stop may take its place.
+    """
+    raw: object = state
+    for key in path:
+        if not isinstance(raw, dict):
+            return False
+        raw = raw.get(key)
     existing = _parse_deadline(raw)
     return existing is not None and existing > deadline
 
@@ -830,7 +877,7 @@ def _write_usage_state(path: Path, state: dict) -> None:
         mtime = path.stat().st_mtime
     except OSError:
         mtime = None
-    _USAGE_STATE_CACHE.update(path=str(path), mtime=mtime, at=time.monotonic(), data=state)
+    _remember_usage_state(path, mtime, state)
 
 
 def _update_usage_state(check: Callable[[dict], bool], mutate: Callable[[dict], None]) -> bool:
@@ -883,7 +930,7 @@ def record_limit_hit(code: int, now: Optional[datetime] = None) -> bool:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     deadline = moment + timedelta(minutes=minutes)
-    reason = "rate limit" if code == 5 else "credit limit"
+    reason = LIMIT_LABELS[code]
 
     def mutate(state: dict) -> None:
         state["commandcode"] = {
@@ -892,7 +939,9 @@ def record_limit_hit(code: int, now: Optional[datetime] = None) -> bool:
             "recordedAt": moment.isoformat(),
         }
 
-    return _update_usage_state(lambda state: _has_longer_cooldown(state, deadline), mutate)
+    return _update_usage_state(
+        lambda state: _has_longer_stop(state, deadline, "commandcode", "cooldownUntil"), mutate
+    )
 
 
 def record_capacity_hit(model: str, now: Optional[datetime] = None) -> bool:
@@ -917,7 +966,9 @@ def record_capacity_hit(model: str, now: Optional[datetime] = None) -> bool:
         capacity[model] = entry
         state["capacity"] = capacity
 
-    return _update_usage_state(lambda state: _has_longer_capacity(state, model, deadline), mutate)
+    return _update_usage_state(
+        lambda state: _has_longer_stop(state, deadline, "capacity", model, "until"), mutate
+    )
 
 
 def cooling_down(now: Optional[datetime] = None) -> bool:
