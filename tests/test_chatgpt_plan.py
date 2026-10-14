@@ -14,7 +14,6 @@ import json
 import random
 import time
 from threading import Event
-from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -22,6 +21,7 @@ import pytest
 
 from accessible_ai.models import (
     Account,
+    GenerationSettings,
     MessageAttachment,
     PROVIDER_CHATGPT,
     PROVIDER_LABELS,
@@ -390,7 +390,7 @@ def test_a_plan_request_is_streamed_unstored_and_without_unsupported_fields(monk
         )
 
     provider = _provider(monkeypatch, handler)
-    settings = SimpleNamespace(
+    settings = GenerationSettings(
         model="gpt-test",
         messages=[{"role": "system", "content": "Hi"}, {"role": "user", "content": "Say hello"}],
         temperature=0.4,
@@ -413,7 +413,7 @@ def test_a_usage_limit_mid_stream_points_at_chatgpt_usage(monkeypatch):
         return httpx.Response(200, content=_sse(failed))
 
     provider = _provider(monkeypatch, handler)
-    settings = SimpleNamespace(model="m", messages=[{"role": "user", "content": "x"}])
+    settings = GenerationSettings(model="m", messages=[{"role": "user", "content": "x"}])
     with pytest.raises(chatgpt.ChatGPTError, match="chatgpt.com/settings/usage"):
         list(provider.generate(settings, Event()))  # type: ignore[arg-type]
 
@@ -425,7 +425,7 @@ def test_a_stream_that_never_completes_is_an_error(monkeypatch):
         )
 
     provider = _provider(monkeypatch, handler)
-    settings = SimpleNamespace(model="m", messages=[{"role": "user", "content": "x"}])
+    settings = GenerationSettings(model="m", messages=[{"role": "user", "content": "x"}])
     with pytest.raises(ProviderError, match="stopped before"):
         list(provider.generate(settings, Event()))  # type: ignore[arg-type]
 
@@ -446,7 +446,7 @@ def test_one_401_retries_with_a_refreshed_token(monkeypatch):
         )
 
     provider = _provider(monkeypatch, handler)
-    settings = SimpleNamespace(model="m", messages=[{"role": "user", "content": "x"}])
+    settings = GenerationSettings(model="m", messages=[{"role": "user", "content": "x"}])
     events = list(provider.generate(settings, Event()))  # type: ignore[arg-type]
     assert len(calls) == 2 and events[-1].kind == "done"
 
@@ -521,3 +521,108 @@ def test_the_account_dialog_signs_in_instead_of_asking_for_a_key(frame, tmp_path
         assert json.loads(credentials.values[account_id])["refresh_token"] == "refresh-1"
     finally:
         dialog.Destroy()
+
+
+# ----- Thinking, web search and answer length on the plan -----
+#
+# Measured live on 2026-10-14: plan models list their own thinking levels
+# (gpt-6.1-sol: low to max; "none" and "minimal" are a 400), summaries stream
+# as reasoning_summary_text, web search is the only hosted tool accepted, and
+# text.verbosity is honoured.
+
+LIVE_ENTRY = {
+    "slug": "gpt-6.1-sol",
+    "display_name": "GPT-6.1-Sol",
+    "default_reasoning_level": "low",
+    "supported_reasoning_levels": [
+        {"effort": e} for e in ("low", "medium", "high", "xhigh", "max", "ultra")
+    ],
+    "support_verbosity": True,
+    "supports_reasoning_summary_parameter": True,
+    "visibility": "list",
+}
+
+
+def test_profile_choices_become_plan_reasoning_and_web_search():
+    from accessible_ai.models import OpenRouterFeatures, SERVER_TOOL_WEB_SEARCH
+
+    features = OpenRouterFeatures(
+        reasoning_effort="high",
+        show_reasoning=True,
+        server_tools=[SERVER_TOOL_WEB_SEARCH, "openrouter:datetime"],
+        search_context="high",
+    )
+    assert chatgpt.plan_reasoning(features) == {"effort": "high", "summary": "auto"}
+    assert chatgpt.plan_tools(features) == [{"type": "web_search", "search_context_size": "high"}]
+    assert chatgpt.plan_reasoning(OpenRouterFeatures(show_reasoning=False)) is None
+    assert chatgpt.plan_tools(OpenRouterFeatures()) == []
+
+
+def test_a_level_the_model_does_not_offer_falls_back_with_a_notice(monkeypatch):
+    monkeypatch.setitem(chatgpt._catalog, "gpt-6.1-sol", LIVE_ENTRY)
+    reasoning, verbosity, notice = chatgpt.fit_to_model(
+        "gpt-6.1-sol", {"effort": "none", "summary": "auto"}, "low"
+    )
+    assert reasoning == {"summary": "auto"}
+    assert verbosity == "low"
+    assert (
+        notice
+        == "GPT-6.1-Sol does not offer the thinking effort No thinking, so it used its default, low."
+    )
+    kept, _verbosity, quiet = chatgpt.fit_to_model("gpt-6.1-sol", {"effort": "max"}, "")
+    assert kept == {"effort": "max"} and quiet == ""
+
+
+def test_thinking_search_and_sources_reach_the_listener(monkeypatch):
+    monkeypatch.setitem(chatgpt._catalog, "gpt-6.1-sol", LIVE_ENTRY)
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=_sse(
+                {"type": "response.reasoning_summary_text.delta", "delta": "**Checking**"},
+                {"type": "response.reasoning_summary_part.added", "summary_index": 1},
+                {"type": "response.reasoning_summary_text.delta", "delta": "**Answering**"},
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "web_search_call",
+                        "status": "completed",
+                        "action": {"type": "search", "query": "latest NVDA release"},
+                    },
+                },
+                {"type": "response.output_text.delta", "delta": "NVDA 2026.2."},
+                {
+                    "type": "response.output_text.annotation.added",
+                    "annotation": {
+                        "type": "url_citation",
+                        "title": "NV Access | Releases",
+                        "url": "https://www.nvaccess.org/category/releases/",
+                    },
+                },
+                {"type": "response.completed", "response": {}},
+            ),
+        )
+
+    provider = _provider(monkeypatch, handler)
+    settings = GenerationSettings(
+        model="gpt-6.1-sol",
+        messages=[{"role": "user", "content": "Latest NVDA?"}],
+        reasoning={"effort": "medium", "summary": "auto"},
+        tools=[{"type": "web_search"}],
+        verbosity="low",
+    )
+    events = list(provider.generate(settings, Event()))  # type: ignore[arg-type]
+    body = bodies[0]
+    assert body["reasoning"] == {"effort": "medium", "summary": "auto"}
+    assert body["tools"] == [{"type": "web_search"}]
+    assert body["text"] == {"verbosity": "low"}
+    by_kind = {
+        kind: "".join(e.text for e in events if e.kind == kind)
+        for kind in ("reasoning", "tool", "sources")
+    }
+    assert by_kind["reasoning"] == "**Checking**\n\n**Answering**"
+    assert by_kind["tool"] == "Searched the web for latest NVDA release"
+    assert "NV Access | Releases" in by_kind["sources"]

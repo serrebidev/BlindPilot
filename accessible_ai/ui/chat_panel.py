@@ -16,8 +16,10 @@ from accessible_ai.models import (
     Message,
     MessageAttachment,
     Profile,
+    PROVIDER_CHATGPT,
     PROVIDER_OPENROUTER,
 )
+from accessible_ai.providers import chatgpt
 from accessible_ai.services.generation_service import GenerationService
 from accessible_ai.services.model_service import ModelService
 from accessible_ai.storage.credentials import CredentialStore
@@ -968,6 +970,11 @@ class ChatPanel(wx.Panel):
             settings.tools = profile.openrouter.request_tools()
             settings.reasoning = profile.openrouter.request_reasoning()
             settings.plugins = profile.openrouter.request_plugins()
+        elif profile is not None and account.provider == PROVIDER_CHATGPT:
+            # The same profile choices, in the Responses shape plan usage takes.
+            settings.reasoning = chatgpt.plan_reasoning(profile.openrouter)
+            settings.tools = chatgpt.plan_tools(profile.openrouter)
+            settings.verbosity = profile.openrouter.verbosity
         return settings
 
     def _last_assistant_message(self) -> Message | None:
