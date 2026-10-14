@@ -193,7 +193,7 @@ class ProfileEditorDialog(wx.Dialog):
         outer.Add(
             wx.StaticText(
                 panel,
-                label="Server tools the model may call (a ChatGPT plan account uses Web search only):",
+                label="OpenRouter server tools the model may call (ChatGPT plan accounts always have their own):",
             ),
             0,
             wx.LEFT | wx.RIGHT,
@@ -210,8 +210,8 @@ class ProfileEditorDialog(wx.Dialog):
         self.server_tools.SetToolTip(
             "The provider runs each of these itself and gives the model the result. Nothing here "
             "runs on this computer, and nothing stops to ask permission. OpenRouter accounts "
-            "offer all of them; a ChatGPT plan account offers Web search, with the web search "
-            "depth above; other providers ignore them."
+            "offer all of them. A ChatGPT plan account ignores this list: it always has web search, at the "
+            "web search depth above, plus reading web pages and the date and time; other providers ignore them."
         )
         outer.Add(self.server_tools, 0, wx.EXPAND | wx.ALL, pad_dialog)
         outer.Add(wx.StaticText(panel, label="System prompt:"), 0, wx.LEFT | wx.RIGHT, pad_dialog)

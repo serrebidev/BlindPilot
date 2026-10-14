@@ -555,7 +555,7 @@ def test_profile_choices_become_plan_reasoning_and_web_search():
     assert chatgpt.plan_reasoning(features) == {"effort": "high", "summary": "auto"}
     assert chatgpt.plan_tools(features) == [{"type": "web_search", "search_context_size": "high"}]
     assert chatgpt.plan_reasoning(OpenRouterFeatures(show_reasoning=False)) is None
-    assert chatgpt.plan_tools(OpenRouterFeatures()) == []
+    assert chatgpt.plan_tools(OpenRouterFeatures()) == [{"type": "web_search"}]
 
 
 def test_a_level_the_model_does_not_offer_falls_back_with_a_notice(monkeypatch):
@@ -617,7 +617,7 @@ def test_thinking_search_and_sources_reach_the_listener(monkeypatch):
     events = list(provider.generate(settings, Event()))  # type: ignore[arg-type]
     body = bodies[0]
     assert body["reasoning"] == {"effort": "medium", "summary": "auto"}
-    assert body["tools"] == [{"type": "web_search"}]
+    assert body["tools"][0] == {"type": "web_search"}
     assert body["text"] == {"verbosity": "low"}
     by_kind = {
         kind: "".join(e.text for e in events if e.kind == kind)
@@ -626,3 +626,108 @@ def test_thinking_search_and_sources_reach_the_listener(monkeypatch):
     assert by_kind["reasoning"] == "**Checking**\n\n**Answering**"
     assert by_kind["tool"] == "Searched the web for latest NVDA release"
     assert "NV Access | Releases" in by_kind["sources"]
+
+
+# ----- Research: search, read what was found, answer -----
+#
+# Measured live on 2026-10-14: a plan turn that ends in a function call takes
+# its own output items back unchanged (store false) and finishes from the
+# tool's result; leaving the web_search_call out makes it search again.
+
+
+def test_a_tool_call_is_run_here_and_the_turn_carried_on(monkeypatch):
+    monkeypatch.setattr(chatgpt, "fetch_url", lambda url: f"Page text of {url}")
+    bodies: list[dict] = []
+    search_item = {
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "gluten free garlic bread"},
+    }
+    call_item = {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "fetch_url",
+        "arguments": '{"url": "https://example.com/bread"}',
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            events = [
+                {"type": "response.output_item.done", "item": search_item},
+                {"type": "response.output_item.done", "item": call_item},
+                {"type": "response.completed", "response": {}},
+            ]
+        else:
+            events = [
+                {"type": "response.output_text.delta", "delta": "Schar makes one."},
+                {"type": "response.completed", "response": {}},
+            ]
+        return httpx.Response(200, content=_sse(*events))
+
+    provider = _provider(monkeypatch, handler)
+    settings = GenerationSettings(
+        model="gpt-6.1-sol", messages=[{"role": "user", "content": "Find GF garlic bread"}]
+    )
+    events = list(provider.generate(settings, Event()))  # type: ignore[arg-type]
+
+    first, second = bodies
+    names = {tool.get("name") or tool["type"] for tool in first["tools"]}
+    assert {"web_search", "fetch_url", "current_time"} <= names
+    assert first["include"] == ["reasoning.encrypted_content"]
+    assert second["input"][1:] == [
+        search_item,
+        call_item,
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "Page text of https://example.com/bread",
+        },
+    ]
+    said = [e.text for e in events if e.kind == "tool"]
+    assert said == ["Searched the web for gluten free garlic bread", "Reading example.com/bread"]
+    assert "".join(e.text for e in events if e.kind == "text") == "Schar makes one."
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8080/",
+        "http://192.168.1.10/admin",
+        "http://[::1]/",
+        "file:///C:/secret.txt",
+    ],
+)
+def test_page_reading_refuses_this_computer_and_the_local_network(url):
+    assert chatgpt._public_address(url)
+    assert not chatgpt.fetch_url(url).startswith("Address:")
+
+
+def test_page_text_drops_scripts_and_markup():
+    parser = chatgpt._PageText()
+    parser.feed("<html><script>evil()</script><h1>Bread</h1><p>Gluten   free</p></html>")
+    assert parser.text() == "Bread\nGluten free"
+
+
+def test_the_clock_tool_answers_with_the_local_date():
+    output, said = chatgpt.run_local_tool("current_time", "{}")
+    assert str(time.localtime().tm_year) in output
+    assert said == "Checked the date and time"
+
+
+@pytest.mark.parametrize(
+    "action, said",
+    [
+        ({"type": "search", "query": "bread"}, "Searched the web for bread"),
+        (
+            {"type": "open_page", "url": "https://www.nvaccess.org/download/"},
+            "Opened www.nvaccess.org",
+        ),
+        ({"type": "find_in_page", "pattern": "2026.2"}, "Looked in the page for 2026.2"),
+        ({}, "Searched the web"),
+    ],
+)
+def test_each_web_search_step_is_said_for_what_it_did(action, said):
+    assert chatgpt._search_said(action) == said

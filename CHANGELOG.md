@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.46.0 - 2026-10-14
+
+- A ChatGPT plan account can now look things up the way ChatGPT does. Web search is always available to it, and the model decides when to search. Before, it searched only when the conversation profile had OpenRouter's Web search ticked, so a profile set up for OpenRouter's other tools left it answering that it could not search. The model can also read the pages it finds and check the local date and time, through two tools BlindPilot runs itself. A turn can search, read and search again for up to eight rounds before it must answer. Page reading only reads public http and https addresses, never this computer or the local network, so a page cannot steer it inward. Every step is announced: each search with what it searched for, each page opened or read, and the clock. The sources are listed at the end, as before.
+
 ## v0.45.0 - 2026-10-14
 
 - A ChatGPT plan account now takes the conversation profile's choices instead of only answering. Thinking effort is sent as the request's reasoning effort, with a new Extra high level beside Maximum. A level the chosen model does not offer falls back to that model's own default and says so, rather than failing. The plan models refuse No thinking and Minimal, for example, and the model list now records which levels each model offers. "Read the thinking as it arrives" asks for OpenAI's thinking summary, which is read out as it streams, one heading per part. Web search, ticked in the profile's tool list, runs on the plan with the profile's search depth: each search is announced with what it searched for, and the pages the answer cites are listed at the end. A new Answer length setting (Short, Standard or Long) sets how long plan answers are. All of this was measured live against a signed-in plan, which also showed that web search is the only server tool plan usage runs, so the tool list's label and tooltip now say so.

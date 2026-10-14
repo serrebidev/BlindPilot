@@ -77,8 +77,8 @@ BUILTIN_PROVIDER_NOTES = {
         "Uses your ChatGPT plan instead of an API key. Choose Continue with ChatGPT, sign in in your "
         "browser, and allow BlindPilot to use your plan. Chats count toward your plan's usage limits, "
         f"which you can review at {chatgpt.USAGE_URL}. Images, PDFs and text files can be attached; "
-        "audio and video cannot. Thinking effort, reading the thinking, web search and answer "
-        "length are set in the conversation profile."
+        "audio and video cannot. The model can search the web, read the pages it finds and check the "
+        "date and time whenever it needs to. Thinking effort, reading the thinking, search depth and answer length are set in the conversation profile."
     ),
     PROVIDER_CLAUDE: (
         "Claude connection addresses are built in. Enter an account name and your Anthropic API key. "
