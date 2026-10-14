@@ -1,7 +1,8 @@
-# BlindPilot 0.43.11
+# BlindPilot 0.43.12
 
-This release fixes Command Code effort levels, which could be refused by the model and leave the turn running with no effort at all.
+This release hardens Command Code routing and backend failure handling, contributed by Farhan Khan.
 
-- BlindPilot sent some Command Code turns with the effort "xhigh" translated from the model's own top level. The current Command Code CLI checks the level against the chosen model's own list -- Kimi K3, for example, takes low, high, max -- so those turns were refused with 'Unknown effort "xhigh"' and rerun bare. Auto routing now picks the strongest level from the chosen model's own list, spelled exactly as that model spells it, and the fallback routes do the same.
-- If a level is still refused -- say, one picked by hand from an older BlindPilot -- the retry now uses the strongest level from the CLI's own "Supported:" list instead of dropping the effort. Only a model with no adjustable effort at all still retries without one.
-- The Model picker's effort list for Command Code again offers every level a model may take: low, medium, high, xhigh, max.
+- When Command Code reports a rate or credit stop, BlindPilot records a cooldown and withholds paid models while it is in effect: a quick task runs on a free model, a heavier task keeps the CLI's configured model, and the spoken route says Command Code is cooling down. A lookup phrased as a question now counts as a quick task.
+- Hermes "Don't ask" mode now declines approval prompts instead of approving them, and a Hermes turn that crashes says so instead of silently ending. Cancelling a turn no longer risks closing the connection the next turn has adopted.
+- Failed writes no longer lose agent data: agent files are written atomically, backend processes that survive a kill are reaped, unknown result frames fail the turn instead of being announced as finished answers, and update downloads write through the temporary file's own descriptor.
+- wxPython 4.3.2 callback and drawing types are aligned, with focused tests covering the changed paths.

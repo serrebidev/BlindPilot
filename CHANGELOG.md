@@ -2,6 +2,8 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.43.12 - 2026-10-14
+
 - Command Code task routing now treats a lookup phrased as a question ("how does the router pick") as a quick task. A rate or credit stop (the CLI's exit 5 or 10) is recorded, and while it is in effect paid models are withheld: a quick task runs on a free model, a heavier task keeps the CLI's configured model, and the spoken route says Command Code is cooling down.
 
 - Hermes "Don't ask" mode now declines an approval prompt instead of approving it: the picker's text for the mode is "Approval prompts are declined instead of interrupting the run", and the mode no longer tells the gateway to bypass approvals either. A Hermes turn that crashes now says so instead of ending with Send re-enabled and nothing announced. Cancelling a Hermes turn drops the held connection only while the turn did not end cleanly, so a late cancel cannot close the connection the next turn has already adopted, and a subagent list resized mid-cancel can no longer kill the interrupt before it is sent.
