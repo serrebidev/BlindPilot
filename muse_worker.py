@@ -1417,11 +1417,14 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             if method == "item/completed":
                 item = (frame.get("params") or {}).get("item") or {}
                 if str(item.get("kind") or "") == "compaction":
+                    self._clean_end = True
                     self._on_complete("Conversation compacted")
                     return True
             if method == "turn/completed":
+                self._clean_end = True
                 self._on_complete("Conversation compacted")
                 return True
+        self._clean_end = True
         self._on_complete("Compaction accepted; the summary arrives with the next message.")
         return True
 
@@ -1452,6 +1455,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             # at all; the view is paged instead, which is what the protocol
             # tells a client to do when inline history is not what it got.
             self._page_replay()
+        self._clean_end = True
         self._on_complete("")
 
     def _replay_item(self, item: object) -> None:

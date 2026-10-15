@@ -972,6 +972,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         one transport per session, so whoever resumed last receives the events.
         The window says so before this worker is started.
         """
+        if self._ended or self._clean_end:
+            return
         target = self._gateway_session
         if not target:
             self._on_failed("There is no conversation id to reopen")
@@ -1022,6 +1024,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
 
     def _ensure_session(self) -> bool:
         """Create a conversation, or reopen the one we were given."""
+        if self._ended or self._clean_end:
+            return False
         if self._gateway_session:
             # Reopening a stored conversation. Hermes resolves the id through
             # its compression chain, so a conversation that was compacted since
@@ -1116,7 +1120,13 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         return params
 
     def _run_turn(self) -> None:
+        if self._ended or self._clean_end:
+            return
         command = self._as_slash_command()
+        if self._ended or self._clean_end:
+            # The check itself awaited a reply, and that wait can carry the
+            # turn's end: nothing more may be sent once it has.
+            return
         if command is not None:
             self._run_slash_command(command)
             return
@@ -1276,6 +1286,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
 
     def _run_compaction(self) -> None:
         """Compact in place. Hermes answers when the summary is written."""
+        if self._ended or self._clean_end:
+            return
         result = self._call(
             "session.compress",
             {"session_id": self._live_session},
@@ -1833,6 +1845,10 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             self._request("approval.respond", {"request_id": request_id, "choice": choice})
 
     def _turn_complete(self, payload: dict) -> Optional[bool]:
+        if self._ended or self._clean_end:
+            # The ending was already reported; this is a second completion
+            # frame and must not announce the answer, or a failure, twice.
+            return True
         self._accepting_input.clear()
         status = str(payload.get("status") or "complete")
         # Nothing more is coming, so the tail that never finished a sentence is

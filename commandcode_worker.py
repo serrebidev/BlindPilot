@@ -553,6 +553,7 @@ class CommandcodeWorker(threading.Thread):
                 )
             else:
                 self._remember_session(sessions[-1])
+                self._completed = True
                 self._on_complete(
                     "Conversation compacted into a new session. The original remains in Recent Conversations."
                 )
@@ -1103,6 +1104,10 @@ class CommandcodeWorker(threading.Thread):
         self._on_activity("tool", f"{etype}: {first}" if first else etype)
 
     def _handle_result(self, frame: dict) -> None:
+        if self._completed or self._failed:
+            # The reader does not stop at a result line, so a second one must
+            # not announce the finished turn again.
+            return
         subtype = str(frame.get("subtype") or "")
         session = str(frame.get("sessionId") or "")
         if session:
@@ -1190,9 +1195,10 @@ class CommandcodeWorker(threading.Thread):
             except (OSError, subprocess.TimeoutExpired):
                 code = None
         if self._cancelled:
-            if not self._failed:
+            if not self._failed and not self._completed:
                 self._release_all()
                 text = "".join(self._assistant_parts).strip()
+                self._completed = True
                 self._on_complete(text or "Stopped")
             return
         if code in (5, 10):

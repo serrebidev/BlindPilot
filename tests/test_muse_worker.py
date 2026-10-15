@@ -963,6 +963,106 @@ def test_a_resume_only_turn_replays_the_stored_transcript(monkeypatch):
     assert recorder.sessions == ["sess-9"]
 
 
+def _boom_worker(monkeypatch, frames, session=None, **kwargs):
+    """Run a turn whose answer listener raises; return what the listeners saw."""
+    _with_script(monkeypatch, frames)
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = MuseWorker(
+        "",
+        session,
+        ".",
+        "bypassPermissions",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _t: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+        **kwargs,
+    )
+    _run(worker)
+    return completed, failures
+
+
+def test_a_compaction_summary_listener_that_raises_is_not_a_failed_turn(monkeypatch):
+    """The summary settles compaction before it is announced; a listener that
+    cannot take it is not the turn's failure."""
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {"item": {"kind": "compaction", "summary": "The conversation so far"}},
+        },
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, compact=True)
+
+    assert completed == ["Conversation compacted"]
+    assert failures == []
+
+
+def test_a_compaction_turn_end_listener_that_raises_is_not_a_failed_turn(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, compact=True)
+
+    assert completed == ["Conversation compacted"]
+    assert failures == []
+
+
+def test_a_compaction_that_ends_without_a_summary_still_settles_before_saying(monkeypatch):
+    # The wait gives up when the host's stream ends; what it says then is
+    # still a finished answer, not a turn whose failure the listener caused.
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {}},
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, compact=True)
+
+    assert completed == ["Compaction accepted; the summary arrives with the next message."]
+    assert failures == []
+
+
+def test_a_replay_listener_that_raises_is_not_a_failed_turn(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {
+                "session": {"sessionId": "sess-9"},
+                "history": {
+                    "items": [
+                        {"kind": "userMessage", "text": "fix the bug"},
+                        {"kind": "agentMessage", "text": "Fixed."},
+                    ]
+                },
+            },
+        },
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, session="sess-9", resume_only=True)
+
+    assert completed == [""]
+    assert failures == []
+
+
 def test_the_window_can_hold_the_muse_worker_like_any_other():
     from agent_backends import worker_class
 

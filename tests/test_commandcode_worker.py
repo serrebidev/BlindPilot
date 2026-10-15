@@ -274,6 +274,22 @@ def test_an_error_result_is_reported(worker_env):
     assert "complete" not in rec.kinds()
 
 
+def test_a_second_result_line_does_not_announce_the_turn_again(worker_env):
+    """The reader keeps going past a result line, so the stream can carry
+    another one; the finished turn is announced once."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _result(subtype="success", sessionId="s1", finalText="done"),
+            _result(subtype="success", sessionId="s1", finalText="done"),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert rec.texts("complete") == ["done"]
+    assert rec.kinds().count("complete") == 1
+
+
 def test_a_completion_callback_that_raises_is_not_announced_as_a_failed_turn(worker_env):
     """The turn succeeded; a listener that cannot take the answer is not its
     failure. _completed is set before on_complete, and the crash guard reads
@@ -687,6 +703,102 @@ def test_cancel_reports_stopped_without_a_failure(monkeypatch):
     assert rec.kinds()[-1] == "done"
 
 
+def test_cancel_after_the_answer_is_not_reported_a_second_time(monkeypatch):
+    """Stop right after the result line: the answer already settled the turn,
+    so the cancelled path must not announce it again."""
+    rec = _Recorder()
+    monkeypatch.setattr(commandcode_worker, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(commandcode_worker, "subprocess_env", lambda _binary: {})
+    monkeypatch.setattr(commandcode_worker, "end_process_group", lambda *_a, **_k: None)
+    holder: dict = {}
+
+    class _ResultThenCancel(_FakeProcess):
+        def __init__(self):
+            super().__init__(returncode=0)
+            self.stdout = self._lines()
+
+        def _lines(self):
+            yield _result(subtype="success", sessionId="s1", finalText="done")
+            holder["worker"].cancel()
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda *a, **k: _ResultThenCancel())
+    worker = CommandcodeWorker(
+        "do the thing",
+        None,
+        "C:\\work",
+        "plan",
+        on_session=rec.callback("session"),
+        on_started=rec.callback("started"),
+        on_activity=rec.callback("activity"),
+        on_complete=rec.callback("complete"),
+        on_failed=rec.callback("failed"),
+        on_done=rec.callback("done"),
+    )
+    holder["worker"] = worker
+    worker.run()
+
+    assert rec.texts("complete") == ["done"]
+    assert rec.texts("failed") == []
+
+
+def test_a_cancelled_turn_whose_answer_listener_raises_is_not_a_failure(monkeypatch):
+    """The cancelled turn reported its answer before the listener crashed;
+    the listener's own failure is not the turn's."""
+    release = threading.Event()
+    started = threading.Event()
+
+    class _Blocking(_FakeProcess):
+        def __init__(self):
+            super().__init__(returncode=0)
+            first = _event({"type": "run_start", "sessionId": "s1"})
+            self.stdin = _Stdin()
+            self.stdout = self._lines(first)
+            self.stderr = iter(())
+
+        def _lines(self, first):
+            yield first
+            release.wait(10)
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    proc = _Blocking()
+    monkeypatch.setattr(commandcode_worker, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(commandcode_worker, "subprocess_env", lambda _binary: {})
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(commandcode_worker, "end_process_group", lambda *_a, **_k: release.set())
+
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = CommandcodeWorker(
+        "count",
+        None,
+        "C:\\work",
+        "plan",
+        on_session=lambda _sid: None,
+        on_started=lambda: started.set(),
+        on_activity=lambda _k, _t: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+    worker.start()
+    assert started.wait(10)
+    worker.cancel()
+    worker.join(20)
+
+    assert completed == ["Stopped"]
+    assert failures == []
+
+
 def _worker(rec, **extra):
     return CommandcodeWorker(
         "hi",
@@ -755,6 +867,54 @@ def test_compaction_saves_summary_in_new_session_before_switching(worker_env, mo
     assert len(rec.texts("complete")) == 1
     assert rec.kinds().count("done") == 1
     assert "failed" not in rec.kinds()
+
+
+def test_a_compaction_callback_that_raises_is_not_announced_as_a_failed_turn(
+    worker_env, monkeypatch
+):
+    """Compaction settles the turn before its answer, the same way a normal
+    one does: a listener that cannot take the summary is not a failure."""
+    first = _FakeProcess(
+        lines=[
+            _result(
+                subtype="success", sessionId="original", finalText="Objective and unfinished work"
+            )
+        ]
+    )
+    second = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "compacted"}),
+            _result(subtype="success", sessionId="compacted", finalText="Ready"),
+        ]
+    )
+    processes = iter([first, second])
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda argv, **_k: next(processes))
+
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = CommandcodeWorker(
+        "hi",
+        "original",
+        ".",
+        "default",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _t: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+        compact=True,
+    )
+    worker.run()
+
+    assert len(completed) == 1
+    assert "compacted" in completed[0]
+    assert failures == []
 
 
 def test_compaction_announces_free_fallback_and_uses_it_for_both_stages(worker_env, monkeypatch):
