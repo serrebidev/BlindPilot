@@ -2,7 +2,7 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## Unreleased
+## v0.47.4 - 2026-10-15
 
 - Command Code Auto skips Ling 3.1 Flash's retired free tier even when the installed CLI's bundled catalog still lists it as free; Laguna S 2.1 remains available for quick tasks and safe credit-limit retries.
 - History loading scans the providers in parallel, so opening history is faster when several backends have stored conversations.
