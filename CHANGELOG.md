@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.47.1 - 2026-10-14
+
+- Tab and Shift+Tab reach the conversation list in Agent mode's Recent Conversations again. Arrows worked inside the list, but Windows' Tab traversal walked past it in both directions, because the drawn list never carried the tab-stop style Windows looks for. The Hermes conversations and slash command pickers use the same list and are fixed with it. Reported by Kaveinthran.
+
+- The Gemini and Antigravity workers no longer break on Python 3.13 and later, where threading.Thread claims the name their frame handler used. Released builds run on 3.12 and were not affected; running from source on a newer Python was.
+
 ## v0.47.0 - 2026-10-14
 
 - Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely. The cooldown is now shared across processes and matches the model id regardless of case, and a provider-capacity stop gets one announced retry on the next paid model.

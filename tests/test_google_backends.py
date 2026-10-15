@@ -219,7 +219,7 @@ def test_gemini_stream_becomes_a_spoken_turn():
         {"type": "result", "status": "success", "stats": {}},
     ]
     for frame in frames:
-        worker._handle(frame)
+        worker._handle_frame(frame)
     assert recorder.sessions == ["s-1"]
     assert recorder.started == 1
     tools = [text for kind, text in recorder.activity if kind == "tool"]
@@ -237,8 +237,8 @@ def test_gemini_error_result_says_the_one_sentence_that_matters():
         '    \\"message\\": \\"API key not valid. Please pass a valid API key.\\",\\n'
         '    \\"status\\": \\"INVALID_ARGUMENT\\"\\n  }\\n}\\n","code":400}}]'
     )
-    worker._handle({"type": "init", "session_id": "s"})
-    worker._handle(
+    worker._handle_frame({"type": "init", "session_id": "s"})
+    worker._handle_frame(
         {"type": "result", "status": "error", "error": {"type": "unknown", "message": message}}
     )
     assert recorder.failed == ["Gemini CLI: API key not valid. Please pass a valid API key."]
@@ -369,7 +369,7 @@ def test_antigravity_stream_becomes_a_spoken_turn():
         },
     ]
     for frame in frames:
-        worker._handle(frame)
+        worker._handle_frame(frame)
     assert recorder.sessions == [conv]
     tools = [text for kind, text in recorder.activity if kind == "tool"]
     assert tools == [
@@ -384,8 +384,8 @@ def test_antigravity_stream_becomes_a_spoken_turn():
 def test_antigravity_reply_without_deltas_comes_from_the_result():
     recorder = Recorder()
     worker = _worker(AntigravityWorker, recorder)
-    worker._handle({"event": "init", "conversation_id": "c"})
-    worker._handle(
+    worker._handle_frame({"event": "init", "conversation_id": "c"})
+    worker._handle_frame(
         {
             "event": "result",
             "result": {"conversation_id": "c", "status": "SUCCESS", "response": "All good."},
@@ -404,7 +404,7 @@ def test_antigravity_failures_are_readable():
         "type.googleapis.com/google.rpc.LocalizedMessage locale:en-US message:API key not valid. "
         "Please pass a valid API key.]]"
     )
-    worker._handle(
+    worker._handle_frame(
         {"event": "result", "result": {"conversation_id": "c", "status": "ERROR", "error": error}}
     )
     assert recorder.failed == ["Antigravity CLI: API key not valid. Please pass a valid API key."]
@@ -413,7 +413,7 @@ def test_antigravity_failures_are_readable():
 def test_antigravity_signed_out_says_how_to_sign_in():
     recorder = Recorder()
     worker = _worker(AntigravityWorker, recorder)
-    worker._handle(
+    worker._handle_frame(
         {
             "event": "result",
             "result": {
