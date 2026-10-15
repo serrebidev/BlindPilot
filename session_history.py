@@ -53,6 +53,7 @@ import re
 import sqlite3
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -1602,14 +1603,20 @@ def list_history(
         backends = [normalize_backend(backend)]
 
     entries: List[HistoryEntry] = []
-    for name in backends:
-        lister = _LISTERS.get(name)
-        if lister is None:
-            continue
+
+    def load(lister: Callable[[Optional[str]], List[HistoryEntry]]) -> List[HistoryEntry]:
         try:
-            entries.extend(lister(cwd))
+            return lister(cwd)
         except OSError:
-            continue
+            return []
+
+    listers = [_LISTERS[name] for name in backends if name in _LISTERS]
+    if len(listers) == 1:
+        entries.extend(load(listers[0]))
+    elif listers:
+        with ThreadPoolExecutor(max_workers=min(4, len(listers))) as executor:
+            for result in executor.map(load, listers):
+                entries.extend(result)
     entries.sort(key=lambda entry: entry.modified, reverse=True)
     return entries[: max(0, limit)]
 
