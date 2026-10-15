@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import platform
 import shutil
+import subprocess
 from pathlib import Path
 
 import agent_backends
@@ -536,3 +537,71 @@ def test_a_local_log_is_read_and_a_missing_one_is_empty(tmp_path, monkeypatch):
     assert muse_backend.muse_session_log_text(str(log)) == '{"a": 1}\n'
     assert muse_backend.muse_session_log_text("") == ""
     assert muse_backend.muse_session_log_text(str(tmp_path / "missing.jsonl")) == ""
+
+
+def test_a_wsl_log_path_is_an_argument_never_shell_code(monkeypatch):
+    """The path comes from Muse's session index, which a hostile entry can poison.
+
+    It used to be interpolated into ``sh -lc 'head ... "<path>"'``, so a path
+    holding ``"`` and ``$(...)`` ran as the shell's own code inside WSL. It is
+    now one argv element, the way the tail reader already passed it.
+    """
+    _wsl(monkeypatch)
+    seen: list[list] = []
+
+    def _run(argv, **_kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(muse_backend.subprocess, "run", _run)
+    hostile = '/tmp/x"$(touch /tmp/pwned)".jsonl'
+
+    assert muse_backend.muse_session_log_text(hostile) == "{}"
+
+    (argv,) = seen
+    assert argv == [
+        "wsl.exe",
+        "-e",
+        "head",
+        "-c",
+        str(muse_backend._WSL_LOG_CAP_BYTES),
+        "--",
+        hostile,
+    ]
+    assert "sh" not in argv
+
+
+def test_a_failed_live_home_probe_is_retried_not_cached(monkeypatch):
+    """A cold distribution once meant no live host for the rest of the run."""
+    monkeypatch.setattr(muse_backend.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(muse_backend, "_HOME_CACHE", None)
+    monkeypatch.setattr(muse_backend, "_HOME_CHECKED", False)
+    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd=None: ["muse"])
+    opened: list = []
+
+    class _Silent:
+        def __init__(self, *args, **kwargs):
+            opened.append(self)
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def send(self, message):
+            return True
+
+        def receive(self, timeout):
+            return None
+
+        def connected(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(muse_backend, "StdioTransport", _Silent)
+
+    assert muse_backend._muse_home_live() is None
+    assert muse_backend._HOME_CHECKED is False
+    assert muse_backend._muse_home_live() is None
+    assert len(opened) == 2, "the second call must probe again, not reuse the failure"

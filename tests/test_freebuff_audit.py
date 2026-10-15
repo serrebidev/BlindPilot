@@ -35,6 +35,17 @@ def test_corrupt_catalog_timestamp_is_a_cache_miss(monkeypatch, tmp_path, mtime)
     assert ab._read_freebuff_catalog_cache(("binary", 1.0, 10)) == []
 
 
+def test_the_catalog_cache_is_written_beside_the_file_and_moved_into_place(monkeypatch, tmp_path):
+    """A read landing mid-write must never see a half-copied catalog."""
+    cache = tmp_path / "freebuff-catalog.json"
+    monkeypatch.setattr(ab, "_freebuff_catalog_cache_path", lambda: cache)
+
+    ab._write_freebuff_catalog_cache(("binary", 1.5, 10), ["a/b"])
+
+    assert ab._read_freebuff_catalog_cache(("binary", 1.5, 10)) == ["a/b"]
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 def test_keychain_credentials_count_as_signed_in_without_rewriting_them(monkeypatch, tmp_path):
     monkeypatch.setattr(ab.Path, "home", classmethod(lambda _: tmp_path))
     monkeypatch.setattr(ab.platform, "system", lambda: "Windows")
