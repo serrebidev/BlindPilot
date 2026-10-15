@@ -316,3 +316,289 @@ def test_applying_preferences_that_cannot_be_saved_says_so(
     app.MainFrame._apply_preferences(frame, _Dialog())
 
     assert frame.announced == ["Error: could not save settings"]
+
+
+# ----- the shared guard over a bare save -----
+def test_the_helper_announces_a_write_the_file_refused(unwritable, monkeypatch):
+    said: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: said.append(text))
+
+    assert app._save_or_announce({"setup_complete": True}) is False
+    assert said == ["Error: could not save settings"]
+
+
+def test_the_helper_stays_quiet_when_the_write_lands(config_at, tmp_path, monkeypatch):
+    config_at(tmp_path / "config.json")
+    said: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: said.append(text))
+
+    assert app._save_or_announce({"backend": "codex"}) is True
+    assert said == []
+
+
+# ----- the history sort -----
+def test_changing_the_sort_that_cannot_be_saved_says_so(unwritable, monkeypatch):
+    """The picker's order still applies to the open dialog; only the file
+    refuses it, and the conversation count that follows must not be the
+    only thing the user hears."""
+    monkeypatch.setattr(app, "_load_config", dict)
+    said: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: said.append(text))
+    refreshed: list[bool] = []
+
+    class _Stub:
+        sort_picker = type("Picker", (), {"GetSelection": lambda self: 0})()
+        _shown = ["entry"]
+
+        def _current(self):
+            return "entry"
+
+        def _refresh(self, keep):
+            refreshed.append(keep is not None)
+
+    app.HistoryDialog._on_sort(_Stub())
+
+    assert said == ["Error: could not save settings"]
+    assert refreshed == [True], "the open dialog still sorts; only the save failed"
+
+
+# ----- switching between Agent and Chat -----
+class _NoopWindow:
+    def Show(self, _show: bool) -> None:
+        pass
+
+    def SetSelection(self, _index: int) -> None:
+        pass
+
+    def Layout(self) -> None:
+        pass
+
+
+def _mode_frame():
+    """The surface `_set_app_mode` touches on the way to the save, in Agent
+    mode, where there is no chat panel to build."""
+    stub = type(
+        "ModeFrameStub",
+        (),
+        {
+            "_announce_setting": lambda self, text: self.announced.append(text),
+            "_refresh_compact_item": lambda self: None,
+            "_refresh_connect_item": lambda self: None,
+            "_refresh_hermes_sessions_item": lambda self: None,
+            "_refresh_museai_menu": lambda self: None,
+            "focus_for_mode": lambda self: None,
+        },
+    )()
+    stub.announced = []
+    stub._app_mode = app.APP_MODE_AGENT
+    stub.chat_panel = None
+    stub.tab_switcher = _NoopWindow()
+    stub.notebook = _NoopWindow()
+    stub.mode_combo = _NoopWindow()
+    stub._root = _NoopWindow()
+    stub._chat_menu_items = []
+    stub._agent_menu_items = []
+    return stub
+
+
+def test_switching_mode_when_the_file_refuses_says_so(unwritable, monkeypatch):
+    monkeypatch.setattr(app, "_load_config", dict)
+    frame = _mode_frame()
+
+    app.MainFrame._set_app_mode(frame, app.APP_MODE_AGENT)
+
+    assert frame.announced == ["Error: could not save settings"]
+
+
+def test_a_startup_mode_restore_stays_quiet_over_a_refused_file(unwritable, monkeypatch):
+    """The restore claims nothing, so there is nothing to correct - and it
+    runs before the window is on screen, where an error would talk over
+    whoever is starting the application."""
+    monkeypatch.setattr(app, "_load_config", dict)
+    frame = _mode_frame()
+
+    app.MainFrame._set_app_mode(frame, app.APP_MODE_AGENT, announce_change=False)
+
+    assert frame.announced == []
+
+
+# ----- the permission mode picker -----
+def test_changing_the_mode_says_what_it_does_then_the_refusal(unwritable, monkeypatch):
+    """Both lines are needed: the description is what the new mode does, the
+    refusal is that it will not survive a restart. The refusal goes last so
+    it is not followed by anything that sounds like success."""
+    monkeypatch.setattr(app, "_load_config", dict)
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app,
+        "announce",
+        lambda text, urgent=False: events.append(("said", text)),
+    )
+    panel = type(
+        "PanelStub",
+        (),
+        {
+            "mode_picker": type("Picker", (), {"SetSelection": lambda self, index: None})(),
+            "_announce": lambda self, text: events.append(("described", text)),
+        },
+    )()
+
+    app.SessionPanel._set_mode(panel, "plan")
+
+    assert events == [
+        ("described", app._MODE_DESCRIPTIONS["plan"]),
+        ("said", "Error: could not save settings"),
+    ]
+
+
+# ----- finishing the setup flow with a folder that cannot be remembered -----
+def test_a_projects_folder_that_cannot_be_saved_is_reported_after_the_backend(
+    unwritable, monkeypatch
+):
+    """Both announcements queue, so the failure has to be the last one said:
+    ending on "Backend changed to Codex" would leave the user believing the
+    whole setup was stored."""
+    monkeypatch.setattr(app, "_load_config", dict)
+
+    class _Wizard:
+        def __init__(self, *_args, **_kwargs):
+            self.backend = "codex"
+            self.projects_folder = "C:/projects"
+
+        def ShowModal(self):
+            return app.wx.ID_OK
+
+        def Destroy(self):
+            pass
+
+    monkeypatch.setattr(app, "SetupWizard", _Wizard)
+    events: list[str] = []
+    frame = type(
+        "ManageStub",
+        (),
+        {
+            "_backend": "claude",
+            "_projects_folder": "",
+            "_set_backend": lambda self, backend: events.append(f"backend {backend}"),
+            "_announce_setting": lambda self, text: events.append(text),
+        },
+    )()
+
+    app.MainFrame._manage_backends(frame)
+
+    assert events == ["backend codex", "Error: could not save settings"]
+    assert frame._projects_folder == "C:/projects", "the session keeps the chosen folder"
+
+
+# ----- the remote Hermes dialog -----
+def _remote_fields():
+    """The dialog fields `RemoteHermesDialog.apply` reads."""
+
+    def field(value):
+        return type("Field", (), {"GetValue": lambda self: value})()
+
+    return type(
+        "ApplyStub",
+        (),
+        {
+            "_credential_name": lambda self: "password",
+            "_enabled": field(True),
+            "_host": field(" host.example "),
+            "_port": field("1234"),
+            "_secure": field(True),
+            "_user": field("me"),
+            "_key": field("secret"),
+        },
+    )()
+
+
+def test_applying_the_remote_address_carries_the_save_answer(monkeypatch):
+    """`apply` is how the dialog handler learns the file refused the
+    address; dropping the return value makes it describe a connection that
+    was never saved."""
+    monkeypatch.setattr(
+        app, "REMOTE_HERMES", type("RemoteStub", (), {"save": lambda self: False})()
+    )
+
+    assert app.RemoteHermesDialog.apply(_remote_fields()) is False
+
+    monkeypatch.setattr(app, "REMOTE_HERMES", type("RemoteStub", (), {"save": lambda self: True})())
+
+    assert app.RemoteHermesDialog.apply(_remote_fields()) is True
+
+
+def test_a_remote_address_that_cannot_be_saved_says_so_not_the_connection(unwritable, monkeypatch):
+    monkeypatch.setattr(app, "_load_config", dict)
+    monkeypatch.setattr(app, "invalidate_model_options", lambda *_a, **_k: None)
+
+    class _Dialog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def ShowModal(self):
+            return app.wx.ID_OK
+
+        def apply(self):
+            return False
+
+        def Destroy(self):
+            pass
+
+    monkeypatch.setattr(app, "RemoteHermesDialog", _Dialog)
+    said: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: said.append(text))
+
+    app.MainFrame._configure_remote_hermes(type("FrameStub", (), {})())
+
+    assert said == ["Error: could not save settings"]
+
+
+def test_a_remote_address_that_saves_describes_the_connection(monkeypatch):
+    """The other half of the guard: a write that works still says where
+    Hermes will be found."""
+    monkeypatch.setattr(app, "invalidate_model_options", lambda *_a, **_k: None)
+
+    class _Dialog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def ShowModal(self):
+            return app.wx.ID_OK
+
+        def apply(self):
+            return True
+
+        def Destroy(self):
+            pass
+
+    monkeypatch.setattr(app, "RemoteHermesDialog", _Dialog)
+    said: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: said.append(text))
+
+    app.MainFrame._configure_remote_hermes(type("FrameStub", (), {})())
+
+    assert len(said) == 1, said
+    assert said[0].startswith("Remote Hermes: "), said
+
+
+# ----- a menu choice under the SETTINGS store -----
+def test_a_narration_pick_that_cannot_be_saved_says_so(unwritable, restored_settings):
+    """ "Narration: ..." would claim a file that refused the change; the mode
+    stays applied for this session, and the failure is what is spoken."""
+    frame = _Frame()
+    key, _label, _help = app.NARRATION_MODES[0]
+
+    app.MainFrame._set_narration(frame, key)
+
+    assert app.SETTINGS.narration == key
+    assert frame.announced == ["Error: could not save settings"]
+
+
+def test_a_narration_pick_that_saves_claims_it(config_at, tmp_path, restored_settings):
+    config_at(tmp_path / "config.json")
+    frame = _Frame()
+    key, label, _help = app.NARRATION_MODES[0]
+
+    app.MainFrame._set_narration(frame, key)
+
+    assert frame.announced == [f"Narration: {label.replace('&', '')}"]

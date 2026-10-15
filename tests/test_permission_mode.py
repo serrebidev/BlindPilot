@@ -49,7 +49,7 @@ class _Sandbox:
         self._old_save = blindpilot_app._save_config
         cfg = {"permission_mode": self._saved} if self._saved else {}
         blindpilot_app._load_config = lambda: dict(cfg)
-        blindpilot_app._save_config = lambda c: self._writes.append(dict(c))
+        blindpilot_app._save_config = lambda c: self._writes.append(dict(c)) or True
         return self
 
     def __exit__(self, *exc):

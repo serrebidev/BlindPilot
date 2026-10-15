@@ -2669,7 +2669,7 @@ def _remember_permission_mode(value: str) -> None:
     if cfg.get("permission_mode") == value:
         return
     cfg["permission_mode"] = value
-    _save_config(cfg)
+    _save_or_announce(cfg)
 
 
 def _looks_like_auth_error(text: str) -> bool:
@@ -3562,6 +3562,18 @@ def _save_config(cfg: dict) -> bool:
         return False
 
 
+def _save_or_announce(cfg: dict) -> bool:
+    """Write the settings, and say so when the file refuses them.
+
+    The bare call sites used to leave the user being told something the
+    file never took; this is that guard in one place.
+    """
+    if _save_config(cfg):
+        return True
+    announce(_SAVE_FAILED)
+    return False
+
+
 # How much of a run is read out.
 #
 # "Everything" is what BlindPilot has always done and stays the default: every
@@ -3845,7 +3857,8 @@ class _RemoteHermes:
         how = "username and password" if self.credential == "password" else "session token"
         return f"On. {url}, signing in with a {how}"
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """Write the address and who it is. False when the file refused it."""
         cfg = _load_config()
         cfg["remote_hermes"] = {
             "enabled": self.enabled,
@@ -3855,8 +3868,9 @@ class _RemoteHermes:
             "credential": self.credential,
             "username": self.username,
         }
-        _save_config(cfg)
+        saved = _save_config(cfg)
         self._write_key()
+        return saved
 
 
 REMOTE_HERMES = _RemoteHermes()
@@ -7435,7 +7449,7 @@ class HistoryDialog(wx.Dialog):
     def _on_sort(self) -> None:
         cfg = _load_config()
         cfg["history_sort"] = _HISTORY_SORTS[max(0, self.sort_picker.GetSelection())]
-        _save_config(cfg)
+        _save_or_announce(cfg)
         self._refresh(self._current() if self._shown else None)
 
     def _rename(self) -> None:
@@ -8442,9 +8456,11 @@ class SessionPanel(wx.Panel):
             return
         self.mode = value
         self.mode_picker.SetSelection(_MODE_VALUES.index(value))
-        # Remembered globally, so new tabs and the next launch start here.
-        _remember_permission_mode(value)
         self._announce(_MODE_DESCRIPTIONS[value])
+        # Remembered globally, so new tabs and the next launch start here.
+        # After the description: a refusal queues behind it, so the failure is
+        # the last thing said rather than the claim sounding like its repair.
+        _remember_permission_mode(value)
 
     def _on_mode_choice(self, event: wx.CommandEvent) -> None:
         self._set_mode(_MODE_VALUES[self.mode_picker.GetSelection()])
@@ -13155,8 +13171,8 @@ class RemoteHermesDialog(wx.Dialog):
         else:
             self._say("Hermes answered. This address and key work.")
 
-    def apply(self) -> None:
-        """Copy the fields into the saved settings."""
+    def apply(self) -> bool:
+        """Copy the fields into the saved settings. False if they were not written."""
         REMOTE_HERMES.enabled = self._enabled.GetValue()
         REMOTE_HERMES.host = self._host.GetValue().strip()
         REMOTE_HERMES.port = int(self._port.GetValue())
@@ -13164,7 +13180,7 @@ class RemoteHermesDialog(wx.Dialog):
         REMOTE_HERMES.credential = self._credential_name()
         REMOTE_HERMES.username = self._user.GetValue().strip()
         REMOTE_HERMES.key = self._key.GetValue().strip()
-        REMOTE_HERMES.save()
+        return REMOTE_HERMES.save()
 
 
 def _chord(chord: str) -> str:
@@ -14083,12 +14099,12 @@ class MainFrame(wx.Frame):
 
         cfg = _load_config()
         cfg["app_mode"] = mode
-        _save_config(cfg)
+        saved = _save_config(cfg)
         # A startup check shows no window, so there is nothing here to focus
         # into, and asking for focus would take it from whoever is running it.
         self.focus_for_mode()
         if announce_change:
-            self._announce_setting(f"{APP_MODE_LABELS[mode]} mode")
+            self._announce_setting(f"{APP_MODE_LABELS[mode]} mode" if saved else _SAVE_FAILED)
 
     def focus_for_mode(self) -> None:
         """Put focus where the mode that is showing actually starts.
@@ -14118,13 +14134,13 @@ class MainFrame(wx.Frame):
             self.chat_panel.set_model_order(self._chat_model_order)
         cfg = _load_config()
         cfg["chat_model_order"] = self._chat_model_order
-        _save_config(cfg)
+        saved = _save_config(cfg)
         label = next(
             label.replace("&", "")
             for value, label, _description in CHAT_MODEL_ORDERS
             if value == self._chat_model_order
         )
-        self._announce_setting(f"Chat model order: {label}")
+        self._announce_setting(f"Chat model order: {label}" if saved else _SAVE_FAILED)
 
     def _show_chat_accounts(self) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
@@ -14160,7 +14176,7 @@ class MainFrame(wx.Frame):
         self._backend = backend
         cfg = _load_config()
         cfg["backend"] = backend
-        _save_config(cfg)
+        saved = _save_config(cfg)
         # The visible tab only. Every tab used to follow this one setting, so
         # picking a backend for a new tab quietly moved the others to it too
         # and their next message went somewhere the person had not chosen.
@@ -14173,7 +14189,7 @@ class MainFrame(wx.Frame):
             f"Backend changed to {backend_label(backend)} for this tab. "
             "It will be used for the next new turn."
         )
-        self._announce_setting(message)
+        self._announce_setting(message if saved else _SAVE_FAILED)
 
     def _refresh_backend_items(self) -> None:
         """Point the menu, and what depends on the backend, at ``_backend``."""
@@ -14239,8 +14255,14 @@ class MainFrame(wx.Frame):
             self._projects_folder = projects_folder
             cfg = _load_config()
             cfg["projects_folder"] = projects_folder
-            _save_config(cfg)
+            folder_saved = _save_config(cfg)
+        else:
+            folder_saved = True
         self._set_backend(chosen)
+        if not folder_saved:
+            # Said after the backend line: the two announcements queue, and
+            # ending on the success claim would bury the failure.
+            self._announce_setting(_SAVE_FAILED)
 
     def _show_preferences(self) -> None:
         """Open the Preferences dialog (Cmd+, on macOS).
@@ -14380,12 +14402,13 @@ class MainFrame(wx.Frame):
         enabled = self._automatic_updates_item.IsChecked()
         cfg = _load_config()
         cfg["check_for_updates_at_startup"] = enabled
-        _save_config(cfg)
-        self._announce_setting(
+        saved = _save_config(cfg)
+        claim = (
             "BlindPilot will check for updates at startup"
             if enabled
             else "BlindPilot will not check for updates at startup"
         )
+        self._announce_setting(claim if saved else _SAVE_FAILED)
 
     def _show_update_dialog(self) -> None:
         from update_dialog import UpdateDialog
@@ -15229,7 +15252,7 @@ class MainFrame(wx.Frame):
         wants it to stop now.
         """
         SETTINGS.progress_cue = _valid_progress_cue(mode)
-        SETTINGS.save()
+        saved = SETTINGS.save()
         if mode == CUE_OFF:
             self.earcons.stop_progress()
             spoken = "off"
@@ -15241,7 +15264,7 @@ class MainFrame(wx.Frame):
             # Restart under the new mode so a turn in flight follows the choice
             # instead of keeping the behaviour it started with.
             self.earcons.start_progress()
-        self._announce_setting(f"Working sound {spoken}")
+        self._announce_setting(f"Working sound {spoken}" if saved else _SAVE_FAILED)
 
     def _configure_cue_interval(self) -> None:
         """Ask how many seconds between working sounds.
@@ -15269,11 +15292,11 @@ class MainFrame(wx.Frame):
         # follows: setting an interval while the sound is off or continuous
         # would otherwise change nothing anyone can hear.
         SETTINGS.progress_cue = CUE_PERIODIC
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self._cue_periodic_item.Check(True)
         if self._turn_in_flight():
             self.earcons.start_progress()
-        self._announce_setting(f"Working sound every {seconds} seconds")
+        self._announce_setting(f"Working sound every {seconds} seconds" if saved else _SAVE_FAILED)
 
     def _toggle_show_thinking(self) -> None:
         self._toggle_setting(
@@ -15307,9 +15330,9 @@ class MainFrame(wx.Frame):
 
     def _set_narration(self, mode: str) -> None:
         SETTINGS.narration = mode
-        SETTINGS.save()
+        saved = SETTINGS.save()
         label = next(text for key, text, _help in NARRATION_MODES if key == mode)
-        self._announce_setting(f"Narration: {label.replace('&', '')}")
+        self._announce_setting(f"Narration: {label.replace('&', '')}" if saved else _SAVE_FAILED)
 
     def _build_sound_cue_menu(self) -> wx.Menu:
         """One check item per cue, under the master switch that governs them.
@@ -15335,43 +15358,47 @@ class MainFrame(wx.Frame):
     def _toggle_sound_cue(self, cue: str) -> None:
         item = self._sound_cue_items[cue]
         SETTINGS.sound_cues[cue] = item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self.earcons.set_cues(SETTINGS.sound_cues)
         label = next(text for key, text, _help in SOUND_CUES if key == cue).replace("&", "")
         state = "on" if SETTINGS.sound_cues[cue] else "off"
-        self._announce_setting(f"{label} sound {state}")
+        self._announce_setting(f"{label} sound {state}" if saved else _SAVE_FAILED)
 
     def _toggle_sounds(self) -> None:
         SETTINGS.sounds_enabled = self._sounds_item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self.earcons.set_enabled(SETTINGS.sounds_enabled)
         # The cues below it describe a choice that is not available while
         # everything is muted.
         for item in getattr(self, "_sound_cue_items", {}).values():
             item.Enable(SETTINGS.sounds_enabled)
         state = "on" if SETTINGS.sounds_enabled else "off"
-        self._announce_setting(f"Sound cues {state}")
+        self._announce_setting(f"Sound cues {state}" if saved else _SAVE_FAILED)
 
     def _toggle_text_view(self) -> None:
         SETTINGS.text_view = self._text_view_item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
         for page in self._session_panels():
             page.apply_view_mode()
-        if SETTINGS.text_view:
-            self._announce_setting("Responses are now a read-only text field, one row per line")
-        else:
-            self._announce_setting("Responses are now a list")
+        claim = (
+            "Responses are now a read-only text field, one row per line"
+            if SETTINGS.text_view
+            else "Responses are now a list"
+        )
+        self._announce_setting(claim if saved else _SAVE_FAILED)
 
     def _use_silent_until_response_mode(self) -> None:
         """One action to remain silent until the complete response arrives."""
         SETTINGS.live_rows = False
         SETTINGS.speak_live = False
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self._rows_item.Check(False)
         self._speak_item.Check(False)
-        self._announce_setting(
-            "Silent until the response is on. Nothing is shown or spoken until the whole answer arrives."
+        claim = (
+            "Silent until the response is on. Nothing is shown or spoken until "
+            "the whole answer arrives."
         )
+        self._announce_setting(claim if saved else _SAVE_FAILED)
 
     def _announce_setting(self, text: str) -> None:
         announce(text)
@@ -15565,7 +15592,7 @@ class MainFrame(wx.Frame):
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 return
-            dlg.apply()
+            saved = dlg.apply()
         finally:
             dlg.Destroy()
         # A conversation already open belongs to whichever Hermes started it,
@@ -15573,6 +15600,11 @@ class MainFrame(wx.Frame):
         # silently moving this one to a different machine. The cached model
         # catalog belonged to the old address and would be wrong for the new.
         invalidate_model_options(BACKEND_HERMES)
+        if not saved:
+            # The fields are live for this session; the file does not hold
+            # them, so the description of the new connection is not said.
+            announce(_SAVE_FAILED)
+            return
         announce(f"Remote Hermes: {REMOTE_HERMES.describe()}. Applies to new conversations.")
 
     def _new_conversation_active(self) -> None:
@@ -15612,8 +15644,11 @@ class MainFrame(wx.Frame):
         self._projects_folder = path
         cfg = _load_config()
         cfg["projects_folder"] = path
-        _save_config(cfg)
-        wx.CallAfter(announce, f"Projects folder set to {_short_label(path)}")
+        saved = _save_config(cfg)
+        wx.CallAfter(
+            announce,
+            f"Projects folder set to {_short_label(path)}" if saved else _SAVE_FAILED,
+        )
         return path
 
     def _close_current_session(self) -> None:
