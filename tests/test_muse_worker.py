@@ -604,6 +604,23 @@ def test_a_refused_fired_command_is_said_not_swallowed(monkeypatch):
     assert any("bad choice" in line for line in recorder.said("tool"))
 
 
+def test_fired_commands_are_capped_when_the_server_never_answers():
+    """A reply pops its own entry; an unanswered command never did.
+
+    Every steer, approval and answer fired in one turn added an entry that
+    only a reply could remove, so a host that stopped answering left one per
+    command for the life of the turn.
+    """
+    transport = _ScriptedMuseTransport(stays_open=True)
+    worker = MuseWorker("go", None, ".", "default", **_Recorder().callbacks())
+    worker._transport = transport
+
+    for _ in range(muse_worker._FIRED_KEEP + 5):
+        assert worker._fire("turn/steer", {"commandId": "c"})
+
+    assert len(worker._fired) == muse_worker._FIRED_KEEP
+
+
 def test_an_internal_decide_failure_is_resent_once_with_the_same_command(monkeypatch):
     # Measured on 1.3.0 under load: approval/decide answered an internal
     # "durability fence" error though the decision was saved. A resend with

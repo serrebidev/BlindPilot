@@ -1107,7 +1107,7 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
     if backend == BACKEND_GEMINI:
         from google_backend import gemini_auth_ok
 
-        return gemini_auth_ok(timeout)
+        return gemini_auth_ok()
     if backend == BACKEND_ANTIGRAVITY:
         from google_backend import antigravity_auth_ok
 
@@ -7540,31 +7540,41 @@ class OpencodeServer:
         env["OPENCODE_SERVER_PASSWORD"] = password
         self._log: "deque[str]" = deque(maxlen=50)
         self._url = ""
-        self._listening = threading.Event()
         self._auth = "Basic " + base64.b64encode(f"opencode:{password}".encode("utf-8")).decode(
             "ascii"
         )
-        # Started from the home directory rather than any one project: one
-        # server serves them all, and the ``directory`` query parameter on each
-        # request is what says which project a call is about.
-        self._proc = subprocess.Popen(
-            [binary, "serve", "--port", str(_free_port()), "--hostname", "127.0.0.1"],
-            cwd=str(Path.home()),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            **own_group_kwargs(),
-            **no_window_kwargs(),
-        )
-        threading.Thread(target=self._pump, daemon=True).start()
-        self._listening.wait(60)
-        if not self._url:
+        # The probe in _free_port closes before this child can bind, so
+        # another process may take the port in between; a second attempt on a
+        # fresh port turns that race into a slower start instead of a failed
+        # turn. The child exits promptly when the port is gone, so a failed
+        # attempt does not wait out the 60 seconds.
+        # shortcut: three attempts, enough for a busy machine; raise with the
+        # wait above if start-up races stay common.
+        for _attempt in range(3):
+            self._listening = threading.Event()
+            # Started from the home directory rather than any one project: one
+            # server serves them all, and the ``directory`` query parameter on each
+            # request is what says which project a call is about.
+            self._proc = subprocess.Popen(
+                [binary, "serve", "--port", str(_free_port()), "--hostname", "127.0.0.1"],
+                cwd=str(Path.home()),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **own_group_kwargs(),
+                **no_window_kwargs(),
+            )
+            threading.Thread(target=self._pump, daemon=True).start()
+            self._listening.wait(60)
+            if self._url:
+                break
             self.stop()
+        if not self._url:
             detail = "\n".join(list(self._log)[-5:]).strip()
             raise OSError(detail or "opencode's server did not start.")
 

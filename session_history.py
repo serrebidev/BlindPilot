@@ -373,13 +373,24 @@ def _globbed(root: Path, pattern: str) -> List[Path]:
         return []
 
 
-def _jsonl_entry(fmt: _JsonlFormat, path: Path, cwd: Optional[str]) -> Optional[HistoryEntry]:
-    """One transcript as a listing entry, or ``None`` if it cannot be offered.
+# Head-of-transcript reads already done, keyed by file and mtime.
+_JSONL_HEAD_CACHE: dict[tuple[str, str, float], tuple[str, str, str]] = {}
+_JSONL_HEAD_CACHE_MAX = 1024
 
-    Reads only as far as the first thing the person typed, because that is the
-    title and the newest conversations have to appear the moment the dialog
-    opens.
+
+def _jsonl_head(fmt: _JsonlFormat, path: Path, modified: float) -> tuple[str, str, str]:
+    """The transcript's id, its recorded directory, and its first prompt.
+
+    Empty strings when the head holds nothing offerable. Kept while the file's
+    mtime stands still: the picker rebuilds its whole list on every filter
+    keystroke, and each rebuild was re-reading the head of every transcript
+    to derive the same three fields again. Capped rather than left to grow,
+    since the transcripts a machine accumulates are never all of them seen.
     """
+    key = (fmt.backend, str(path), modified)
+    hit = _JSONL_HEAD_CACHE.get(key)
+    if hit is not None:
+        return hit
     session_id = ""
     session_cwd = ""
     title = ""
@@ -394,6 +405,21 @@ def _jsonl_entry(fmt: _JsonlFormat, path: Path, cwd: Optional[str]) -> Optional[
         if role == "user":
             title = make_title(text)
             break
+    if len(_JSONL_HEAD_CACHE) >= _JSONL_HEAD_CACHE_MAX:
+        _JSONL_HEAD_CACHE.clear()
+    _JSONL_HEAD_CACHE[key] = (session_id, session_cwd, title)
+    return session_id, session_cwd, title
+
+
+def _jsonl_entry(fmt: _JsonlFormat, path: Path, cwd: Optional[str]) -> Optional[HistoryEntry]:
+    """One transcript as a listing entry, or ``None`` if it cannot be offered.
+
+    Reads only as far as the first thing the person typed, because that is the
+    title and the newest conversations have to appear the moment the dialog
+    opens.
+    """
+    modified = _mtime(path)
+    session_id, session_cwd, title = _jsonl_head(fmt, path, modified)
     if not session_id or not title:
         # Nothing was ever asked here, or there is no id to resume it by, so
         # there is nothing to carry on with either way.
@@ -406,7 +432,7 @@ def _jsonl_entry(fmt: _JsonlFormat, path: Path, cwd: Optional[str]) -> Optional[
         session_id=session_id,
         title=title,
         path=str(path),
-        modified=_mtime(path),
+        modified=modified,
         cwd=session_cwd,
         folder=_folder_name(session_cwd),
     )
@@ -1381,6 +1407,29 @@ def _opencode_first_prompt(connection: "sqlite3.Connection", session_id: str) ->
     return ""
 
 
+# First prompts already read, kept only while the database they came from
+# stands still. The picker rebuilds its whole list on every filter keystroke,
+# and every untitled conversation used to pay its own twenty-row query and
+# JSON parse to be named again on each one.
+_FIRST_PROMPT_CACHE: dict[str, str] = {}
+_FIRST_PROMPT_CACHE_AT: tuple[str, float] = ("", 0.0)
+
+
+def _opencode_first_prompt_cached(connection: "sqlite3.Connection", session_id: str) -> str:
+    """The first prompt, read once per session per database state."""
+    global _FIRST_PROMPT_CACHE_AT
+    db = _opencode_db()
+    at = (str(db), _mtime(db))
+    if at != _FIRST_PROMPT_CACHE_AT:
+        _FIRST_PROMPT_CACHE.clear()
+        _FIRST_PROMPT_CACHE_AT = at
+    if session_id in _FIRST_PROMPT_CACHE:
+        return _FIRST_PROMPT_CACHE[session_id]
+    text = _opencode_first_prompt(connection, session_id)
+    _FIRST_PROMPT_CACHE[session_id] = text
+    return text
+
+
 def _opencode_entries(cwd: Optional[str]) -> List[HistoryEntry]:
     connection = _opencode_connect()
     if connection is None:
@@ -1409,7 +1458,7 @@ def _opencode_entries(cwd: Optional[str]) -> List[HistoryEntry]:
                 continue
             title = str(title or "").strip()
             if not title or _OPENCODE_UNTITLED.match(title):
-                title = _opencode_first_prompt(connection, str(session_id))
+                title = _opencode_first_prompt_cached(connection, str(session_id))
             if not title:
                 continue
             try:

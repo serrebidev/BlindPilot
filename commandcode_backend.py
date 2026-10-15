@@ -307,6 +307,12 @@ def commandcode_model_options(
 _AGENT_COMMANDS: dict[str, tuple[float, list[tuple[str, str]]]] = {}
 _AGENT_COMMANDS_TTL = 600.0
 _AGENT_COMMANDS_LOCK = threading.Lock()
+# One lookup per folder at a time, keyed until the fetch it belongs to has
+# finished either way. The window asks from two places at once -- the
+# background refresh of the slash list and the send path checking a typed
+# command -- and two concurrent asks are two `command-code acp` servers on
+# one conversation.
+_AGENT_COMMANDS_INFLIGHT: dict[str, threading.Event] = {}
 
 
 def commandcode_agent_commands(cwd: Optional[str], wait: bool = False) -> list[tuple[str, str]]:
@@ -319,11 +325,36 @@ def commandcode_agent_commands(cwd: Optional[str], wait: bool = False) -> list[t
     key = str(cwd or "")
     with _AGENT_COMMANDS_LOCK:
         hit = _AGENT_COMMANDS.get(key)
-    if hit and time.monotonic() - hit[0] < _AGENT_COMMANDS_TTL:
-        return hit[1]
+        if hit and time.monotonic() - hit[0] < _AGENT_COMMANDS_TTL:
+            return hit[1]
+        running = _AGENT_COMMANDS_INFLIGHT.get(key)
+        if running is None:
+            running = threading.Event()
+            _AGENT_COMMANDS_INFLIGHT[key] = running
+            mine = True
+        else:
+            mine = False
+
+    def fetch() -> list[tuple[str, str]]:
+        try:
+            return _fetch_agent_commands(key)
+        finally:
+            # Popped before the event is set: whoever wakes reads the cache
+            # the fetch has already written, never a half-finished one.
+            with _AGENT_COMMANDS_LOCK:
+                _AGENT_COMMANDS_INFLIGHT.pop(key, None)
+            running.set()
+
+    if not mine:
+        if not wait:
+            return hit[1] if hit else []
+        running.wait()
+        with _AGENT_COMMANDS_LOCK:
+            hit = _AGENT_COMMANDS.get(key)
+        return hit[1] if hit else []
     if wait:
-        return _fetch_agent_commands(key)
-    threading.Thread(target=_fetch_agent_commands, args=(key,), daemon=True).start()
+        return fetch()
+    threading.Thread(target=fetch, daemon=True).start()
     return hit[1] if hit else []
 
 

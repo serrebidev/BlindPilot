@@ -328,6 +328,19 @@ class _GoogleTurnWorker(_TurnWorker):
             if isinstance(frame, dict):
                 self._handle(frame)
 
+    def _join_stderr_reader(self) -> None:
+        """Wait for the stderr reader to finish, once.
+
+        Every path out of the process has to take this. The reader ends on
+        the child's stderr reaching EOF, which only happens once the child is
+        reaped; left unjoined it outlives the turn, and closing the pipe under
+        it raises in the thread rather than quietly ending it.
+        """
+        reader = self._stderr_thread
+        self._stderr_thread = None
+        if reader is not None:
+            reader.join(timeout=5)
+
     def _finish(self, proc: subprocess.Popen) -> None:
         code: Optional[int] = None
         try:
@@ -339,17 +352,16 @@ class _GoogleTurnWorker(_TurnWorker):
             except (OSError, subprocess.TimeoutExpired):
                 code = None
         if self._cancelled:
+            self._join_stderr_reader()
             if not self._settled.is_set():
                 self._release_all()
                 self._settled.set()
                 self._on_complete("".join(self._parts).strip() or "Stopped")
             return
         if self._completed or self._settled.is_set():
+            self._join_stderr_reader()
             return
-        reader = self._stderr_thread
-        self._stderr_thread = None
-        if reader is not None:
-            reader.join(timeout=5)
+        self._join_stderr_reader()
         from google_backend import readable_error
 
         with self._error_lock:
@@ -378,6 +390,7 @@ class _GoogleTurnWorker(_TurnWorker):
             return
         if proc.poll() is None:
             end_process_group(proc)
+        self._join_stderr_reader()
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             close = getattr(stream, "close", None)
             if close is None:

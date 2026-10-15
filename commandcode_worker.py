@@ -911,7 +911,6 @@ class CommandcodeWorker(threading.Thread):
             "model_request_start",
             "model_trace",
             "thinking_start",
-            "thinking_end",
             "turn_end",
             "run_end",
         ):
