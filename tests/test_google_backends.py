@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import stat
 import sys
+import threading
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -241,6 +243,31 @@ def test_gemini_error_result_says_the_one_sentence_that_matters():
     )
     assert recorder.failed == ["Gemini CLI: API key not valid. Please pass a valid API key."]
     assert recorder.completed == []
+
+
+def test_readable_error_takes_the_sentence_from_each_shape_it_is_given():
+    """The extractor itself, one input per pattern it reads.
+
+    The worker tests above drive one path end to end; these hold the three
+    shapes and the fallback, so a change to any one regex fails on its own
+    input rather than only on whichever worker happened to feed it.
+    """
+    nested = '{"error": {\\"message\\": \\"Quota exceeded for this account.\\"}}'
+    assert google_backend.readable_error(nested) == "Quota exceeded for this account."
+
+    go_map = "HTTP 429: map[locale:en-US message:API key not valid. Please pass a valid API key.]"
+    assert (
+        google_backend.readable_error(go_map) == "API key not valid. Please pass a valid API key."
+    )
+
+    plain = "Message: Please retry later, Status: RESOURCE_EXHAUSTED"
+    assert google_backend.readable_error(plain) == "Please retry later"
+
+    # Nothing recognised: the first line, bounded, rather than the whole dump.
+    assert google_backend.readable_error("first line\nsecond line") == "first line"
+    assert google_backend.readable_error("x" * 400) == "x" * 300
+    assert google_backend.readable_error("") == ""
+    assert google_backend.readable_error(None) == ""
 
 
 # -- Antigravity stream --------------------------------------------------------
@@ -489,6 +516,37 @@ def test_gemini_shut_off_for_personal_accounts_points_to_antigravity():
     worker._finish(Exited())
     assert recorder.failed and "Antigravity CLI" in recorder.failed[0]
     assert "throwIneligible" not in recorder.failed[0]
+
+
+def test_a_cancelled_turn_still_joins_the_stderr_reader():
+    """The stderr reader is a thread on the child's pipe.
+
+    A turn that settles early (cancelled, or completed by a result frame)
+    used to return before touching it, so the thread outlived the turn and
+    the pipe was closed underneath it.
+    """
+
+    class Exited:
+        def wait(self, timeout=None):
+            return 0
+
+    ended = threading.Event()
+
+    def read_stderr(_proc):
+        time.sleep(0.2)
+        ended.set()
+
+    recorder = Recorder()
+    worker = _worker(GeminiWorker, recorder)
+    reader = threading.Thread(target=read_stderr, args=(object(),), daemon=True)
+    worker._stderr_thread = reader
+    reader.start()
+    worker._cancelled = True
+    worker._finish(Exited())
+    assert worker._stderr_thread is None
+    assert not reader.is_alive()
+    assert ended.is_set()
+    assert recorder.completed == ["Stopped"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the stand-in CLI is a shebang script")

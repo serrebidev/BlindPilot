@@ -12,6 +12,8 @@ import json
 import io
 from pathlib import Path
 import subprocess
+import threading
+import time
 
 import agent_backends
 import commandcode_backend
@@ -87,6 +89,78 @@ def test_agent_command_discovery_reaps_after_forced_kill(monkeypatch):
     assert process.waits == 2
     assert process.stdin.closed
     assert process.stdout.closed
+
+
+def test_two_lookups_at_once_start_one_acp_server(monkeypatch):
+    """The window asks from two places at a time and only needs one answer.
+
+    Two concurrent asks used to each start `command-code acp`, leaving two
+    servers on one conversation for as long as the slower one lived.
+    """
+    _ANSWER = json.dumps(
+        {
+            "params": {
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [{"name": "help", "description": "Show help"}],
+                }
+            }
+        }
+    )
+    spawns: list[int] = []
+    inside = threading.Event()
+    release = threading.Event()
+
+    class Process:
+        stdin = io.StringIO()
+        stdout = io.StringIO(_ANSWER + "\n")
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout):
+            return 0
+
+    def popen(*_args, **_kwargs):
+        spawns.append(1)
+        inside.set()
+        release.wait(5)
+        return Process()
+
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(commandcode_backend, "_AGENT_COMMANDS", {})
+    monkeypatch.setattr(commandcode_backend, "_AGENT_COMMANDS_INFLIGHT", {})
+
+    answers: list = []
+    first = threading.Thread(
+        target=lambda: answers.append(
+            commandcode_backend.commandcode_agent_commands("/project", wait=True)
+        ),
+        daemon=True,
+    )
+    first.start()
+    assert inside.wait(5)
+
+    entered = threading.Event()
+
+    def ask_again() -> None:
+        entered.set()
+        answers.append(commandcode_backend.commandcode_agent_commands("/project", wait=True))
+
+    second = threading.Thread(target=ask_again, daemon=True)
+    second.start()
+    assert entered.wait(5)
+    # Long enough for an unguarded second ask to have reached its own Popen.
+    time.sleep(0.3)
+    assert len(spawns) == 1
+
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(spawns) == 1
+    assert answers == [[("/help", "Show help")]] * 2
 
 
 CATALOG = """Available models  \u00b7  4 models

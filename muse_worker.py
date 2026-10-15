@@ -107,6 +107,12 @@ _MAX_OUTPUT_FETCH_BYTES = 1024 * 1024
 # events a page, twenty pages: past that the transcript is a runaway one.
 _REPLAY_MAX_PAGES = 20
 
+# How many fired commands are kept awaiting their reply. A reply pops its own
+# entry; the ones that never come -- a steer sent as the turn ended, a stop
+# after the session closed -- used to stay for the life of the turn, one per
+# unanswered command.
+_FIRED_KEEP = 64
+
 
 def _uuid() -> str:
     # MSP calls this a UUIDv7 idempotency handle, and it means it: measured on
@@ -341,6 +347,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             return False
         request_id = self._next_id()
         self._fired[request_id] = (method, params, retry)
+        if len(self._fired) > _FIRED_KEEP:
+            # Oldest first: a reply still pending after this many commands of
+            # its own is a reply that is not coming, and holding it would cost
+            # more than dropping the one retry it can no longer earn.
+            self._fired.pop(next(iter(self._fired)))
         return transport.send(self._rpc_frame(method, params, request_id))
 
     def _fired_reply(self, frame: dict) -> None:

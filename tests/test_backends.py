@@ -1799,6 +1799,40 @@ def test_opencode_server_is_reached_over_loopback_behind_a_password(monkeypatch)
     assert server._auth.startswith("Basic ")
 
 
+def test_a_port_taken_before_the_child_binds_is_retried_on_a_fresh_one(monkeypatch):
+    """_free_port closes its probe, so the port can be gone by bind time."""
+    started: list[list[str]] = []
+
+    class DeadProcess:
+        stdout = io.StringIO("Error: listen EADDRINUSE: address already in use 127.0.0.1:41234\n")
+
+        def poll(self):
+            return 1
+
+    class LiveProcess:
+        def __init__(self):
+            self.stdout = io.StringIO("opencode server listening on http://127.0.0.1:41235\n")
+
+        def poll(self):
+            return None
+
+    def fake_popen(argv, **kwargs):
+        started.append(argv)
+        return DeadProcess() if len(started) == 1 else LiveProcess()
+
+    ports = iter([41234, 41235])
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(agent_backends, "_free_port", lambda: next(ports))
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _binary: {})
+
+    server = agent_backends.OpencodeServer("opencode")
+
+    assert len(started) == 2
+    assert started[0][3] == "41234"
+    assert started[1][3] == "41235"
+    assert server.base_url == "http://127.0.0.1:41235"
+
+
 def test_opencode_prefers_its_own_executable_over_the_npm_wrapper(monkeypatch, tmp_path):
     wrapper = tmp_path / "npm" / "opencode.cmd"
     native = wrapper.parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"

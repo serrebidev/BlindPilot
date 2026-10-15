@@ -971,6 +971,86 @@ def test_opencode_untitled_conversations_are_titled_by_their_first_message(home:
     assert [entry.title for entry in list_history("opencode")] == ["what does markdown_rows do?"]
 
 
+def test_opencode_first_prompts_are_read_once_until_the_database_changes(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The picker rebuilds on every filter keystroke.
+
+    Each rebuild used to re-run the twenty-row query and JSON parse that names
+    an untitled conversation, once per untitled conversation.
+    """
+    _write_opencode(
+        home,
+        "ses_1",
+        OPENCODE_CWD,
+        "New session - 2026-05-24T22:55:37.511Z",
+        [("user", "what does markdown_rows do?")],
+    )
+    reads: list[str] = []
+    real = session_history._opencode_first_prompt
+
+    def counting(connection, session_id: str) -> str:
+        reads.append(session_id)
+        return real(connection, session_id)
+
+    monkeypatch.setattr(session_history, "_opencode_first_prompt", counting)
+
+    first = [entry.title for entry in list_history("opencode")]
+    second = [entry.title for entry in list_history("opencode")]
+
+    assert first == second == ["what does markdown_rows do?"]
+    assert reads == ["ses_1"]
+
+    # A changed database is a changed answer, so the cache goes with it.
+    database = home / ".local" / "share" / "opencode" / "opencode.db"
+    stat = database.stat()
+    os.utime(database, (stat.st_atime, stat.st_mtime + 10))
+
+    assert [entry.title for entry in list_history("opencode")] == ["what does markdown_rows do?"]
+    assert reads == ["ses_1", "ses_1"]
+
+
+def test_jsonl_heads_are_read_once_until_the_file_changes(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The picker rebuilds on every filter keystroke.
+
+    Each rebuild used to re-read the head of every transcript to derive the
+    same id, directory and title again.
+    """
+    path = _write_claude(
+        home,
+        CLAUDE_CWD,
+        "11111111-1111-1111-1111-111111111111",
+        [
+            {"type": "mode", "mode": "default"},
+            _claude_user("Fix the login redirect", cwd=CLAUDE_CWD),
+            _claude_assistant("Found it in auth.py."),
+        ],
+    )
+    reads: list[Path] = []
+    real = session_history._iter_jsonl
+
+    def counting(*args, **kwargs):
+        reads.append(Path(args[0]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(session_history, "_iter_jsonl", counting)
+
+    first = list_history("claude")
+    second = list_history("claude")
+
+    assert first == second
+    assert [entry.title for entry in first] == ["Fix the login redirect"]
+    assert reads == [path]
+
+    stat = path.stat()
+    os.utime(path, (stat.st_atime, stat.st_mtime + 10))
+
+    assert [entry.title for entry in list_history("claude")] == ["Fix the login redirect"]
+    assert reads == [path, path]
+
+
 def test_opencode_subagent_conversations_are_not_offered_to_resume(home: Path) -> None:
     """A subagent gets a session of its own, which nobody had with opencode."""
     _write_opencode(home, "ses_1", OPENCODE_CWD, "Real conversation", [("user", "hello")])
