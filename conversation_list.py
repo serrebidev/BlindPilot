@@ -64,6 +64,24 @@ def as_rows(items: Sequence[Union[Row, str]]) -> list[Row]:
 # native wx.ListBox by themselves without any accessible object from us.
 ACCESSIBLE_AVAILABLE = wx.Platform == "__WXMSW__"
 
+_GWL_STYLE = -16
+_WS_TABSTOP = 0x00010000
+
+
+def _add_tab_stop(window: wx.Window) -> None:
+    """Let Windows' own Tab traversal stop on this window.
+
+    wxMSW gives WS_TABSTOP to native controls only. A wx.VListBox is drawn by
+    wx, so its window lacks the style, and the dialog manager that moves focus
+    on Tab walked straight past the list: arrows worked inside it, but Tab and
+    Shift+Tab never came back to it.
+    """
+    import ctypes
+
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    hwnd = window.GetHandle()
+    user32.SetWindowLongW(hwnd, _GWL_STYLE, user32.GetWindowLongW(hwnd, _GWL_STYLE) | _WS_TABSTOP)
+
 
 class ConversationList(wx.VListBox):
     """Rows that wrap to the width of the control and are drawn by kind."""
@@ -89,6 +107,7 @@ class ConversationList(wx.VListBox):
         if ACCESSIBLE_AVAILABLE:
             self._accessible = RowsAccessible(self)
             self.SetAccessible(self._accessible)
+            _add_tab_stop(self)
         self.Bind(wx.EVT_SET_FOCUS, self._on_focus)
 
     # ----- rows -----

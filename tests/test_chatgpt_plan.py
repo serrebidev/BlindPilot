@@ -369,6 +369,12 @@ def _provider(monkeypatch, handler) -> chatgpt.ChatGPTProvider:
     provider = create_provider(account, FakeCredentials())  # type: ignore[arg-type]
     assert isinstance(provider, chatgpt.ChatGPTProvider)
     monkeypatch.setattr(chatgpt, "access_token", lambda *_a, **_k: "token")
+    # generate() reads the model catalogue once per process. Whichever test
+    # ran first used to spend a request of its handler on it, so a count of
+    # requests passed or failed on test order.
+    tried = Event()
+    tried.set()
+    monkeypatch.setattr(chatgpt, "_catalog_tried", tried)
     transport = httpx.MockTransport(handler)
     monkeypatch.setattr(provider, "client", lambda: httpx.Client(transport=transport))
     return provider

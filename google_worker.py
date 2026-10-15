@@ -241,7 +241,9 @@ class _GoogleTurnWorker(_TurnWorker):
         # key is handed to an agent turn.
         return subprocess_env(binary)
 
-    def _handle(self, frame: dict) -> None:
+    # Not `_handle`: from Python 3.13 threading.Thread sets that attribute in
+    # __init__, which hid the method and broke every frame.
+    def _handle_frame(self, frame: dict) -> None:
         raise NotImplementedError
 
     # -- the turn ---------------------------------------------------------------
@@ -326,7 +328,7 @@ class _GoogleTurnWorker(_TurnWorker):
             except ValueError:
                 continue
             if isinstance(frame, dict):
-                self._handle(frame)
+                self._handle_frame(frame)
 
     def _join_stderr_reader(self) -> None:
         """Wait for the stderr reader to finish, once.
@@ -481,7 +483,7 @@ class GeminiWorker(_GoogleTurnWorker):
         # stdin is the prompt, so a message beginning with "-" is never a flag.
         return self._prompt.rstrip("\n") + "\n"
 
-    def _handle(self, frame: dict) -> None:
+    def _handle_frame(self, frame: dict) -> None:
         kind = str(frame.get("type") or "")
         if kind == "init":
             self._remember_session(str(frame.get("session_id") or ""))
@@ -600,7 +602,7 @@ class AntigravityWorker(_GoogleTurnWorker):
         message = {"event": "user", "message": {"content": self._prompt}}
         return json.dumps(message, ensure_ascii=False) + "\n"
 
-    def _handle(self, frame: dict) -> None:
+    def _handle_frame(self, frame: dict) -> None:
         kind = str(frame.get("event") or "")
         if kind == "init":
             self._remember_session(str(frame.get("conversation_id") or ""))

@@ -582,6 +582,7 @@ def test_capacity_stop_withholds_a_free_model_too(monkeypatch, tmp_path):
     catalog = router.parse_prices(CATALOG)
 
     assert router.record_capacity_hit(free, now=moment) is True
+    assert router.record_capacity_hit("inclusionai/ling-3.1-flash:free", now=moment) is True
     # A capacity-recorded free model is withheld from selection AND the
     # free-fallback walk, the same way a paid one is.
     quick = router.select(router.QUICK, catalog, now=moment)
@@ -621,6 +622,7 @@ def test_capacity_cooldown_matches_the_model_id_regardless_of_case(monkeypatch, 
 
     assert router.record_capacity_hit("DeepSeek/DeepSeek-V4-Pro", now=moment) is True
     assert router.record_capacity_hit("Poolside/Laguna-S-2.1-Free", now=moment) is True
+    assert router.record_capacity_hit("InclusionAI/Ling-3.1-Flash:Free", now=moment) is True
     assert router.capacity_cooling_down("deepseek/deepseek-v4-pro", now=moment) is True
     assert router.capacity_cooling_down("DEEPSEEK/DEEPSEEK-V4-PRO", now=moment) is True
 

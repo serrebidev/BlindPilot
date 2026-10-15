@@ -7,6 +7,26 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 - Command Code Auto skips Ling 3.1 Flash's retired free tier even when the installed CLI's bundled catalog still lists it as free; Laguna S 2.1 remains available for quick tasks and safe credit-limit retries.
 - Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely.
 
+## v0.47.3 - 2026-10-14
+
+- Tab and Shift+Tab reach the conversation list in Agent mode's Recent Conversations again. Arrows worked inside the list, but Windows' Tab traversal walked past it in both directions, because the drawn list never carried the tab-stop style Windows looks for. The Hermes conversations and slash command pickers use the same list and are fixed with it. Reported by Kaveinthran.
+
+- The Gemini and Antigravity workers no longer break on Python 3.13 and later, where threading.Thread claims the name their frame handler used. Released builds run on 3.12 and were not affected; running from source on a newer Python was.
+
+- A ChatGPT plan test no longer passes or fails on test order: generate() reads the model catalogue once per process, and the first test to run spent a mocked request on it. This cost the 0.47.1 tag its macOS build. The console-window test also waits up to two seconds for a new window to show, instead of reading it the instant the process starts.
+
+- The Command Code discovery test that freezes the clock now freezes it only for its own thread. It patched the process-wide time.monotonic, so another thread could take the first reading, push the deadline past the frozen time, and spin the lookup until pytest's timeout. That hang cost the 0.47.2 tag its Windows build, so neither 0.47.1 nor 0.47.2 was published.
+
+## v0.47.0 - 2026-10-14
+
+- Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely. The cooldown is now shared across processes and matches the model id regardless of case, and a provider-capacity stop gets one announced retry on the next paid model.
+
+- The backends are hardened: the Muse log is read without a shell, Hermes refuses a cleartext login, a Code exit-3 result wins over later frames, FreeBuff's cache is replaced atomically and probe caches are set only on success, and a process group that is ended gets a bounded wait with its pipes closed.
+
+- All three workers guard against completing a turn twice after a cancel, compaction, replay or result, subagent rows are counted, and Muse reasoning is buffered into one row instead of many.
+
+- Settings save failures are now always spoken, once, including failed credential writes. Callbacks that arrive after the app has closed are dropped, an empty turn that exits cleanly leaves no blank row, and the update-status file now lives in the per-user data folder instead of shared temporary storage.
+
 ## v0.46.0 - 2026-10-14
 
 - A ChatGPT plan account can now look things up the way ChatGPT does. Web search is always available to it, and the model decides when to search. Before, it searched only when the conversation profile had OpenRouter's Web search ticked, so a profile set up for OpenRouter's other tools left it answering that it could not search. The model can also read the pages it finds and check the local date and time, through two tools BlindPilot runs itself. A turn can search, read and search again for up to eight rounds before it must answer. Page reading only reads public http and https addresses, never this computer or the local network, so a page cannot steer it inward. Every step is announced: each search with what it searched for, each page opened or read, and the clock. The sources are listed at the end, as before.
