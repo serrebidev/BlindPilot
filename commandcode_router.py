@@ -146,6 +146,7 @@ def _resolve_max_plan(max_plan) -> str:
         return candidate
     return "go"
 
+
 # The task text that makes a tier, ported from the terminal router so the
 # two classify alike. The high-risk scan runs first, so a question about
 # risky work lands on deep even when it reads as a lookup ("explain the
