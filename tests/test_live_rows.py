@@ -560,6 +560,7 @@ def test_worker_activity_uses_bounded_gui_batches(monkeypatch):
     import blindpilot_app as app
 
     scheduled = []
+    monkeypatch.setattr(app.wx, "GetApp", lambda: object())
     monkeypatch.setattr(app.wx, "CallAfter", lambda callback: scheduled.append(callback))
 
     panel = type("PanelStub", (), {})()
@@ -1132,3 +1133,94 @@ def test_streamed_sentences_become_rows_of_whole_markdown_blocks(monkeypatch):
     assert (
         panel._rows[3].label == "List: Fixed: the docstring. Now accurate. No action: build output."
     )
+
+
+def _streaming_panel(app, monkeypatch):
+    panel = _stub_panel(app)
+    panel._session_backend = app.BACKEND_FREEBUFF
+    panel._begin_stream_response = lambda: 1
+    monkeypatch.setattr(app.SETTINGS, "live_rows", True)
+    return panel
+
+
+def _stream_whole_answer(panel, app, answer):
+    """Hand the answer over the way a streaming backend does, then end it."""
+    from markdown_rows import complete_sentences
+
+    streamed = 0
+    while True:
+        ready = complete_sentences(answer[streamed:])
+        if not ready:
+            break
+        app.SessionPanel._on_activity(panel, "assistant", ready)
+        streamed += len(ready)
+    app.SessionPanel._on_activity(panel, "assistant", answer[streamed:])
+    app.SessionPanel._on_activity(panel, "tool", "done")
+
+
+def test_a_fenced_code_block_streamed_in_pieces_is_one_whole_row(monkeypatch):
+    """The fence spans chunks, and the parse offset must not land inside it:
+    the rows are the ones the whole answer parses to."""
+    import blindpilot_app as app
+    from markdown_rows import _flatten
+
+    panel = _streaming_panel(app, monkeypatch)
+    answer = (
+        "**Summary:**\n\nDone in two steps.\n\n"
+        "```python\ndef f(x):\n    return x + 1\n```\n\nAll green."
+    )
+
+    _stream_whole_answer(panel, app, answer)
+
+    whole = app.parse_response(answer, 1)[1:]
+    streamed_rows = panel._rows[:-1]  # the last row is the tool that ended it
+    assert (
+        [row.kind for row in streamed_rows]
+        == [row.kind for row in whole]
+        == [
+            "prose",
+            "prose",
+            "code",
+            "prose",
+        ]
+    )
+    assert [(row.kind, _flatten(row.payload)) for row in streamed_rows] == [
+        (row.kind, _flatten(row.payload)) for row in whole
+    ]
+    assert "return x + 1" in streamed_rows[2].payload
+
+
+def test_a_block_already_shown_is_never_parsed_again(monkeypatch):
+    """The whole of the finding: every chunk used to re-parse the whole
+    answer. Once a block has been shown, no later parse sees it."""
+    import blindpilot_app as app
+
+    seen: list[str] = []
+    real_parse = app.parse_response
+
+    def spy(text, n):
+        seen.append(text)
+        return real_parse(text, n)
+
+    monkeypatch.setattr(app, "parse_response", spy)
+    panel = _streaming_panel(app, monkeypatch)
+    answer = "# First heading\n\nBody of the first block, in words.\n\nSecond block.\n\nTail."
+
+    _stream_whole_answer(panel, app, answer)
+
+    heading_parses = [text for text in seen if "# First" in text]
+    assert len(heading_parses) == 1, heading_parses
+
+
+def test_an_indented_block_streamed_mid_answer_arrives_as_code(monkeypatch):
+    """The offset lands on the block's first line, where strip() would take
+    the indent that makes it code: the indent has to be propped up."""
+    import blindpilot_app as app
+
+    panel = _streaming_panel(app, monkeypatch)
+    answer = "Intro text, in one sentence.\n\n    indented_code_line = 1\n\nOutro text."
+
+    _stream_whole_answer(panel, app, answer)
+
+    assert [row.kind for row in panel._rows] == ["prose", "code", "prose", "tool"]
+    assert "indented_code_line = 1" in panel._rows[1].payload

@@ -120,8 +120,12 @@ FAKES: list[tuple[str, str, str, bool]] = [
     ("test_hermes_questions", "_RecordingTransport", "kl()", False),
     ("test_hermes_slash", "_ScriptedTransport", "kl([])", True),
     # The Muse worker's scripted MSP host: replays a canned JSON-RPC
-    # conversation and ends like a pipe when it runs out.
+    # conversation and ends like a pipe when they run out.
     ("test_muse_worker", "_ScriptedMuseTransport", "kl([])", True),
+    # The Hermes worker's new tests: a scripted turn ends like a pipe when its
+    # frames run out; a delegate-only stream stays connected after its frames.
+    ("test_hermes_worker", "_ScriptedTransport", "kl([])", True),
+    ("test_hermes_worker", "_ProgressThenComplete", "kl(0)", False),
 ]
 
 REAL: list[tuple[str, object, bool]] = [

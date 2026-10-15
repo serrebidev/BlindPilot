@@ -27,7 +27,6 @@ from agent_backends import (
     Question,
     QuestionOption,
     SubagentReport,
-    ignore_subagents,
     question_summary,
     subagent_line,
     subagent_status,
@@ -607,7 +606,17 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         # Not yet wired to a Hermes approval request; accepted for parity
         # with the upstream workers so the contract test holds.
         self._on_permission = on_permission
-        self._on_subagent = on_subagent or ignore_subagents
+
+        # Counted like the rows above: a delegate-only stream whose frames
+        # never bumped the count tripped the silence diagnosis and the idle
+        # limit even though the work was plainly under way. Counted even when
+        # the window ignores subagent rows -- the turn is still working.
+        def counted_subagent(agent_id: str, goal: str, status: str, line: str) -> None:
+            self._rows_emitted += 1
+            if on_subagent is not None:
+                on_subagent(agent_id, goal, status, line)
+
+        self._on_subagent = counted_subagent
         # delegate_task children this turn has heard of, by subagent id, with
         # where each stands: interrupting the session does not reach them,
         # so Stop interrupts each one still running by name.
@@ -710,8 +719,12 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         except Exception as exc:
             # A crash has to be said, not silent: the shared turn
             # scaffold reports one, and a screen reader left with
-            # nothing announced is the worst outcome there is.
-            self._on_failed(f"Hermes turn failed: {exc}")
+            # nothing announced is the worst outcome there is. But a
+            # turn that already ended -- cleanly or with its ending
+            # already reported -- must not be announced as failed
+            # because the completion callback raised.
+            if not self._clean_end and not self._ended:
+                self._on_failed(f"Hermes turn failed: {exc}")
         finally:
             self._accepting_input.clear()
             transport = self._transport

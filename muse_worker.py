@@ -238,6 +238,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._streamed = 0
         self._tool_names: dict[str, str] = {}
         self._tool_output_parts: dict[str, list[str]] = {}
+        # Reasoning/summary deltas held per item until the item completes:
+        # a row per delta was torn speech, and the completing item then
+        # spoke the whole reasoning again.
+        self._reasoning_parts: dict[str, list[str]] = {}
         # Answer text seen so far per agentMessage item.
         self._answer_items: dict[str, str] = {}
         # Approval stages already answered, and each approval's tool name
@@ -849,9 +853,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             return
         # A reasoning item streams its summary as "summary.0", "summary.1"...
         # (measured 1.3.0); taken for answer text, it was spoken and saved as
-        # the reply.
+        # the reply. Held until the item completes, the way Command Code holds
+        # thinking deltas: released per delta the reader heard half a thought,
+        # and the completing item then spoke the whole reasoning again.
         if field.startswith(("reasoning", "summary")):
-            self._on_activity("thinking", delta)
+            self._reasoning_parts.setdefault(item_id, []).append(delta)
             return
         if field.startswith("output") or item_id in self._tool_names:
             self._tool_output_parts.setdefault(item_id, []).append(delta)
@@ -902,9 +908,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                 self._on_activity("result", f"{name}: {result_text.strip()}")
             self._tool_output_parts.pop(item_id, None)
         elif kind == "reasoning":
-            text = _item_text(item)
-            if text.strip():
-                self._on_activity("thinking", text.strip())
+            buffered = "".join(self._reasoning_parts.pop(item_id, [])).strip()
+            text = _item_text(item).strip() or buffered
+            if text:
+                self._on_activity("thinking", text)
         elif kind == "compaction":
             self._on_activity("tool", "Conversation compacted")
         elif kind == "userShell":
@@ -1179,6 +1186,9 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             self._fail(message)
             return
         text = "".join(self._assistant_parts).strip()
+        # Settled before the callback: a listener that raises on the
+        # finished answer must not have the turn re-announced as failed.
+        self._clean_end = True
         if terminal == "cancelled":
             self._on_complete(text or "Stopped")
             return

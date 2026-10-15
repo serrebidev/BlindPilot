@@ -274,6 +274,41 @@ def test_an_error_result_is_reported(worker_env):
     assert "complete" not in rec.kinds()
 
 
+def test_a_completion_callback_that_raises_is_not_announced_as_a_failed_turn(worker_env):
+    """The turn succeeded; a listener that cannot take the answer is not its
+    failure. _completed is set before on_complete, and the crash guard reads
+    it -- without that the finished turn was announced as failed."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[_result(subtype="success", sessionId="s1", finalText="done")]
+    )
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = CommandcodeWorker(
+        "do the thing",
+        None,
+        "C:\\work",
+        "plan",
+        model="gpt-5.5",
+        effort="xhigh",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _kind, _text: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+    worker.start()
+    worker.join(20)
+
+    assert completed == ["done"]
+    assert failures == []
+
+
 def test_a_turn_cut_off_at_the_turn_limit_keeps_what_it_produced(worker_env):
     """Print mode hands the partial answer back and exits 8; it did not fail.
 
