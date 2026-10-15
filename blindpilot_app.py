@@ -2689,7 +2689,7 @@ def _notify_if_away(panel: "SessionPanel", message: str) -> None:
     BlindPilot forward on this tab.
     """
     app = wx.GetApp()
-    if not SETTINGS.notify_in_background or app is None or app.IsActive():
+    if not SETTINGS.notify_in_background or app is None or cast(wx.App, app).IsActive():
         return
     title = _tab_label(getattr(panel, "tab_title", ""), getattr(panel, "cwd", ""))
     note = wx.adv.NotificationMessage(f"BlindPilot: {title}", message, panel)
@@ -2700,7 +2700,7 @@ def _notify_if_away(panel: "SessionPanel", message: str) -> None:
         held = panel._notifications = []
     held.append(note)
 
-    def done(_event, chosen: bool) -> None:
+    def done(chosen: bool) -> None:
         if note in held:
             held.remove(note)
         if chosen:
@@ -2711,7 +2711,11 @@ def _notify_if_away(panel: "SessionPanel", message: str) -> None:
         (wx.adv.wxEVT_NOTIFICATION_MESSAGE_CLICK, True),
         (wx.adv.wxEVT_NOTIFICATION_MESSAGE_DISMISSED, False),
     ):
-        note.Bind(wx.PyEventBinder(event_type), lambda e, c=chosen: done(e, c))
+
+        def on_notification(_event: wx.Event, selected: bool = chosen) -> None:
+            done(selected)
+
+        note.Bind(wx.PyEventBinder(event_type), on_notification)
     note.Show()
 
 
@@ -5095,7 +5099,12 @@ class FormattedView(wx.Dialog):
         try:
             import wx.html2 as html2
 
-            backend = html2.WebViewBackendEdge if platform.system() == "Windows" else ""
+            edge = html2.WebViewBackendEdge
+            backend = (
+                (edge.decode() if isinstance(edge, bytes) else edge)
+                if platform.system() == "Windows"
+                else ""
+            )
             if backend and not html2.WebView.IsBackendAvailable(backend):
                 return None
             return cls(parent, page, title, html2, backend)
@@ -5215,7 +5224,11 @@ class BugReportDialog(wx.Dialog):
             ("&Copy Report", self._copy),
         ):
             button = wx.Button(self, label=label)
-            button.Bind(wx.EVT_BUTTON, lambda _e, act=action: act())
+
+            def on_button(_event: wx.CommandEvent, selected: Callable[[], object] = action) -> None:
+                selected()
+
+            button.Bind(wx.EVT_BUTTON, on_button)
             buttons.Add(button, 0, wx.RIGHT, self.FromDIP(PAD))
         buttons.Add(wx.Button(self, wx.ID_CANCEL, "Close"))
         sizer.Add(buttons, 0, wx.ALL, pad)
@@ -5831,10 +5844,15 @@ class AgentFileList(wx.Dialog):
             actions += [(wx.ID_ADD, add_label), (wx.ID_DELETE, "&Delete")]
         for id_, label in actions:
             button = wx.Button(self, id_, label)
-            button.Bind(wx.EVT_BUTTON, lambda _e, id_=id_: self._end(id_))
+
+            def on_button(_event: wx.CommandEvent, selected: int = id_) -> None:
+                self._end(selected)
+
+            button.Bind(wx.EVT_BUTTON, on_button)
             buttons.Add(button, 0, wx.RIGHT, self.FromDIP(8))
+            if id_ == wx.ID_OPEN:
+                button.SetDefault()
         buttons.Add(wx.Button(self, wx.ID_CANCEL, "Back"))
-        self.FindWindow(wx.ID_OPEN).SetDefault()
 
         pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -5876,14 +5894,16 @@ class AddMemoryDialog(wx.Dialog):
             grid.Add(control, 1, wx.EXPAND)
             return control
 
-        self.name = field("&Name:", wx.TextCtrl(self))
-        self.description = field("&Description, one line:", wx.TextCtrl(self))
-        self.kind = field("&Type:", wx.Choice(self, choices=list(MEMORY_TYPES)))
+        self.name = cast(wx.TextCtrl, field("&Name:", wx.TextCtrl(self)))
+        self.description = cast(wx.TextCtrl, field("&Description, one line:", wx.TextCtrl(self)))
+        self.kind = cast(wx.Choice, field("&Type:", wx.Choice(self, choices=list(MEMORY_TYPES))))
         self.kind.SetSelection(MEMORY_TYPES.index("project"))
         self.folders = folders
-        self.folder = field("&Folder:", wx.Choice(self, choices=[str(f) for f in folders]))
+        self.folder = cast(
+            wx.Choice, field("&Folder:", wx.Choice(self, choices=[str(f) for f in folders]))
+        )
         self.folder.SetSelection(0)
-        self.body = field("&Memory:", wx.TextCtrl(self, style=wx.TE_MULTILINE))
+        self.body = cast(wx.TextCtrl, field("&Memory:", wx.TextCtrl(self, style=wx.TE_MULTILINE)))
         self.body.SetMinSize(self.FromDIP(wx.Size(480, 160)))
         grid.AddGrowableRow(4)
 
@@ -6203,7 +6223,11 @@ class PermissionDialog(wx.Dialog):
             choices.append((self.DENY, "De&ny"))
         for button_id, text in choices:
             button = wx.Button(self, button_id, text)
-            button.Bind(wx.EVT_BUTTON, lambda _e, i=button_id: self.EndModal(i))
+
+            def on_button(_event: wx.CommandEvent, selected: int = button_id) -> None:
+                self.EndModal(selected)
+
+            button.Bind(wx.EVT_BUTTON, on_button)
             buttons.Add(button, 0, wx.RIGHT, self.FromDIP(PAD))
             if button_id == self.DENY:
                 button.SetDefault()
@@ -7192,7 +7216,7 @@ class HistoryDialog(wx.Dialog):
         self._refresh()
         announce(f"Error: {error}" if error else self.summary.GetLabel())
 
-    def Destroy(self) -> bool:
+    def Destroy(self) -> bool:  # type: ignore[override]
         # Cocoa may defer native destruction past an already queued callback.
         self._load_serial += 1
         self._preview_timer.Stop()
@@ -7757,7 +7781,11 @@ class SavedPromptsDialog(wx.Dialog):
             ("Move Do&wn", lambda: self._move(1)),
         ):
             button = wx.Button(self, label=label)
-            button.Bind(wx.EVT_BUTTON, lambda _e, a=action: a())
+
+            def on_button(_event: wx.CommandEvent, selected: Callable[[], None] = action) -> None:
+                selected()
+
+            button.Bind(wx.EVT_BUTTON, on_button)
             buttons.Add(button, 0, wx.RIGHT, self.FromDIP(4))
         close = wx.Button(self, wx.ID_CANCEL, "&Close")
         buttons.Add(close)
@@ -7928,6 +7956,7 @@ class SessionPanel(wx.Panel):
         self._focus_before = focus_before
         self._focus_after = focus_after
         self.last_status = "Ready"
+        self._notifications: list[wx.adv.NotificationMessage] = []
 
         # A question this turn asked through its backend's own question tool,
         # so a question left in the answer as well is not asked over again.
@@ -8060,7 +8089,7 @@ class SessionPanel(wx.Panel):
         self.prompt.Bind(wx.EVT_KEY_DOWN, self._on_prompt_key)
         self.prompt.Bind(wx.EVT_SET_FOCUS, self._on_prompt_focus)
         self.prompt.Bind(wx.EVT_TEXT, self._on_prompt_text_changed)
-        self._dictation_timer = None
+        self._dictation_timer: wx.CallLater | None = None
         # What the prompt held at the last change, so the next one can be
         # told apart from a keystroke, and what is waiting to be read back.
         self._prompt_text = ""
@@ -8830,7 +8859,7 @@ class SessionPanel(wx.Panel):
         """Raise the window with this tab showing, from a notification."""
         if not self:
             return
-        frame = wx.GetTopLevelParent(self)
+        frame = cast("MainFrame | None", wx.GetTopLevelParent(self))
         if frame is None:
             return
         frame.Iconize(False)
@@ -10260,7 +10289,9 @@ class SessionPanel(wx.Panel):
         if seen is not None:
             self._museai_seen = seen
         if getattr(self, "_museai_watch", None) is None:
-            self._museai_watch = wx.CallLater(self._MUSEAI_IDLE_CHECK_MS, self._check_museai)
+            self._museai_watch: wx.CallLater | None = wx.CallLater(
+                self._MUSEAI_IDLE_CHECK_MS, self._check_museai
+            )
 
     def _check_museai(self) -> None:
         self._museai_watch = None
@@ -11113,14 +11144,30 @@ class SessionPanel(wx.Panel):
         row = self._displayed[sel]
         menu = wx.Menu()
         formatted = menu.Append(wx.ID_ANY, "Read response as formatted page\tShift+Enter")
-        self.Bind(wx.EVT_MENU, lambda _e, r=row: self._read_formatted(r), formatted)
+
+        def read_formatted(_event: wx.CommandEvent) -> None:
+            self._read_formatted(row)
+
+        self.Bind(wx.EVT_MENU, read_formatted, formatted)
         if row.kind == "code":
             item = menu.Append(wx.ID_ANY, "Save code to file…")
-            self.Bind(wx.EVT_MENU, lambda _e, r=row: self._action_save_code(r), item)
+
+            def save_code(_event: wx.CommandEvent) -> None:
+                self._action_save_code(row)
+
+            self.Bind(wx.EVT_MENU, save_code, item)
         insert_item = menu.Append(wx.ID_ANY, "Insert into prompt")
-        self.Bind(wx.EVT_MENU, lambda _e, r=row: self._action_insert(r), insert_item)
+
+        def insert(_event: wx.CommandEvent) -> None:
+            self._action_insert(row)
+
+        self.Bind(wx.EVT_MENU, insert, insert_item)
         copy_item = menu.Append(wx.ID_ANY, "Copy whole response")
-        self.Bind(wx.EVT_MENU, lambda _e, r=row: self._action_copy_response(r), copy_item)
+
+        def copy_response(_event: wx.CommandEvent) -> None:
+            self._action_copy_response(row)
+
+        self.Bind(wx.EVT_MENU, copy_response, copy_item)
         copy_all_item = menu.Append(wx.ID_ANY, "Copy whole conversation")
         self.Bind(wx.EVT_MENU, lambda _e: self._action_copy_conversation(), copy_all_item)
         self._responses_ctrl().PopupMenu(menu)
@@ -13334,11 +13381,11 @@ class MainFrame(wx.Frame):
             item = model_order_menu.AppendRadioItem(wx.ID_ANY, label, description)
             item.Check(order == self._chat_model_order)
             self._chat_model_order_items[order] = item
-            self.Bind(
-                wx.EVT_MENU,
-                lambda _e, selected=order: self._set_chat_model_order(selected),
-                item,
-            )
+
+            def set_order(_event: wx.CommandEvent, selected: str = order) -> None:
+                self._set_chat_model_order(selected)
+
+            self.Bind(wx.EVT_MENU, set_order, item)
         chat_menu.AppendSubMenu(
             model_order_menu,
             "Model &order",
@@ -13596,7 +13643,11 @@ class MainFrame(wx.Frame):
         for n in range(1, 10):
             tid = wx.NewIdRef()
             self._tab_jump_ids.append(tid)
-            self.Bind(wx.EVT_MENU, lambda _e, idx=n - 1: self._jump_to_tab(idx), id=tid)
+
+            def jump_to_tab(_event: wx.CommandEvent, idx: int = n - 1) -> None:
+                self._jump_to_tab(idx)
+
+            self.Bind(wx.EVT_MENU, jump_to_tab, id=tid)
             accel_entries.append(wx.AcceleratorEntry(wx.ACCEL_CMD, ord(str(n)), tid))
 
         self.SetAcceleratorTable(wx.AcceleratorTable(accel_entries))
@@ -14632,7 +14683,11 @@ class MainFrame(wx.Frame):
             item = menu.AppendRadioItem(wx.ID_ANY, BACKEND_LABELS[backend])
             item.Check(backend == self._backend)
             self._backend_items[backend] = item
-            self.Bind(wx.EVT_MENU, lambda _e, chosen=backend: self._set_backend(chosen), item)
+
+            def set_backend(_event: wx.CommandEvent, chosen: str = backend) -> None:
+                self._set_backend(chosen)
+
+            self.Bind(wx.EVT_MENU, set_backend, item)
         return menu
 
     def _build_permission_mode_menu(self) -> wx.Menu:
@@ -14646,7 +14701,11 @@ class MainFrame(wx.Frame):
         for value, label, description in PERMISSION_MODES:
             item = menu.AppendRadioItem(wx.ID_ANY, label, description)
             self._mode_items[value] = item
-            self.Bind(wx.EVT_MENU, lambda _e, mode=value: self._set_mode_active(mode), item)
+
+            def set_mode(_event: wx.CommandEvent, mode: str = value) -> None:
+                self._set_mode_active(mode)
+
+            self.Bind(wx.EVT_MENU, set_mode, item)
         return menu
 
     def _refresh_mode_items(self) -> None:
@@ -15035,7 +15094,11 @@ class MainFrame(wx.Frame):
             item = menu.AppendRadioItem(wx.ID_ANY, label, help_text)
             item.Check(mode == SETTINGS.narration)
             self._narration_items[mode] = item
-            self.Bind(wx.EVT_MENU, lambda _e, chosen=mode: self._set_narration(chosen), item)
+
+            def set_narration(_event: wx.CommandEvent, chosen: str = mode) -> None:
+                self._set_narration(chosen)
+
+            self.Bind(wx.EVT_MENU, set_narration, item)
         return menu
 
     def _set_narration(self, mode: str) -> None:
@@ -15058,7 +15121,11 @@ class MainFrame(wx.Frame):
             item.Check(SETTINGS.sound_cues.get(cue, True))
             item.Enable(SETTINGS.sounds_enabled)
             self._sound_cue_items[cue] = item
-            self.Bind(wx.EVT_MENU, lambda _e, key=cue: self._toggle_sound_cue(key), item)
+
+            def toggle_cue(_event: wx.CommandEvent, key: str = cue) -> None:
+                self._toggle_sound_cue(key)
+
+            self.Bind(wx.EVT_MENU, toggle_cue, item)
         return menu
 
     def _toggle_sound_cue(self, cue: str) -> None:
