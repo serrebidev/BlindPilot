@@ -754,6 +754,14 @@ def test_usage_state_reads_are_cached_but_a_write_takes_effect(monkeypatch, tmp_
 # --------------------------------------------------------------------------
 
 
+def test_installed_catalog_covers_every_tier_candidate():
+    catalog = router.price_catalog()
+    if not catalog:
+        pytest.skip("no installed Command Code catalog")
+    missing = router.catalog_missing_candidates(catalog)
+    assert not missing, f"tier candidates missing from catalog: {missing}"
+
+
 def test_a_lock_held_too_long_fails_the_record_instead_of_hanging(monkeypatch, tmp_path):
     state = tmp_path / "usage.json"
     state.write_text("{}", encoding="utf-8")
