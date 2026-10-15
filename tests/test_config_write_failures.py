@@ -581,6 +581,67 @@ def test_a_remote_address_that_saves_describes_the_connection(monkeypatch):
     assert said[0].startswith("Remote Hermes: "), said
 
 
+@pytest.fixture
+def restored_remote():
+    """Put the process-wide REMOTE_HERMES singleton back after each test here."""
+    before = dict(app.REMOTE_HERMES.__dict__)
+    yield
+    app.REMOTE_HERMES.__dict__.clear()
+    app.REMOTE_HERMES.__dict__.update(before)
+
+
+def test_a_key_write_that_fails_is_spoken_once_like_any_other_save_failure(
+    config_at, tmp_path, monkeypatch, restored_remote
+):
+    """The key is half of what the dialog saved.
+
+    A settings file that lands while the key refuses its write is still a
+    failed save: `apply` must not report success, and the handler must speak
+    the one failure sentence -- once, whether one file refused or both.
+    """
+    real_apply = app.RemoteHermesDialog.apply
+    key_blocker = tmp_path / "key-in-the-way"
+    key_blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(
+        app._RemoteHermes,
+        "_key_path",
+        staticmethod(lambda: key_blocker / "remote-hermes-key"),
+    )
+    monkeypatch.setattr(app, "invalidate_model_options", lambda *_a, **_k: None)
+    said: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, urgent=False: said.append(text))
+
+    class _Dialog(type(_remote_fields())):
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def ShowModal(self):
+            return app.wx.ID_OK
+
+        def Destroy(self):
+            pass
+
+        def apply(self):
+            return real_apply(self)
+
+    monkeypatch.setattr(app, "RemoteHermesDialog", _Dialog)
+
+    # The settings write lands; only the key file refuses. The refusal is
+    # still the sentence the caller speaks, not a success that drops the key.
+    config_at(tmp_path / "config.json")
+    app.MainFrame._configure_remote_hermes(type("FrameStub", (), {})())
+
+    assert (tmp_path / "config.json").exists()
+    assert said == ["Error: could not save settings"]
+
+    # Both files refuse now: one sentence, not two.
+    said.clear()
+    config_at(key_blocker / "config.json")
+    app.MainFrame._configure_remote_hermes(type("FrameStub", (), {})())
+
+    assert said == ["Error: could not save settings"]
+
+
 # ----- a menu choice under the SETTINGS store -----
 def test_a_narration_pick_that_cannot_be_saved_says_so(unwritable, restored_settings):
     """ "Narration: ..." would claim a file that refused the change; the mode

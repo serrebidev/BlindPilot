@@ -3823,13 +3823,19 @@ class _RemoteHermes:
         except (OSError, ValueError):
             return ""
 
-    def _write_key(self) -> None:
+    def _write_key(self) -> bool:
+        """Write the credential file. False when it refused the write.
+
+        The failure is returned rather than raised or logged alone, because
+        `save` has to carry it to the caller: a key that never reached disk
+        leaves the next launch connecting without it, in silence.
+        """
         path = self._key_path()
         try:
             _config_dir().mkdir(parents=True, exist_ok=True)
             if not self.key:
                 path.unlink(missing_ok=True)
-                return
+                return True
             # Created owner-only rather than chmod'ed afterwards, so it is
             # never readable by others even for an instant. On Windows the
             # per-user AppData directory is already the boundary.
@@ -3838,8 +3844,9 @@ class _RemoteHermes:
                 fh.write(self.key)
             if platform.system() != "Windows":
                 os.chmod(path, 0o600)
+            return True
         except OSError:
-            pass
+            return False
 
     def url(self) -> str:
         """The gateway address, or "" when the remote mode is not in use."""
@@ -3858,7 +3865,12 @@ class _RemoteHermes:
         return f"On. {url}, signing in with a {how}"
 
     def save(self) -> bool:
-        """Write the address and who it is. False when the file refused it."""
+        """Write the address, who it is, and the key. False when either file refused.
+
+        One answer for both writes: the caller speaks the failure once, so a
+        settings file and a key file that both refused cost one sentence
+        between them, not two.
+        """
         cfg = _load_config()
         cfg["remote_hermes"] = {
             "enabled": self.enabled,
@@ -3869,8 +3881,8 @@ class _RemoteHermes:
             "username": self.username,
         }
         saved = _save_config(cfg)
-        self._write_key()
-        return saved
+        key_saved = self._write_key()
+        return saved and key_saved
 
 
 REMOTE_HERMES = _RemoteHermes()
@@ -10909,6 +10921,15 @@ class SessionPanel(wx.Panel):
             self._stream_response = None
             self._set_status(f"Reopened, {len(self._rows)} rows")
             return
+        if not text.strip() and self._stream_response is None and self._turns:
+            # A turn that ended without an error and without a word: the fresh
+            # "Response N" header below would carry an empty payload, a row
+            # with nothing for a reader to read, and its status would claim
+            # segments that do not exist. The response number is left for the
+            # next real answer rather than spent on the empty one.
+            self._turns[-1].response = ""
+            self._stream_response = None
+            return
         self._narrate_completed_response(text)
         if self._turns:
             self._turns[-1].response = text
@@ -11356,40 +11377,50 @@ class SessionPanel(wx.Panel):
         return f"Copied {names.get(row.kind, 'paragraph')}"
 
     # ----- Per-row actions menu -----
-    def _show_row_menu(self) -> None:
-        """Arrowable actions for the focused row (Menu key / context gesture)."""
-        sel = self._selected_row()
-        if not (0 <= sel < len(self._displayed)):
-            return
-        row = self._displayed[sel]
+    def _build_row_menu(self, row: Row) -> wx.Menu:
+        """The actions offered for one row.
+
+        Each item binds on the menu it belongs to rather than on the panel:
+        a binding made on the panel outlives the menu that needed it, so every
+        open of this menu used to add five more for as long as the
+        conversation stayed on screen.
+        """
         menu = wx.Menu()
         formatted = menu.Append(wx.ID_ANY, "Read response as formatted page\tShift+Enter")
 
         def read_formatted(_event: wx.CommandEvent) -> None:
             self._read_formatted(row)
 
-        self.Bind(wx.EVT_MENU, read_formatted, formatted)
+        menu.Bind(wx.EVT_MENU, read_formatted, formatted)
         if row.kind == "code":
             item = menu.Append(wx.ID_ANY, "Save code to file…")
 
             def save_code(_event: wx.CommandEvent) -> None:
                 self._action_save_code(row)
 
-            self.Bind(wx.EVT_MENU, save_code, item)
+            menu.Bind(wx.EVT_MENU, save_code, item)
         insert_item = menu.Append(wx.ID_ANY, "Insert into prompt")
 
         def insert(_event: wx.CommandEvent) -> None:
             self._action_insert(row)
 
-        self.Bind(wx.EVT_MENU, insert, insert_item)
+        menu.Bind(wx.EVT_MENU, insert, insert_item)
         copy_item = menu.Append(wx.ID_ANY, "Copy whole response")
 
         def copy_response(_event: wx.CommandEvent) -> None:
             self._action_copy_response(row)
 
-        self.Bind(wx.EVT_MENU, copy_response, copy_item)
+        menu.Bind(wx.EVT_MENU, copy_response, copy_item)
         copy_all_item = menu.Append(wx.ID_ANY, "Copy whole conversation")
-        self.Bind(wx.EVT_MENU, lambda _e: self._action_copy_conversation(), copy_all_item)
+        menu.Bind(wx.EVT_MENU, lambda _e: self._action_copy_conversation(), copy_all_item)
+        return menu
+
+    def _show_row_menu(self) -> None:
+        """Arrowable actions for the focused row (Menu key / context gesture)."""
+        sel = self._selected_row()
+        if not (0 <= sel < len(self._displayed)):
+            return
+        menu = self._build_row_menu(self._displayed[sel])
         self._responses_ctrl().PopupMenu(menu)
         menu.Destroy()
 
