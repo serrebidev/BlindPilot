@@ -1,4 +1,4 @@
-# BlindPilot 0.47.2
+# BlindPilot 0.47.3
 
 This release fixes keyboard navigation in Agent mode's Recent Conversations.
 
