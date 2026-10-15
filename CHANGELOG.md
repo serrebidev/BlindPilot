@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## Unreleased
+
+- Command Code Auto skips Ling 3.1 Flash's retired free tier even when the installed CLI's bundled catalog still lists it as free; Laguna S 2.1 remains available for quick tasks and safe credit-limit retries.
+- History loading scans the providers in parallel, so opening history is faster when several backends have stored conversations.
+
 ## v0.47.3 - 2026-10-14
 
 - Tab and Shift+Tab reach the conversation list in Agent mode's Recent Conversations again. Arrows worked inside the list, but Windows' Tab traversal walked past it in both directions, because the drawn list never carried the tab-stop style Windows looks for. The Hermes conversations and slash command pickers use the same list and are fixed with it. Reported by Kaveinthran.
