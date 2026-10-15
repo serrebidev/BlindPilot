@@ -183,3 +183,123 @@ def test_a_stream_of_subagent_progress_does_not_trip_the_idle_path(monkeypatch):
     assert failures == []
     silent = [text for _kind, text in rows if "silent" in text.lower()]
     assert not silent, f"a turn reporting subagent progress was diagnosed as silent: {silent}"
+
+
+# --------------------------------------------------------------------------
+# Work that must not start after the turn has already ended
+# --------------------------------------------------------------------------
+
+
+def test_a_prompt_is_not_sent_after_the_turn_has_ended():
+    completed: list[str] = []
+    failures: list[str] = []
+    worker = HermesWorker(
+        "hi",
+        None,
+        ".",
+        "default",
+        **_callbacks(on_complete=completed.append, on_failed=failures.append),
+    )
+    worker._ended = True
+    calls: list[str] = []
+    worker._call = lambda *args, **_kwargs: calls.append(args[0])
+
+    worker._run_turn()
+
+    assert calls == []
+    assert completed == []
+    assert failures == []
+
+
+def test_a_slash_check_that_ends_the_turn_does_not_send_the_prompt():
+    # The completion can arrive while complete.slash is being answered; the
+    # turn is over by the time that check returns, so nothing follows it.
+    completed: list[str] = []
+    worker = HermesWorker(
+        "/compact",
+        None,
+        ".",
+        "default",
+        **_callbacks(on_complete=completed.append),
+    )
+    worker._transport = _ScriptedTransport(
+        [_event("message.complete", {"status": "complete", "text": "the answer"})]
+    )
+    calls: list[str] = []
+    worker._call = lambda *args, **_kwargs: calls.append(args[0])
+
+    worker._run_turn()
+
+    assert completed == ["the answer"]
+    assert calls == []
+
+
+def test_compaction_is_not_started_after_the_turn_has_ended():
+    completed: list[str] = []
+    failures: list[str] = []
+    worker = HermesWorker(
+        "",
+        None,
+        ".",
+        "default",
+        compact=True,
+        **_callbacks(on_complete=completed.append, on_failed=failures.append),
+    )
+    worker._ended = True
+    calls: list[str] = []
+    worker._call = lambda *args, **_kwargs: calls.append(args[0]) or {}
+
+    worker._run_compaction()
+
+    assert calls == []
+    assert completed == []
+    assert failures == []
+
+
+def test_a_completion_after_the_turn_ended_is_not_announced_again():
+    for flag in ("_ended", "_clean_end"):
+        completed: list[str] = []
+        failures: list[str] = []
+        worker = HermesWorker(
+            "hi",
+            None,
+            ".",
+            "default",
+            **_callbacks(on_complete=completed.append, on_failed=failures.append),
+        )
+        setattr(worker, flag, True)
+
+        ended = worker._turn_complete({"status": "complete", "text": "the answer"})
+
+        assert ended is True, flag
+        assert completed == [], f"{flag} allowed the ending to be announced again"
+        assert failures == [], f"{flag} allowed a failure on top of the ending"
+
+
+def test_a_replay_is_not_reopened_after_the_turn_has_ended():
+    failures: list[str] = []
+    worker = HermesWorker(
+        "", "sess-9", ".", "default", resume_only=True, **_callbacks(on_failed=failures.append)
+    )
+    worker._ended = True
+    calls: list[str] = []
+    worker._call = lambda *args, **_kwargs: calls.append(args[0]) or {}
+
+    worker._run_replay()
+
+    assert calls == []
+    assert failures == []
+
+
+def test_a_session_is_not_created_after_the_turn_has_ended():
+    failures: list[str] = []
+    worker = HermesWorker("hi", None, ".", "default", **_callbacks(on_failed=failures.append))
+    worker._ended = True
+    calls: list[str] = []
+    worker._call = lambda *args, **_kwargs: calls.append(args[0]) or {}
+
+    created = worker._ensure_session()
+
+    assert created is False
+    assert calls == []
+    assert failures == []
