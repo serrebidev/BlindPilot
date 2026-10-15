@@ -2,9 +2,15 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## Unreleased
+## v0.47.0 - 2026-10-14
 
-- Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely.
+- Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely. The cooldown is now shared across processes and matches the model id regardless of case, and a provider-capacity stop gets one announced retry on the next paid model.
+
+- The backends are hardened: the Muse log is read without a shell, Hermes refuses a cleartext login, a Code exit-3 result wins over later frames, FreeBuff's cache is replaced atomically and probe caches are set only on success, and a process group that is ended gets a bounded wait with its pipes closed.
+
+- All three workers guard against completing a turn twice after a cancel, compaction, replay or result, subagent rows are counted, and Muse reasoning is buffered into one row instead of many.
+
+- Settings save failures are now always spoken, once, including failed credential writes. Callbacks that arrive after the app has closed are dropped, an empty turn that exits cleanly leaves no blank row, and the update-status file now lives in the per-user data folder instead of shared temporary storage.
 
 ## v0.46.0 - 2026-10-14
 

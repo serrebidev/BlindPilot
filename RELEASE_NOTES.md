@@ -1,8 +1,9 @@
-# BlindPilot 0.46.0
+# BlindPilot 0.47.0
 
-This release makes a ChatGPT plan account in Chat mode search and research the way ChatGPT itself does.
+This release hardens the backends, the workers, and settings saving, and makes Command Code Auto handle rate and credit limits more clearly.
 
-- Web search is always on for ChatGPT plan accounts, and the model decides when to use it. In 0.45.0 it searched only when the conversation profile had OpenRouter's Web search ticked, so a profile set up for other tools left the model saying it could not search the web. The profile's Web search depth still applies.
-- The model can now read the pages it finds, and check your local date and time, through two tools BlindPilot runs on your computer. It can search, read a page, and search again, for up to eight rounds in one answer, which is enough for "look at ten results and find me..." requests.
-- Page reading only opens public web addresses. It refuses your own computer and your local network, so a web page cannot steer it towards them.
-- Every step is spoken as it happens: each search and what it searched for, each page opened or read, and checking the clock. The sources the answer cites are listed at the end.
+- During a recorded rate or credit cooldown, Command Code Auto runs any task on a model the installed catalog confirms is free, and announces that choice. It also speaks up when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely. The cooldown is shared across processes and matches the model id regardless of case, and a provider-capacity stop gets one announced retry on the next paid model.
+- Turns can no longer complete twice after a cancel, compaction, replay or result, in any of the three workers. Subagent rows are counted, and Muse reasoning arrives as one row.
+- A settings save that fails is now always spoken, once, including a credential write that fails. Before, some of these failures were silent.
+- Security and reliability fixes underneath: the Muse log is read without a shell, Hermes refuses a cleartext login, FreeBuff's cache is replaced atomically, and a process group that is ended gets a bounded wait with its pipes closed, so a wedged turn cannot leave the app stuck.
+- The update-status file moved from shared temporary storage into your per-user data folder.
