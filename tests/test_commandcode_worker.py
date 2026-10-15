@@ -87,10 +87,10 @@ def worker_env(monkeypatch):
     return state
 
 
-def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5"):
+def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5", prompt="do the thing"):
     rec = _Recorder()
     worker = CommandcodeWorker(
-        "do the thing",
+        prompt,
         session_id,
         "C:\\work",
         "plan",
@@ -272,6 +272,57 @@ def test_an_error_result_is_reported(worker_env):
 
     assert rec.texts("failed") == ["boom"]
     assert "complete" not in rec.kinds()
+
+
+def test_a_second_result_line_does_not_announce_the_turn_again(worker_env):
+    """The reader keeps going past a result line, so the stream can carry
+    another one; the finished turn is announced once."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _result(subtype="success", sessionId="s1", finalText="done"),
+            _result(subtype="success", sessionId="s1", finalText="done"),
+        ]
+    )
+
+    _worker, rec = _run()
+
+    assert rec.texts("complete") == ["done"]
+    assert rec.kinds().count("complete") == 1
+
+
+def test_a_completion_callback_that_raises_is_not_announced_as_a_failed_turn(worker_env):
+    """The turn succeeded; a listener that cannot take the answer is not its
+    failure. _completed is set before on_complete, and the crash guard reads
+    it -- without that the finished turn was announced as failed."""
+    worker_env["proc"] = _FakeProcess(
+        lines=[_result(subtype="success", sessionId="s1", finalText="done")]
+    )
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = CommandcodeWorker(
+        "do the thing",
+        None,
+        "C:\\work",
+        "plan",
+        model="gpt-5.5",
+        effort="xhigh",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _kind, _text: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+    worker.start()
+    worker.join(20)
+
+    assert completed == ["done"]
+    assert failures == []
 
 
 def test_a_turn_cut_off_at_the_turn_limit_keeps_what_it_produced(worker_env):
@@ -463,6 +514,16 @@ def test_a_preferred_free_model_is_not_retried(worker_env, monkeypatch):
     assert any("rate limited" in text for text in rec.texts("failed"))
 
 
+def test_a_limit_without_a_confirmed_free_model_explains_no_retry(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(lines=[], returncode=5)
+    monkeypatch.setattr(commandcode_worker, "best_free_model", lambda **_kwargs: None)
+
+    _worker, rec = _run(auto_free_fallback=True)
+
+    assert any("no confirmed free model" in text for text in rec.activity("notice"))
+    assert any("rate limited" in text for text in rec.texts("failed"))
+
+
 def test_a_limited_free_model_tries_the_next_confirmed_free_model(worker_env, monkeypatch):
     argv_log: list = []
     _two_runs(
@@ -507,6 +568,7 @@ def test_a_rate_limit_after_partial_output_is_not_retried(worker_env, monkeypatc
     _worker, rec = _run(auto_free_fallback=True)
 
     assert any("limit reached" in text for text in rec.texts("failed"))
+    assert any("already produced an answer" in text for text in rec.activity("notice"))
 
 
 @pytest.mark.parametrize(
@@ -534,6 +596,7 @@ def test_a_rate_limit_after_a_started_tool_is_not_retried(worker_env, monkeypatc
     _worker, rec = _run(auto_free_fallback=True)
 
     assert any("rate limited" in text for text in rec.texts("failed"))
+    assert any("already ran a tool" in text for text in rec.activity("notice"))
 
 
 def test_a_missing_cli_is_reported(monkeypatch):
@@ -640,6 +703,102 @@ def test_cancel_reports_stopped_without_a_failure(monkeypatch):
     assert rec.kinds()[-1] == "done"
 
 
+def test_cancel_after_the_answer_is_not_reported_a_second_time(monkeypatch):
+    """Stop right after the result line: the answer already settled the turn,
+    so the cancelled path must not announce it again."""
+    rec = _Recorder()
+    monkeypatch.setattr(commandcode_worker, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(commandcode_worker, "subprocess_env", lambda _binary: {})
+    monkeypatch.setattr(commandcode_worker, "end_process_group", lambda *_a, **_k: None)
+    holder: dict = {}
+
+    class _ResultThenCancel(_FakeProcess):
+        def __init__(self):
+            super().__init__(returncode=0)
+            self.stdout = self._lines()
+
+        def _lines(self):
+            yield _result(subtype="success", sessionId="s1", finalText="done")
+            holder["worker"].cancel()
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda *a, **k: _ResultThenCancel())
+    worker = CommandcodeWorker(
+        "do the thing",
+        None,
+        "C:\\work",
+        "plan",
+        on_session=rec.callback("session"),
+        on_started=rec.callback("started"),
+        on_activity=rec.callback("activity"),
+        on_complete=rec.callback("complete"),
+        on_failed=rec.callback("failed"),
+        on_done=rec.callback("done"),
+    )
+    holder["worker"] = worker
+    worker.run()
+
+    assert rec.texts("complete") == ["done"]
+    assert rec.texts("failed") == []
+
+
+def test_a_cancelled_turn_whose_answer_listener_raises_is_not_a_failure(monkeypatch):
+    """The cancelled turn reported its answer before the listener crashed;
+    the listener's own failure is not the turn's."""
+    release = threading.Event()
+    started = threading.Event()
+
+    class _Blocking(_FakeProcess):
+        def __init__(self):
+            super().__init__(returncode=0)
+            first = _event({"type": "run_start", "sessionId": "s1"})
+            self.stdin = _Stdin()
+            self.stdout = self._lines(first)
+            self.stderr = iter(())
+
+        def _lines(self, first):
+            yield first
+            release.wait(10)
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    proc = _Blocking()
+    monkeypatch.setattr(commandcode_worker, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(commandcode_worker, "subprocess_env", lambda _binary: {})
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(commandcode_worker, "end_process_group", lambda *_a, **_k: release.set())
+
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = CommandcodeWorker(
+        "count",
+        None,
+        "C:\\work",
+        "plan",
+        on_session=lambda _sid: None,
+        on_started=lambda: started.set(),
+        on_activity=lambda _k, _t: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+    worker.start()
+    assert started.wait(10)
+    worker.cancel()
+    worker.join(20)
+
+    assert completed == ["Stopped"]
+    assert failures == []
+
+
 def _worker(rec, **extra):
     return CommandcodeWorker(
         "hi",
@@ -708,6 +867,54 @@ def test_compaction_saves_summary_in_new_session_before_switching(worker_env, mo
     assert len(rec.texts("complete")) == 1
     assert rec.kinds().count("done") == 1
     assert "failed" not in rec.kinds()
+
+
+def test_a_compaction_callback_that_raises_is_not_announced_as_a_failed_turn(
+    worker_env, monkeypatch
+):
+    """Compaction settles the turn before its answer, the same way a normal
+    one does: a listener that cannot take the summary is not a failure."""
+    first = _FakeProcess(
+        lines=[
+            _result(
+                subtype="success", sessionId="original", finalText="Objective and unfinished work"
+            )
+        ]
+    )
+    second = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "compacted"}),
+            _result(subtype="success", sessionId="compacted", finalText="Ready"),
+        ]
+    )
+    processes = iter([first, second])
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", lambda argv, **_k: next(processes))
+
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = CommandcodeWorker(
+        "hi",
+        "original",
+        ".",
+        "default",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _t: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+        compact=True,
+    )
+    worker.run()
+
+    assert len(completed) == 1
+    assert "compacted" in completed[0]
+    assert failures == []
 
 
 def test_compaction_announces_free_fallback_and_uses_it_for_both_stages(worker_env, monkeypatch):
@@ -1335,3 +1542,293 @@ def test_the_newest_withheld_tool_is_named_as_withheld(worker_env):
     _worker, rec = _run()
 
     assert any("withholds this tool from a headless run" in t for t in rec.activity("tool"))
+
+
+# --------------------------------------------------------------------------
+# A provider-capacity stop
+# --------------------------------------------------------------------------
+
+# Measured from the installed CLI dist: exit 1, raw server text on stderr.
+_CAPACITY_TEXT = (
+    "Error: 429 The request limited providers for this model and they are "
+    "currently at capacity. Add more providers or remove restrictions for "
+    "automatic fallback. Providers considered: poolside."
+)
+
+
+def _capacity_worker():
+    return CommandcodeWorker(
+        "hi",
+        None,
+        ".",
+        "default",
+        on_session=lambda _s: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _t: None,
+        on_complete=lambda _t: None,
+        on_failed=lambda _m: None,
+        on_done=lambda: None,
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        _CAPACITY_TEXT,
+        "error: providers considered: poolside",
+        "The request LIMITED PROVIDERS for this model",
+        "429 too many requests",
+    ],
+)
+def test_capacity_stop_recognises_the_servers_own_words(line):
+    worker = _capacity_worker()
+    worker._error_lines = [line]
+    assert worker._capacity_stop(1) is True
+    # Only a non-zero exit counts, and other exit-1 refusals are not capacity.
+    assert worker._capacity_stop(0) is False
+    assert worker._capacity_stop(None) is False
+
+    other = _capacity_worker()
+    other._error_lines = ['No session "gone" found to resume.']
+    assert other._capacity_stop(1) is False
+
+
+def test_a_capacity_stop_records_the_model_and_retries_on_the_next_paid(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="paid done")]),
+        argv_log,
+    )
+    recorded: list = []
+    monkeypatch.setattr(
+        commandcode_worker, "record_capacity_hit", lambda model: recorded.append(model) or True
+    )
+    routed: list = []
+
+    def fake_route(_task, **kwargs):
+        routed.append(kwargs)
+        return commandcode_worker.Route("paid/next", "high", "standard", cost=0.5, priced=True)
+
+    monkeypatch.setattr(commandcode_worker, "route", fake_route)
+
+    worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    assert recorded == ["paid/first"]
+    assert routed and routed[0]["exclude_models"] == {"paid/first"}
+    # The retry asks without free candidates, so a QUICK task cannot prefer one.
+    assert routed[0]["include_free"] is False
+    assert routed[0]["context_tokens"] is None
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "paid/next"
+    assert argv_log[1][argv_log[1].index("--effort") + 1] == "high"
+    assert rec.texts("complete") == ["paid done"]
+    assert worker.fallback_model == "paid/next"
+    assert any(
+        "at capacity for paid/first. Retrying with paid/next" in text
+        for text in rec.activity("notice")
+    )
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [_event({"type": "text_delta", "delta": "half an answer"})],
+        [_event({"type": "tool_running", "toolCallId": "c1", "toolName": "write_file"})],
+    ],
+)
+def test_a_capacity_stop_after_output_or_a_tool_is_not_retried(worker_env, monkeypatch, lines):
+    worker_env["proc"] = _FakeProcess(lines=lines, stderr=[_CAPACITY_TEXT], returncode=1)
+    recorded: list = []
+    monkeypatch.setattr(
+        commandcode_worker, "record_capacity_hit", lambda model: recorded.append(model) or True
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda *_a, **_k: pytest.fail("a half-run turn must not replay"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    # The stop is still recorded: the next turn must not re-pick the model.
+    assert recorded == ["paid/first"]
+    assert rec.texts("complete") == []
+    assert any("at capacity" in text for text in rec.texts("failed"))
+
+
+def test_a_capacity_stop_falls_back_to_free_when_no_paid_model_remains(worker_env, monkeypatch):
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="free done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(commandcode_worker, "record_capacity_hit", lambda _model: True)
+    # The router knows the tier but no other paid candidate is eligible.
+    monkeypatch.setattr(
+        commandcode_worker, "route", lambda _task, **_k: commandcode_worker.Route("", "", "")
+    )
+    monkeypatch.setattr(
+        commandcode_worker,
+        "best_free_model",
+        lambda **_k: commandcode_worker.Route("free/code", "", "free", cost=0.0, priced=True),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "free/code"
+    assert "--effort" not in argv_log[1]
+    assert rec.texts("complete") == ["free done"]
+    assert any(
+        "provider capacity reached. Retrying with free model free/code" in text
+        for text in rec.activity("notice")
+    )
+
+
+def test_a_capacity_stop_is_recorded_but_not_retried_when_auto_fallback_is_off(
+    worker_env, monkeypatch
+):
+    worker_env["proc"] = _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1)
+    recorded: list = []
+    monkeypatch.setattr(
+        commandcode_worker, "record_capacity_hit", lambda model: recorded.append(model) or True
+    )
+    monkeypatch.setattr(
+        commandcode_worker, "route", lambda *_a, **_k: pytest.fail("no retry without Auto")
+    )
+
+    _worker, rec = _run(auto_free_fallback=False, model="paid/first")
+
+    # The stop is recorded like a limit stop is: Auto or not, the next turn
+    # must not re-pick a model whose providers are full.
+    assert recorded == ["paid/first"]
+    assert rec.texts("complete") == []
+    assert any("at capacity" in text for text in rec.texts("failed"))
+
+
+def test_a_limit_that_cannot_be_recorded_says_so(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(lines=[], returncode=10)
+    monkeypatch.setattr(commandcode_worker, "record_limit_hit", lambda _code: False)
+
+    _worker, rec = _run(auto_free_fallback=False)
+
+    assert any("could not be recorded" in text for text in rec.activity("notice"))
+    assert any("insufficient credits" in text for text in rec.texts("failed"))
+
+
+# Measured from the installed CLI dist, in the same table shape the router
+# parses: a QUICK task's cheapest pick is free, and a paid candidate remains
+# beside it.
+_QUICK_CATALOG = """| Id (use EXACTLY this) | Name | Context | Efforts | $/1M in/out · cache read | Min plan | Best for |
+|---|---|---|---|---|---|---|
+| `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash | 1M | off, high, max | $0.15/$0.6 · cache $0.003 | Go and above | fast |
+| `deepseek/deepseek-v4.1-flash` | DeepSeek V4.1 Flash | 1M | low, medium | $0.16/$0.58 · cache $0.003 | Go and above | fast |
+| `inclusionai/ling-3.1-flash:free` | Ling 3.1 Flash | 262K | low, medium, high | $0/$0 · cache $0 | Go and above | cheap |
+"""
+
+
+def test_a_quick_capacity_retry_prefers_a_paid_candidate_over_free(
+    worker_env, monkeypatch, tmp_path
+):
+    # A QUICK task's normal pick is the free model, so the capacity retry
+    # must ask without free candidates or it would "switch" to the model it
+    # would have chosen anyway while paid candidates remain.
+    import commandcode_router as router
+
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    catalog = router.parse_prices(_QUICK_CATALOG)
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda task, **kwargs: router.route(task, catalog=catalog, **kwargs),
+    )
+    argv_log: list = []
+    _two_runs(
+        monkeypatch,
+        _FakeProcess(lines=[], stderr=[_CAPACITY_TEXT], returncode=1),
+        _FakeProcess(lines=[_result(subtype="success", sessionId="s1", finalText="paid done")]),
+        argv_log,
+    )
+    monkeypatch.setattr(commandcode_worker, "record_capacity_hit", lambda _model: True)
+
+    _worker, rec = _run(
+        auto_free_fallback=True, model="deepseek/deepseek-v4-flash", prompt="fix the typo"
+    )
+
+    assert len(argv_log) == 2
+    assert argv_log[1][argv_log[1].index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
+    assert rec.texts("complete") == ["paid done"]
+
+
+def test_a_capacity_stop_that_cannot_switch_models_announces_it_once(worker_env, monkeypatch):
+    worker_env["proc"] = _FakeProcess(
+        lines=[_event({"type": "text_delta", "delta": "half an answer"})],
+        stderr=[_CAPACITY_TEXT],
+        returncode=1,
+    )
+    monkeypatch.setattr(commandcode_worker, "record_capacity_hit", lambda _model: True)
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda *_a, **_k: pytest.fail("a half-run turn must not replay"),
+    )
+
+    _worker, rec = _run(auto_free_fallback=True, model="paid/first")
+
+    assert rec.activity("notice") == [
+        "Command Code providers were at capacity; this turn cannot switch models."
+    ]
+    assert any("at capacity" in text for text in rec.texts("failed"))
+
+
+def test_the_turns_context_size_is_exposed_for_pricing_and_the_tab(worker_env):
+    # Measured from the installed CLI dist: model_request_end carries the
+    # request's usage, and the request's input side is the context the next
+    # turn re-reads.
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _event({"type": "run_start", "sessionId": "s1"}),
+            _event(
+                {
+                    "type": "model_request_end",
+                    "model": "gpt-5.5",
+                    "usage": {
+                        "inputTokens": 1_000,
+                        "outputTokens": 200,
+                        "cacheReadTokens": 50_000,
+                        "cacheWriteTokens": 300,
+                    },
+                    "stopReason": "end_turn",
+                }
+            ),
+            _event({"type": "text_delta", "delta": "done. "}),
+            _result(subtype="success", sessionId="s1", finalText="done."),
+        ]
+    )
+
+    worker, _rec = _run()
+
+    assert worker.context_tokens == (51_300, 0)
+
+
+def test_a_result_that_reports_usage_alone_still_exposes_the_context_size(worker_env):
+    # The result's usage totals are one request's usage when the stream
+    # carried no model_request_end.
+    worker_env["proc"] = _FakeProcess(
+        lines=[
+            _result(
+                subtype="success",
+                sessionId="s1",
+                finalText="done",
+                usage={"inputTokens": 10, "outputTokens": 5, "cacheReadTokens": 40},
+            )
+        ]
+    )
+
+    worker, _rec = _run()
+
+    assert worker.context_tokens == (50, 0)

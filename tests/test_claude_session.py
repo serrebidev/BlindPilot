@@ -199,6 +199,20 @@ def test_a_sink_set_after_events_arrived_is_woken_at_once():
     assert woken == [1]
 
 
+def test_idle_events_pile_up_no_further_than_the_stderr_cap():
+    """With no turn attached, every CLI event used to append without bound."""
+    session = cs.ClaudeSession(_Proc(), WANTS)
+    total = cs._PENDING_KEEP + cs._PENDING_TRIM
+    for index in range(total):
+        session._deliver({"type": "assistant", "index": index})
+
+    assert len(session._pending) == cs._PENDING_KEEP
+    assert session._pending_dropped == cs._PENDING_TRIM
+    # The oldest went first; what a late turn still sees is the newest talk.
+    assert session._pending[0]["index"] == cs._PENDING_TRIM
+    assert session._pending[-1]["index"] == total - 1
+
+
 def test_only_one_turn_can_be_attached():
     session = cs.ClaudeSession(_Proc(), WANTS)
     session.attach()

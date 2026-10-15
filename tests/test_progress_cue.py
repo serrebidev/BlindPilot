@@ -15,34 +15,9 @@ from pathlib import Path
 import pytest
 
 
-def _install_wx_stub() -> None:
-    """Minimal stand-in for wx, so the module under test can be imported."""
-    if "wx" in sys.modules:
-        return
+import stub_wx
 
-    class _Stub:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __getattr__(self, name):
-            return _Stub()
-
-        def __call__(self, *args, **kwargs):
-            return _Stub()
-
-    class _Module(types.ModuleType):
-        def __getattr__(self, name):
-            value = type(name, (_Stub,), {})
-            setattr(self, name, value)
-            return value
-
-    wx = _Module("wx")
-    sys.modules["wx"] = wx
-    for name in ("wx.adv", "wx.lib", "wx.lib.newevent", "wx.html", "wx.richtext", "wx.stc"):
-        sys.modules[name] = _Module(name)
-
-
-_install_wx_stub()
+stub_wx.install()
 
 import blindpilot_app  # noqa: E402
 

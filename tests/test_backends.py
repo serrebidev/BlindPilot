@@ -1799,6 +1799,40 @@ def test_opencode_server_is_reached_over_loopback_behind_a_password(monkeypatch)
     assert server._auth.startswith("Basic ")
 
 
+def test_a_port_taken_before_the_child_binds_is_retried_on_a_fresh_one(monkeypatch):
+    """_free_port closes its probe, so the port can be gone by bind time."""
+    started: list[list[str]] = []
+
+    class DeadProcess:
+        stdout = io.StringIO("Error: listen EADDRINUSE: address already in use 127.0.0.1:41234\n")
+
+        def poll(self):
+            return 1
+
+    class LiveProcess:
+        def __init__(self):
+            self.stdout = io.StringIO("opencode server listening on http://127.0.0.1:41235\n")
+
+        def poll(self):
+            return None
+
+    def fake_popen(argv, **kwargs):
+        started.append(argv)
+        return DeadProcess() if len(started) == 1 else LiveProcess()
+
+    ports = iter([41234, 41235])
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(agent_backends, "_free_port", lambda: next(ports))
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _binary: {})
+
+    server = agent_backends.OpencodeServer("opencode")
+
+    assert len(started) == 2
+    assert started[0][3] == "41234"
+    assert started[1][3] == "41235"
+    assert server.base_url == "http://127.0.0.1:41235"
+
+
 def test_opencode_prefers_its_own_executable_over_the_npm_wrapper(monkeypatch, tmp_path):
     wrapper = tmp_path / "npm" / "opencode.cmd"
     native = wrapper.parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
@@ -2344,10 +2378,12 @@ def test_stopping_a_child_that_already_exited_does_nothing(monkeypatch):
     agent_backends.end_process_group(Gone())
 
 
-def test_stopping_a_task_does_not_block_the_window(monkeypatch):
-    # Stop Task and a closing wizard both call this from the GUI thread. A wait
-    # there is a frozen application rather than a stopped task, so waiting is
-    # opt-in and the callers that used to wait are the only ones that still do.
+def test_a_killed_child_is_always_reaped_within_a_bound(monkeypatch):
+    # Stop Task and a closing wizard both call this from the GUI thread, so an
+    # unbounded wait there is a frozen application -- but no wait at all leaves
+    # a zombie on POSIX and an unreleased handle on Windows. The wait is
+    # therefore always attempted and always bounded: 5s by default, or the
+    # caller's own budget when it has one.
     monkeypatch.setattr(agent_backends.os, "killpg", lambda *_a: None, raising=False)
     monkeypatch.setattr(agent_backends.os, "getpgid", lambda pid: pid, raising=False)
     monkeypatch.setattr(
@@ -2369,10 +2405,10 @@ def test_stopping_a_task_does_not_block_the_window(monkeypatch):
             return 0
 
     agent_backends.end_process_group(Child())
-    assert waited == []
+    assert waited == [5]
 
     agent_backends.end_process_group(Child(), timeout=2)
-    assert waited == [2]
+    assert waited == [5, 2]
 
 
 class _Child:
@@ -2466,6 +2502,70 @@ def test_opencode_is_stopped_with_its_tree_on_windows(monkeypatch):
     server.stop()
 
     assert ran and ran[0][-1] == "99"
+
+
+def test_stopping_an_already_exited_server_still_closes_its_pipes():
+    """A dead server's pipes are still file handles until something closes them.
+
+    Both stops used to return early when the process had already exited, so
+    one restart's worth of stdin/stdout/stderr handles leaked per dead server.
+    """
+
+    class _Pipe:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class _Gone:
+        pid = 99
+
+        def __init__(self):
+            self.stdin = _Pipe()
+            self.stdout = _Pipe()
+            self.stderr = _Pipe()
+
+        def poll(self):
+            return 7
+
+        def kill(self):
+            pytest.fail("a finished process must not be killed")
+
+        def wait(self, timeout=None):
+            return 7
+
+    codex_proc = _Gone()
+    agent_backends.CodexServer(codex_proc).stop()
+    assert codex_proc.stdin.closed and codex_proc.stdout.closed and codex_proc.stderr.closed
+
+    opencode_proc = _Gone()
+    server = agent_backends.OpencodeServer.__new__(agent_backends.OpencodeServer)
+    server._proc = opencode_proc
+    server.stop()
+    assert (
+        opencode_proc.stdin.closed and opencode_proc.stdout.closed and opencode_proc.stderr.closed
+    )
+
+
+def test_a_probe_keeps_stderr_when_stdout_also_said_something(monkeypatch):
+    """A CLI that painted a banner and then failed used to lose the failure."""
+    import sys
+
+    monkeypatch.setattr(agent_backends, "login_shell_path_dirs", list)
+    code, text = agent_backends._probe_backend(
+        sys.executable,
+        [
+            "-c",
+            "import sys; sys.stdout.write('banner\\n'); "
+            "sys.stderr.write('the real error\\n'); sys.exit(3)",
+        ],
+        60,
+    )
+
+    assert code == 3
+    assert "banner" in text
+    assert "the real error" in text
 
 
 # ----- /status -----

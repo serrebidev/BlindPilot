@@ -465,11 +465,23 @@ def test_a_helper_that_cannot_leave_its_job_object_still_starts(monkeypatch, tmp
 def test_a_failed_update_leaves_its_reason_for_the_next_start(monkeypatch, tmp_path):
     """The update finishes after BlindPilot has closed, so this is the only
     way its failure can ever reach the user."""
-    monkeypatch.setattr("app_updater.tempfile.gettempdir", lambda: str(tmp_path))
+    data = tmp_path / "data"
+    temp = tmp_path / "temp"
+    monkeypatch.setattr("app_updater.app_data_dir", lambda: data)
+    monkeypatch.setattr("app_updater.tempfile.gettempdir", lambda: str(temp))
 
     assert app_updater.pending_failure() == ("", "")
 
-    status = tmp_path / app_updater.STATUS_FILE_NAME
+    # The reason lives in the per-user data dir, never the shared temp folder,
+    # where any process could plant a file and have it spoken on next start.
+    assert app_updater._status_path() == data / app_updater.STATUS_FILE_NAME
+    planted = temp / app_updater.STATUS_FILE_NAME
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("Planted by another process.\nC:\\temp\\planted.log\n", "utf-8")
+    assert app_updater.pending_failure() == ("", "")
+
+    status = data / app_updater.STATUS_FILE_NAME
+    status.parent.mkdir(parents=True, exist_ok=True)
     status.write_text("Could not move the current version aside.\nC:\\temp\\u.log\n", "utf-8")
 
     assert app_updater.pending_failure() == (
@@ -487,9 +499,8 @@ def test_abandoned_downloads_are_swept_but_a_running_one_is_left_alone(monkeypat
     old = tmp_path / f"{app_updater.TEMPORARY_PREFIX}old.zip"
     fresh = tmp_path / f"{app_updater.TEMPORARY_PREFIX}fresh.zip"
     log = tmp_path / f"{app_updater.TEMPORARY_PREFIX}old.log"
-    status = tmp_path / app_updater.STATUS_FILE_NAME
     unrelated = tmp_path / "something-else.zip"
-    for path in (old, fresh, log, status, unrelated):
+    for path in (old, fresh, log, unrelated):
         path.write_bytes(b"x")
     stale = time.time() - 24 * 60 * 60
     os.utime(old, (stale, stale))
@@ -501,9 +512,9 @@ def test_abandoned_downloads_are_swept_but_a_running_one_is_left_alone(monkeypat
     assert not old.exists()
     # A download in flight belongs to an update that is running right now.
     assert fresh.exists()
-    # The log and the recorded reason are what the next start reads.
+    # The log is what the status file points the next start at; it outlives
+    # the sweep even when stale.
     assert log.exists()
-    assert status.exists()
     assert unrelated.exists()
 
 

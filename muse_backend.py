@@ -608,18 +608,23 @@ def _muse_home_live() -> Optional[str]:
     global _HOME_CACHE, _HOME_CHECKED
     if _HOME_CHECKED:
         return _HOME_CACHE
-    _HOME_CHECKED = True
     if platform.system() == "Windows":
+        _HOME_CHECKED = True
         return None
     command = muse_command()
     if not command:
+        _HOME_CHECKED = True
         return None
     transport, init = _open_host(command, None)
     if transport is None:
+        # The probe failed -- a cold distribution, a broken install -- which is
+        # not the same answer as "no home": the flag stays clear so the next
+        # call probes again instead of caching the failure for the whole run.
         return None
     try:
         home = (init or {}).get("museHome")
         _HOME_CACHE = str(home) if home else None
+        _HOME_CHECKED = True
     finally:
         transport.close()
     return _HOME_CACHE
@@ -703,9 +708,12 @@ _WSL_LOG_CAP_BYTES = 32 * 1024 * 1024
 def muse_session_log_text(path: str) -> str:
     """The whole of one session.jsonl, from here or through WSL.
 
-    Empty when the log cannot be read. A WSL-side path is fetched with ``cat``
+    Empty when the log cannot be read. A WSL-side path is fetched with ``head``
     rather than opened: on Windows the path names a file inside the
-    distribution, which this process cannot open itself.
+    distribution, which this process cannot open itself. The path is its own
+    argv element, never interpolated into a shell command: it comes from Muse's
+    session index, which a hostile entry could poison with quotes and
+    substitutions.
     """
     if not path:
         return ""
@@ -719,7 +727,7 @@ def muse_session_log_text(path: str) -> str:
         return ""
     try:
         proc = subprocess.run(
-            [launcher, "-e", "sh", "-lc", f'head -c {_WSL_LOG_CAP_BYTES} -- "{path}"'],
+            [launcher, "-e", "head", "-c", str(_WSL_LOG_CAP_BYTES), "--", path],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=25,

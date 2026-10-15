@@ -107,6 +107,12 @@ _MAX_OUTPUT_FETCH_BYTES = 1024 * 1024
 # events a page, twenty pages: past that the transcript is a runaway one.
 _REPLAY_MAX_PAGES = 20
 
+# How many fired commands are kept awaiting their reply. A reply pops its own
+# entry; the ones that never come -- a steer sent as the turn ended, a stop
+# after the session closed -- used to stay for the life of the turn, one per
+# unanswered command.
+_FIRED_KEEP = 64
+
 
 def _uuid() -> str:
     # MSP calls this a UUIDv7 idempotency handle, and it means it: measured on
@@ -238,6 +244,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._streamed = 0
         self._tool_names: dict[str, str] = {}
         self._tool_output_parts: dict[str, list[str]] = {}
+        # Reasoning/summary deltas held per item until the item completes:
+        # a row per delta was torn speech, and the completing item then
+        # spoke the whole reasoning again.
+        self._reasoning_parts: dict[str, list[str]] = {}
         # Answer text seen so far per agentMessage item.
         self._answer_items: dict[str, str] = {}
         # Approval stages already answered, and each approval's tool name
@@ -337,6 +347,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             return False
         request_id = self._next_id()
         self._fired[request_id] = (method, params, retry)
+        if len(self._fired) > _FIRED_KEEP:
+            # Oldest first: a reply still pending after this many commands of
+            # its own is a reply that is not coming, and holding it would cost
+            # more than dropping the one retry it can no longer earn.
+            self._fired.pop(next(iter(self._fired)))
         return transport.send(self._rpc_frame(method, params, request_id))
 
     def _fired_reply(self, frame: dict) -> None:
@@ -849,9 +864,11 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             return
         # A reasoning item streams its summary as "summary.0", "summary.1"...
         # (measured 1.3.0); taken for answer text, it was spoken and saved as
-        # the reply.
+        # the reply. Held until the item completes, the way Command Code holds
+        # thinking deltas: released per delta the reader heard half a thought,
+        # and the completing item then spoke the whole reasoning again.
         if field.startswith(("reasoning", "summary")):
-            self._on_activity("thinking", delta)
+            self._reasoning_parts.setdefault(item_id, []).append(delta)
             return
         if field.startswith("output") or item_id in self._tool_names:
             self._tool_output_parts.setdefault(item_id, []).append(delta)
@@ -902,9 +919,10 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
                 self._on_activity("result", f"{name}: {result_text.strip()}")
             self._tool_output_parts.pop(item_id, None)
         elif kind == "reasoning":
-            text = _item_text(item)
-            if text.strip():
-                self._on_activity("thinking", text.strip())
+            buffered = "".join(self._reasoning_parts.pop(item_id, [])).strip()
+            text = _item_text(item).strip() or buffered
+            if text:
+                self._on_activity("thinking", text)
         elif kind == "compaction":
             self._on_activity("tool", "Conversation compacted")
         elif kind == "userShell":
@@ -1179,6 +1197,9 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             self._fail(message)
             return
         text = "".join(self._assistant_parts).strip()
+        # Settled before the callback: a listener that raises on the
+        # finished answer must not have the turn re-announced as failed.
+        self._clean_end = True
         if terminal == "cancelled":
             self._on_complete(text or "Stopped")
             return
@@ -1407,11 +1428,14 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             if method == "item/completed":
                 item = (frame.get("params") or {}).get("item") or {}
                 if str(item.get("kind") or "") == "compaction":
+                    self._clean_end = True
                     self._on_complete("Conversation compacted")
                     return True
             if method == "turn/completed":
+                self._clean_end = True
                 self._on_complete("Conversation compacted")
                 return True
+        self._clean_end = True
         self._on_complete("Compaction accepted; the summary arrives with the next message.")
         return True
 
@@ -1442,6 +1466,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             # at all; the view is paged instead, which is what the protocol
             # tells a client to do when inline history is not what it got.
             self._page_replay()
+        self._clean_end = True
         self._on_complete("")
 
     def _replay_item(self, item: object) -> None:

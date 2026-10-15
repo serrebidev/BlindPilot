@@ -230,8 +230,8 @@ class Database:
             default_model=row["default_model"],
             timeout_seconds=float(row["timeout_seconds"]),
             streaming=bool(row["streaming"]),
-            custom_headers=json.loads(row["custom_headers_json"] or "{}"),
-            custom_body=json.loads(row["custom_body_json"] or "{}"),
+            custom_headers=self._json_column(row, "custom_headers_json"),
+            custom_body=self._json_column(row, "custom_body_json"),
             is_default=self._flag_column(row, "is_default"),
         )
 

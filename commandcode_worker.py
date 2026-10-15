@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import threading
 import urllib.parse
@@ -51,7 +52,15 @@ from agent_backends import (
     subagent_line,
     subprocess_env,
 )
-from commandcode_router import Route, best_free_model, record_limit_hit, strongest_effort
+from commandcode_router import (
+    LIMIT_LABELS,
+    Route,
+    best_free_model,
+    record_capacity_hit,
+    record_limit_hit,
+    route,
+    strongest_effort,
+)
 from hermes_backend import STDERR_KEEP_LINES
 from markdown_rows import release_finished, release_remainder
 
@@ -246,6 +255,16 @@ _EXIT_MESSAGES = {
     130: "Command Code was interrupted.",
 }
 
+# A provider-capacity stop, as the CLI surfaces it: exit 1 with the raw server
+# text on stderr. "at capacity" and "Providers considered" are the server's own
+# words and "Error: " the CLI's prefix (measured from the installed dist); the
+# same stderr can name several providers, so any one marker is enough.
+_CAPACITY_MARKERS = re.compile(r"(?i)(\b429\b|at capacity|limited providers|providers considered)")
+
+# Said once when Auto routing was on but a capacity stop could not switch
+# models -- the one retry was already spent, or the turn produced work to keep.
+_CAPACITY_NO_RETRY = "Command Code providers were at capacity; this turn cannot switch models."
+
 
 def build_command(
     binary: str,
@@ -343,6 +362,11 @@ class CommandcodeWorker(threading.Thread):
         # Set only after the free retry starts, so the window can report the
         # model that actually handled this turn.
         self.fallback_model = ""
+        # The conversation's last reported context size, as (used tokens,
+        # window): priced by the capacity retry, and read by the window when
+        # the turn ends. The CLI's print-mode stream reports no window, so
+        # that half stays 0 and the window keeps the one it already knows.
+        self.context_tokens: Optional[tuple[int, int]] = None
         self._on_session = on_session
         self._on_started = on_started
         self._on_activity = on_activity
@@ -386,6 +410,11 @@ class CommandcodeWorker(threading.Thread):
         self._free_fallback: Optional[Route] = None
         self._free_fallback_retried = False
         self._free_fallback_code = 0
+        # The same shape for a provider-capacity stop: one retry on the next
+        # paid model of the same tier, excluding the model that just failed.
+        self._capacity_retry: Optional[Route] = None
+        self._capacity_retried = False
+        self._capacity_failed_model = ""
         self._run_model = model
         self._result_error = ""
 
@@ -410,6 +439,8 @@ class CommandcodeWorker(threading.Thread):
         self._last_refusal = ""
         # The bypass caveat is worth hearing once a turn, not once a refusal.
         self._gap_note_said = False
+        # The same for a capacity stop that could not switch models.
+        self._capacity_note_said = False
 
     # -- public surface the window drives ---------------------------------
 
@@ -445,7 +476,10 @@ class CommandcodeWorker(threading.Thread):
             else:
                 self._do_run()
         except Exception as exc:  # noqa: BLE001 - the crash IS the report
-            if not self._failed and not self._clean_end:
+            # _completed is set before on_complete, so a listener that
+            # raises on the finished answer must not re-announce the turn
+            # as failed after it succeeded.
+            if not self._failed and not self._clean_end and not self._completed:
                 self._fail(f"Command Code turn failed: {exc}")
         finally:
             self._close_process()
@@ -519,6 +553,7 @@ class CommandcodeWorker(threading.Thread):
                 )
             else:
                 self._remember_session(sessions[-1])
+                self._completed = True
                 self._on_complete(
                     "Conversation compacted into a new session. The original remains in Recent Conversations."
                 )
@@ -548,8 +583,9 @@ class CommandcodeWorker(threading.Thread):
         # Each recoverable pre-start failure is retried once, in whatever
         # order they arrive: the CLI resolves --resume before it checks
         # effort, so a lost session still leaves the effort to refuse, and a
-        # refused effort still leaves the session to lose.
-        for _ in range(3):
+        # refused effort still leaves the session to lose. Four slots, one
+        # per retry kind: effort, session, capacity model, free model.
+        for _ in range(4):
             if self._cancelled or self._failed:
                 break
             if self._effort_refused and not self._effort_retried:
@@ -583,21 +619,37 @@ class CommandcodeWorker(threading.Thread):
                 self._session_id = None
                 self._run_turn(binary, self._run_effort, self._run_model)
                 continue
-            if self._free_fallback is not None and not self._free_fallback_retried:
-                fallback = self._free_fallback
-                self._free_fallback_retried = True
-                self.fallback_model = fallback.model
-                limit = "rate limit" if self._free_fallback_code == 5 else "credit limit"
-                self._on_activity(
-                    "notice",
-                    f"Command Code {limit} reached. Retrying with free model {fallback.model}.",
+            if self._capacity_retry is not None and not self._capacity_retried:
+                target = self._capacity_retry
+                notice = (
+                    f"Command Code providers at capacity for {self._capacity_failed_model}. "
+                    f"Retrying with {target.model}."
                 )
-                self._close_process()
-                self._reset_run_state()
-                self._run_turn(binary, "", fallback.model)
+                self._rerun_on_model(
+                    binary, target, lambda: setattr(self, "_capacity_retried", True), notice
+                )
+                continue
+            if self._free_fallback is not None and not self._free_fallback_retried:
+                target = self._free_fallback
+                limit = LIMIT_LABELS.get(self._free_fallback_code, "provider capacity")
+                notice = f"Command Code {limit} reached. Retrying with free model {target.model}."
+                self._rerun_on_model(
+                    binary, target, lambda: setattr(self, "_free_fallback_retried", True), notice
+                )
                 continue
             break
         self._clean_end = True
+
+    def _rerun_on_model(
+        self, binary: str, target: Route, mark_retried: Callable[[], None], notice: str
+    ) -> None:
+        """Switch this turn to another model and run it again."""
+        mark_retried()
+        self.fallback_model = target.model
+        self._on_activity("notice", notice)
+        self._close_process()
+        self._reset_run_state()
+        self._run_turn(binary, target.effort, target.model)
 
     def _run_turn(self, binary: str, effort: str, model: str) -> None:
         """One process for the prompt: started, streamed, and finished."""
@@ -649,6 +701,7 @@ class CommandcodeWorker(threading.Thread):
         self._effort_refused = False
         self._effort_supported = []
         self._free_fallback = None
+        self._capacity_retry = None
         self._result_error = ""
         with self._error_lock:
             self._error_lines = []
@@ -849,15 +902,15 @@ class CommandcodeWorker(threading.Thread):
             self._end_message(event)
         elif etype == "tool_update":
             self._tool_ran = True
+        elif etype == "model_request_end":
+            self._note_context_usage(event.get("usage"))
         elif etype in (
             "turn_start",
             "message_start",
             "message_update",
             "model_request_start",
-            "model_request_end",
             "model_trace",
             "thinking_start",
-            "thinking_end",
             "turn_end",
             "run_end",
         ):
@@ -906,7 +959,12 @@ class CommandcodeWorker(threading.Thread):
     def _remember_session(self, session: str) -> None:
         if session and session != self._session_seen:
             self._session_seen = session
-            if self._session_retried or self._compact or self._free_fallback_retried:
+            if (
+                self._session_retried
+                or self._compact
+                or self._free_fallback_retried
+                or self._capacity_retried
+            ):
                 # A retry may replace the failed run's id; compaction replaces
                 # the conversation. The caller must adopt the new id.
                 self.session_replaced = True
@@ -983,6 +1041,30 @@ class CommandcodeWorker(threading.Thread):
         self._gap_note_said = True
         self._on_activity("tool", _BYPASS_GAP_NOTE)
 
+    def _say_capacity_no_retry(self) -> None:
+        """Explain, once a turn, why a capacity stop could not switch models."""
+        if self._capacity_note_said or not self._auto_free_fallback:
+            return
+        self._capacity_note_said = True
+        self._on_activity("notice", _CAPACITY_NO_RETRY)
+
+    def _note_context_usage(self, usage: object) -> None:
+        """Remember the context size the last model request carried.
+
+        The request's input side is the conversation the next turn re-reads:
+        uncached input plus the cache it hit and wrote. The CLI's
+        print-mode stream reports no window size, so the pair carries 0
+        there and the tab keeps the window it already knows.
+        """
+        if not isinstance(usage, dict):
+            return
+        used = sum(
+            _as_int(usage.get(key))
+            for key in ("inputTokens", "cacheReadTokens", "cacheWriteTokens")
+        )
+        if used > 0:
+            self.context_tokens = (used, 0)
+
     def _end_message(self, event: dict) -> None:
         """Finish one model message before the next begins.
 
@@ -1021,11 +1103,19 @@ class CommandcodeWorker(threading.Thread):
         self._on_activity("tool", f"{etype}: {first}" if first else etype)
 
     def _handle_result(self, frame: dict) -> None:
+        if self._completed or self._failed:
+            # The reader does not stop at a result line, so a second one must
+            # not announce the finished turn again.
+            return
         subtype = str(frame.get("subtype") or "")
         session = str(frame.get("sessionId") or "")
         if session:
             self._remember_session(session)
         self._release_all()
+        if self.context_tokens is None:
+            # A run whose stream carried no model_request_end still reports
+            # its usage totals here; one request's totals ARE its context.
+            self._note_context_usage(frame.get("usage"))
         if subtype not in ("success", "max_turns"):
             # Exit code decides whether an empty pre-start error can use the
             # one automatic free-model retry. Do not fail until _finish.
@@ -1104,15 +1194,24 @@ class CommandcodeWorker(threading.Thread):
             except (OSError, subprocess.TimeoutExpired):
                 code = None
         if self._cancelled:
-            if not self._failed:
+            if not self._failed and not self._completed:
                 self._release_all()
                 text = "".join(self._assistant_parts).strip()
+                self._completed = True
                 self._on_complete(text or "Stopped")
             return
         if code in (5, 10):
             # Record every real limit stop, even when replay is unsafe because
             # the turn already produced output or Auto fallback is disabled.
-            record_limit_hit(code)
+            if not record_limit_hit(code):
+                # The lock timed out or the state file could not be written:
+                # paid models are NOT withheld, and pretending otherwise
+                # would walk straight back into the same stop.
+                self._on_activity(
+                    "notice",
+                    "Command Code's cooldown could not be recorded; paid models "
+                    "may be chosen again before the limit actually resets.",
+                )
         if self._completed or self._failed:
             return
         # Whatever is decided next reads stderr, so the reader is joined
@@ -1135,12 +1234,44 @@ class CommandcodeWorker(threading.Thread):
             self._session_lost = True
             self.lost_session = True
             return
+        if self._capacity_stop(code):
+            # The upstream is out of providers for this model. The stop is
+            # recorded whether or not the turn may be replayed, the same way
+            # a rate or credit stop is, so the next turn picks a model whose
+            # providers are still up.
+            record_capacity_hit(self._run_model)
+            if self._can_retry_after_capacity():
+                target = self._paid_capacity_retry()
+                if target is not None:
+                    self._capacity_retry = target
+                    self._capacity_failed_model = self._run_model
+                    return
+                # No other paid model in the tier: the confirmed-free path,
+                # the same one a rate or credit stop falls back to.
+                if not self._free_fallback_retried:
+                    fallback = self._free_fallback_model()
+                    if fallback is not None:
+                        self._free_fallback = fallback
+                        self._free_fallback_code = code or 0
+                        return
+                    self._on_activity(
+                        "notice", "Auto free retry unavailable: no confirmed free model."
+                    )
+            else:
+                # Otherwise fall through: the stop is reported like any other
+                # non-zero exit, with the server's own text on its tail -- but
+                # not silently when Auto could have switched models and did not.
+                self._say_capacity_no_retry()
         if self._can_retry_with_free_model(code):
             fallback = self._free_fallback_model()
             if fallback is not None:
                 self._free_fallback = fallback
                 self._free_fallback_code = code or 0
                 return
+            self._on_activity("notice", "Auto free retry unavailable: no confirmed free model.")
+        elif self._auto_free_fallback and code in (5, 10) and not self._free_fallback_retried:
+            reason = "already ran a tool" if self._tool_ran else "already produced an answer"
+            self._on_activity("notice", f"Auto free retry skipped: this turn {reason}.")
         message = _EXIT_MESSAGES.get(code) if code is not None else None
         if self._result_error:
             message = f"{message} {self._result_error}" if message else self._result_error
@@ -1156,15 +1287,62 @@ class CommandcodeWorker(threading.Thread):
             message = f"Command Code's free fallback {self._run_model} also failed: {message}"
         self._fail(message[:600])
 
+    def _safe_to_replay(self) -> bool:
+        """Auto routing is on and the turn has produced nothing to keep.
+
+        A mid-turn stop keeps whatever it made, so only a stop before any
+        answer or tool may spend a prompt on a second run.
+        """
+        return self._auto_free_fallback and not self._assistant_parts and not self._tool_ran
+
     def _can_retry_with_free_model(self, code: Optional[int]) -> bool:
         """Whether a rate or credit stop is safe to replay once on free."""
-        return (
-            self._auto_free_fallback
-            and not self._free_fallback_retried
-            and code in (5, 10)
-            and not self._assistant_parts
-            and not self._tool_ran
-        )
+        return self._safe_to_replay() and not self._free_fallback_retried and code in (5, 10)
+
+    def _capacity_stop(self, code: Optional[int]) -> bool:
+        """Whether this run died on a provider-capacity stop.
+
+        Exit 1 with the server's own capacity text on stderr -- the CLI does
+        not have an exit code of its own for it, so the text is the signal.
+        """
+        if code in (None, 0):
+            return False
+        with self._error_lock:
+            lines = list(self._error_lines)
+        return any(_CAPACITY_MARKERS.search(line) for line in lines)
+
+    def _can_retry_after_capacity(self) -> bool:
+        """Whether a capacity stop is safe to replay once on another model.
+
+        The same guard as the free-model retry; only the kind-specific
+        spent-shot check differs.
+        """
+        return self._safe_to_replay() and not self._capacity_retried
+
+    def _paid_capacity_retry(self) -> Optional[Route]:
+        """The next paid model of the same tier, excluding the one that failed.
+
+        Free candidates are excluded from the ask: a QUICK task's normal
+        pick is a free model, and a capacity retry must stay on paid while
+        any paid candidate remains. Free stays the separate last-resort
+        fallback when none does.
+        """
+        try:
+            chosen = route(
+                self._prompt,
+                include_free=False,
+                exclude_models={self._run_model},
+                context_tokens=self.context_tokens[0] if self.context_tokens else None,
+            )
+        except Exception:  # noqa: BLE001 - optional routing must not mask the CLI failure
+            return None
+        # A free answer (or none at all) is the free fallback's job, not a
+        # paid retry.
+        if not chosen.model or not chosen.cost:
+            return None
+        if chosen.model.casefold() == self._run_model.casefold():
+            return None
+        return chosen
 
     def _free_fallback_model(self) -> Optional[Route]:
         """The best confirmed free model other than this run's model."""
@@ -1214,6 +1392,14 @@ class CommandcodeWorker(threading.Thread):
     def _release_all(self) -> None:
         text = "".join(self._assistant_parts)
         self._streamed = release_remainder(text, self._streamed, self._emit_answer)
+
+
+def _as_int(value: object) -> int:
+    """A numeric field from the CLI's stream, or 0 when it is not one."""
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 0
 
 
 def _content_text(content: object) -> str:

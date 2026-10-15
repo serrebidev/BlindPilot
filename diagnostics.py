@@ -51,6 +51,30 @@ _started = False
 _crash_file = None
 
 
+def _trim_crash_log(path: Path) -> None:
+    """Hold the crash log to the same budget the log file is held to.
+
+    faulthandler keeps this file's raw descriptor for the life of the
+    process, so unlike the log it cannot be rotated while it is open -- the
+    trim has to happen before the descriptor is handed over, or the trimming
+    is never done at all. The oldest bytes go, cut at a line boundary so the
+    file still starts with a whole crash record.
+    """
+    try:
+        if path.stat().st_size <= MAX_BYTES:
+            return
+        tail = path.read_bytes()[-MAX_BYTES:]
+    except OSError:
+        return
+    start = tail.find(b"\n")
+    if start >= 0:
+        tail = tail[start + 1 :]
+    try:
+        path.write_bytes(tail)
+    except OSError:
+        return
+
+
 def log_dir() -> Path:
     """The platform's directory for logs, which is not the one for settings.
 
@@ -135,7 +159,9 @@ def start_logging() -> Optional[Path]:
     try:
         # A separate file, not this one: faulthandler holds a raw descriptor,
         # and rotation would leave it writing into a file nobody reads again.
-        _crash_file = open(directory / CRASH_NAME, "a", encoding="utf-8", errors="replace")
+        crash_path = directory / CRASH_NAME
+        _trim_crash_log(crash_path)
+        _crash_file = open(crash_path, "a", encoding="utf-8", errors="replace")
         faulthandler.enable(file=_crash_file)
     except (OSError, ValueError, RuntimeError):
         # A native crash going unrecorded is a smaller problem than refusing

@@ -147,6 +147,23 @@ def test_the_log_is_capped_and_rolls_over(tmp_path, monkeypatch, logs_in_tmp_pat
     assert len(written) <= diagnostics.KEEP + 1, f"kept more than it promised: {written}"
 
 
+def test_the_crash_log_is_held_to_the_same_budget(tmp_path, monkeypatch, logs_in_tmp_path):
+    """`MAX_BYTES` and `KEEP` promise four files at a megabyte at most.
+
+    The crash log was appended to with no cap of its own. faulthandler holds
+    its descriptor for the whole process, so the trim has to happen before
+    the file is opened rather than while it is being written to.
+    """
+    monkeypatch.setattr(diagnostics, "MAX_BYTES", 4096)
+    crash = tmp_path / diagnostics.CRASH_NAME
+    crash.write_bytes((b"crash record " + b"x" * 100 + b"\n") * 200)
+
+    diagnostics.start_logging()
+
+    assert crash.stat().st_size <= diagnostics.MAX_BYTES
+    assert crash.read_bytes().startswith(b"crash record ")
+
+
 # ----- failures that used to vanish -----
 def test_an_uncaught_exception_reaches_the_log(tmp_path, monkeypatch, logs_in_tmp_path):
     """In the packaged windowed build there is no stderr, so an uncaught

@@ -12,6 +12,8 @@ import json
 import io
 from pathlib import Path
 import subprocess
+import threading
+import time
 
 import agent_backends
 import commandcode_backend
@@ -87,6 +89,78 @@ def test_agent_command_discovery_reaps_after_forced_kill(monkeypatch):
     assert process.waits == 2
     assert process.stdin.closed
     assert process.stdout.closed
+
+
+def test_two_lookups_at_once_start_one_acp_server(monkeypatch):
+    """The window asks from two places at a time and only needs one answer.
+
+    Two concurrent asks used to each start `command-code acp`, leaving two
+    servers on one conversation for as long as the slower one lived.
+    """
+    _ANSWER = json.dumps(
+        {
+            "params": {
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [{"name": "help", "description": "Show help"}],
+                }
+            }
+        }
+    )
+    spawns: list[int] = []
+    inside = threading.Event()
+    release = threading.Event()
+
+    class Process:
+        stdin = io.StringIO()
+        stdout = io.StringIO(_ANSWER + "\n")
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout):
+            return 0
+
+    def popen(*_args, **_kwargs):
+        spawns.append(1)
+        inside.set()
+        release.wait(5)
+        return Process()
+
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "command-code")
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(commandcode_backend, "_AGENT_COMMANDS", {})
+    monkeypatch.setattr(commandcode_backend, "_AGENT_COMMANDS_INFLIGHT", {})
+
+    answers: list = []
+    first = threading.Thread(
+        target=lambda: answers.append(
+            commandcode_backend.commandcode_agent_commands("/project", wait=True)
+        ),
+        daemon=True,
+    )
+    first.start()
+    assert inside.wait(5)
+
+    entered = threading.Event()
+
+    def ask_again() -> None:
+        entered.set()
+        answers.append(commandcode_backend.commandcode_agent_commands("/project", wait=True))
+
+    second = threading.Thread(target=ask_again, daemon=True)
+    second.start()
+    assert entered.wait(5)
+    # Long enough for an unguarded second ask to have reached its own Popen.
+    time.sleep(0.3)
+    assert len(spawns) == 1
+
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    assert len(spawns) == 1
+    assert answers == [[("/help", "Show help")]] * 2
 
 
 CATALOG = """Available models  \u00b7  4 models
@@ -259,14 +333,28 @@ def test_signed_in_comes_from_the_status_command(home, monkeypatch):
     assert "Provider: Command Code" in fields
 
 
-def test_a_refused_status_falls_back_to_the_stored_credential(home, monkeypatch):
+def test_a_refused_status_is_signed_out_despite_a_stored_credential(home, monkeypatch):
+    """Exit 3 is Command Code's own "not authenticated" and outranks auth.json.
+
+    A logout leaves the credential file behind, and the old fallback read that
+    file as proof of a live sign-in.
+    """
     _wire(monkeypatch, status=(3, "not authenticated"))
     home.joinpath(".commandcode").mkdir(parents=True)
     home.joinpath(".commandcode", "auth.json").write_text(
         json.dumps({"userName": "person"}), encoding="utf-8"
     )
+    assert commandcode_backend.commandcode_auth_ok() is False
+
+
+def test_no_cli_at_all_falls_back_to_the_stored_credential(home, monkeypatch):
+    """The file is consulted only when the CLI never ran to answer."""
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: None)
+    home.joinpath(".commandcode").mkdir(parents=True)
+    home.joinpath(".commandcode", "auth.json").write_text(
+        json.dumps({"userName": "person"}), encoding="utf-8"
+    )
     assert commandcode_backend.commandcode_auth_ok() is True
-    assert "Account: person" in commandcode_backend.commandcode_account_lines()
 
 
 def test_no_credential_and_no_status_means_signed_out(home, monkeypatch):

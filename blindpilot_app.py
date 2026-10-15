@@ -165,6 +165,7 @@ from muse_backend import (
 
 from markdown_rows import (
     Row,
+    _MD,
     _strip_noise,
     parse_response,
     reassemble,
@@ -319,6 +320,24 @@ def announce(text: str, urgent: bool = False) -> None:
         )
     except Exception:  # an announcement is never worth raising over
         pass
+
+
+# Said when a settings write failed, in place of the sentence that would claim
+# a change the file did not keep.
+_SAVE_FAILED = "Error: could not save settings"
+
+
+def _call_after_alive(callback: Callable[..., object], *args: object) -> None:
+    """wx.CallAfter, unless the application has already gone.
+
+    A worker finishing during shutdown, or a history dialog's background load,
+    lands after wx.App is destroyed, where wx.CallAfter raises. The work is
+    dropped instead: the receiving end checks for a dead window too, so
+    nothing that could have been shown is lost.
+    """
+    if wx.GetApp() is None:
+        return
+    wx.CallAfter(callback, *args)
 
 
 APP_NAME = "BlindPilot"
@@ -2650,7 +2669,7 @@ def _remember_permission_mode(value: str) -> None:
     if cfg.get("permission_mode") == value:
         return
     cfg["permission_mode"] = value
-    _save_config(cfg)
+    _save_or_announce(cfg)
 
 
 def _looks_like_auth_error(text: str) -> bool:
@@ -3395,6 +3414,45 @@ def _starts_of(lines: List[str]) -> List[int]:
     return starts
 
 
+def _last_block_start(text: str) -> int:
+    """Offset of the last top-level block's first line in `text`.
+
+    That block is still growing, so it is held back: the answer is parsed from
+    here rather than from the start, and rows are only ever appended whole. The
+    depth counter walks past a table or a fenced block, so a blank line inside
+    one is not mistaken for the boundary.
+    """
+    if not text:
+        return 0
+    # Line starts as the parser counts them: split on newlines, which are kept.
+    line_starts = [0]
+    for i, character in enumerate(text):
+        if character == "\n":
+            line_starts.append(i + 1)
+    depth, start = 0, 0
+    for token in _MD.parse(text):
+        if depth == 0 and token.nesting >= 0 and token.map and token.map[0] < len(line_starts):
+            start = line_starts[token.map[0]]
+        depth += token.nesting
+    return start
+
+
+def _search_key(row: Row) -> tuple[str, str]:
+    """The row's lowercased payload and label, lowered once per content.
+
+    Search lowers both strings of every row on every refresh, and a turn that
+    streams calls that refresh for each batch. The lowered pair is cached on
+    the row and kept only while it still holds the very strings the row holds,
+    so a payload rewritten later is lowered afresh.
+    """
+    cached = getattr(row, "_search_key", None)
+    if cached is not None and cached[2] is row.payload and cached[3] is row.label:
+        return cached[0], cached[1]
+    lowered = (row.payload.lower(), row.label.lower(), row.payload, row.label)
+    setattr(row, "_search_key", lowered)  # noqa: B010 -- Row has no such attribute declared
+    return lowered[0], lowered[1]
+
+
 # How a refused tool call reads, as against one that simply failed. Claude Code
 # flags both with ``is_error`` on the tool result and says nothing else about
 # which it was, so the wording is what tells them apart: a permission rule, a
@@ -3502,6 +3560,18 @@ def _save_config(cfg: dict) -> bool:
         except OSError:
             pass
         return False
+
+
+def _save_or_announce(cfg: dict) -> bool:
+    """Write the settings, and say so when the file refuses them.
+
+    The bare call sites used to leave the user being told something the
+    file never took; this is that guard in one place.
+    """
+    if _save_config(cfg):
+        return True
+    announce(_SAVE_FAILED)
+    return False
 
 
 # How much of a run is read out.
@@ -3682,7 +3752,8 @@ class _Settings:
         # and save it like the rest.
         self.appearance = _valid_appearance(cfg.get("appearance"))
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """Write the settings out. False means the file did not take them."""
         cfg = _load_config()
         cfg["live_rows"] = self.live_rows
         cfg["speak_live"] = self.speak_live
@@ -3697,7 +3768,7 @@ class _Settings:
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["appearance"] = self.appearance
-        _save_config(cfg)
+        return _save_config(cfg)
 
 
 # Before any setting is read: an install that predates the macOS conventions
@@ -3752,13 +3823,19 @@ class _RemoteHermes:
         except (OSError, ValueError):
             return ""
 
-    def _write_key(self) -> None:
+    def _write_key(self) -> bool:
+        """Write the credential file. False when it refused the write.
+
+        The failure is returned rather than raised or logged alone, because
+        `save` has to carry it to the caller: a key that never reached disk
+        leaves the next launch connecting without it, in silence.
+        """
         path = self._key_path()
         try:
             _config_dir().mkdir(parents=True, exist_ok=True)
             if not self.key:
                 path.unlink(missing_ok=True)
-                return
+                return True
             # Created owner-only rather than chmod'ed afterwards, so it is
             # never readable by others even for an instant. On Windows the
             # per-user AppData directory is already the boundary.
@@ -3767,8 +3844,9 @@ class _RemoteHermes:
                 fh.write(self.key)
             if platform.system() != "Windows":
                 os.chmod(path, 0o600)
+            return True
         except OSError:
-            pass
+            return False
 
     def url(self) -> str:
         """The gateway address, or "" when the remote mode is not in use."""
@@ -3786,7 +3864,13 @@ class _RemoteHermes:
         how = "username and password" if self.credential == "password" else "session token"
         return f"On. {url}, signing in with a {how}"
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """Write the address, who it is, and the key. False when either file refused.
+
+        One answer for both writes: the caller speaks the failure once, so a
+        settings file and a key file that both refused cost one sentence
+        between them, not two.
+        """
         cfg = _load_config()
         cfg["remote_hermes"] = {
             "enabled": self.enabled,
@@ -3796,8 +3880,9 @@ class _RemoteHermes:
             "credential": self.credential,
             "username": self.username,
         }
-        _save_config(cfg)
-        self._write_key()
+        saved = _save_config(cfg)
+        key_saved = self._write_key()
+        return saved and key_saved
 
 
 REMOTE_HERMES = _RemoteHermes()
@@ -7235,7 +7320,7 @@ class HistoryDialog(wx.Dialog):
                 entries, error = list_history(backend, cwd), ""
             except Exception as exc:
                 entries, error = [], f"Could not load conversations: {exc}"
-            wx.CallAfter(self._history_loaded, serial, entries, error)
+            _call_after_alive(self._history_loaded, serial, entries, error)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7340,7 +7425,7 @@ class HistoryDialog(wx.Dialog):
                 text = _last_exchange(load_turns(entry))
             except Exception:
                 text = "Could not read this conversation."
-            wx.CallAfter(self._show_preview, entry, text)
+            _call_after_alive(self._show_preview, entry, text)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7376,7 +7461,7 @@ class HistoryDialog(wx.Dialog):
     def _on_sort(self) -> None:
         cfg = _load_config()
         cfg["history_sort"] = _HISTORY_SORTS[max(0, self.sort_picker.GetSelection())]
-        _save_config(cfg)
+        _save_or_announce(cfg)
         self._refresh(self._current() if self._shown else None)
 
     def _rename(self) -> None:
@@ -7398,7 +7483,12 @@ class HistoryDialog(wx.Dialog):
         else:
             names.pop(_history_key(entry), None)
         cfg["conversation_names"] = names
-        _save_config(cfg)
+        if not _save_config(cfg):
+            # The file kept its old names, so the list stays as it is: a
+            # refresh would re-read them and say the rename worked.
+            announce(_SAVE_FAILED)
+            self.list_box.SetFocus()
+            return
         self._refresh(entry)
         announce(f"Renamed to {self._title(entry)}")
         self.list_box.SetFocus()
@@ -7418,7 +7508,16 @@ class HistoryDialog(wx.Dialog):
             hidden.add(key)
             said = "Hidden. Show hidden conversations lists it again"
         cfg["hidden_conversations"] = sorted(hidden)
-        _save_config(cfg)
+        if not _save_config(cfg):
+            # The in-memory set is the one the list reads, so it goes back the
+            # way it was rather than hiding a conversation the file does not.
+            if key in hidden:
+                hidden.discard(key)
+            else:
+                hidden.add(key)
+            announce(_SAVE_FAILED)
+            self.list_box.SetFocus()
+            return
         selection = self.list_box.GetSelection()
         self._refresh(entry)
         if entry not in self._shown and self._shown:
@@ -8014,7 +8113,8 @@ class SessionPanel(wx.Panel):
         # finished answer can be checked against it rather than assumed shown.
         self._streamed_assistant = ""
         # The message being streamed a sentence at a time: [response number,
-        # speaker, its text so far, rows already added]. See _stream_answer_rows.
+        # speaker, its text so far, parse offset, rows added so far]. See
+        # _stream_answer_rows.
         self._live_answer: Optional[list] = None
         # Set while the user's Stop is being carried out, so the backend's own
         # "cancelled" report is not announced to them as an error.
@@ -8368,9 +8468,11 @@ class SessionPanel(wx.Panel):
             return
         self.mode = value
         self.mode_picker.SetSelection(_MODE_VALUES.index(value))
-        # Remembered globally, so new tabs and the next launch start here.
-        _remember_permission_mode(value)
         self._announce(_MODE_DESCRIPTIONS[value])
+        # Remembered globally, so new tabs and the next launch start here.
+        # After the description: a refusal queues behind it, so the failure is
+        # the last thing said rather than the claim sounding like its repair.
+        _remember_permission_mode(value)
 
     def _on_mode_choice(self, event: wx.CommandEvent) -> None:
         self._set_mode(_MODE_VALUES[self.mode_picker.GetSelection()])
@@ -9236,7 +9338,7 @@ class SessionPanel(wx.Panel):
             if self._worker_events_scheduled:
                 return
             self._worker_events_scheduled = True
-        wx.CallAfter(self._drain_worker_events)
+        _call_after_alive(self._drain_worker_events)
 
     def _drain_worker_events(self) -> None:
         """Apply a short batch, then yield to keyboard and accessibility events."""
@@ -9865,6 +9967,18 @@ class SessionPanel(wx.Panel):
             extra["auto_free_fallback"] = self.model == AUTO_MODEL
         self._launch_turn(send_text, selected_backend, extra)
 
+    def _set_auto_route(self, note: str) -> None:
+        """Say an Auto-routing note once, until the route says something else.
+
+        Called unbound (``SessionPanel._set_auto_route(self, ...)``) from
+        ``_turn_model``, the way ``_turn_model`` itself is driven, so a caller
+        that supplies its own panel-shaped object needs nothing but
+        ``_announce`` and an ``_auto_route`` slot.
+        """
+        if note != getattr(self, "_auto_route", ""):
+            self._auto_route = note
+            self._announce(note)
+
     def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
         """The model and effort for one turn.
 
@@ -9873,7 +9987,10 @@ class SessionPanel(wx.Panel):
         eligible model and heavier work on a stronger one (see
         ``commandcode_router``). A late turn (nothing sent) and a slash command
         are left alone -- they are not work to price. Any failure to route
-        leaves the model unset, preserving the CLI configuration.
+        leaves the model unset, preserving the CLI configuration. The context
+        size last reported for this conversation, when there is one, is passed
+        along so pricing compares models over this conversation rather than a
+        fixed typical session.
         """
         if selected_backend != BACKEND_COMMANDCODE or self.model != AUTO_MODEL:
             return self.model, self.effort
@@ -9882,15 +9999,21 @@ class SessionPanel(wx.Panel):
         try:
             from commandcode_router import route
 
-            chosen = route(send_text)
+            context_tokens = SessionPanel._known_context(self)[0] or None
+            chosen = route(send_text, context_tokens=context_tokens)
         except Exception:  # noqa: BLE001 - routing must never stop a turn
+            SessionPanel._set_auto_route(
+                self, "Auto routing unavailable; using the Command Code default."
+            )
             return "", self.effort
         if not chosen.model:
+            if getattr(chosen, "cooldown", False):
+                SessionPanel._set_auto_route(
+                    self,
+                    "Auto could not confirm a free model during cooldown; using the Command Code default.",
+                )
             return "", self.effort
-        description = chosen.describe()
-        if description != getattr(self, "_auto_route", ""):
-            self._auto_route = description
-            self._announce(description)
+        SessionPanel._set_auto_route(self, chosen.describe())
         return chosen.model, self.effort or chosen.effort
 
     def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
@@ -10700,7 +10823,7 @@ class SessionPanel(wx.Panel):
         live = getattr(self, "_live_answer", None)
         if live is None or live[0] != n or live[1] != speaker:
             self._flush_live_answer()
-            live = self._live_answer = [n, speaker, "", 0]
+            live = self._live_answer = [n, speaker, "", 0, 0]
         if live[2] and not text[:1].isspace():
             # A chunk that arrived trimmed. A line break keeps a list item or
             # heading that starts it a block of its own, and is otherwise just
@@ -10710,18 +10833,30 @@ class SessionPanel(wx.Panel):
         self._add_live_answer_rows(final=False)
 
     def _add_live_answer_rows(self, final: bool) -> None:
+        """Add the blocks of the streamed answer that have finished.
+
+        Only the text from the parse offset on is parsed, and the block still
+        growing is held back until the one after it begins, so a chunk never
+        re-parses the whole answer or emits half a block. The offset only ever
+        lands on a block's first line; where a prefix the parser would strip
+        begins indented, an empty html block props the indent up, so an
+        indented block still arrives whole.
+        """
         live = self._live_answer
         if live is None:
             return
-        n, speaker, text, done = live
-        segments = parse_response(text, n)[1:]
-        ready = segments if final else segments[:-1]
-        for i in range(done, len(ready)):
-            row = ready[i]
-            if i == 0 and row.kind != "code":
+        n, speaker, text, offset, done = live
+        split = len(text) - offset if final else _last_block_start(text[offset:])
+        prefix = text[offset : offset + split]
+        if offset and prefix[:1].isspace():
+            prefix = "<!-- -->\n\n" + prefix
+        rows = parse_response(prefix, n)[1:]
+        for i, row in enumerate(rows):
+            if done == 0 and i == 0 and row.kind != "code":
                 row.label = f"{speaker}: {row.label}"
             self._rows.append(row)
-        live[3] = max(done, len(ready))
+        live[3] = offset + split
+        live[4] = done + len(rows)
 
     def _flush_live_answer(self) -> None:
         """Add the last block of the message being streamed; it has ended."""
@@ -10785,6 +10920,15 @@ class SessionPanel(wx.Panel):
             # Close the replayed response, or the next message lands under it.
             self._stream_response = None
             self._set_status(f"Reopened, {len(self._rows)} rows")
+            return
+        if not text.strip() and self._stream_response is None and self._turns:
+            # A turn that ended without an error and without a word: the fresh
+            # "Response N" header below would carry an empty payload, a row
+            # with nothing for a reader to read, and its status would claim
+            # segments that do not exist. The response number is left for the
+            # next real answer rather than spent on the empty one.
+            self._turns[-1].response = ""
+            self._stream_response = None
             return
         self._narrate_completed_response(text)
         if self._turns:
@@ -10871,7 +11015,7 @@ class SessionPanel(wx.Panel):
             self._turn_started_at = None
         fallback_model = getattr(self._worker, "fallback_model", "")
         if getattr(self, "model", "") == AUTO_MODEL and fallback_model:
-            self._auto_route = f"Free fallback {fallback_model} after a Command Code limit."
+            self._auto_route = f"Switched to {fallback_model} after a Command Code stop."
         self._replay_done = False
         SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
         SessionPanel._drop_step_rows(self)
@@ -10984,8 +11128,10 @@ class SessionPanel(wx.Panel):
         labels: List[str] = []
         self._displayed = []
         for row in self._rows:
-            if term and term not in row.payload.lower() and term not in row.label.lower():
-                continue
+            if term:
+                payload, label = _search_key(row)
+                if term not in payload and term not in label:
+                    continue
             labels.append(row.label)
             self._displayed.append(row)
 
@@ -11231,40 +11377,50 @@ class SessionPanel(wx.Panel):
         return f"Copied {names.get(row.kind, 'paragraph')}"
 
     # ----- Per-row actions menu -----
-    def _show_row_menu(self) -> None:
-        """Arrowable actions for the focused row (Menu key / context gesture)."""
-        sel = self._selected_row()
-        if not (0 <= sel < len(self._displayed)):
-            return
-        row = self._displayed[sel]
+    def _build_row_menu(self, row: Row) -> wx.Menu:
+        """The actions offered for one row.
+
+        Each item binds on the menu it belongs to rather than on the panel:
+        a binding made on the panel outlives the menu that needed it, so every
+        open of this menu used to add five more for as long as the
+        conversation stayed on screen.
+        """
         menu = wx.Menu()
         formatted = menu.Append(wx.ID_ANY, "Read response as formatted page\tShift+Enter")
 
         def read_formatted(_event: wx.CommandEvent) -> None:
             self._read_formatted(row)
 
-        self.Bind(wx.EVT_MENU, read_formatted, formatted)
+        menu.Bind(wx.EVT_MENU, read_formatted, formatted)
         if row.kind == "code":
             item = menu.Append(wx.ID_ANY, "Save code to file…")
 
             def save_code(_event: wx.CommandEvent) -> None:
                 self._action_save_code(row)
 
-            self.Bind(wx.EVT_MENU, save_code, item)
+            menu.Bind(wx.EVT_MENU, save_code, item)
         insert_item = menu.Append(wx.ID_ANY, "Insert into prompt")
 
         def insert(_event: wx.CommandEvent) -> None:
             self._action_insert(row)
 
-        self.Bind(wx.EVT_MENU, insert, insert_item)
+        menu.Bind(wx.EVT_MENU, insert, insert_item)
         copy_item = menu.Append(wx.ID_ANY, "Copy whole response")
 
         def copy_response(_event: wx.CommandEvent) -> None:
             self._action_copy_response(row)
 
-        self.Bind(wx.EVT_MENU, copy_response, copy_item)
+        menu.Bind(wx.EVT_MENU, copy_response, copy_item)
         copy_all_item = menu.Append(wx.ID_ANY, "Copy whole conversation")
-        self.Bind(wx.EVT_MENU, lambda _e: self._action_copy_conversation(), copy_all_item)
+        menu.Bind(wx.EVT_MENU, lambda _e: self._action_copy_conversation(), copy_all_item)
+        return menu
+
+    def _show_row_menu(self) -> None:
+        """Arrowable actions for the focused row (Menu key / context gesture)."""
+        sel = self._selected_row()
+        if not (0 <= sel < len(self._displayed)):
+            return
+        menu = self._build_row_menu(self._displayed[sel])
         self._responses_ctrl().PopupMenu(menu)
         menu.Destroy()
 
@@ -13046,8 +13202,8 @@ class RemoteHermesDialog(wx.Dialog):
         else:
             self._say("Hermes answered. This address and key work.")
 
-    def apply(self) -> None:
-        """Copy the fields into the saved settings."""
+    def apply(self) -> bool:
+        """Copy the fields into the saved settings. False if they were not written."""
         REMOTE_HERMES.enabled = self._enabled.GetValue()
         REMOTE_HERMES.host = self._host.GetValue().strip()
         REMOTE_HERMES.port = int(self._port.GetValue())
@@ -13055,7 +13211,7 @@ class RemoteHermesDialog(wx.Dialog):
         REMOTE_HERMES.credential = self._credential_name()
         REMOTE_HERMES.username = self._user.GetValue().strip()
         REMOTE_HERMES.key = self._key.GetValue().strip()
-        REMOTE_HERMES.save()
+        return REMOTE_HERMES.save()
 
 
 def _chord(chord: str) -> str:
@@ -13974,12 +14130,12 @@ class MainFrame(wx.Frame):
 
         cfg = _load_config()
         cfg["app_mode"] = mode
-        _save_config(cfg)
+        saved = _save_config(cfg)
         # A startup check shows no window, so there is nothing here to focus
         # into, and asking for focus would take it from whoever is running it.
         self.focus_for_mode()
         if announce_change:
-            self._announce_setting(f"{APP_MODE_LABELS[mode]} mode")
+            self._announce_setting(f"{APP_MODE_LABELS[mode]} mode" if saved else _SAVE_FAILED)
 
     def focus_for_mode(self) -> None:
         """Put focus where the mode that is showing actually starts.
@@ -14009,13 +14165,13 @@ class MainFrame(wx.Frame):
             self.chat_panel.set_model_order(self._chat_model_order)
         cfg = _load_config()
         cfg["chat_model_order"] = self._chat_model_order
-        _save_config(cfg)
+        saved = _save_config(cfg)
         label = next(
             label.replace("&", "")
             for value, label, _description in CHAT_MODEL_ORDERS
             if value == self._chat_model_order
         )
-        self._announce_setting(f"Chat model order: {label}")
+        self._announce_setting(f"Chat model order: {label}" if saved else _SAVE_FAILED)
 
     def _show_chat_accounts(self) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
@@ -14051,7 +14207,7 @@ class MainFrame(wx.Frame):
         self._backend = backend
         cfg = _load_config()
         cfg["backend"] = backend
-        _save_config(cfg)
+        saved = _save_config(cfg)
         # The visible tab only. Every tab used to follow this one setting, so
         # picking a backend for a new tab quietly moved the others to it too
         # and their next message went somewhere the person had not chosen.
@@ -14064,7 +14220,7 @@ class MainFrame(wx.Frame):
             f"Backend changed to {backend_label(backend)} for this tab. "
             "It will be used for the next new turn."
         )
-        self._announce_setting(message)
+        self._announce_setting(message if saved else _SAVE_FAILED)
 
     def _refresh_backend_items(self) -> None:
         """Point the menu, and what depends on the backend, at ``_backend``."""
@@ -14130,8 +14286,14 @@ class MainFrame(wx.Frame):
             self._projects_folder = projects_folder
             cfg = _load_config()
             cfg["projects_folder"] = projects_folder
-            _save_config(cfg)
+            folder_saved = _save_config(cfg)
+        else:
+            folder_saved = True
         self._set_backend(chosen)
+        if not folder_saved:
+            # Said after the backend line: the two announcements queue, and
+            # ending on the success claim would bury the failure.
+            self._announce_setting(_SAVE_FAILED)
 
     def _show_preferences(self) -> None:
         """Open the Preferences dialog (Cmd+, on macOS).
@@ -14170,7 +14332,7 @@ class MainFrame(wx.Frame):
         changed_appearance = dialog.appearance != SETTINGS.appearance
         SETTINGS.appearance = dialog.appearance
         changed_text_view = SETTINGS.text_view != self._text_view_item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
 
         self._rows_item.Check(SETTINGS.live_rows)
         self._speak_item.Check(SETTINGS.speak_live)
@@ -14198,9 +14360,9 @@ class MainFrame(wx.Frame):
 
         cfg = _load_config()
         cfg["check_for_updates_at_startup"] = dialog.check_updates_startup
-        _save_config(cfg)
+        saved = _save_config(cfg) and saved
         self._automatic_updates_item.Check(dialog.check_updates_startup)
-        self._announce_setting("Preferences applied")
+        self._announce_setting("Preferences applied" if saved else _SAVE_FAILED)
         if changed_appearance:
             # Nothing on screen changes yet, so without this the new choice
             # would seem to have done nothing.
@@ -14271,12 +14433,13 @@ class MainFrame(wx.Frame):
         enabled = self._automatic_updates_item.IsChecked()
         cfg = _load_config()
         cfg["check_for_updates_at_startup"] = enabled
-        _save_config(cfg)
-        self._announce_setting(
+        saved = _save_config(cfg)
+        claim = (
             "BlindPilot will check for updates at startup"
             if enabled
             else "BlindPilot will not check for updates at startup"
         )
+        self._announce_setting(claim if saved else _SAVE_FAILED)
 
     def _show_update_dialog(self) -> None:
         from update_dialog import UpdateDialog
@@ -15083,8 +15246,8 @@ class MainFrame(wx.Frame):
         """One checkable setting: store what the menu now says, and say it."""
         value = item.IsChecked()
         setattr(SETTINGS, attr, value)
-        SETTINGS.save()
-        self._announce_setting(on_text if value else off_text)
+        saved = SETTINGS.save()
+        self._announce_setting((on_text if value else off_text) if saved else _SAVE_FAILED)
 
     def _toggle_live_rows(self) -> None:
         self._toggle_setting(
@@ -15120,7 +15283,7 @@ class MainFrame(wx.Frame):
         wants it to stop now.
         """
         SETTINGS.progress_cue = _valid_progress_cue(mode)
-        SETTINGS.save()
+        saved = SETTINGS.save()
         if mode == CUE_OFF:
             self.earcons.stop_progress()
             spoken = "off"
@@ -15132,7 +15295,7 @@ class MainFrame(wx.Frame):
             # Restart under the new mode so a turn in flight follows the choice
             # instead of keeping the behaviour it started with.
             self.earcons.start_progress()
-        self._announce_setting(f"Working sound {spoken}")
+        self._announce_setting(f"Working sound {spoken}" if saved else _SAVE_FAILED)
 
     def _configure_cue_interval(self) -> None:
         """Ask how many seconds between working sounds.
@@ -15160,11 +15323,11 @@ class MainFrame(wx.Frame):
         # follows: setting an interval while the sound is off or continuous
         # would otherwise change nothing anyone can hear.
         SETTINGS.progress_cue = CUE_PERIODIC
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self._cue_periodic_item.Check(True)
         if self._turn_in_flight():
             self.earcons.start_progress()
-        self._announce_setting(f"Working sound every {seconds} seconds")
+        self._announce_setting(f"Working sound every {seconds} seconds" if saved else _SAVE_FAILED)
 
     def _toggle_show_thinking(self) -> None:
         self._toggle_setting(
@@ -15198,9 +15361,9 @@ class MainFrame(wx.Frame):
 
     def _set_narration(self, mode: str) -> None:
         SETTINGS.narration = mode
-        SETTINGS.save()
+        saved = SETTINGS.save()
         label = next(text for key, text, _help in NARRATION_MODES if key == mode)
-        self._announce_setting(f"Narration: {label.replace('&', '')}")
+        self._announce_setting(f"Narration: {label.replace('&', '')}" if saved else _SAVE_FAILED)
 
     def _build_sound_cue_menu(self) -> wx.Menu:
         """One check item per cue, under the master switch that governs them.
@@ -15226,43 +15389,47 @@ class MainFrame(wx.Frame):
     def _toggle_sound_cue(self, cue: str) -> None:
         item = self._sound_cue_items[cue]
         SETTINGS.sound_cues[cue] = item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self.earcons.set_cues(SETTINGS.sound_cues)
         label = next(text for key, text, _help in SOUND_CUES if key == cue).replace("&", "")
         state = "on" if SETTINGS.sound_cues[cue] else "off"
-        self._announce_setting(f"{label} sound {state}")
+        self._announce_setting(f"{label} sound {state}" if saved else _SAVE_FAILED)
 
     def _toggle_sounds(self) -> None:
         SETTINGS.sounds_enabled = self._sounds_item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self.earcons.set_enabled(SETTINGS.sounds_enabled)
         # The cues below it describe a choice that is not available while
         # everything is muted.
         for item in getattr(self, "_sound_cue_items", {}).values():
             item.Enable(SETTINGS.sounds_enabled)
         state = "on" if SETTINGS.sounds_enabled else "off"
-        self._announce_setting(f"Sound cues {state}")
+        self._announce_setting(f"Sound cues {state}" if saved else _SAVE_FAILED)
 
     def _toggle_text_view(self) -> None:
         SETTINGS.text_view = self._text_view_item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
         for page in self._session_panels():
             page.apply_view_mode()
-        if SETTINGS.text_view:
-            self._announce_setting("Responses are now a read-only text field, one row per line")
-        else:
-            self._announce_setting("Responses are now a list")
+        claim = (
+            "Responses are now a read-only text field, one row per line"
+            if SETTINGS.text_view
+            else "Responses are now a list"
+        )
+        self._announce_setting(claim if saved else _SAVE_FAILED)
 
     def _use_silent_until_response_mode(self) -> None:
         """One action to remain silent until the complete response arrives."""
         SETTINGS.live_rows = False
         SETTINGS.speak_live = False
-        SETTINGS.save()
+        saved = SETTINGS.save()
         self._rows_item.Check(False)
         self._speak_item.Check(False)
-        self._announce_setting(
-            "Silent until the response is on. Nothing is shown or spoken until the whole answer arrives."
+        claim = (
+            "Silent until the response is on. Nothing is shown or spoken until "
+            "the whole answer arrives."
         )
+        self._announce_setting(claim if saved else _SAVE_FAILED)
 
     def _announce_setting(self, text: str) -> None:
         announce(text)
@@ -15456,7 +15623,7 @@ class MainFrame(wx.Frame):
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 return
-            dlg.apply()
+            saved = dlg.apply()
         finally:
             dlg.Destroy()
         # A conversation already open belongs to whichever Hermes started it,
@@ -15464,6 +15631,11 @@ class MainFrame(wx.Frame):
         # silently moving this one to a different machine. The cached model
         # catalog belonged to the old address and would be wrong for the new.
         invalidate_model_options(BACKEND_HERMES)
+        if not saved:
+            # The fields are live for this session; the file does not hold
+            # them, so the description of the new connection is not said.
+            announce(_SAVE_FAILED)
+            return
         announce(f"Remote Hermes: {REMOTE_HERMES.describe()}. Applies to new conversations.")
 
     def _new_conversation_active(self) -> None:
@@ -15503,8 +15675,11 @@ class MainFrame(wx.Frame):
         self._projects_folder = path
         cfg = _load_config()
         cfg["projects_folder"] = path
-        _save_config(cfg)
-        wx.CallAfter(announce, f"Projects folder set to {_short_label(path)}")
+        saved = _save_config(cfg)
+        wx.CallAfter(
+            announce,
+            f"Projects folder set to {_short_label(path)}" if saved else _SAVE_FAILED,
+        )
         return path
 
     def _close_current_session(self) -> None:

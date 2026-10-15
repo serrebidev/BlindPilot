@@ -604,6 +604,23 @@ def test_a_refused_fired_command_is_said_not_swallowed(monkeypatch):
     assert any("bad choice" in line for line in recorder.said("tool"))
 
 
+def test_fired_commands_are_capped_when_the_server_never_answers():
+    """A reply pops its own entry; an unanswered command never did.
+
+    Every steer, approval and answer fired in one turn added an entry that
+    only a reply could remove, so a host that stopped answering left one per
+    command for the life of the turn.
+    """
+    transport = _ScriptedMuseTransport(stays_open=True)
+    worker = MuseWorker("go", None, ".", "default", **_Recorder().callbacks())
+    worker._transport = transport
+
+    for _ in range(muse_worker._FIRED_KEEP + 5):
+        assert worker._fire("turn/steer", {"commandId": "c"})
+
+    assert len(worker._fired) == muse_worker._FIRED_KEEP
+
+
 def test_an_internal_decide_failure_is_resent_once_with_the_same_command(monkeypatch):
     # Measured on 1.3.0 under load: approval/decide answered an internal
     # "durability fence" error though the decision was saved. A resend with
@@ -628,6 +645,9 @@ def test_an_internal_decide_failure_is_resent_once_with_the_same_command(monkeyp
 
 def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
     # Measured on 1.3.0: a reasoning item streams on field "summary.0".
+    # The deltas are held, and the whole reasoning is ONE thinking row when
+    # the item completes: a row per delta was torn speech, and the
+    # completing item then spoke the whole reasoning again.
     frames = [
         _init_reply(101),
         {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
@@ -635,7 +655,19 @@ def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
         {
             "jsonrpc": "2.0",
             "method": "item/delta",
-            "params": {"itemId": "r1", "field": "summary.0", "delta": "Checking the maths."},
+            "params": {"itemId": "r1", "field": "summary.0", "delta": "Checking "},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/delta",
+            "params": {"itemId": "r1", "field": "summary.1", "delta": "the maths."},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {"itemId": "r1", "kind": "reasoning", "text": "Checking the maths."}
+            },
         },
         {
             "jsonrpc": "2.0",
@@ -650,8 +682,46 @@ def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
 
     _run(worker)
 
+    # One row, the full text: none per delta, and the completion did not
+    # speak it a second time.
     assert recorder.said("thinking") == ["Checking the maths."]
     assert recorder.completed == ["No."]
+
+
+def test_a_completion_callback_that_raises_is_not_announced_as_a_failed_turn(monkeypatch):
+    """_turn_completed settles the turn before on_complete, so a listener
+    that raises on the finished answer is not the turn's failure."""
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "bypassPermissions",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _kind, _text: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+
+    _run(worker)
+
+    assert completed == ["Finished with nothing to say."]
+    assert failures == []
 
 
 def test_a_completed_message_is_not_spoken_twice_and_earlier_ones_are_kept(monkeypatch):
@@ -908,6 +978,106 @@ def test_a_resume_only_turn_replays_the_stored_transcript(monkeypatch):
     assert ("assistant", "Fixed.") in recorder.activity
     assert recorder.completed == [""]
     assert recorder.sessions == ["sess-9"]
+
+
+def _boom_worker(monkeypatch, frames, session=None, **kwargs):
+    """Run a turn whose answer listener raises; return what the listeners saw."""
+    _with_script(monkeypatch, frames)
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = MuseWorker(
+        "",
+        session,
+        ".",
+        "bypassPermissions",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _k, _t: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+        **kwargs,
+    )
+    _run(worker)
+    return completed, failures
+
+
+def test_a_compaction_summary_listener_that_raises_is_not_a_failed_turn(monkeypatch):
+    """The summary settles compaction before it is announced; a listener that
+    cannot take it is not the turn's failure."""
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {}},
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {"item": {"kind": "compaction", "summary": "The conversation so far"}},
+        },
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, compact=True)
+
+    assert completed == ["Conversation compacted"]
+    assert failures == []
+
+
+def test_a_compaction_turn_end_listener_that_raises_is_not_a_failed_turn(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, compact=True)
+
+    assert completed == ["Conversation compacted"]
+    assert failures == []
+
+
+def test_a_compaction_that_ends_without_a_summary_still_settles_before_saying(monkeypatch):
+    # The wait gives up when the host's stream ends; what it says then is
+    # still a finished answer, not a turn whose failure the listener caused.
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {}},
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, compact=True)
+
+    assert completed == ["Compaction accepted; the summary arrives with the next message."]
+    assert failures == []
+
+
+def test_a_replay_listener_that_raises_is_not_a_failed_turn(monkeypatch):
+    frames = [
+        _init_reply(101),
+        {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "result": {
+                "session": {"sessionId": "sess-9"},
+                "history": {
+                    "items": [
+                        {"kind": "userMessage", "text": "fix the bug"},
+                        {"kind": "agentMessage", "text": "Fixed."},
+                    ]
+                },
+            },
+        },
+    ]
+
+    completed, failures = _boom_worker(monkeypatch, frames, session="sess-9", resume_only=True)
+
+    assert completed == [""]
+    assert failures == []
 
 
 def test_the_window_can_hold_the_muse_worker_like_any_other():

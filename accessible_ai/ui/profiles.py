@@ -507,6 +507,7 @@ class ProfilesDialog(wx.Dialog):
             temperature=source.temperature,
             max_output_tokens=source.max_output_tokens,
             streaming=source.streaming,
+            openrouter=OpenRouterFeatures.from_dict(source.openrouter.as_dict()),
         )
         self._edit_dialog(duplicate)
 
