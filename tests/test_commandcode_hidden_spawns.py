@@ -25,11 +25,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Written to a file: a grandchild that got a console of its own also gets that
-# console's handles, so anything it printed would never reach the pipe.
+# console's handles, so anything it printed would never reach the pipe. A new
+# console window is shown a moment after the process starts, so the probe
+# waits up to two seconds for it; read at once, a loaded machine said hidden.
 _PROBE = (
-    "import ctypes, sys; h = ctypes.windll.kernel32.GetConsoleWindow(); "
-    "open(sys.argv[1], 'w').write("
-    "'visible' if h and ctypes.windll.user32.IsWindowVisible(h) else 'hidden')"
+    "import ctypes, sys, time; h = ctypes.windll.kernel32.GetConsoleWindow(); "
+    "seen = lambda: bool(h and ctypes.windll.user32.IsWindowVisible(h)); "
+    "[time.sleep(0.05) for _ in range(40) if not seen()]; "
+    "open(sys.argv[1], 'w').write('visible' if seen() else 'hidden')"
 )
 # Command Code's own background spawn: shell, detached, asked to be hidden.
 _SPAWN = (
