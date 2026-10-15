@@ -5,7 +5,7 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 ## Unreleased
 
 - Command Code Auto skips Ling 3.1 Flash's retired free tier even when the installed CLI's bundled catalog still lists it as free; Laguna S 2.1 remains available for quick tasks and safe credit-limit retries.
-- Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely.
+- History loading scans the providers in parallel, so opening history is faster when several backends have stored conversations.
 
 ## v0.47.3 - 2026-10-14
 
