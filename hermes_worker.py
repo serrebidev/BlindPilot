@@ -873,7 +873,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             # the remote path is the difference between "wrong address" and "slow".
             if self._wait_for_ready() is False:
                 return
-            self._advertise_server_requests()
+            if self._advertise_server_requests() is False:
+                return
             if self._resume_only:
                 self._run_replay()
                 return
@@ -890,7 +891,8 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             # change that never happened. session.resume takes neither, so the
             # change is applied to the live session the way Hermes' own hosts
             # do it: through its slash commands.
-            self._apply_live_selection()
+            if self._apply_live_selection() is False:
+                return
             # The permission mode can change between turns of a held
             # conversation; a mode picked since the last message applies now.
             self._apply_yolo()
@@ -899,7 +901,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             return
         self._run_turn()
 
-    def _apply_live_selection(self) -> None:
+    def _apply_live_selection(self) -> bool:
         """Move a reused session onto the currently picked model.
 
         The reasoning level is deliberately NOT sent here. Hermes takes it on
@@ -914,31 +916,36 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         Best-effort by design: a refused switch must not lose the message the
         user typed. The reply is reported as activity so a wrong model name is
         heard rather than silently ignored.
+
+        False when the turn ended or was cancelled while this was being
+        asked: the switch and everything after it must be given up, or a
+        Stop pressed here would still send the prompt on.
         """
-        if not self._model or self._model == self._session_model:
-            return
-        provider, model = split_model_row(self._model)
-        command = f"/model {model}"
-        if provider:
-            command += f" --provider {provider}"
-        # --session: this conversation's choice, not a new profile default.
-        command += " --session"
-        request_id = self._send(
-            "slash.exec", {"session_id": self._live_session, "command": command}
-        )
-        if request_id is None:
-            return
-        reply = self._await_response(request_id, 60.0)
-        if reply is None:
-            return
-        error = reply.get("error")
-        if isinstance(error, dict):
-            self._on_activity(
-                "tool",
-                f"Hermes refused {command}: {error.get('message') or 'no reason given'}",
+        if (
+            not (self._ended or self._cancelled)
+            and self._model
+            and self._model != self._session_model
+        ):
+            provider, model = split_model_row(self._model)
+            command = f"/model {model}"
+            if provider:
+                command += f" --provider {provider}"
+            # --session: this conversation's choice, not a new profile default.
+            command += " --session"
+            request_id = self._send(
+                "slash.exec", {"session_id": self._live_session, "command": command}
             )
-            return
-        self._session_model = self._model
+            reply = self._await_response(request_id, 60.0) if request_id is not None else None
+            if reply is not None:
+                error = reply.get("error")
+                if isinstance(error, dict):
+                    self._on_activity(
+                        "tool",
+                        f"Hermes refused {command}: {error.get('message') or 'no reason given'}",
+                    )
+                else:
+                    self._session_model = self._model
+        return not (self._ended or self._cancelled)
 
     def _wait_for_ready(self) -> bool:
         ready = self._await_frame(lambda frame: self._event_type(frame) == "gateway.ready", 60.0)
@@ -949,12 +956,18 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             self._on_failed(detail or "Hermes did not become ready in time")
         return False
 
-    def _advertise_server_requests(self) -> None:
-        """Tell current Hermes builds that this client answers blocking prompts."""
+    def _advertise_server_requests(self) -> bool:
+        """Tell current Hermes builds that this client answers blocking prompts.
+
+        Either reply is fine -- older gateways reject this optional method --
+        and silence from one that never answers is not an error either. What
+        is not fine is the wait itself ending the turn or being cancelled
+        inside it: False then, and the caller must send nothing more.
+        """
         request_id = self._send("client.capabilities", {"server_requests": True})
         if request_id is not None:
-            # Older gateways reject this optional method; either reply is fine.
             self._await_response(request_id, 5.0)
+        return not (self._ended or self._cancelled)
 
     def _run_replay(self) -> None:
         """Reopen a stored conversation and hand its transcript to the window.
@@ -1120,12 +1133,12 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         return params
 
     def _run_turn(self) -> None:
-        if self._ended or self._clean_end:
+        if self._ended or self._clean_end or self._cancelled:
             return
         command = self._as_slash_command()
-        if self._ended or self._clean_end:
+        if self._ended or self._clean_end or self._cancelled:
             # The check itself awaited a reply, and that wait can carry the
-            # turn's end: nothing more may be sent once it has.
+            # turn's end or its Stop: nothing more may be sent once it has.
             return
         if command is not None:
             self._run_slash_command(command)
