@@ -131,6 +131,21 @@ _DEEPSEEK_PEAK: dict[str, dict[str, float]] = {
 # filtered out, so a Go-tier account never picks a Pro/GOAT/Max-only model.
 _PLAN_RANK = {"go": 1, "goat": 2, "pro": 3, "max": 4}
 
+# The environment variable that names the account plan, when it can't be read
+# from the CLI headlessly. Defaults to the lowest tier.
+_PLAN_ENV = "COMMANDCODE_PLAN"
+
+
+def _resolve_max_plan(max_plan) -> str:
+    """The plan to route against, falling back to the env, then to ``go``."""
+    if isinstance(max_plan, str) and max_plan.strip():
+        return max_plan.strip().lower()
+    raw = os.environ.get(_PLAN_ENV, "")
+    candidate = raw.strip().lower()
+    if candidate in _PLAN_RANK:
+        return candidate
+    return "go"
+
 # The task text that makes a tier, ported from the terminal router so the
 # two classify alike. The high-risk scan runs first, so a question about
 # risky work lands on deep even when it reads as a lookup ("explain the
@@ -380,7 +395,7 @@ def select(
     tier: str,
     catalog: dict,
     *,
-    max_plan: str = "go",
+    max_plan: Optional[str] = None,
     include_free: bool = True,
     now: Optional[datetime] = None,
     cooldown: bool = False,
@@ -421,7 +436,7 @@ def select(
             continue
         if capacity_cooling_down(model_id, now):
             continue
-        if not plan_eligible(entry.get("minPlan", ""), max_plan):
+        if not plan_eligible(entry.get("minPlan", ""), _resolve_max_plan(max_plan)):
             continue
         cost = model_cost(entry, peak, context_tokens)
         if cost < best_cost:
@@ -444,7 +459,7 @@ def route(
     task: str,
     *,
     catalog: Optional[dict] = None,
-    max_plan: str = "go",
+    max_plan: Optional[str] = None,
     include_free: bool = True,
     now: Optional[datetime] = None,
     static: bool = False,
@@ -498,7 +513,7 @@ def best_free_model(
     *,
     catalog: Optional[dict] = None,
     exclude_model: str = "",
-    max_plan: str = "go",
+    max_plan: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Optional[Route]:
     """A coding-focused free fallback confirmed by the installed CLI catalog.
@@ -508,17 +523,60 @@ def best_free_model(
     model that just refused the turn.
     """
     active_catalog = catalog if catalog is not None else price_catalog()
-    for model_id in _FREE_FALLBACK_CANDIDATES:
+    # Capability-gated, not a bare free scan: only models the router already
+    # considers fit for work qualify, so a free model the catalog just
+    # started offering never outranks the curated shortlist. The declared
+    # fallbacks go first, then the quick tier's candidates (what a QUICK task
+    # may already pick), then any free catalog entry whose id matches a tier
+    # candidate -- this keeps the fallback working across CLI versions whose
+    # exact model ids changed.
+    candidate_ids: list[str] = []
+    for model_id in _FREE_FALLBACK_CANDIDATES + _TIER_CANDIDATES.get(QUICK, ()):
+        if model_id not in candidate_ids:
+            candidate_ids.append(model_id)
+    # Also consider any tier candidate (any tier) the catalog marks free, so
+    # a free upstream that appears in the installed CLI's catalog is not
+    # silently ignored just because it was paid in the hand-written table.
+    for tier_ids in _TIER_CANDIDATES.values():
+        for model_id in tier_ids:
+            if model_id not in candidate_ids:
+                candidate_ids.append(model_id)
+    max_plan_resolved = _resolve_max_plan(max_plan)
+    for model_id in candidate_ids:
         entry = active_catalog.get(model_id)
         if (
             model_id != exclude_model.lower()
             and entry
             and entry.get("free") is True
+            and model_id not in _TRAINING_MODELS
             and not capacity_cooling_down(model_id, now)
-            and plan_eligible(entry.get("minPlan", ""), max_plan)
+            and plan_eligible(entry.get("minPlan", ""), max_plan_resolved)
         ):
             return Route(model=model_id, effort="", tier="free", cost=0.0, priced=True)
     return None
+
+
+def catalog_missing_candidates(catalog: Optional[dict] = None) -> dict:
+    """Tier candidates the catalog does not currently offer.
+
+    A renamed or retired model is not a crash -- ``select`` already skips an
+    id that is absent -- but leaving it in the shortlist silently weakens the
+    tier. This surfaces the gap so a release check (or a developer) can take
+    the model out or add its replacement. Returns a mapping of tier to the
+    missing ids; an empty dict means full coverage.
+    """
+    active = catalog if catalog is not None else price_catalog()
+    missing: dict = {}
+    for tier, ids in _TIER_CANDIDATES.items():
+        absent = [model_id for model_id in ids if model_id not in active]
+        if absent:
+            missing[tier] = absent
+    return missing
+
+
+def catalog_is_complete(catalog: Optional[dict] = None) -> bool:
+    """Whether every tier candidate appears in the catalog."""
+    return not catalog_missing_candidates(catalog)
 
 
 def parse_prices(text: str) -> dict:
