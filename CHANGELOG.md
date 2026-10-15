@@ -2,11 +2,13 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## v0.47.1 - 2026-10-14
+## v0.47.2 - 2026-10-14
 
 - Tab and Shift+Tab reach the conversation list in Agent mode's Recent Conversations again. Arrows worked inside the list, but Windows' Tab traversal walked past it in both directions, because the drawn list never carried the tab-stop style Windows looks for. The Hermes conversations and slash command pickers use the same list and are fixed with it. Reported by Kaveinthran.
 
 - The Gemini and Antigravity workers no longer break on Python 3.13 and later, where threading.Thread claims the name their frame handler used. Released builds run on 3.12 and were not affected; running from source on a newer Python was.
+
+- A ChatGPT plan test no longer passes or fails on test order: generate() reads the model catalogue once per process, and the first test to run spent a mocked request on it. This cost the 0.47.1 tag its macOS build, so 0.47.1 was never published. The console-window test also waits up to two seconds for a new window to show, instead of reading it the instant the process starts.
 
 ## v0.47.0 - 2026-10-14
 
