@@ -953,6 +953,9 @@ def record_capacity_hit(model: str, now: Optional[datetime] = None) -> bool:
     """
     if not model:
         return False
+    # The id can arrive in any case from user config; one casefolded key
+    # matches what capacity_cooling_down looks up, whatever case arrives.
+    key = model.casefold()
     moment = now or datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
@@ -963,11 +966,11 @@ def record_capacity_hit(model: str, now: Optional[datetime] = None) -> bool:
         capacity = state.get("capacity")
         if not isinstance(capacity, dict):
             capacity = {}
-        capacity[model] = entry
+        capacity[key] = entry
         state["capacity"] = capacity
 
     return _update_usage_state(
-        lambda state: _has_longer_stop(state, deadline, "capacity", model, "until"), mutate
+        lambda state: _has_longer_stop(state, deadline, "capacity", key, "until"), mutate
     )
 
 
@@ -996,7 +999,7 @@ def capacity_cooling_down(model: str, now: Optional[datetime] = None) -> bool:
         moment = moment.replace(tzinfo=timezone.utc)
     raw = _read_usage_state_cached()
     try:
-        until = raw.get("capacity", {}).get(model, {}).get("until", "")
+        until = raw.get("capacity", {}).get(model.casefold(), {}).get("until", "")
     except AttributeError:
         return False
     deadline = _parse_deadline(until)

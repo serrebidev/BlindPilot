@@ -629,6 +629,30 @@ def test_an_empty_model_is_not_recorded_as_at_capacity(monkeypatch, tmp_path):
     assert router.capacity_cooling_down("") is False
 
 
+def test_capacity_cooldown_matches_the_model_id_regardless_of_case(monkeypatch, tmp_path):
+    # The id can arrive mixed-case from user config, while the tier candidate
+    # ids the router selects on are lowercase; the capacity map must not care.
+    monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
+    moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
+    catalog = router.parse_prices(CATALOG)
+
+    assert router.record_capacity_hit("DeepSeek/DeepSeek-V4-Pro", now=moment) is True
+    assert router.record_capacity_hit("InclusionAI/Ling-3.1-Flash:Free", now=moment) is True
+    assert router.capacity_cooling_down("deepseek/deepseek-v4-pro", now=moment) is True
+    assert router.capacity_cooling_down("DEEPSEEK/DEEPSEEK-V4-PRO", now=moment) is True
+
+    standard = router.select(router.STANDARD, catalog, now=moment)
+    assert standard is None  # v4-pro is the only standard candidate in the catalog
+    assert router.best_free_model(catalog=catalog, now=moment) is None
+
+    later = moment + timedelta(minutes=11)
+    assert router.capacity_cooling_down("deepseek/deepseek-v4-pro", now=later) is False
+    standard = router.select(router.STANDARD, catalog, now=later)
+    assert standard is not None and standard.model == "deepseek/deepseek-v4-pro"
+    quick = router.best_free_model(catalog=catalog, now=later)
+    assert quick is not None and quick.model == "inclusionai/ling-3.1-flash:free"
+
+
 def test_select_excludes_named_models():
     catalog = router.parse_prices(CATALOG)
     assert (
