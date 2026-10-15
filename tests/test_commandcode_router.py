@@ -752,7 +752,6 @@ def test_usage_state_reads_are_cached_but_a_write_takes_effect(monkeypatch, tmp_
 # --------------------------------------------------------------------------
 
 
-
 def test_installed_catalog_covers_every_tier_candidate():
     catalog = router.price_catalog()
     if not catalog:
