@@ -172,7 +172,7 @@ def test_the_interval_is_only_editable_for_the_periodic_cue(wx_app):
 def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypatch):
     saved: list[dict] = []
     monkeypatch.setattr(app, "_load_config", dict)
-    monkeypatch.setattr(app, "_save_config", lambda cfg: saved.append(dict(cfg)))
+    monkeypatch.setattr(app, "_save_config", lambda cfg: saved.append(dict(cfg)) or True)
     frame = _FrameStub()
 
     class _Dialog:

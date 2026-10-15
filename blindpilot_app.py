@@ -165,6 +165,7 @@ from muse_backend import (
 
 from markdown_rows import (
     Row,
+    _MD,
     _strip_noise,
     parse_response,
     reassemble,
@@ -319,6 +320,24 @@ def announce(text: str, urgent: bool = False) -> None:
         )
     except Exception:  # an announcement is never worth raising over
         pass
+
+
+# Said when a settings write failed, in place of the sentence that would claim
+# a change the file did not keep.
+_SAVE_FAILED = "Error: could not save settings"
+
+
+def _call_after_alive(callback: Callable[..., object], *args: object) -> None:
+    """wx.CallAfter, unless the application has already gone.
+
+    A worker finishing during shutdown, or a history dialog's background load,
+    lands after wx.App is destroyed, where wx.CallAfter raises. The work is
+    dropped instead: the receiving end checks for a dead window too, so
+    nothing that could have been shown is lost.
+    """
+    if wx.GetApp() is None:
+        return
+    wx.CallAfter(callback, *args)
 
 
 APP_NAME = "BlindPilot"
@@ -3395,6 +3414,45 @@ def _starts_of(lines: List[str]) -> List[int]:
     return starts
 
 
+def _last_block_start(text: str) -> int:
+    """Offset of the last top-level block's first line in `text`.
+
+    That block is still growing, so it is held back: the answer is parsed from
+    here rather than from the start, and rows are only ever appended whole. The
+    depth counter walks past a table or a fenced block, so a blank line inside
+    one is not mistaken for the boundary.
+    """
+    if not text:
+        return 0
+    # Line starts as the parser counts them: split on newlines, which are kept.
+    line_starts = [0]
+    for i, character in enumerate(text):
+        if character == "\n":
+            line_starts.append(i + 1)
+    depth, start = 0, 0
+    for token in _MD.parse(text):
+        if depth == 0 and token.nesting >= 0 and token.map and token.map[0] < len(line_starts):
+            start = line_starts[token.map[0]]
+        depth += token.nesting
+    return start
+
+
+def _search_key(row: Row) -> tuple[str, str]:
+    """The row's lowercased payload and label, lowered once per content.
+
+    Search lowers both strings of every row on every refresh, and a turn that
+    streams calls that refresh for each batch. The lowered pair is cached on
+    the row and kept only while it still holds the very strings the row holds,
+    so a payload rewritten later is lowered afresh.
+    """
+    cached = getattr(row, "_search_key", None)
+    if cached is not None and cached[2] is row.payload and cached[3] is row.label:
+        return cached[0], cached[1]
+    lowered = (row.payload.lower(), row.label.lower(), row.payload, row.label)
+    setattr(row, "_search_key", lowered)  # noqa: B010 -- Row has no such attribute declared
+    return lowered[0], lowered[1]
+
+
 # How a refused tool call reads, as against one that simply failed. Claude Code
 # flags both with ``is_error`` on the tool result and says nothing else about
 # which it was, so the wording is what tells them apart: a permission rule, a
@@ -3682,7 +3740,8 @@ class _Settings:
         # and save it like the rest.
         self.appearance = _valid_appearance(cfg.get("appearance"))
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """Write the settings out. False means the file did not take them."""
         cfg = _load_config()
         cfg["live_rows"] = self.live_rows
         cfg["speak_live"] = self.speak_live
@@ -3697,7 +3756,7 @@ class _Settings:
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["appearance"] = self.appearance
-        _save_config(cfg)
+        return _save_config(cfg)
 
 
 # Before any setting is read: an install that predates the macOS conventions
@@ -7235,7 +7294,7 @@ class HistoryDialog(wx.Dialog):
                 entries, error = list_history(backend, cwd), ""
             except Exception as exc:
                 entries, error = [], f"Could not load conversations: {exc}"
-            wx.CallAfter(self._history_loaded, serial, entries, error)
+            _call_after_alive(self._history_loaded, serial, entries, error)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7340,7 +7399,7 @@ class HistoryDialog(wx.Dialog):
                 text = _last_exchange(load_turns(entry))
             except Exception:
                 text = "Could not read this conversation."
-            wx.CallAfter(self._show_preview, entry, text)
+            _call_after_alive(self._show_preview, entry, text)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7398,7 +7457,12 @@ class HistoryDialog(wx.Dialog):
         else:
             names.pop(_history_key(entry), None)
         cfg["conversation_names"] = names
-        _save_config(cfg)
+        if not _save_config(cfg):
+            # The file kept its old names, so the list stays as it is: a
+            # refresh would re-read them and say the rename worked.
+            announce(_SAVE_FAILED)
+            self.list_box.SetFocus()
+            return
         self._refresh(entry)
         announce(f"Renamed to {self._title(entry)}")
         self.list_box.SetFocus()
@@ -7418,7 +7482,16 @@ class HistoryDialog(wx.Dialog):
             hidden.add(key)
             said = "Hidden. Show hidden conversations lists it again"
         cfg["hidden_conversations"] = sorted(hidden)
-        _save_config(cfg)
+        if not _save_config(cfg):
+            # The in-memory set is the one the list reads, so it goes back the
+            # way it was rather than hiding a conversation the file does not.
+            if key in hidden:
+                hidden.discard(key)
+            else:
+                hidden.add(key)
+            announce(_SAVE_FAILED)
+            self.list_box.SetFocus()
+            return
         selection = self.list_box.GetSelection()
         self._refresh(entry)
         if entry not in self._shown and self._shown:
@@ -8014,7 +8087,8 @@ class SessionPanel(wx.Panel):
         # finished answer can be checked against it rather than assumed shown.
         self._streamed_assistant = ""
         # The message being streamed a sentence at a time: [response number,
-        # speaker, its text so far, rows already added]. See _stream_answer_rows.
+        # speaker, its text so far, parse offset, rows added so far]. See
+        # _stream_answer_rows.
         self._live_answer: Optional[list] = None
         # Set while the user's Stop is being carried out, so the backend's own
         # "cancelled" report is not announced to them as an error.
@@ -9236,7 +9310,7 @@ class SessionPanel(wx.Panel):
             if self._worker_events_scheduled:
                 return
             self._worker_events_scheduled = True
-        wx.CallAfter(self._drain_worker_events)
+        _call_after_alive(self._drain_worker_events)
 
     def _drain_worker_events(self) -> None:
         """Apply a short batch, then yield to keyboard and accessibility events."""
@@ -10721,7 +10795,7 @@ class SessionPanel(wx.Panel):
         live = getattr(self, "_live_answer", None)
         if live is None or live[0] != n or live[1] != speaker:
             self._flush_live_answer()
-            live = self._live_answer = [n, speaker, "", 0]
+            live = self._live_answer = [n, speaker, "", 0, 0]
         if live[2] and not text[:1].isspace():
             # A chunk that arrived trimmed. A line break keeps a list item or
             # heading that starts it a block of its own, and is otherwise just
@@ -10731,18 +10805,30 @@ class SessionPanel(wx.Panel):
         self._add_live_answer_rows(final=False)
 
     def _add_live_answer_rows(self, final: bool) -> None:
+        """Add the blocks of the streamed answer that have finished.
+
+        Only the text from the parse offset on is parsed, and the block still
+        growing is held back until the one after it begins, so a chunk never
+        re-parses the whole answer or emits half a block. The offset only ever
+        lands on a block's first line; where a prefix the parser would strip
+        begins indented, an empty html block props the indent up, so an
+        indented block still arrives whole.
+        """
         live = self._live_answer
         if live is None:
             return
-        n, speaker, text, done = live
-        segments = parse_response(text, n)[1:]
-        ready = segments if final else segments[:-1]
-        for i in range(done, len(ready)):
-            row = ready[i]
-            if i == 0 and row.kind != "code":
+        n, speaker, text, offset, done = live
+        split = len(text) - offset if final else _last_block_start(text[offset:])
+        prefix = text[offset : offset + split]
+        if offset and prefix[:1].isspace():
+            prefix = "<!-- -->\n\n" + prefix
+        rows = parse_response(prefix, n)[1:]
+        for i, row in enumerate(rows):
+            if done == 0 and i == 0 and row.kind != "code":
                 row.label = f"{speaker}: {row.label}"
             self._rows.append(row)
-        live[3] = max(done, len(ready))
+        live[3] = offset + split
+        live[4] = done + len(rows)
 
     def _flush_live_answer(self) -> None:
         """Add the last block of the message being streamed; it has ended."""
@@ -11005,8 +11091,10 @@ class SessionPanel(wx.Panel):
         labels: List[str] = []
         self._displayed = []
         for row in self._rows:
-            if term and term not in row.payload.lower() and term not in row.label.lower():
-                continue
+            if term:
+                payload, label = _search_key(row)
+                if term not in payload and term not in label:
+                    continue
             labels.append(row.label)
             self._displayed.append(row)
 
@@ -14191,7 +14279,7 @@ class MainFrame(wx.Frame):
         changed_appearance = dialog.appearance != SETTINGS.appearance
         SETTINGS.appearance = dialog.appearance
         changed_text_view = SETTINGS.text_view != self._text_view_item.IsChecked()
-        SETTINGS.save()
+        saved = SETTINGS.save()
 
         self._rows_item.Check(SETTINGS.live_rows)
         self._speak_item.Check(SETTINGS.speak_live)
@@ -14219,9 +14307,9 @@ class MainFrame(wx.Frame):
 
         cfg = _load_config()
         cfg["check_for_updates_at_startup"] = dialog.check_updates_startup
-        _save_config(cfg)
+        saved = _save_config(cfg) and saved
         self._automatic_updates_item.Check(dialog.check_updates_startup)
-        self._announce_setting("Preferences applied")
+        self._announce_setting("Preferences applied" if saved else _SAVE_FAILED)
         if changed_appearance:
             # Nothing on screen changes yet, so without this the new choice
             # would seem to have done nothing.
@@ -15104,8 +15192,8 @@ class MainFrame(wx.Frame):
         """One checkable setting: store what the menu now says, and say it."""
         value = item.IsChecked()
         setattr(SETTINGS, attr, value)
-        SETTINGS.save()
-        self._announce_setting(on_text if value else off_text)
+        saved = SETTINGS.save()
+        self._announce_setting((on_text if value else off_text) if saved else _SAVE_FAILED)
 
     def _toggle_live_rows(self) -> None:
         self._toggle_setting(
