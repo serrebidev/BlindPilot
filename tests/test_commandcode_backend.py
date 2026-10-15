@@ -259,14 +259,28 @@ def test_signed_in_comes_from_the_status_command(home, monkeypatch):
     assert "Provider: Command Code" in fields
 
 
-def test_a_refused_status_falls_back_to_the_stored_credential(home, monkeypatch):
+def test_a_refused_status_is_signed_out_despite_a_stored_credential(home, monkeypatch):
+    """Exit 3 is Command Code's own "not authenticated" and outranks auth.json.
+
+    A logout leaves the credential file behind, and the old fallback read that
+    file as proof of a live sign-in.
+    """
     _wire(monkeypatch, status=(3, "not authenticated"))
     home.joinpath(".commandcode").mkdir(parents=True)
     home.joinpath(".commandcode", "auth.json").write_text(
         json.dumps({"userName": "person"}), encoding="utf-8"
     )
+    assert commandcode_backend.commandcode_auth_ok() is False
+
+
+def test_no_cli_at_all_falls_back_to_the_stored_credential(home, monkeypatch):
+    """The file is consulted only when the CLI never ran to answer."""
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: None)
+    home.joinpath(".commandcode").mkdir(parents=True)
+    home.joinpath(".commandcode", "auth.json").write_text(
+        json.dumps({"userName": "person"}), encoding="utf-8"
+    )
     assert commandcode_backend.commandcode_auth_ok() is True
-    assert "Account: person" in commandcode_backend.commandcode_account_lines()
 
 
 def test_no_credential_and_no_status_means_signed_out(home, monkeypatch):

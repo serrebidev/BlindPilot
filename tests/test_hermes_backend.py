@@ -1030,6 +1030,8 @@ def test_a_login_that_is_refused_says_so_without_repeating_the_password(monkeypa
     import urllib.error
     import urllib.request
 
+    monkeypatch.setenv("BLINDPILOT_HERMES_ALLOW_INSECURE_LOGIN", "1")
+
     class _Opener:
         def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
@@ -1468,6 +1470,7 @@ def test_an_address_hermes_was_not_told_about_is_not_reported_as_a_bad_password(
         )
 
     _login_opener(monkeypatch, _respond)
+    monkeypatch.setenv("BLINDPILOT_HERMES_ALLOW_INSECURE_LOGIN", "1")
 
     try:
         hermes_backend.mint_ws_ticket("ws://box:9119/api/ws", "someone", "hunter2")
@@ -1500,6 +1503,7 @@ def test_a_hermes_that_needs_no_login_says_so_instead_of_asking_for_a_ticket(mon
         )
 
     _login_opener(monkeypatch, _respond)
+    monkeypatch.setenv("BLINDPILOT_HERMES_ALLOW_INSECURE_LOGIN", "1")
     monkeypatch.setattr(hermes_backend, "hermes_asks_for_a_login", lambda url, timeout=20.0: False)
 
     try:
@@ -2082,3 +2086,100 @@ def test_the_wsl_history_probes_stay_off_the_screen(monkeypatch):
     assert hermes_backend.wsl_sqlite_query("select 1") == []
     assert len(seen) == 2
     assert all(kwargs.get("creationflags") == 0x08000000 for kwargs in seen)
+
+
+def test_a_ws_remote_refuses_to_send_the_password_in_clear_text(monkeypatch):
+    """A ws:// login is plain HTTP; the default is not to hand it the password."""
+    import urllib.request
+
+    monkeypatch.delenv("BLINDPILOT_HERMES_ALLOW_INSECURE_LOGIN", raising=False)
+    sent = []
+
+    def _opener(*_args):
+        class _Never:
+            def open(self, _request, timeout=None):
+                sent.append(True)
+                raise AssertionError("no request may carry a password in clear text")
+
+        return _Never()
+
+    monkeypatch.setattr(urllib.request, "build_opener", _opener)
+
+    try:
+        hermes_backend.mint_ws_ticket("ws://box:9119/api/ws", "someone", "hunter2")
+    except OSError as exc:
+        message = str(exc)
+    else:  # pragma: no cover - the refusal is the point
+        raise AssertionError("a clear-text login must be refused")
+
+    assert sent == [], "the password must not be sent before the refusal"
+    assert "clear text" in message
+    assert "TLS" in message or "wss://" in message
+    assert "BLINDPILOT_HERMES_ALLOW_INSECURE_LOGIN" in message
+    assert "hunter2" not in message
+
+
+def test_the_insecure_login_opt_in_lets_a_ws_remote_proceed(monkeypatch):
+    import urllib.request
+
+    monkeypatch.setenv("BLINDPILOT_HERMES_ALLOW_INSECURE_LOGIN", "1")
+    posted: list[str] = []
+
+    class _Ok:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def read(self):
+            return b'{"ticket": "t1"}'
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            posted.append(request.full_url)
+            return _Ok()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _Opener())
+
+    ticket, _cookies = hermes_backend.mint_ws_ticket("ws://box:9119/api/ws", "someone", "pw")
+
+    assert ticket == "t1"
+    assert any(url.endswith("/auth/password-login") for url in posted)
+
+
+def test_a_failed_wsl_probe_is_retried_not_cached(monkeypatch):
+    """A cold distribution once meant no state.db for the rest of the run."""
+    _reset_wsl_cache(monkeypatch)
+    monkeypatch.setattr(hermes_backend, "_WSL_STATE_DB", None, raising=False)
+    monkeypatch.setattr(hermes_backend, "_WSL_STATE_DB_CHECKED", False, raising=False)
+    monkeypatch.setattr(hermes_backend, "wsl_exe", lambda: "wsl.exe")
+    attempts: list = []
+
+    def _run(*_args, **_kwargs):
+        attempts.append(1)
+        raise subprocess.TimeoutExpired("wsl", 25)
+
+    monkeypatch.setattr(hermes_backend.subprocess, "run", _run)
+
+    assert hermes_backend.wsl_state_db() is None
+    assert hermes_backend._WSL_STATE_DB_CHECKED is False
+    assert hermes_backend.wsl_state_db() is None
+    assert len(attempts) == 2, "the second call must probe again, not reuse the failure"
+
+
+def test_a_failed_wsl_python_probe_is_retried_not_cached(monkeypatch):
+    _reset_wsl_cache(monkeypatch)
+    monkeypatch.setattr(hermes_backend, "wsl_exe", lambda: "wsl.exe")
+    attempts: list = []
+
+    def _run(*_args, **_kwargs):
+        attempts.append(1)
+        raise OSError("wsl.exe is wedged")
+
+    monkeypatch.setattr(hermes_backend.subprocess, "run", _run)
+
+    assert hermes_backend.wsl_hermes_python() is None
+    assert hermes_backend._WSL_PYTHON_CHECKED is False
+    assert hermes_backend.wsl_hermes_python() is None
+    assert len(attempts) == 2

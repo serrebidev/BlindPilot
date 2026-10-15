@@ -111,15 +111,19 @@ def commandcode_auth_ok(timeout: int = 12) -> bool:
 
     Command Code answers this with ``command-code status``, whose exit code is
     the signal (its documented exit 3 is "not authenticated") and whose output
-    names the account otherwise. A release that stops answering in a shape
-    this reads falls back to the credential file, so a check never reports a
-    signed-in user as signed out.
+    names the account otherwise. A definitive answer from the CLI wins: exit 3
+    means signed out even when a stale ``auth.json`` is still on disk, which is
+    exactly what a logout leaves behind. The credential file is consulted only
+    when the CLI could not be run at all, so a release that stops answering in
+    a shape this reads still never reports a signed-in user as signed out.
     """
     binary = agent_backends.find_backend_cli(BACKEND_COMMANDCODE)
     if binary:
         code, text = _probe(binary, ["status"], timeout)
         if code == 0 and not _says_signed_out(text):
             return True
+        if code is not None:
+            return False
     return commandcode_credentials() is not None
 
 
