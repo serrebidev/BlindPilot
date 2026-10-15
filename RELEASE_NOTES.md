@@ -1,8 +1,6 @@
-# BlindPilot 0.46.0
+# BlindPilot 0.47.3
 
-This release makes a ChatGPT plan account in Chat mode search and research the way ChatGPT itself does.
+This release fixes keyboard navigation in Agent mode's Recent Conversations.
 
-- Web search is always on for ChatGPT plan accounts, and the model decides when to use it. In 0.45.0 it searched only when the conversation profile had OpenRouter's Web search ticked, so a profile set up for other tools left the model saying it could not search the web. The profile's Web search depth still applies.
-- The model can now read the pages it finds, and check your local date and time, through two tools BlindPilot runs on your computer. It can search, read a page, and search again, for up to eight rounds in one answer, which is enough for "look at ten results and find me..." requests.
-- Page reading only opens public web addresses. It refuses your own computer and your local network, so a web page cannot steer it towards them.
-- Every step is spoken as it happens: each search and what it searched for, each page opened or read, and checking the clock. The sources the answer cites are listed at the end.
+- Tab and Shift+Tab now reach the conversation list in Recent Conversations (Ctrl+Shift+H). Before, the arrow keys worked once you were in the list, but tabbing away and back skipped it in both directions, so there was no way to find it again without closing the dialog. Windows only stops Tab on windows marked as tab stops, and the list, which BlindPilot draws itself so long titles wrap, never had that mark. It does now, and the Hermes conversations and slash command pickers, which use the same list, are fixed too. Chat mode's History list and its Recent Conversations already used a standard list and were not affected. Thanks to Kaveinthran for the report.
+- Running BlindPilot from source on Python 3.13 or later no longer breaks the Gemini and Antigravity backends. Python's own thread class started using the name their message handler had, which hid it. The released builds use Python 3.12 and were not affected.

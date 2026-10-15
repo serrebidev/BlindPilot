@@ -81,8 +81,17 @@ def test_agent_command_discovery_reaps_after_forced_kill(monkeypatch):
     process = Process()
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "command-code")
     monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
+    # This patches the process-wide clock. Answering every thread let another
+    # one take the 0, which put the deadline past the frozen 46 and spun the
+    # lookup until pytest's timeout.
     times = iter((0, 46))
-    monkeypatch.setattr(commandcode_backend.time, "monotonic", lambda: next(times, 46))
+    real = time.monotonic
+    me = threading.get_ident()
+    monkeypatch.setattr(
+        commandcode_backend.time,
+        "monotonic",
+        lambda: next(times, 46) if threading.get_ident() == me else real(),
+    )
 
     assert commandcode_backend._fetch_agent_commands("") == []
     assert process.killed is True
