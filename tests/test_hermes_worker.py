@@ -42,8 +42,10 @@ class _ScriptedTransport:
     def __init__(self, frames: list[dict]) -> None:
         self._frames = list(frames)
         self._closed = False
+        self.sent: list[dict] = []
 
-    def send(self, _message: dict) -> bool:
+    def send(self, message: dict) -> bool:
+        self.sent.append(message)
         return not self._closed
 
     def receive(self, _timeout: float) -> dict | None:
@@ -301,5 +303,98 @@ def test_a_session_is_not_created_after_the_turn_has_ended():
     created = worker._ensure_session()
 
     assert created is False
+    assert calls == []
+    assert failures == []
+
+
+# --------------------------------------------------------------------------
+# Work that must not start after a Stop pressed inside an awaited reply
+# --------------------------------------------------------------------------
+
+
+class _CancelOnEmptyRead(_ScriptedTransport):
+    """Cancels the worker on the first read that has no frame left to give.
+
+    The Stop lands while an awaited reply is outstanding, which is when the
+    wait itself -- not the code before it -- decides what gets sent next.
+    """
+
+    def __init__(self, frames: list[dict], worker: HermesWorker | None = None) -> None:
+        super().__init__(frames)
+        self._worker = worker
+        self._fired = False
+
+    def receive(self, timeout: float) -> dict | None:
+        frame = super().receive(timeout)
+        if frame is None and not self._fired:
+            self._fired = True
+            if self._worker is not None:
+                self._worker._cancelled = True
+        return frame
+
+
+def test_a_turn_cancelled_during_the_capability_wait_sends_no_session():
+    """`client.capabilities` is awaited before any session work.
+
+    A Stop pressed inside that wait must end the turn there; falling through
+    would hand the gateway a `session.create` for a conversation nobody is
+    going to talk to.
+    """
+    failures: list[str] = []
+    worker = HermesWorker("hi", None, ".", "default", **_callbacks(on_failed=failures.append))
+    transport = _CancelOnEmptyRead([_event("gateway.ready", {})], worker)
+    worker._transport = transport
+    worker._open_transport = lambda: True
+
+    worker._do_run()
+
+    assert [m.get("method") for m in transport.sent] == ["client.capabilities"]
+    assert failures == []
+
+
+def test_a_turn_cancelled_during_the_model_switch_sends_no_prompt():
+    """The reused connection's `/model` wait is the same hole.
+
+    Without the guard the fall-through pushes config.set and then the user's
+    prompt onto the connection after Stop, and the prompt turns the cancelled
+    message into a live turn nobody reads.
+    """
+    from hermes_worker import HeldConnection
+
+    failures: list[str] = []
+    worker = HermesWorker(
+        "hi", None, ".", "default", model="picked-model", **_callbacks(on_failed=failures.append)
+    )
+    transport = _CancelOnEmptyRead(
+        [{"jsonrpc": "2.0", "id": 999, "result": {}}],  # keeps the held connection "connected"
+        worker,
+    )
+    held = HeldConnection()
+    held.keep(transport, "live-1", "session-model")
+    worker._held = held
+
+    worker._do_run()
+
+    assert [m.get("method") for m in transport.sent] == ["slash.exec"]
+    assert failures == []
+
+
+def test_a_turn_cancelled_during_the_slash_check_sends_no_prompt():
+    """`complete.slash` is awaited to tell a command from an ordinary message.
+
+    A Stop pressed inside that wait must end the turn there; falling through
+    would push the user's prompt onto the connection after Stop, turning the
+    cancelled message into a live turn nobody reads.
+    """
+    failures: list[str] = []
+    worker = HermesWorker("/compact", None, ".", "default", **_callbacks(on_failed=failures.append))
+    transport = _CancelOnEmptyRead([], worker)
+    worker._transport = transport
+    calls: list[str] = []
+    worker._call = lambda *args, **_kwargs: calls.append(args[0])
+
+    worker._run_turn()
+
+    assert [m.get("method") for m in transport.sent] == ["complete.slash"]
     assert calls == []
     assert failures == []

@@ -126,6 +126,9 @@ FAKES: list[tuple[str, str, str, bool]] = [
     # frames run out; a delegate-only stream stays connected after its frames.
     ("test_hermes_worker", "_ScriptedTransport", "kl([])", True),
     ("test_hermes_worker", "_ProgressThenComplete", "kl(0)", False),
+    # Cancels the worker on the first empty read; the stream still ends like a
+    # pipe when the frames run out.
+    ("test_hermes_worker", "_CancelOnEmptyRead", "kl([])", True),
 ]
 
 REAL: list[tuple[str, object, bool]] = [
