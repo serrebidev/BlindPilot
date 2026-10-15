@@ -47,6 +47,10 @@ _STOP_TASK_SECONDS = 2.0
 # stderr lines kept. The tail is the part that says how a process ended.
 _STDERR_KEEP = 4000
 _STDERR_TRIM = 2000
+# Events kept while no turn is attached, capped the same way: a CLI that
+# keeps talking between turns must not grow the list without bound.
+_PENDING_KEEP = 4000
+_PENDING_TRIM = 2000
 
 # Put on a turn's queue when the process ends, so a reader blocked on the
 # queue learns of the death instead of waiting for a result that never comes.
@@ -110,6 +114,7 @@ class ClaudeSession:
         self._state = threading.Lock()
         self._sink: Optional[queue.Queue] = None
         self._pending: list = []
+        self._pending_dropped = 0
         self._idle_sink: Optional[Callable[[], None]] = None
         self._idle_told = False
         self._waiting: dict[str, tuple[threading.Event, dict]] = {}
@@ -216,6 +221,9 @@ class ClaudeSession:
                 # announce an exit code nobody asked about.
                 return
             self._pending.append(event)
+            if len(self._pending) > _PENDING_KEEP:
+                del self._pending[:_PENDING_TRIM]
+                self._pending_dropped += _PENDING_TRIM
             if self._idle_sink is not None and not self._idle_told:
                 self._idle_told = True
                 tell = self._idle_sink
