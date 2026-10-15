@@ -127,12 +127,15 @@ def _probe(binary: str, args: list[str], timeout: int) -> tuple[Optional[int], s
     return agent_backends._probe_backend(binary, args, timeout)
 
 
-def gemini_auth_ok(timeout: int = 12) -> bool:
+def gemini_auth_ok() -> bool:
     """Whether a Gemini CLI turn can sign in without asking anybody.
 
     A Google sign-in is settled when the CLI chose it and cached its
     credentials. A method somebody configured in the CLI by hand -- Vertex AI,
     a key of their own -- is the CLI's business, and counts as signed in.
+
+    No timeout: this reads the CLI's own settings files and nothing else, so
+    there is no wait for a timeout to bound.
     """
     configured = gemini_configured_auth()
     if configured == GEMINI_GOOGLE_SIGN_IN:

@@ -26,7 +26,7 @@ def test_new_conversation_stays_reachable_in_chat_mode(monkeypatch, tmp_path):
     app = wx.GetApp() or wx.App(False)
     saved: dict[str, object] = {"setup_complete": True, "app_mode": "agent"}
     monkeypatch.setattr(blindpilot_app, "_load_config", lambda: dict(saved))
-    monkeypatch.setattr(blindpilot_app, "_save_config", lambda cfg: saved.update(cfg))
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda cfg: saved.update(cfg) or True)
 
     frame = blindpilot_app.MainFrame(initial_cwd=str(tmp_path))
     try:
@@ -56,7 +56,7 @@ def test_new_conversation_command_reaches_the_chat_panel(monkeypatch, tmp_path):
     app = wx.GetApp() or wx.App(False)
     saved: dict[str, object] = {"setup_complete": True, "app_mode": "agent"}
     monkeypatch.setattr(blindpilot_app, "_load_config", lambda: dict(saved))
-    monkeypatch.setattr(blindpilot_app, "_save_config", lambda cfg: saved.update(cfg))
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda cfg: saved.update(cfg) or True)
 
     frame = blindpilot_app.MainFrame(initial_cwd=str(tmp_path))
     try:

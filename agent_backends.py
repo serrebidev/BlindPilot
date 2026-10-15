@@ -79,9 +79,12 @@ def own_group_kwargs() -> dict:
 def end_process_group(proc: object, timeout: float = 0.0) -> None:
     """Stop a child started with :func:`own_group_kwargs`, and its own children.
 
-    Returns as soon as the signals are away unless *timeout* is given: Stop
-    Task and a closing wizard both call this from the window's own thread, and
-    a wait there is a frozen application rather than a stopped task.
+    The kill signals go out immediately; the wait for the child to be gone is
+    bounded by *timeout*, or five seconds when it is not given. Stop Task and a
+    closing wizard both call this from the window's own thread, so an unbounded
+    wait there is a frozen application -- but no wait at all leaves a zombie on
+    POSIX and an unreleased handle on Windows, which is why the default path
+    gained the short bounded wait.
 
     The group is only signalled when the child is demonstrably the leader of
     one, which is exactly what ``start_new_session`` made it. Anything else, a
@@ -95,34 +98,56 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
     and Codex's app-server has a dozen or more MCP children to leave behind.
     """
     poll = getattr(proc, "poll", None)
-    if poll is not None and poll() is not None:
-        return
-    pid = getattr(proc, "pid", None)
-    if isinstance(pid, int) and pid > 0:
-        if platform.system() == "Windows":
-            _end_windows_tree(pid)
-        else:
+    if poll is None or poll() is None:
+        pid = getattr(proc, "pid", None)
+        if isinstance(pid, int) and pid > 0:
+            if platform.system() == "Windows":
+                _end_windows_tree(pid)
+            else:
+                try:
+                    # POSIX only, and the platform test above is a runtime
+                    # condition the checker cannot read, so against a Windows
+                    # target it reports all three of these as missing.
+                    if os.getpgid(pid) == pid:  # type: ignore[attr-defined]
+                        os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
+                except OSError:
+                    pass
+        # Still done after the tree kill, so a taskkill that failed or was not
+        # there still costs the parent its life.
+        kill = getattr(proc, "kill", None)
+        if kill is not None:
             try:
-                # POSIX only, and the platform test above is a runtime
-                # condition the checker cannot read, so against a Windows
-                # target it reports all three of these as missing.
-                if os.getpgid(pid) == pid:  # type: ignore[attr-defined]
-                    os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
+                kill()
             except OSError:
                 pass
-    # Still done after the tree kill, so a taskkill that failed or was not
-    # there still costs the parent its life.
-    kill = getattr(proc, "kill", None)
-    if kill is not None:
-        try:
-            kill()
-        except OSError:
-            pass
+    # Reaped whether the kill just happened or the child had already exited:
+    # a finished child that is never waited on stays a zombie (POSIX) or keeps
+    # its process handle (Windows). An already-exited child answers at once.
     wait = getattr(proc, "wait", None)
-    if timeout and wait is not None:
+    if wait is not None:
         try:
-            wait(timeout=timeout)
+            wait(timeout=timeout or 5)
         except Exception:
+            pass
+
+
+def _close_process_pipes(proc: object) -> None:
+    """Close a child's pipe handles, whatever state the child is in.
+
+    Ending a process does not hand its pipes back: a server stopped after it
+    had already exited still holds one file handle per pipe until something
+    closes them, and an application that stays open all day leaks one server's
+    worth per restart. Best effort, and tolerant of the stand-ins tests use --
+    a pipe without a ``close`` method is left alone rather than raising.
+    """
+    for name in ("stdin", "stdout", "stderr"):
+        pipe = getattr(proc, name, None)
+        close = getattr(pipe, "close", None)
+        if close is None:
+            continue
+        try:
+            close()
+        except (OSError, ValueError, AttributeError):
             pass
 
 
@@ -1082,7 +1107,7 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
     if backend == BACKEND_GEMINI:
         from google_backend import gemini_auth_ok
 
-        return gemini_auth_ok(timeout)
+        return gemini_auth_ok()
     if backend == BACKEND_ANTIGRAVITY:
         from google_backend import antigravity_auth_ok
 
@@ -1225,7 +1250,12 @@ def _probe_backend(binary: str, args: list[str], timeout: int) -> tuple[Optional
         return None, ""
     # These CLIs draw their own output, so what comes back is wrapped in the
     # escape sequences that would otherwise be spelled out letter by letter.
-    return proc.returncode, _strip_terminal_noise(proc.stdout) or _strip_terminal_noise(proc.stderr)
+    stdout = _strip_terminal_noise(proc.stdout)
+    stderr = _strip_terminal_noise(proc.stderr)
+    # A CLI that painted a banner on stdout and failed on stderr used to hand
+    # back only the banner; when both streams have something to say, both are
+    # kept, because the error is the half the caller needs.
+    return proc.returncode, f"{stdout}\n{stderr}" if stdout and stderr else stdout or stderr
 
 
 def _claude_account_lines(code: Optional[int], text: str) -> list[str]:
@@ -2658,7 +2688,11 @@ def _write_freebuff_catalog_cache(stamp: tuple[str, float, int], models: list[st
     path = _freebuff_catalog_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        # Written beside the file and moved into place, the same as the model
+        # choice above: a read that lands mid-write must never see a half-copied
+        # catalog, which parses as nothing and throws the cache away.
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
             json.dumps(
                 {"path": stamp[0], "mtime": stamp[1], "size": stamp[2], "models": models},
                 indent=2,
@@ -2666,6 +2700,7 @@ def _write_freebuff_catalog_cache(stamp: tuple[str, float, int], models: list[st
             + "\n",
             encoding="utf-8",
         )
+        os.replace(temporary, path)
     except OSError:
         pass
 
@@ -3644,8 +3679,14 @@ class CodexServer:
             self.forget_turn(turn_id)
 
     def stop(self) -> None:
-        end_process_group(self.proc, timeout=2)
-        self._close("")
+        try:
+            end_process_group(self.proc, timeout=2)
+        finally:
+            # Both happen even when the process had already exited: waiting
+            # turns must still be woken, and the pipe handles must still be
+            # released.
+            self._close("")
+            _close_process_pipes(self.proc)
 
 
 def _app_version() -> str:
@@ -7499,31 +7540,41 @@ class OpencodeServer:
         env["OPENCODE_SERVER_PASSWORD"] = password
         self._log: "deque[str]" = deque(maxlen=50)
         self._url = ""
-        self._listening = threading.Event()
         self._auth = "Basic " + base64.b64encode(f"opencode:{password}".encode("utf-8")).decode(
             "ascii"
         )
-        # Started from the home directory rather than any one project: one
-        # server serves them all, and the ``directory`` query parameter on each
-        # request is what says which project a call is about.
-        self._proc = subprocess.Popen(
-            [binary, "serve", "--port", str(_free_port()), "--hostname", "127.0.0.1"],
-            cwd=str(Path.home()),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            **own_group_kwargs(),
-            **no_window_kwargs(),
-        )
-        threading.Thread(target=self._pump, daemon=True).start()
-        self._listening.wait(60)
-        if not self._url:
+        # The probe in _free_port closes before this child can bind, so
+        # another process may take the port in between; a second attempt on a
+        # fresh port turns that race into a slower start instead of a failed
+        # turn. The child exits promptly when the port is gone, so a failed
+        # attempt does not wait out the 60 seconds.
+        # shortcut: three attempts, enough for a busy machine; raise with the
+        # wait above if start-up races stay common.
+        for _attempt in range(3):
+            self._listening = threading.Event()
+            # Started from the home directory rather than any one project: one
+            # server serves them all, and the ``directory`` query parameter on each
+            # request is what says which project a call is about.
+            self._proc = subprocess.Popen(
+                [binary, "serve", "--port", str(_free_port()), "--hostname", "127.0.0.1"],
+                cwd=str(Path.home()),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                **own_group_kwargs(),
+                **no_window_kwargs(),
+            )
+            threading.Thread(target=self._pump, daemon=True).start()
+            self._listening.wait(60)
+            if self._url:
+                break
             self.stop()
+        if not self._url:
             detail = "\n".join(list(self._log)[-5:]).strip()
             raise OSError(detail or "opencode's server did not start.")
 
@@ -7588,19 +7639,24 @@ class OpencodeServer:
 
     def stop(self) -> None:
         proc = self._proc
-        if proc.poll() is not None:
-            return
-        if platform.system() != "Windows":
-            # It owns a SQLite database, so it is asked to close before it is
-            # made to. On Windows terminate() is TerminateProcess, which asks
-            # nothing and would leave its children behind, so there the tree
-            # is ended in one go below.
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        end_process_group(proc, timeout=5)
+        try:
+            if proc.poll() is None:
+                if platform.system() != "Windows":
+                    # It owns a SQLite database, so it is asked to close before
+                    # it is made to. On Windows terminate() is TerminateProcess,
+                    # which asks nothing and would leave its children behind, so
+                    # there the tree is ended in one go below.
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                end_process_group(proc, timeout=5)
+        finally:
+            # Released whether the process was stopped just now or had already
+            # exited on its own: a dead server's stdout pipe is still a handle
+            # until something closes it.
+            _close_process_pipes(proc)
 
 
 def opencode_server() -> OpencodeServer:

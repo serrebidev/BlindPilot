@@ -24,6 +24,7 @@ from typing import Callable, Optional, Protocol
 from urllib.parse import urlparse
 from urllib.request import Request
 
+from accessible_ai.storage.paths import app_data_dir
 from certificates import open_url
 
 
@@ -297,6 +298,10 @@ def download_update(
             raise UpdateCancelled("The update download was cancelled.")
         if received != release.asset_size:
             raise UpdateError("The update download was incomplete.")
+        # shortcut: this hash arrives on the same channel as the asset (GitHub),
+        # so it catches a corrupted download, not a compromised release host.
+        # Upgrade to a detached signature (minisign or GPG with a pinned key)
+        # when the release process can sign.
         if digest.hexdigest().casefold() != expected:
             raise UpdateError("The update failed SHA-256 verification.")
         return temporary
@@ -945,7 +950,12 @@ STATUS_FILE_NAME = "BlindPilot-update-status.txt"
 
 
 def _status_path() -> Path:
-    return Path(tempfile.gettempdir()) / STATUS_FILE_NAME
+    """Where a failed update leaves its reason, inside the per-user data dir.
+
+    Not the shared temp folder: its path is predictable, so any process could
+    plant a file there and have it spoken on BlindPilot's next start.
+    """
+    return app_data_dir() / STATUS_FILE_NAME
 
 
 def pending_failure() -> tuple[str, str]:
@@ -983,7 +993,7 @@ def sweep_temporary_files(minimum_age_seconds: float = 6 * 60 * 60) -> int:
     except OSError:
         return 0
     for path in candidates:
-        if path.name == STATUS_FILE_NAME or path.suffix.casefold() == ".log":
+        if path.suffix.casefold() == ".log":
             continue
         try:
             if not path.is_file() or now - path.stat().st_mtime < minimum_age_seconds:

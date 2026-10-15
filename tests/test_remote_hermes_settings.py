@@ -8,49 +8,13 @@ is left to manual testing with a screen reader.
 from __future__ import annotations
 
 import json
-import sys
-import types
 from pathlib import Path
 
 import pytest
 
+import stub_wx
 
-def _install_wx_stub() -> None:
-    """Minimal stand-in for wx, so the module under test can be imported.
-
-    The stub has to hand back real classes, not instances: the module defines
-    dialogs and frames that subclass wx types, and a subclass needs a type.
-    """
-    if "wx" in sys.modules:
-        return
-
-    class _Stub:
-        """A class that can be subclassed, instantiated, and called freely."""
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __getattr__(self, name):
-            return _Stub()
-
-        def __call__(self, *args, **kwargs):
-            return _Stub()
-
-    class _Module(types.ModuleType):
-        def __getattr__(self, name):
-            # Anything asked of wx is a subclassable class, which also stands
-            # in for its constants and functions.
-            value = type(name, (_Stub,), {})
-            setattr(self, name, value)
-            return value
-
-    wx = _Module("wx")
-    sys.modules["wx"] = wx
-    for name in ("wx.adv", "wx.lib", "wx.lib.newevent", "wx.html", "wx.richtext", "wx.stc"):
-        sys.modules[name] = _Module(name)
-
-
-_install_wx_stub()
+stub_wx.install()
 
 import blindpilot_app  # noqa: E402
 

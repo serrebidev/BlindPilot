@@ -66,7 +66,7 @@ def test_sound_menu_updates_the_saved_setting_and_live_earcons(monkeypatch):
         },
     )()
     monkeypatch.setattr(app.SETTINGS, "sounds_enabled", True)
-    monkeypatch.setattr(app.SETTINGS, "save", lambda: saved.append(True))
+    monkeypatch.setattr(app.SETTINGS, "save", lambda: saved.append(True) or True)
 
     app.MainFrame._toggle_sounds(frame)
 

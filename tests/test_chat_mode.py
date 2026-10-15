@@ -28,7 +28,7 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
     app = wx.GetApp() or wx.App(False)
     saved: dict[str, object] = {"setup_complete": True, "app_mode": "agent"}
     monkeypatch.setattr(blindpilot_app, "_load_config", lambda: dict(saved))
-    monkeypatch.setattr(blindpilot_app, "_save_config", lambda value: saved.update(value))
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda value: saved.update(value) or True)
     monkeypatch.setattr(chat_integration, "database_path", lambda: tmp_path / "chat.sqlite3")
     monkeypatch.setattr(
         chat_integration,
@@ -118,7 +118,7 @@ def test_mode_combo_opens_embedded_chat_without_replacing_agent_sessions(monkeyp
 
 def _frame(monkeypatch, tmp_path, saved):
     monkeypatch.setattr(blindpilot_app, "_load_config", lambda: dict(saved))
-    monkeypatch.setattr(blindpilot_app, "_save_config", lambda value: saved.update(value))
+    monkeypatch.setattr(blindpilot_app, "_save_config", lambda value: saved.update(value) or True)
     monkeypatch.setattr(chat_integration, "database_path", lambda: tmp_path / "chat.sqlite3")
     monkeypatch.setattr(chat_integration, "import_existing_accessible_ai_data", lambda _t: None)
     return blindpilot_app.MainFrame(str(tmp_path))

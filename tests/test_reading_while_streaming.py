@@ -191,6 +191,44 @@ def test_rows_disappearing_is_still_a_rebuild(monkeypatch):
     assert control.labels == ["gamma"]
 
 
+# ----- what the search term is matched against -----
+def test_a_row_whose_payload_was_rewritten_still_answers_the_search(monkeypatch):
+    """A finished answer's header is rewritten with the full text once the
+    turn ends, so the lowered copy the search keeps has to go with it."""
+    header = Row(kind="header", label="Response 1", payload="the first draft", response_number=1)
+    control = _ListBox()
+    panel = _panel(monkeypatch, text_view=False, displayed=[], rows=[header], control=control)
+    panel._search_term = "final"
+    app.SessionPanel._refresh_list(panel)  # warms the cache on the old text
+
+    header.payload = "the final answer"
+    app.SessionPanel._refresh_list(panel)
+
+    assert control.labels == ["Response 1"]
+
+
+def test_the_lowered_search_text_is_computed_once_per_row(monkeypatch):
+    """A turn that streams calls this refresh for every batch, and lowering
+    the same text again each time was the cost the cache removes."""
+    lowered: list[str] = []
+
+    class _Counted(str):
+        def lower(self):
+            lowered.append(str(self))
+            return str.lower(self)
+
+    row = Row(kind="prose", label="alpha", payload=_Counted("alpha payload"), response_number=1)
+    control = _ListBox()
+    panel = _panel(monkeypatch, text_view=False, displayed=[], rows=[row], control=control)
+    panel._search_term = "alpha"
+
+    app.SessionPanel._refresh_list(panel)
+    app.SessionPanel._refresh_list(panel)
+    app.SessionPanel._refresh_list(panel)
+
+    assert lowered == ["alpha payload"], "the same text was lowered again on a later refresh"
+
+
 # ----- the text view -----
 def test_the_caret_does_not_leave_the_line_being_read(monkeypatch):
     """Same bug, said in the other control's terms: a caret move is what the

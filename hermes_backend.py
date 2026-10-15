@@ -264,7 +264,6 @@ def wsl_hermes_python(timeout: int = 25) -> Optional[str]:
     global _WSL_PYTHON, _WSL_PYTHON_CHECKED
     if _WSL_PYTHON_CHECKED:
         return _WSL_PYTHON
-    _WSL_PYTHON_CHECKED = True
     launcher = wsl_exe()
     if not launcher:
         return None
@@ -286,7 +285,10 @@ def wsl_hermes_python(timeout: int = 25) -> Optional[str]:
             **_no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
+        # The probe never ran, so nothing is known: the flag stays clear and
+        # the next call tries again rather than caching the failure forever.
         return None
+    _WSL_PYTHON_CHECKED = True
     if proc.returncode != 0:
         return None
     found = (proc.stdout or "").strip()
@@ -303,7 +305,6 @@ def wsl_state_db() -> Optional[str]:
     global _WSL_STATE_DB, _WSL_STATE_DB_CHECKED
     if _WSL_STATE_DB_CHECKED:
         return _WSL_STATE_DB
-    _WSL_STATE_DB_CHECKED = True
     launcher = wsl_exe()
     if not launcher:
         return None
@@ -323,7 +324,11 @@ def wsl_state_db() -> Optional[str]:
             **_no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
+        # The probe never ran -- a cold distribution, a timeout -- so nothing
+        # is known. The flag stays clear and the next call probes again instead
+        # of caching the failure for the rest of the run.
         return None
+    _WSL_STATE_DB_CHECKED = True
     if proc.returncode != 0:
         return None
     found = (proc.stdout or "").strip()
@@ -498,6 +503,17 @@ REMOTE_CREDENTIALS = ("token", "password")
 # never sent this way -- it buys a ticket first.
 WS_QUERY_CREDENTIALS = ("token", "ticket")
 
+# Opt-in for a password login over a plain-HTTP address. Without it a remote
+# given as ws:// refuses the login rather than handing the password to the
+# network in clear text; the environment variable is the escape hatch for a
+# trusted private link the user has decided is acceptable.
+INSECURE_LOGIN_ENV = "BLINDPILOT_HERMES_ALLOW_INSECURE_LOGIN"
+
+
+def _insecure_login_allowed() -> bool:
+    """Whether the user has explicitly accepted a clear-text password login."""
+    return os.environ.get(INSECURE_LOGIN_ENV, "").strip() == "1"
+
 
 def _http_base(url: str) -> str:
     """The plain-HTTP origin behind a gateway URL, for the routes beside it.
@@ -571,6 +587,18 @@ def mint_ws_ticket(url: str, username: str, password: str) -> tuple[str, str]:
     import urllib.request
 
     base = _http_base(url)
+
+    # The login and ticket routes are plain HTTP beside the WebSocket, so a
+    # remote given as ws:// would carry the password in clear text. Refusing is
+    # the default; the environment variable above is the deliberate opt-in.
+    if base.startswith("http://") and not _insecure_login_allowed():
+        raise OSError(
+            f"Hermes at {base} does not use TLS, so a password sent there would "
+            "cross the network in clear text and will not be sent. Configure "
+            "the remote with a wss:// address (turn on TLS, or put an https "
+            f"reverse proxy in front of it). If this connection is trusted and "
+            f"you accept the risk, set {INSECURE_LOGIN_ENV}=1."
+        )
 
     # One jar spans the whole exchange and is handed back to the caller. The
     # login sets Hermes' own session cookie on it, and whatever sits between
