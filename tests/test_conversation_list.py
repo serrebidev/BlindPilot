@@ -354,3 +354,18 @@ def test_the_native_list_holds_rows_grows_and_keeps_its_selection(frame):
     assert lst.GetSelection() == 1
     lst.SetSelection(wx.NOT_FOUND)
     assert lst.GetSelection() == wx.NOT_FOUND
+
+
+@pytest.mark.skipif(not cl.ACCESSIBLE_AVAILABLE, reason="WS_TABSTOP is a Windows style")
+def test_windows_tab_traversal_stops_on_the_drawn_list(frame):
+    """Recent Conversations: arrows worked in the list, Tab never reached it.
+
+    Windows moves focus on Tab through windows marked WS_TABSTOP. wxMSW marks
+    only native controls, so the drawn list was walked past in both
+    directions until it was given the style itself.
+    """
+    import ctypes
+
+    ctrl = cl.ConversationList(frame, name="Conversations")
+    style = ctypes.windll.user32.GetWindowLongW(ctrl.GetHandle(), -16)
+    assert style & 0x00010000
