@@ -13,7 +13,7 @@ from pathlib import Path
 
 import wx
 
-from accessible_ai.models import Account, Message, Profile
+from accessible_ai.models import Account, Message, OpenRouterFeatures, Profile
 from accessible_ai.services.generation_service import GenerationService
 from accessible_ai.services.model_service import ModelService
 from accessible_ai.storage.credentials import CredentialStore
@@ -125,6 +125,63 @@ def test_a_database_written_before_defaults_existed_still_opens(tmp_path):
     assert accounts[0].is_default is False
     db.set_default_account(accounts[0].id)
     assert db.default_account().name == "Old"
+
+
+def test_one_damaged_headers_row_does_not_break_the_whole_accounts_list(tmp_path):
+    """A hand-edited JSON column costs that account its headers, not the list."""
+    import sqlite3
+    from contextlib import closing
+
+    path = tmp_path / "chat.sqlite3"
+    db = Database(path)
+    db.save_account(
+        Account(
+            name="Damaged",
+            provider="openrouter",
+            base_url="https://example",
+            custom_headers={"X-Thing": "1"},
+        )
+    )
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("UPDATE accounts SET custom_headers_json = 'not json'")
+        conn.commit()
+
+    accounts = db.list_accounts()
+
+    assert [account.name for account in accounts] == ["Damaged"]
+    assert accounts[0].custom_headers == {}
+
+
+def test_duplicating_a_profile_keeps_its_openrouter_features(tmp_path):
+    """The copy used to keep the prompt and lose every server tool."""
+    app = _app()
+    db = _seeded(tmp_path)
+    source = _profile(db, "Writing")
+    source.openrouter = OpenRouterFeatures(
+        server_tools=["openrouter:web_search", "openrouter:datetime"],
+        reasoning_effort="high",
+        show_reasoning=False,
+    )
+    db.save_profile(source)
+    dialog = ProfilesDialog(None, db)
+    try:
+        # Answering sorts first, so Writing is the second row.
+        dialog.listbox.SetSelection(1)
+        captured: dict[str, Profile] = {}
+        dialog._edit_dialog = lambda profile: captured.setdefault("profile", profile)
+        dialog.on_duplicate(wx.CommandEvent())
+
+        duplicate = captured["profile"]
+        assert duplicate.openrouter.as_dict() == source.openrouter.as_dict()
+        # A copy, not a shared object: editing one must not move the other.
+        duplicate.openrouter.server_tools.append("openrouter:shell")
+        assert source.openrouter.server_tools == [
+            "openrouter:web_search",
+            "openrouter:datetime",
+        ]
+    finally:
+        dialog.Destroy()
+        app.ProcessPendingEvents()
 
 
 # ----- The checkbox under each list -----
