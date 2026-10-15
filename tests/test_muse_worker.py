@@ -628,6 +628,9 @@ def test_an_internal_decide_failure_is_resent_once_with_the_same_command(monkeyp
 
 def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
     # Measured on 1.3.0: a reasoning item streams on field "summary.0".
+    # The deltas are held, and the whole reasoning is ONE thinking row when
+    # the item completes: a row per delta was torn speech, and the
+    # completing item then spoke the whole reasoning again.
     frames = [
         _init_reply(101),
         {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
@@ -635,7 +638,19 @@ def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
         {
             "jsonrpc": "2.0",
             "method": "item/delta",
-            "params": {"itemId": "r1", "field": "summary.0", "delta": "Checking the maths."},
+            "params": {"itemId": "r1", "field": "summary.0", "delta": "Checking "},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/delta",
+            "params": {"itemId": "r1", "field": "summary.1", "delta": "the maths."},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "item/completed",
+            "params": {
+                "item": {"itemId": "r1", "kind": "reasoning", "text": "Checking the maths."}
+            },
         },
         {
             "jsonrpc": "2.0",
@@ -650,8 +665,46 @@ def test_the_reasoning_summary_is_thinking_not_the_answer(monkeypatch):
 
     _run(worker)
 
+    # One row, the full text: none per delta, and the completion did not
+    # speak it a second time.
     assert recorder.said("thinking") == ["Checking the maths."]
     assert recorder.completed == ["No."]
+
+
+def test_a_completion_callback_that_raises_is_not_announced_as_a_failed_turn(monkeypatch):
+    """_turn_completed settles the turn before on_complete, so a listener
+    that raises on the finished answer is not the turn's failure."""
+    frames = [
+        _init_reply(101),
+        {"jsonrpc": "2.0", "id": 102, "result": {"session": {"sessionId": "sess-1"}}},
+        {"jsonrpc": "2.0", "id": 103, "result": {"turnId": "turn-1"}},
+        {"jsonrpc": "2.0", "method": "turn/completed", "params": {"terminal": "completed"}},
+    ]
+    _with_script(monkeypatch, frames)
+    completed: list[str] = []
+    failures: list[str] = []
+
+    def boom(text: str) -> None:
+        completed.append(text)
+        raise RuntimeError("the listener fell over")
+
+    worker = MuseWorker(
+        "go",
+        None,
+        ".",
+        "bypassPermissions",
+        on_session=lambda _sid: None,
+        on_started=lambda: None,
+        on_activity=lambda _kind, _text: None,
+        on_complete=boom,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+
+    _run(worker)
+
+    assert completed == ["Finished with nothing to say."]
+    assert failures == []
 
 
 def test_a_completed_message_is_not_spoken_twice_and_earlier_ones_are_kept(monkeypatch):

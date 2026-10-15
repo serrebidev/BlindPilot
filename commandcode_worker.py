@@ -476,7 +476,10 @@ class CommandcodeWorker(threading.Thread):
             else:
                 self._do_run()
         except Exception as exc:  # noqa: BLE001 - the crash IS the report
-            if not self._failed and not self._clean_end:
+            # _completed is set before on_complete, so a listener that
+            # raises on the finished answer must not re-announce the turn
+            # as failed after it succeeded.
+            if not self._failed and not self._clean_end and not self._completed:
                 self._fail(f"Command Code turn failed: {exc}")
         finally:
             self._close_process()
