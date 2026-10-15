@@ -887,6 +887,28 @@ def test_reopening_a_finished_conversation_leaves_no_open_response(monkeypatch):
     assert panel.status[-1] == "Reopened, 1 rows"
 
 
+def test_a_turn_that_ends_saying_nothing_leaves_no_empty_response_row(monkeypatch):
+    """An exit-0 backend that produced no text used to add a bare "Response N"
+    header with an empty payload -- a row with nothing to read."""
+    import blindpilot_app as app
+
+    panel = _stub_panel(app)
+    panel._turns = [app.Turn(prompt="Say banana")]
+    panel._stream_response = None
+    panel._response_count = 1
+    panel._rows = [
+        app.Row(kind="you", label="You: Say banana", payload="Say banana", response_number=1)
+    ]
+    panel._narrate_completed_response = lambda _text: None
+
+    app.SessionPanel._on_response_complete(panel, "")
+
+    assert [row.kind for row in panel._rows] == ["you"]
+    assert panel._response_count == 1, "the empty turn must not spend a response number"
+    assert panel._stream_response is None
+    assert panel._turns[0].response == ""
+
+
 def test_a_failed_turns_prompt_is_not_grouped_into_the_next_response(monkeypatch):
     """The failed prompt kept the number the next turn then took, so copy whole
     response returned both prompts."""
