@@ -196,6 +196,60 @@ def test_best_free_model_never_guesses_when_price_or_plan_is_unconfirmed():
     assert router.best_free_model(catalog={}) is None
 
 
+def test_production_routes_only_models_in_current_cli_list(monkeypatch):
+    import commandcode_backend
+
+    catalog = router.parse_prices(CATALOG)
+    monkeypatch.setattr(router, "price_catalog", lambda: catalog)
+    listings = iter(
+        [
+            (["unpriced/new-model"], [], "", "", ""),
+            (["DEEPSEEK/DEEPSEEK-V4-FLASH", "deepseek/deepseek-v4-flash"], [], "", "", ""),
+        ]
+    )
+    monkeypatch.setattr(commandcode_backend, "commandcode_model_options", lambda: next(listings))
+
+    assert router.route("Fix a small typo").model == ""
+    assert router.route("Fix a small typo").model == "deepseek/deepseek-v4-flash"
+
+
+def test_failed_or_malformed_live_list_never_uses_stale_paid_or_free_route(monkeypatch):
+    import commandcode_backend
+
+    monkeypatch.setattr(router, "price_catalog", lambda: router.parse_prices(CATALOG))
+    for models, error in (([], "list failed"), (None, ""), (["garbage"], "")):
+        monkeypatch.setattr(
+            commandcode_backend,
+            "commandcode_model_options",
+            lambda models=models, error=error: (models, [], "", "", error),
+        )
+        assert router.route("Refactor the authentication flow").model == ""
+        assert router.route("Refactor the authentication flow", static=True).model == ""
+        assert router.best_free_model() is None
+
+
+def test_retry_routes_recheck_live_list(monkeypatch):
+    import commandcode_backend
+
+    monkeypatch.setattr(router, "price_catalog", lambda: router.parse_prices(CATALOG))
+    monkeypatch.setattr(
+        commandcode_backend,
+        "commandcode_model_options",
+        lambda: (["deepseek/deepseek-v4-pro"], [], "", "", ""),
+    )
+    assert router.route(
+        "Refactor the authentication flow", exclude_models={"other/model"}
+    ).model == ("deepseek/deepseek-v4-pro")
+    assert router.best_free_model() is None
+    monkeypatch.setattr(
+        commandcode_backend,
+        "commandcode_model_options",
+        lambda: (["poolside/laguna-s-2.1-free"], [], "", "", ""),
+    )
+    assert router.route("Refactor the authentication flow", include_free=False).model == ""
+    assert router.best_free_model().model == "poolside/laguna-s-2.1-free"
+
+
 def test_catalog_prefers_the_worker_cli_over_path(monkeypatch, tmp_path):
     worker_cli = tmp_path / "managed" / "command-code.cmd"
     worker_cli.parent.mkdir()
@@ -750,7 +804,6 @@ def test_usage_state_reads_are_cached_but_a_write_takes_effect(monkeypatch, tmp_
 # --------------------------------------------------------------------------
 # A lock that never releases
 # --------------------------------------------------------------------------
-
 
 
 def test_installed_catalog_covers_every_tier_candidate():

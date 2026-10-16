@@ -4,6 +4,8 @@ Release history for BlindPilot, newest first. Entries are short by design. The r
 
 ## Unreleased
 
+- What Agents Know now lists and edits global Codex, Command Code, and OpenCode agents, with separate project-agent lists. Adding a Command Code agent rejects the built-in names `explore`, `plan`, `review`, and `general`, which the CLI ignores. The macOS updater preserves its existing backup if a process ID is reused.
+- Command Code Auto checks the CLI's current model list in the background before each turn and retry, selecting only priced eligible models still listed there. If the check fails, it uses the CLI default instead of a stale bundled route. The check no longer holds up the BlindPilot window, and Stop cancels an in-progress check before the prompt launches.
 - Command Code Auto skips Ling 3.1 Flash's retired free tier even when the installed CLI's bundled catalog still lists it as free; Laguna S 2.1 remains available for quick tasks and safe credit-limit retries.
 - Command Code Auto uses a catalog-confirmed free model for any task during a recorded rate or credit cooldown, and announces that choice. It also says when routing is unavailable, no free route is confirmed, or a limit cannot be retried safely.
 

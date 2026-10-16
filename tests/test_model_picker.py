@@ -455,29 +455,22 @@ def test_commandcode_default_keeps_the_cli_model_without_routing(monkeypatch):
     assert stub.spoken == []
 
 
-def test_commandcode_auto_announces_only_a_changed_route(monkeypatch):
-    chosen = types.SimpleNamespace(
-        model="model-a", effort="low", describe=lambda: "Auto model model-a, quick task."
-    )
+def test_commandcode_auto_model_lookup_does_not_block_the_ui(monkeypatch):
     stub = types.SimpleNamespace(
         model=blindpilot_app.AUTO_MODEL, effort="xhigh", spoken=[], _auto_route=""
     )
     stub._announce = lambda text: stub.spoken.append(text)
     monkeypatch.setitem(
-        sys.modules, "commandcode_router", types.SimpleNamespace(route=lambda _text, **_k: chosen)
+        sys.modules,
+        "commandcode_router",
+        types.SimpleNamespace(route=lambda _text, **_k: pytest.fail("UI called the live probe")),
     )
 
     assert blindpilot_app.SessionPanel._turn_model(stub, "Fix a typo", BACKEND_COMMANDCODE) == (
-        "model-a",
+        "",
         "xhigh",
     )
-    assert blindpilot_app.SessionPanel._turn_model(
-        stub, "Fix another typo", BACKEND_COMMANDCODE
-    ) == (
-        "model-a",
-        "xhigh",
-    )
-    assert stub.spoken == ["Auto model model-a, quick task."]
+    assert stub.spoken == []
 
 
 def test_commandcode_auto_never_passes_its_marker_to_the_cli(monkeypatch):
@@ -497,47 +490,27 @@ def test_commandcode_auto_never_passes_its_marker_to_the_cli(monkeypatch):
     assert stub.spoken == []
 
 
-def test_commandcode_auto_explains_missing_free_route_during_cooldown(monkeypatch):
+def test_commandcode_auto_announces_only_a_changed_worker_route(monkeypatch):
     stub = types.SimpleNamespace(
         model=blindpilot_app.AUTO_MODEL, effort="", spoken=[], _auto_route=""
     )
     stub._announce = stub.spoken.append
-    monkeypatch.setitem(
-        sys.modules,
-        "commandcode_router",
-        types.SimpleNamespace(
-            route=lambda _text, **_k: types.SimpleNamespace(model="", cooldown=True)
-        ),
-    )
-
+    note = "Auto model model-a, quick task."
     for _ in range(2):
-        assert blindpilot_app.SessionPanel._turn_model(
-            stub, "Continue work", BACKEND_COMMANDCODE
-        ) == (
-            "",
-            "",
-        )
-    assert stub.spoken == [
-        "Auto could not confirm a free model during cooldown; using the Command Code default."
-    ]
+        blindpilot_app.SessionPanel._set_auto_route(stub, note)
+    assert stub.spoken == [note]
 
 
-def test_commandcode_auto_explains_router_error_without_blocking_turn(monkeypatch):
-    stub = types.SimpleNamespace(
-        model=blindpilot_app.AUTO_MODEL, effort="", spoken=[], _auto_route=""
-    )
+def test_commandcode_auto_check_status_is_spoken_once():
+    stub = types.SimpleNamespace(_auto_check_announced=False, spoken=[], statuses=[])
     stub._announce = stub.spoken.append
+    stub._set_status = stub.statuses.append
 
-    def fail_route(_text, **_kwargs):
-        raise ValueError("bad catalog")
+    blindpilot_app.SessionPanel._auto_check_status(stub)
+    blindpilot_app.SessionPanel._auto_check_status(stub)
 
-    monkeypatch.setitem(sys.modules, "commandcode_router", types.SimpleNamespace(route=fail_route))
-
-    for _ in range(2):
-        assert blindpilot_app.SessionPanel._turn_model(
-            stub, "Continue work", BACKEND_COMMANDCODE
-        ) == ("", "")
-    assert stub.spoken == ["Auto routing unavailable; using the Command Code default."]
+    assert stub.spoken == ["Checking current Command Code models."]
+    assert stub.statuses == ["Checking current Command Code models."]
 
 
 def test_auto_command_is_opt_in_and_other_backends_keep_literal_auto():
