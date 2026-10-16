@@ -1,7 +1,7 @@
 -r requirements.txt
 pyinstaller>=6.22.3
 pytest>=9.1.1
-ruff>=0.16.10
+ruff>=0.17.0
 mypy>=2.4.0
 # A hung test fails in a minute instead of running out GitHub's six-hour
 # default, and the order is shuffled so one test cannot quietly depend on
@@ -10,4 +10,4 @@ pytest-timeout>=2.4
 pytest-randomly>=5
 # Earns its place: it found the casefold length bug in _keyed in seconds,
 # on ordinary German text no example test had thought to use.
-hypothesis>=6.168.3
+hypothesis>=6.169.0

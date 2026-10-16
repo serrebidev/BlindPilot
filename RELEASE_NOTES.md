@@ -1,5 +1,5 @@
-# BlindPilot 0.47.5
+# BlindPilot 0.47.7
 
-This release improves Command Code Auto's free fallback routing.
+This release hardens the build pipeline; the app itself is unchanged.
 
-- When a Command Code model refuses a turn or cools down, Auto's free fallback now only picks free models the router already considers fit for work, instead of any free model in the catalog, and it never picks a model whose provider trains on your data. The account plan can also be set through the COMMANDCODE_PLAN environment variable when it can't be read from the CLI. A new catalog coverage check flags models in the router's shortlists that the installed CLI no longer offers, so a renamed or retired model gets spotted instead of silently weakening a tier. Thanks to Farhan Khan for the fix.
+- The CI and release workflows now pin every GitHub Action to a full commit SHA instead of a mutable tag, so a moved or compromised tag cannot change what runs, and Dependabot is configured to keep the pins current. Thanks to Farhan Khan for the hardening.
