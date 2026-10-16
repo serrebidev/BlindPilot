@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 remains supported; 3.12 CI checks TOML parsing.
+    tomllib = None
+
 import blindpilot_app as app
 
 
@@ -187,6 +192,138 @@ def test_hermes_memory_entries_are_split_on_the_section_sign(tmp_path):
     assert memory.read_text(encoding="utf-8") == "first\nline two\n§\nthird"
 
 
+def test_an_opencode_agents_backup_folder_is_not_listed_as_live(tmp_path, monkeypatch):
+    """The opencode glob was `agent*`, which matched agents.bak-* and showed
+    stale agents as though they were installed."""
+    monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
+    _write(tmp_path / ".config" / "opencode" / "agents" / "scout.md")
+    _write(tmp_path / ".config" / "opencode" / "agents.bak-20260101" / "old.md")
+
+    opencode = app.BACKEND_LABELS[app.BACKEND_OPENCODE]
+    labels = [
+        label
+        for group in app.agent_files(None)
+        if group.backend == opencode and group.kind == "Agents"
+        for _key, label in group.files
+    ]
+
+    assert labels == ["scout.md"]
+
+
+def test_project_agents_are_separate_from_editable_global_agents(tmp_path, monkeypatch):
+    """A project's committed agent must not inherit the global list's Delete action."""
+    monkeypatch.setattr(app.Path, "home", lambda: tmp_path / "home")
+    project = tmp_path / "work" / "app"
+    _write(project / ".commandcode" / "agents" / "reviewer.md")
+    _write(project / ".opencode" / "agent" / "tester.md")
+    _write(tmp_path / "home" / ".commandcode" / "agents" / "global.md")
+
+    groups = {(g.backend, g.kind): g for g in app.agent_files(str(project))}
+    cc = app.BACKEND_LABELS[app.BACKEND_COMMANDCODE]
+    opencode = app.BACKEND_LABELS[app.BACKEND_OPENCODE]
+    assert groups[(cc, "Agents")].files == [
+        (str(tmp_path / "home" / ".commandcode" / "agents" / "global.md"), "global.md")
+    ]
+    assert groups[(cc, "Agents")].editable == "agent"
+    for backend, filename in [(cc, "reviewer.md"), (opencode, "tester.md")]:
+        group = groups[(backend, "Project Agents")]
+        assert group.editable == "" and group.home is None
+        assert len(group.files) == 1
+        assert group.files[0][1].startswith(filename)
+        assert str(project) in group.files[0][1]
+        assert all(filename not in label for _, label in groups[(backend, "Agents")].files)
+
+
+@pytest.mark.parametrize(
+    "backend", [app.BACKEND_CODEX, app.BACKEND_COMMANDCODE, app.BACKEND_OPENCODE]
+)
+def test_add_agent_writes_backend_file_with_user_text(tmp_path, backend):
+    path = app.add_agent(
+        tmp_path, backend, "my_agent", 'Review "quoted" changes', "Check the diff.\nReport risks."
+    )
+
+    assert path == tmp_path / "agents" / (
+        "my_agent.toml" if backend == app.BACKEND_CODEX else "my_agent.md"
+    )
+    if backend == app.BACKEND_CODEX:
+        content = path.read_text(encoding="utf-8")
+        if tomllib:
+            assert tomllib.loads(content) == {
+                "name": "my_agent",
+                "description": 'Review "quoted" changes',
+                "developer_instructions": "Check the diff.\nReport risks.",
+            }
+        else:
+            assert 'name = "my_agent"' in content
+            assert 'developer_instructions = "Check the diff.\\nReport risks."' in content
+    else:
+        assert app._front_matter(path)["description"] == 'Review "quoted" changes'
+        assert path.read_text(encoding="utf-8").endswith("\n\nCheck the diff.\nReport risks.\n")
+        if backend == app.BACKEND_COMMANDCODE:
+            assert app._front_matter(path)["name"] == "my_agent"
+            assert "tools:" not in path.read_text(encoding="utf-8")
+        else:
+            assert app._front_matter(path)["mode"] == "subagent"
+
+
+@pytest.mark.parametrize("name", ["", "../escape", "a/b", "bad name", "CON"])
+def test_add_agent_rejects_invalid_names(tmp_path, name):
+    with pytest.raises(ValueError):
+        app.add_agent(tmp_path, app.BACKEND_CODEX, name, "Description", "Instructions")
+    assert not (tmp_path / "agents").exists()
+
+
+@pytest.mark.parametrize("name", ["explore", "plan", "review", "general", "PLAN"])
+def test_add_commandcode_agent_rejects_reserved_names(tmp_path, name):
+    with pytest.raises(ValueError, match="reserved Command Code agent name"):
+        app.add_agent(tmp_path, app.BACKEND_COMMANDCODE, name, "Description", "Instructions")
+    assert not (tmp_path / "agents").exists()
+
+
+def test_add_agent_rejects_empty_fields_and_preserves_duplicate(tmp_path):
+    for description, instructions in [("", "Instructions"), ("Description", "  ")]:
+        with pytest.raises(ValueError):
+            app.add_agent(tmp_path, app.BACKEND_OPENCODE, "helper", description, instructions)
+    original = app.add_agent(tmp_path, app.BACKEND_OPENCODE, "helper", "First", "Original")
+    with pytest.raises(FileExistsError):
+        app.add_agent(tmp_path, app.BACKEND_OPENCODE, "helper", "Second", "Replacement")
+    assert "Original" in original.read_text(encoding="utf-8")
+    assert "Replacement" not in original.read_text(encoding="utf-8")
+
+
+def test_empty_agent_groups_can_be_opened_to_add(tmp_path, monkeypatch):
+    monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    groups = [group for group in app.agent_files(None) if group.kind == "Agents"]
+    assert {group.backend for group in groups} == {
+        app.BACKEND_LABELS[backend]
+        for backend in (app.BACKEND_CODEX, app.BACKEND_COMMANDCODE, app.BACKEND_OPENCODE)
+    }
+    assert all(group.editable == "agent" and group.files == [] for group in groups)
+
+
+def test_agent_can_be_discovered_edited_and_deleted(tmp_path, monkeypatch):
+    monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    path = app.add_agent(
+        tmp_path / ".codex", app.BACKEND_CODEX, "reviewer", "Review changes", "Read diff"
+    )
+    group = next(
+        group
+        for group in app.agent_files(None)
+        if group.backend == app.BACKEND_LABELS[app.BACKEND_CODEX] and group.kind == "Agents"
+    )
+    assert group.files == [(str(path), "reviewer.toml")]
+    key = group.files[0][0]
+    assert "Read diff" in app.entry_text(key, "agent")[1]
+    app.save_entry(
+        key, "agent", 'name = "reviewer"\ndescription = "New"\ndeveloper_instructions = "Updated"\n'
+    )
+    assert 'developer_instructions = "Updated"' in path.read_text(encoding="utf-8")
+    app.delete_entry(key, "agent")
+    assert not path.exists()
+
+
 def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path, monkeypatch):
     monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
@@ -198,19 +335,21 @@ def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path
 
     names = [f"{g.backend} {g.kind}" for g in app.agent_files(None)]
 
-    claude, cc, hermes, gemini = (
-        app.BACKEND_LABELS[b] for b in ("claude", "commandcode", "hermes", "gemini")
+    claude, cc, codex, hermes, gemini, opencode = (
+        app.BACKEND_LABELS[b]
+        for b in ("claude", "commandcode", "codex", "hermes", "gemini", "opencode")
     )
-    # Claude Code memories, Command Code tastes and Hermes memories are offered
-    # empty, so the first can be added; nothing else is listed when empty.
-    # In the backends' own order, which is alphabetical by label: Command Code
-    # before Gemini CLI before Hermes.
+    # Editable kinds remain reachable when empty; other empty kinds stay hidden.
+    # The backend order follows BACKEND_LABELS.
     assert names == [
         f"{claude} Memories",
+        f"{codex} Agents",
         f"{cc} Tastes",
         f"{cc} Instructions",
+        f"{cc} Agents",
         f"{gemini} Instructions",
         f"{hermes} Memories",
+        f"{opencode} Agents",
     ]
 
 

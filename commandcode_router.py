@@ -8,11 +8,10 @@ choice is two layers, both in this file:
 
 1. A capability tier -- a text heuristic on the task string (quick, standard,
    deep).
-2. A model within the tier -- the cheapest eligible Command Code model, priced
-   from the CLI's own bundled catalog (``models.md``, the same source the
-   pricing page is generated from). Cost is blended over a typical request
-   (see ``_COST_PROFILE``), so cache-read price dominates, as it does in a real
-   long session.
+2. A model within the tier -- the cheapest eligible model listed by the CLI
+   now, priced from its bundled catalog (``models.md``). Cost is blended over
+   a typical request (see ``_COST_PROFILE``), so cache-read price dominates,
+   as it does in a real long session.
 
 A rate or credit stop (the CLI's exit codes 5 and 10) is recorded to a
 small state file, and while the stop is in effect paid models are
@@ -31,8 +30,8 @@ This is the BlindPilot-side twin of the ``work``/``agent-task`` router in
 ``~/Documents/Codex/tools``: the tiers, the candidate shortlists and the
 normal routing match. During a cooldown BlindPilot may run heavier work on
 free, so a terminal ``work`` run can choose differently. Prices are read from
-the installed CLI at runtime; the hand-picked table is the fallback when that
-cannot be read, and is what tests exercise directly.
+the installed CLI at runtime and filtered by its current model list. The
+hand-picked table remains available to explicit static callers and tests.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 Based on the original Claude Code Reader application by doubletaponair:
@@ -466,22 +465,30 @@ def route(
     static: bool = False,
     exclude_models: Optional[set[str]] = None,
     context_tokens: Optional[int] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Route:
     """The model and effort for a task.
 
-    With a price catalog (read from the CLI unless one is passed), the cheapest
-    eligible model for the task's tier wins. A catalog with no eligible model
-    returns an empty route so the caller keeps its existing choice. Without a
-    catalog -- or with ``static`` outside cooldown -- the hand-picked table
-    answers. While a recorded rate or credit stop is in effect, paid models
+    With a price catalog (filtered by the live CLI list unless one is passed),
+    the cheapest eligible model for the task's tier wins. A catalog with no
+    eligible model returns an empty route so the caller keeps its existing
+    choice. An injected empty catalog, or ``static`` with an injected catalog
+    outside cooldown, uses the hand-picked table. Failed live discovery keeps
+    the CLI default. While a recorded rate or credit stop is in effect, paid models
     are withheld and a catalog-confirmed free model handles any tier.
     ``exclude_models`` and ``context_tokens`` are passed through to
     ``select``/``model_cost``.
     """
     tier = classify(task)
-    active_catalog = catalog if catalog is not None else price_catalog()
+    active_catalog = (
+        catalog
+        if catalog is not None
+        else (
+            live_price_catalog(cancel_event=cancel_event) if cancel_event else live_price_catalog()
+        )
+    )
     cooldown = cooling_down(now)
-    if active_catalog and (not static or cooldown):
+    if active_catalog and (not static or cooldown or catalog is None):
         chosen = select(
             tier,
             active_catalog,
@@ -499,8 +506,8 @@ def route(
             if free is not None:
                 return Route(free.model, free.effort, tier, free.cost, free.priced, True)
         return Route(model="", effort="", tier=tier, cooldown=cooldown)
-    if cooldown:
-        return Route(model="", effort="", tier=tier, cooldown=True)
+    if cooldown or catalog is None:
+        return Route(model="", effort="", tier=tier, cooldown=cooldown)
     fallback = _STATIC_ROUTES[tier]
     effort = fallback["effort"]
     entry = (active_catalog or {}).get(fallback["model"])
@@ -516,14 +523,21 @@ def best_free_model(
     exclude_model: str = "",
     max_plan: Optional[str] = None,
     now: Optional[datetime] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Optional[Route]:
-    """A coding-focused free fallback confirmed by the installed CLI catalog.
+    """A coding-focused free fallback confirmed by the live CLI list and catalog.
 
     A free model whose providers were just recorded at capacity is skipped
     the same way ``select`` skips one, so the fallback never lands on the
     model that just refused the turn.
     """
-    active_catalog = catalog if catalog is not None else price_catalog()
+    active_catalog = (
+        catalog
+        if catalog is not None
+        else (
+            live_price_catalog(cancel_event=cancel_event) if cancel_event else live_price_catalog()
+        )
+    )
     # Capability-gated, not a bare free scan: only models the router already
     # considers fit for work qualify, so a free model the catalog just
     # started offering never outranks the curated shortlist. The declared
@@ -726,6 +740,25 @@ def price_catalog() -> dict:
         _CATALOG_CACHE = _FileCache(str(path) if path else "", mtime, time.monotonic(), data)
         return data
     return {}
+
+
+def live_price_catalog(*, cancel_event: Optional[threading.Event] = None) -> dict:
+    """Priced models that the selected Command Code CLI lists right now."""
+    from commandcode_backend import commandcode_model_options
+
+    models, _, _, _, error = (
+        commandcode_model_options(cancel_event=cancel_event)
+        if cancel_event
+        else commandcode_model_options()
+    )
+    if error:
+        return {}
+    if not isinstance(models, (list, tuple)):
+        return {}
+    available = {model.casefold() for model in models if isinstance(model, str)}
+    return {
+        model: entry for model, entry in price_catalog().items() if model.casefold() in available
+    }
 
 
 # --------------------------------------------------------------------------

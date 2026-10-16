@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -276,12 +277,57 @@ def _models_from_catalog(text: str) -> list[str]:
 
 def commandcode_model_options(
     cwd: Optional[str] = None,
+    *,
+    cancel_event: Optional[threading.Event] = None,
 ) -> tuple[list[str], list[str], str, str, str]:
     """The picker's answer: (models, efforts, current model, current effort, error)."""
     binary = agent_backends.find_backend_cli(BACKEND_COMMANDCODE)
     if not binary:
         return [], [], "", "", "Command Code was not found."
-    code, text = _probe(binary, ["--list-models"], CLI_PROBE_TIMEOUT)
+    if cancel_event is None:
+        code, text = _probe(binary, ["--list-models"], CLI_PROBE_TIMEOUT)
+    elif cancel_event.is_set():
+        code, text = None, ""
+    else:
+        try:
+            proc = subprocess.Popen(  # noqa: S603 - fixed CLI argument, no shell
+                [binary, "--list-models"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={**agent_backends.subprocess_env(binary), "PYTHONIOENCODING": "utf-8"},
+                **agent_backends.no_window_kwargs(),
+                **agent_backends.own_group_kwargs(),
+            )
+        except OSError:
+            code, text = None, ""
+        else:
+            deadline = time.monotonic() + CLI_PROBE_TIMEOUT
+            try:
+                while not cancel_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        stdout, stderr = proc.communicate(timeout=min(0.1, remaining))
+                        code = proc.returncode
+                        stdout = agent_backends._strip_terminal_noise(stdout)
+                        stderr = agent_backends._strip_terminal_noise(stderr)
+                        text = f"{stdout}\n{stderr}" if stdout and stderr else stdout or stderr
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+                else:
+                    code, text = None, ""
+                if cancel_event.is_set() or time.monotonic() >= deadline:
+                    code, text = None, ""
+            finally:
+                if proc.poll() is None:
+                    agent_backends.end_process_group(proc, timeout=1)
+                agent_backends._close_process_pipes(proc)
     models = _models_from_catalog(text) if code == 0 else []
     config = commandcode_config()
     current = str(config.get("model") or "").strip()
