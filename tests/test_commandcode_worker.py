@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import threading
 
 import commandcode_worker
@@ -87,7 +88,15 @@ def worker_env(monkeypatch):
     return state
 
 
-def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5", prompt="do the thing"):
+def _run(
+    session_id=None,
+    *,
+    auto_free_fallback=False,
+    auto_route=False,
+    auto_context_tokens=None,
+    model="gpt-5.5",
+    prompt="do the thing",
+):
     rec = _Recorder()
     worker = CommandcodeWorker(
         prompt,
@@ -97,6 +106,8 @@ def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5", prompt="
         model=model,
         effort="xhigh",
         auto_free_fallback=auto_free_fallback,
+        auto_route=auto_route,
+        auto_context_tokens=auto_context_tokens,
         on_session=rec.callback("session"),
         on_started=rec.callback("started"),
         on_activity=rec.callback("activity"),
@@ -107,6 +118,148 @@ def _run(session_id=None, *, auto_free_fallback=False, model="gpt-5.5", prompt="
     worker.start()
     worker.join(20)
     return worker, rec
+
+
+def test_auto_route_probes_on_worker_thread_before_running_turn(monkeypatch, worker_env):
+    from commandcode_router import Route
+
+    checked_on = []
+
+    def choose(_prompt, **kwargs):
+        checked_on.append(threading.current_thread())
+        assert kwargs["context_tokens"] == 12345
+        return Route("deepseek/deepseek-v4-pro", "high", "standard")
+
+    monkeypatch.setattr(commandcode_worker, "route", choose)
+    worker, rec = _run(model="", auto_route=True, auto_context_tokens=12345)
+
+    assert checked_on == [worker]
+    assert worker._run_model == "deepseek/deepseek-v4-pro"
+    assert rec.activity("auto_route") == [
+        "Auto model deepseek/deepseek-v4-pro, standard task, high effort."
+    ]
+
+
+def test_auto_route_failure_uses_cli_default(monkeypatch, worker_env):
+    def fail(_prompt, **_kwargs):
+        raise ValueError("bad live list")
+
+    monkeypatch.setattr(commandcode_worker, "route", fail)
+    worker, rec = _run(model="", auto_route=True)
+
+    assert worker._run_model == ""
+    assert rec.activity("auto_route") == [
+        "Auto routing unavailable; using the Command Code default."
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cooldown", "note"),
+    [
+        (False, "Auto could not confirm a current model; using the Command Code default."),
+        (
+            True,
+            "Auto could not confirm a free model during cooldown; using the Command Code default.",
+        ),
+    ],
+)
+def test_auto_route_without_eligible_live_model_uses_cli_default(
+    monkeypatch, worker_env, cooldown, note
+):
+    from commandcode_router import Route
+
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda _prompt, **_kwargs: Route("", "", "quick", cooldown=cooldown),
+    )
+    worker, rec = _run(model="", auto_route=True)
+
+    assert worker._run_model == ""
+    assert rec.activity("auto_route") == [note]
+
+
+def test_auto_route_does_not_probe_slash_commands(monkeypatch, worker_env):
+    monkeypatch.setattr(
+        commandcode_worker,
+        "route",
+        lambda *_args, **_kwargs: pytest.fail("slash command was routed"),
+    )
+    worker, rec = _run(model="", auto_route=True, prompt="/help")
+    assert worker._run_model == ""
+    assert rec.activity("auto_route") == []
+
+
+def test_cancel_during_auto_probe_prevents_command_code_launch(monkeypatch, worker_env):
+    import commandcode_backend
+    import commandcode_router
+
+    probing = threading.Event()
+    launched = []
+
+    class HeldProbe:
+        def __init__(self):
+            self.stdout = io.StringIO()
+            self.stderr = io.StringIO()
+            self.killed = False
+            self.waited = False
+            self.returncode = None
+
+        def communicate(self, timeout):
+            probing.set()
+            if not self.killed:
+                threading.Event().wait(timeout)
+                raise subprocess.TimeoutExpired("command-code", timeout)
+            return "", ""
+
+        def poll(self):
+            return None if not self.killed else -9
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout):
+            self.waited = True
+            return -9
+
+    probe = HeldProbe()
+    monkeypatch.setattr(
+        commandcode_backend.agent_backends, "find_backend_cli", lambda _id: "command-code"
+    )
+    monkeypatch.setattr(commandcode_backend, "commandcode_config", dict)
+    monkeypatch.setattr(commandcode_router, "price_catalog", dict)
+
+    def launch(*args, **kwargs):
+        if args[0][1] == "--list-models":
+            return probe
+        launched.append(args)
+        return worker_env["proc"]
+
+    monkeypatch.setattr(commandcode_worker.subprocess, "Popen", launch)
+    rec = _Recorder()
+    worker = CommandcodeWorker(
+        "do the thing",
+        None,
+        "C:\\work",
+        "plan",
+        auto_route=True,
+        on_session=rec.callback("session"),
+        on_started=rec.callback("started"),
+        on_activity=rec.callback("activity"),
+        on_complete=rec.callback("complete"),
+        on_failed=rec.callback("failed"),
+        on_done=rec.callback("done"),
+    )
+    worker.start()
+    assert probing.wait(5)
+    worker.cancel()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert launched == []
+    assert rec.activity("auto_route") == []
+    assert probe.killed and probe.waited
+    assert probe.stdout.closed and probe.stderr.closed
 
 
 # --------------------------------------------------------------------------

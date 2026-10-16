@@ -326,6 +326,8 @@ class CommandcodeWorker(threading.Thread):
         additional_dirs: tuple[str, ...] = (),
         allow_session_retry: bool = True,
         auto_free_fallback: bool = False,
+        auto_route: bool = False,
+        auto_context_tokens: Optional[int] = None,
         on_session: Callable[[str], None],
         on_started: Callable[[], None],
         on_activity: Callable[[str, str], None],
@@ -352,6 +354,8 @@ class CommandcodeWorker(threading.Thread):
         # "succeed" with a content-free replacement session.
         self._allow_session_retry = allow_session_retry
         self._auto_free_fallback = auto_free_fallback
+        self._auto_route = auto_route
+        self._auto_context_tokens = auto_context_tokens
         # Public flags the window reads. session_replaced says the id this
         # worker reports has replaced the one the caller held (a fresh or free
         # retry, or a compaction's summarized replacement) and must be adopted.
@@ -385,6 +389,7 @@ class CommandcodeWorker(threading.Thread):
         self._proc: Optional[subprocess.Popen] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._cancelled = False
+        self._cancel_event = threading.Event()
         self._failed = False
         self._clean_end = False
         self._completed = False
@@ -461,6 +466,7 @@ class CommandcodeWorker(threading.Thread):
         would leave the child running.
         """
         self._cancelled = True
+        self._cancel_event.set()
         if self._compact_child is not None:
             self._compact_child.cancel()
         proc = self._proc
@@ -578,6 +584,31 @@ class CommandcodeWorker(threading.Thread):
         binary = find_backend_cli(BACKEND_COMMANDCODE)
         if not binary:
             self._fail("Command Code is not installed. Run: npm install -g command-code")
+            return
+        if self._auto_route and self._prompt and not self._prompt.lstrip().startswith("/"):
+            try:
+                chosen = route(
+                    self._prompt,
+                    context_tokens=self._auto_context_tokens,
+                    cancel_event=self._cancel_event,
+                )
+                if chosen.model:
+                    self._model = chosen.model
+                    self._effort = self._effort or chosen.effort
+                    note = chosen.describe()
+                elif chosen.cooldown:
+                    note = (
+                        "Auto could not confirm a free model during cooldown; "
+                        "using the Command Code default."
+                    )
+                else:
+                    note = "Auto could not confirm a current model; using the Command Code default."
+            except Exception:  # noqa: BLE001 - routing must never stop a turn
+                note = "Auto routing unavailable; using the Command Code default."
+            if self._cancelled:
+                return
+            self._on_activity("auto_route", note)
+        if self._cancelled:
             return
         self._run_turn(binary, self._effort, self._model)
         # Each recoverable pre-start failure is retried once, in whatever
@@ -1333,6 +1364,7 @@ class CommandcodeWorker(threading.Thread):
                 include_free=False,
                 exclude_models={self._run_model},
                 context_tokens=self.context_tokens[0] if self.context_tokens else None,
+                cancel_event=self._cancel_event,
             )
         except Exception:  # noqa: BLE001 - optional routing must not mask the CLI failure
             return None
@@ -1347,7 +1379,9 @@ class CommandcodeWorker(threading.Thread):
     def _free_fallback_model(self) -> Optional[Route]:
         """The best confirmed free model other than this run's model."""
         try:
-            candidate = best_free_model(exclude_model=self._run_model)
+            candidate = best_free_model(
+                exclude_model=self._run_model, cancel_event=self._cancel_event
+            )
         except Exception:  # noqa: BLE001 - optional routing must not mask the CLI failure
             return None
         if candidate is None or candidate.model.casefold() == self._run_model.casefold():
