@@ -229,9 +229,16 @@ def test_cancel_during_auto_probe_prevents_command_code_launch(monkeypatch, work
     monkeypatch.setattr(commandcode_backend, "commandcode_config", dict)
     monkeypatch.setattr(commandcode_router, "price_catalog", dict)
 
+    real_popen = subprocess.Popen
+
     def launch(*args, **kwargs):
         if args[0][1] == "--list-models":
             return probe
+        if args[0][1] == "-l":
+            # agent_backends' login-shell PATH probe goes through
+            # subprocess.run, which shares this Popen; it is not a
+            # Command Code launch (macOS CI caught it being counted).
+            return real_popen(*args, **kwargs)
         launched.append(args)
         return worker_env["proc"]
 
