@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.47.7 - 2026-10-16
+
+- CI and release workflows now pin every GitHub Action to a full commit SHA instead of a mutable tag, and Dependabot is configured to keep those pins updated. No app behaviour changes. Thanks to Farhan Khan for the hardening.
+
 ## v0.47.6 - 2026-10-16
 
 - Command Code Auto routing and its free fallback now filter the priced catalog by the CLI's current --list-models before choosing, so a model the CLI no longer offers is never routed to. Stop cancels an in-progress model-list check on every route, retry, and fallback path, and the cancel-during-probe test no longer counts the login-shell PATH probe as a launch (it failed macOS CI).
