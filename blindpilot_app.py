@@ -3006,8 +3006,9 @@ class AgentFiles:
     `files` are (key, label). A key is a path, or for tastes and Hermes
     memories "path\\nindex": one taste line or one Hermes entry of that file.
     `editable` says what Add and Delete do: "memory" (a Claude Code memory
-    file), "taste" (a Command Code taste line), "hermes" (a Hermes entry), or
-    "" for read only. `home` is where Add writes.
+    file), "taste" (a Command Code taste line), "hermes" (a Hermes entry),
+    "agent" (a global agent file), or "" for read and edit only. `home` is
+    where Add writes.
     """
 
     backend: str
@@ -3096,6 +3097,54 @@ def add_hermes_memory(path: Path, text: str) -> None:
     _replace_agent_file(path, "\n§\n".join([*entries, text.strip()]))
 
 
+_AGENT_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+_WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+
+def add_agent(home: Path, backend: str, name: str, description: str, instructions: str) -> Path:
+    """Create one agent in its backend's global agents folder without replacing a file."""
+    if not _AGENT_NAME.fullmatch(name) or name.casefold() in _WINDOWS_RESERVED_NAMES:
+        raise ValueError(
+            "Name must use letters, numbers, hyphens or underscores, and not a reserved device name"
+        )
+    if backend == BACKEND_COMMANDCODE and name.casefold() in {
+        "explore",
+        "plan",
+        "review",
+        "general",
+    }:
+        raise ValueError("This is a reserved Command Code agent name")
+    description = " ".join(description.split())
+    instructions = instructions.strip()
+    if not description or not instructions:
+        raise ValueError("An agent needs a description and instructions")
+    if backend == BACKEND_CODEX:
+        filename = f"{name}.toml"
+        content = (
+            f"name = {json.dumps(name)}\n"
+            f"description = {json.dumps(description, ensure_ascii=False)}\n"
+            f"developer_instructions = {json.dumps(instructions, ensure_ascii=False)}\n"
+        )
+    elif backend in (BACKEND_COMMANDCODE, BACKEND_OPENCODE):
+        filename = f"{name}.md"
+        front = f"name: {name}\n" if backend == BACKEND_COMMANDCODE else "mode: subagent\n"
+        content = f"---\n{front}description: {json.dumps(description, ensure_ascii=False)}\n---\n\n{instructions}\n"
+    else:
+        raise ValueError("This backend does not support adding agents here")
+    path = home / "agents" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8", newline="") as file:
+        file.write(content)
+    return path
+
+
 def entry_text(key: str, editable: str) -> tuple[str, str]:
     """The file a key names, and the text to read for it."""
     path, _, at = key.partition("\n")
@@ -3108,10 +3157,13 @@ def entry_text(key: str, editable: str) -> tuple[str, str]:
 
 
 def delete_entry(key: str, editable: str) -> None:
-    """Delete a Claude Code memory, one taste line, or one Hermes entry."""
+    """Delete a Claude Code memory, one taste line, one Hermes entry, or an agent file."""
     path, _, at = key.partition("\n")
     if editable == "memory":
         delete_memory(Path(path))
+        return
+    if editable == "agent":
+        Path(path).unlink()
         return
     file = Path(path)
     if editable == "hermes":
@@ -3185,6 +3237,13 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
             BACKEND_LABELS[BACKEND_COMMANDCODE],
             "Agents",
             _plain_files(cc.glob("agents/*.md"), False),
+            "agent",
+            cc,
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COMMANDCODE],
+            "Project Agents",
+            _plain_files((project / ".commandcode" / "agents").glob("*.md")) if project else [],
         ),
         AgentFiles(
             BACKEND_LABELS[BACKEND_HERMES],
@@ -3214,6 +3273,13 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
             BACKEND_LABELS[BACKEND_CODEX], "Skills", _plain_files(codex.glob("skills/*/SKILL.md"))
         ),
         AgentFiles(
+            BACKEND_LABELS[BACKEND_CODEX],
+            "Agents",
+            _plain_files(codex.glob("agents/*.toml"), False),
+            "agent",
+            codex,
+        ),
+        AgentFiles(
             BACKEND_LABELS[BACKEND_GEMINI],
             "Instructions",
             _plain_files([gemini / "GEMINI.md", *([project / "GEMINI.md"] if project else [])]),
@@ -3229,7 +3295,20 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
         AgentFiles(
             BACKEND_LABELS[BACKEND_OPENCODE],
             "Agents",
-            _plain_files(opencode.glob("agent*/*.md"), False),
+            # Name the live folders explicitly; agent* would also match backups.
+            _plain_files([*opencode.glob("agent/*.md"), *opencode.glob("agents/*.md")], False),
+            "agent",
+            opencode,
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_OPENCODE],
+            "Project Agents",
+            _plain_files(
+                [
+                    *((project / ".opencode" / "agent").glob("*.md") if project else []),
+                    *((project / ".opencode" / "agents").glob("*.md") if project else []),
+                ]
+            ),
         ),
     ]
     for backend in BACKEND_LABELS:
@@ -3243,7 +3322,11 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
         groups.append(AgentFiles(BACKEND_LABELS[backend], "Settings", found))
     order = list(BACKEND_LABELS.values())
     groups.sort(key=lambda g: order.index(g.backend))  # stable: kinds keep their order
-    return [g for g in groups if g.files or g.editable == "memory" or (g.home and g.home.is_dir())]
+    return [
+        g
+        for g in groups
+        if g.files or g.editable in ("memory", "agent") or (g.home and g.home.is_dir())
+    ]
 
 
 # A CommonMark fenced code block: three or more backticks or tildes, closed by
@@ -6031,6 +6114,37 @@ class AddMemoryDialog(wx.Dialog):
         )
 
 
+class AddAgentDialog(wx.Dialog):
+    """Name, description and instructions for one new backend agent."""
+
+    def __init__(self, parent: wx.Window, backend: str):
+        super().__init__(
+            parent, title=f"Add {backend} Agent", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER
+        )
+        grid = wx.FlexGridSizer(cols=2, vgap=self.FromDIP(6), hgap=self.FromDIP(8))
+        grid.AddGrowableCol(1)
+
+        def field(label: str, control: wx.TextCtrl) -> wx.TextCtrl:
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            control.SetName(label.replace("&", "").rstrip(":"))
+            grid.Add(control, 1, wx.EXPAND)
+            return control
+
+        self.name = field("&Name (letters, numbers, hyphens, underscores):", wx.TextCtrl(self))
+        self.description = field("&Description, one line:", wx.TextCtrl(self))
+        self.instructions = field("&Instructions:", wx.TextCtrl(self, style=wx.TE_MULTILINE))
+        self.instructions.SetMinSize(self.FromDIP(wx.Size(480, 160)))
+        grid.AddGrowableRow(2)
+
+        pad = self.FromDIP(PAD_DIALOG)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(grid, 1, wx.EXPAND | wx.ALL, pad)
+        sizer.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0, wx.EXPAND | wx.ALL, pad)
+        self.SetSizerAndFit(sizer)
+        self.name.SetFocus()
+        self.CentreOnParent()
+
+
 class AddNoteDialog(wx.Dialog):
     """A Command Code taste or a Hermes memory entry: where it goes, and its text.
 
@@ -8159,6 +8273,7 @@ class SessionPanel(wx.Panel):
         self.model = ""
         self.effort = ""
         self._auto_route = ""
+        self._auto_check_announced = False
         # What the CLI last reported it is using, for when we pass no flag.
         self._cli_model = ""
         self._cli_effort = ""
@@ -8863,6 +8978,7 @@ class SessionPanel(wx.Panel):
         self.model = model
         self.effort = effort
         self._auto_route = ""
+        self._auto_check_announced = False
         note = ""
         if effort_changed:
             # Hermes fixes the reasoning level when the conversation is created
@@ -9909,6 +10025,7 @@ class SessionPanel(wx.Panel):
             self.model = ""
             self.effort = ""
             self._auto_route = ""
+            self._auto_check_announced = False
             self._cli_model = ""
             self._cli_effort = ""
             self.backend_status.SetLabel(f"Backend: {backend_label(selected_backend)}")
@@ -9965,56 +10082,30 @@ class SessionPanel(wx.Panel):
         elif selected_backend == BACKEND_COMMANDCODE:
             extra["additional_dirs"] = getattr(self, "_commandcode_dirs", ())
             extra["auto_free_fallback"] = self.model == AUTO_MODEL
+            extra["auto_route"] = self.model == AUTO_MODEL
+            extra["auto_context_tokens"] = SessionPanel._known_context(self)[0] or None
         self._launch_turn(send_text, selected_backend, extra)
 
     def _set_auto_route(self, note: str) -> None:
-        """Say an Auto-routing note once, until the route says something else.
-
-        Called unbound (``SessionPanel._set_auto_route(self, ...)``) from
-        ``_turn_model``, the way ``_turn_model`` itself is driven, so a caller
-        that supplies its own panel-shaped object needs nothing but
-        ``_announce`` and an ``_auto_route`` slot.
-        """
+        """Say a changed Auto route after the worker's live model check."""
         if note != getattr(self, "_auto_route", ""):
             self._auto_route = note
             self._announce(note)
 
-    def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
-        """The model and effort for one turn.
+    def _auto_check_status(self) -> None:
+        """Show the live check each turn, speaking it once per Auto selection."""
+        note = "Checking current Command Code models."
+        if not self._auto_check_announced:
+            self._auto_check_announced = True
+            self._announce(note)
+        else:
+            self._set_status(note)
 
-        A Command Code tab set to automatic routing is routed by the task: a
-        lookup or a small edit runs on the cheapest
-        eligible model and heavier work on a stronger one (see
-        ``commandcode_router``). A late turn (nothing sent) and a slash command
-        are left alone -- they are not work to price. Any failure to route
-        leaves the model unset, preserving the CLI configuration. The context
-        size last reported for this conversation, when there is one, is passed
-        along so pricing compares models over this conversation rather than a
-        fixed typical session.
-        """
+    def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
+        """The explicit model, or the CLI default until a worker resolves Auto."""
         if selected_backend != BACKEND_COMMANDCODE or self.model != AUTO_MODEL:
             return self.model, self.effort
-        if not send_text or send_text.lstrip().startswith("/"):
-            return "", self.effort
-        try:
-            from commandcode_router import route
-
-            context_tokens = SessionPanel._known_context(self)[0] or None
-            chosen = route(send_text, context_tokens=context_tokens)
-        except Exception:  # noqa: BLE001 - routing must never stop a turn
-            SessionPanel._set_auto_route(
-                self, "Auto routing unavailable; using the Command Code default."
-            )
-            return "", self.effort
-        if not chosen.model:
-            if getattr(chosen, "cooldown", False):
-                SessionPanel._set_auto_route(
-                    self,
-                    "Auto could not confirm a free model during cooldown; using the Command Code default.",
-                )
-            return "", self.effort
-        SessionPanel._set_auto_route(self, chosen.describe())
-        return chosen.model, self.effort or chosen.effort
+        return "", self.effort
 
     def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
         """Start the worker for one turn. `send_text` is None for a late turn,
@@ -10058,6 +10149,13 @@ class SessionPanel(wx.Panel):
 
             if isinstance(self._worker, MuseAiWorker):
                 self._worker.follow_after = getattr(self, "_museai_follow_after", None)
+        if (
+            selected_backend == BACKEND_COMMANDCODE
+            and self.model == AUTO_MODEL
+            and send_text
+            and not send_text.lstrip().startswith("/")
+        ):
+            SessionPanel._auto_check_status(self)
         try:
             self._worker.start()
         except RuntimeError as exc:
@@ -10710,6 +10808,9 @@ class SessionPanel(wx.Panel):
         the exception: its rows are the transcript, not live activity, and
         without them a reopened conversation would show nothing at all.
         """
+        if kind == "auto_route":
+            SessionPanel._set_auto_route(self, text)
+            return
         if kind == "replay_end":
             # The transcript a reopened Hermes conversation replays is over;
             # whatever follows is the attached turn itself.
@@ -15073,17 +15174,25 @@ class MainFrame(wx.Frame):
 
         A list of each backend's kinds with their counts, then the entries of
         the chosen one; Enter reads one, and Escape steps back a list. Claude
-        Code memories, Command Code tastes and Hermes memories can be added
-        and deleted here, and anything listed can be edited and saved.
+        Code memories, Command Code tastes, Hermes memories and global agents
+        can be added and deleted here. Project agents can be read and edited.
         """
         page = self.notebook.GetCurrentPage()
         cwd = page.cwd if isinstance(page, SessionPanel) else None
         group_at = 0
         while True:
             groups = agent_files(cwd)
+            message = "What your coding agents keep about you on this computer. Enter lists one."
+            agents = [
+                f"{g.backend} {g.kind.lower()} {len(g.files)}"
+                for g in groups
+                if g.kind in ("Agents", "Project Agents")
+            ]
+            if agents:
+                message += "\n\nAgents installed: " + " · ".join(agents)
             with wx.SingleChoiceDialog(
                 self,
-                "What your coding agents keep about you on this computer. Enter lists one.",
+                message,
                 "What Agents Know",
                 [f"{g.backend} {g.kind.lower()}, {len(g.files)}" for g in groups],
             ) as dlg:
@@ -15094,7 +15203,12 @@ class MainFrame(wx.Frame):
             self._agent_files_of(cwd, groups[group_at].backend, groups[group_at].kind)
 
     def _agent_files_of(self, cwd: Optional[str], backend: str, kind: str) -> None:
-        add_labels = {"memory": "&Add Memory…", "taste": "&Add Taste…", "hermes": "&Add Memory…"}
+        add_labels = {
+            "memory": "&Add Memory…",
+            "taste": "&Add Taste…",
+            "hermes": "&Add Memory…",
+            "agent": "&Add Agent…",
+        }
         title = f"{backend} {kind.lower()}"
         file_at = 0
         while True:
@@ -15159,11 +15273,29 @@ class MainFrame(wx.Frame):
                 return
 
     def _add_entry(self, cwd: Optional[str], group: AgentFiles) -> Optional[str]:
-        """Ask for a new memory or taste and save it; its key, or None."""
+        """Ask for a new entry and save it; its key, or None."""
         if group.editable == "memory":
             return self._add_memory(cwd)
         assert group.home is not None
         home = group.home
+        if group.editable == "agent":
+            backend = next(key for key, label in BACKEND_LABELS.items() if label == group.backend)
+            with AddAgentDialog(self, group.backend) as dlg:
+                while dlg.ShowModal() == wx.ID_OK:
+                    try:
+                        path = add_agent(
+                            home,
+                            backend,
+                            dlg.name.GetValue().strip(),
+                            dlg.description.GetValue(),
+                            dlg.instructions.GetValue(),
+                        )
+                    except (OSError, ValueError) as exc:
+                        wx.MessageBox(str(exc), "Add Agent", wx.OK | wx.ICON_ERROR, dlg)
+                        continue
+                    announce("Agent added")
+                    return str(path)
+            return None
         if group.editable == "taste":
             title, place, editable = "Add Taste", "&Category, or type a new one:", True
             places = sorted(

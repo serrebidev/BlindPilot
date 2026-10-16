@@ -233,6 +233,14 @@ def test_macos_update_rejects_a_translocated_application():
     assert "Applications folder" in problem
 
 
+def test_macos_helper_preserves_a_backup_from_a_reused_pid():
+    script = app_updater._MACOS_HELPER
+
+    assert 'rm -rf "$backup"' not in script
+    assert 'mktemp -d "${app_path}.update-backup-XXXXXX"' in script
+    assert 'backup="$backup_dir/BlindPilot.app"' in script
+
+
 def test_macos_update_rejects_an_application_the_user_cannot_replace(monkeypatch):
     monkeypatch.setattr("app_updater.os.access", lambda *_args: False)
 
@@ -296,6 +304,11 @@ def test_macos_helper_replaces_a_quarantined_unsigned_update_and_relaunches(tmp_
     environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
     environment["TMPDIR"] = str(tmp_path)
     environment["OPEN_MARKER"] = str(open_marker)
+    environment["TEST_APP"] = str(app)
+    environment["TEST_HELPER"] = str(helper)
+    environment["TEST_ARCHIVE"] = str(archive)
+    environment["TEST_LOG"] = str(log)
+    environment["TEST_STATUS"] = str(status)
     # The helper waits for its parent PID to close before replacing the bundle.
     # Passing a PID that is already gone makes that wait end at once. Zero is
     # wrong here: kill(2) reads pid 0 as the caller's own process group, so the
@@ -304,15 +317,16 @@ def test_macos_helper_replaces_a_quarantined_unsigned_update_and_relaunches(tmp_
     dead_parent = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
     dead_parent_pid = dead_parent.pid
     dead_parent.wait()
+    environment["TEST_PARENT_PID"] = str(dead_parent_pid)
+    # Seed the helper's former PID-based path in the same process before exec.
     result = subprocess.run(
         [
             "/bin/sh",
-            str(helper),
-            str(dead_parent_pid),
-            str(archive),
-            str(app),
-            str(log),
-            str(status),
+            "-c",
+            'backup="${TEST_APP}.update-backup-$$"; '
+            'mkdir "$backup" && printf "%s" "recovery data" >"$backup/marker" && '
+            'exec /bin/sh "$TEST_HELPER" "$TEST_PARENT_PID" "$TEST_ARCHIVE" '
+            '"$TEST_APP" "$TEST_LOG" "$TEST_STATUS"',
         ],
         check=False,
         capture_output=True,
@@ -331,7 +345,9 @@ def test_macos_helper_replaces_a_quarantined_unsigned_update_and_relaunches(tmp_
     )
     assert "com.apple.quarantine:" not in attributes.stdout
     assert open_marker.read_text(encoding="utf-8").splitlines() == ["-n", str(app)]
-    assert not list(install_parent.glob("BlindPilot.app.update-backup-*"))
+    backups = list(install_parent.glob("BlindPilot.app.update-backup-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "marker").read_text(encoding="utf-8") == "recovery data"
     assert not archive.exists()
     assert not helper.exists()
     assert not log.exists()

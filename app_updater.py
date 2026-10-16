@@ -751,6 +751,7 @@ status_file="$5"
 executable="$app_path/Contents/MacOS/BlindPilot"
 stage=""
 backup=""
+backup_dir=""
 lock=""
 moved_aside=0
 replaced=0
@@ -891,9 +892,13 @@ if ! clear_quarantine "$new_app"; then
     fail "macOS would not allow the update to be prepared for automatic launch."
 fi
 
-backup="${app_path}.update-backup-$$"
-rm -rf "$backup"
+backup_dir="$(mktemp -d "${app_path}.update-backup-XXXXXX" 2>/dev/null)" || backup_dir=""
+if [ -z "$backup_dir" ]; then
+    fail "A backup folder for the current version could not be created."
+fi
+backup="$backup_dir/BlindPilot.app"
 if ! mv "$app_path" "$backup" 2>>"$log_file"; then
+    rmdir "$backup_dir" 2>/dev/null || true
     fail "The current version could not be moved aside."
 fi
 moved_aside=1
@@ -910,7 +915,7 @@ fi
 
 log "Update applied. Restarting BlindPilot."
 start_blindpilot
-rm -rf "$backup"
+rm -rf "$backup_dir"
 log "Done."
 rm -f "$log_file"
 discard
