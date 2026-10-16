@@ -8273,6 +8273,7 @@ class SessionPanel(wx.Panel):
         self.model = ""
         self.effort = ""
         self._auto_route = ""
+        self._auto_check_announced = False
         # What the CLI last reported it is using, for when we pass no flag.
         self._cli_model = ""
         self._cli_effort = ""
@@ -8977,6 +8978,7 @@ class SessionPanel(wx.Panel):
         self.model = model
         self.effort = effort
         self._auto_route = ""
+        self._auto_check_announced = False
         note = ""
         if effort_changed:
             # Hermes fixes the reasoning level when the conversation is created
@@ -10023,6 +10025,7 @@ class SessionPanel(wx.Panel):
             self.model = ""
             self.effort = ""
             self._auto_route = ""
+            self._auto_check_announced = False
             self._cli_model = ""
             self._cli_effort = ""
             self.backend_status.SetLabel(f"Backend: {backend_label(selected_backend)}")
@@ -10079,56 +10082,30 @@ class SessionPanel(wx.Panel):
         elif selected_backend == BACKEND_COMMANDCODE:
             extra["additional_dirs"] = getattr(self, "_commandcode_dirs", ())
             extra["auto_free_fallback"] = self.model == AUTO_MODEL
+            extra["auto_route"] = self.model == AUTO_MODEL
+            extra["auto_context_tokens"] = SessionPanel._known_context(self)[0] or None
         self._launch_turn(send_text, selected_backend, extra)
 
     def _set_auto_route(self, note: str) -> None:
-        """Say an Auto-routing note once, until the route says something else.
-
-        Called unbound (``SessionPanel._set_auto_route(self, ...)``) from
-        ``_turn_model``, the way ``_turn_model`` itself is driven, so a caller
-        that supplies its own panel-shaped object needs nothing but
-        ``_announce`` and an ``_auto_route`` slot.
-        """
+        """Say a changed Auto route after the worker's live model check."""
         if note != getattr(self, "_auto_route", ""):
             self._auto_route = note
             self._announce(note)
 
-    def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
-        """The model and effort for one turn.
+    def _auto_check_status(self) -> None:
+        """Show the live check each turn, speaking it once per Auto selection."""
+        note = "Checking current Command Code models."
+        if not self._auto_check_announced:
+            self._auto_check_announced = True
+            self._announce(note)
+        else:
+            self._set_status(note)
 
-        A Command Code tab set to automatic routing is routed by the task: a
-        lookup or a small edit runs on the cheapest
-        eligible model and heavier work on a stronger one (see
-        ``commandcode_router``). A late turn (nothing sent) and a slash command
-        are left alone -- they are not work to price. Any failure to route
-        leaves the model unset, preserving the CLI configuration. The context
-        size last reported for this conversation, when there is one, is passed
-        along so pricing compares models over this conversation rather than a
-        fixed typical session.
-        """
+    def _turn_model(self, send_text: Optional[str], selected_backend: str) -> tuple[str, str]:
+        """The explicit model, or the CLI default until a worker resolves Auto."""
         if selected_backend != BACKEND_COMMANDCODE or self.model != AUTO_MODEL:
             return self.model, self.effort
-        if not send_text or send_text.lstrip().startswith("/"):
-            return "", self.effort
-        try:
-            from commandcode_router import route
-
-            context_tokens = SessionPanel._known_context(self)[0] or None
-            chosen = route(send_text, context_tokens=context_tokens)
-        except Exception:  # noqa: BLE001 - routing must never stop a turn
-            SessionPanel._set_auto_route(
-                self, "Auto routing unavailable; using the Command Code default."
-            )
-            return "", self.effort
-        if not chosen.model:
-            if getattr(chosen, "cooldown", False):
-                SessionPanel._set_auto_route(
-                    self,
-                    "Auto could not confirm a free model during cooldown; using the Command Code default.",
-                )
-            return "", self.effort
-        SessionPanel._set_auto_route(self, chosen.describe())
-        return chosen.model, self.effort or chosen.effort
+        return "", self.effort
 
     def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
         """Start the worker for one turn. `send_text` is None for a late turn,
@@ -10172,6 +10149,13 @@ class SessionPanel(wx.Panel):
 
             if isinstance(self._worker, MuseAiWorker):
                 self._worker.follow_after = getattr(self, "_museai_follow_after", None)
+        if (
+            selected_backend == BACKEND_COMMANDCODE
+            and self.model == AUTO_MODEL
+            and send_text
+            and not send_text.lstrip().startswith("/")
+        ):
+            SessionPanel._auto_check_status(self)
         try:
             self._worker.start()
         except RuntimeError as exc:
@@ -10824,6 +10808,9 @@ class SessionPanel(wx.Panel):
         the exception: its rows are the transcript, not live activity, and
         without them a reopened conversation would show nothing at all.
         """
+        if kind == "auto_route":
+            SessionPanel._set_auto_route(self, text)
+            return
         if kind == "replay_end":
             # The transcript a reopened Hermes conversation replays is over;
             # whatever follows is the attached turn itself.
