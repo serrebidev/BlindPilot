@@ -1,5 +1,5 @@
-# BlindPilot 0.47.6
+# BlindPilot 0.47.7
 
-This release tightens Command Code Auto's model routing.
+This release hardens the build pipeline; the app itself is unchanged.
 
-- Auto routing and the free fallback now filter the priced catalog by the Command Code CLI's current --list-models before choosing a model, so a renamed or retired model is never routed to. Stop cancels an in-progress model-list check on every route, retry, and fallback path. Thanks to Farhan Khan for the fix.
+- The CI and release workflows now pin every GitHub Action to a full commit SHA instead of a mutable tag, so a moved or compromised tag cannot change what runs, and Dependabot is configured to keep the pins current. Thanks to Farhan Khan for the hardening.
