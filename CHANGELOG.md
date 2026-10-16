@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.47.6 - 2026-10-16
+
+- Command Code Auto routing and its free fallback now filter the priced catalog by the CLI's current --list-models before choosing, so a model the CLI no longer offers is never routed to. Stop cancels an in-progress model-list check on every route, retry, and fallback path, and the cancel-during-probe test no longer counts the login-shell PATH probe as a launch (it failed macOS CI).
+
 ## v0.47.5 - 2026-10-15
 
 - Command Code Auto's free fallback is now capability-gated: it only picks free models the router already considers fit for work (never training-data models), reads the account plan from the COMMANDCODE_PLAN environment variable when the CLI plan can't be read, and a new catalog coverage check flags tier candidates the installed CLI no longer offers.
