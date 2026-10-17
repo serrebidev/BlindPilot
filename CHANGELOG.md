@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.47.12 - 2026-10-17
+
+- CodeQL security analysis restored and widened: the workflow file that PR #93 meant to add never reached main (its merge landed only the dependency-review workflow), and the default setup it replaced had been switched off, leaving the repo with no scanning. The new workflow analyzes both the Python source and the GitHub Actions workflows, on push, pull requests, and a weekly schedule. No app behaviour changes.
+
 ## v0.47.11 - 2026-10-17
 
 - wxPython updated to 4.3.2 on every platform: Windows and macOS from PyPI, Linux from the official distro wheel wxPython publishes for Ubuntu 24.04, since PyPI ships no Linux wheel. Same approach as the 4.3.1 bump in #92.

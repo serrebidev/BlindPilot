@@ -1,5 +1,5 @@
-# BlindPilot 0.47.11
+# BlindPilot 0.47.12
 
-This release updates the GUI toolkit underneath the app.
+This release restores the security scanning behind the scenes.
 
-- wxPython is updated to 4.3.2 on every platform: Windows and macOS from PyPI, Linux from the official distro wheel wxPython publishes for Ubuntu 24.04, since PyPI ships no Linux wheel. No app behaviour changes.
+- CodeQL now analyzes both the Python source and the GitHub Actions workflows, on every push and pull request and on a weekly schedule. The workflow file an earlier change meant to add never actually reached the repository, and this release puts that right. No app behaviour changes.
