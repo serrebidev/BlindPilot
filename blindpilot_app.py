@@ -66,6 +66,7 @@ import wx.adv
 from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
+from backend_updates import BackendUpdateResult, BackendUpdateService, BackendUpdateState
 import claude_session
 import diagnostics
 from certificates import open_url
@@ -12028,6 +12029,10 @@ class SetupWizard(wx.Dialog):
         self.backend = normalize_backend(initial_backend)
         self._step = 0
         self._backend_path: Optional[str] = None
+        self._update_check_generation = 0
+        self._backend_update_service = BackendUpdateService(
+            cache_path=blindpilot_data_dir() / "backend-update-cache.json"
+        )
         self._login: Optional[BackendLogin] = None
         # A sign-in running in a terminal the user never sees, kept so backing
         # out of the wizard stops it rather than leaving it to finish unseen.
@@ -12138,7 +12143,7 @@ class SetupWizard(wx.Dialog):
         self._cli_path_btn.Bind(wx.EVT_BUTTON, lambda _e: self._repair_path())
         self._cli_path_btn.Hide()
         self._cli_check_btn = wx.Button(p, label="Check Again")
-        self._cli_check_btn.Bind(wx.EVT_BUTTON, lambda _e: self._check_cli())
+        self._cli_check_btn.Bind(wx.EVT_BUTTON, lambda _e: self._check_cli(force_update_check=True))
         self._cli_check_btn.Hide()
 
         # Read-only multiline field rather than a label: NVDA can review the
@@ -12463,13 +12468,14 @@ class SetupWizard(wx.Dialog):
 
     # ---- CLI step ----
 
-    def _check_cli(self) -> None:
+    def _check_cli(self, force_update_check: bool = False) -> None:
         if not self:
             # `_show_step` queues these, so one can land an event-loop
             # iteration after the wizard was closed.
             return
+        self._update_check_generation += 1
         if self.backend != BACKEND_CLAUDE:
-            self._check_npm_backend_cli()
+            self._check_npm_backend_cli(force_update_check)
             return
         self._backend_path = self._find_selected_cli()
         windows = platform.system() == "Windows"
@@ -12499,9 +12505,10 @@ class SetupWizard(wx.Dialog):
                     "work in a terminal. Tab to the Add to PATH button to fix it."
                 )
             self._cli_install_btn.Hide()
-            self._cli_update_btn.Show()
+            self._cli_update_btn.Hide()
             self._cli_check_btn.Hide()
             self._next_btn.Enable(True)
+            self._check_backend_updates(self._backend_path, force_update_check)
         elif _install_argv() is not None:
             flavour = "native Windows version" if windows else "native version"
             self._cli_status.SetLabel("Claude Code is not installed on this computer.")
@@ -12541,7 +12548,7 @@ class SetupWizard(wx.Dialog):
         self.Layout()
         announce(" ".join(filter(None, (self._cli_status.GetLabel(), hint))))
 
-    def _check_npm_backend_cli(self) -> None:
+    def _check_npm_backend_cli(self, force_update_check: bool = False) -> None:
         """Check a non-Claude backend without showing Claude-specific guidance."""
         info = BACKENDS[self.backend]
         self._backend_path = self._find_selected_cli()
@@ -12552,7 +12559,7 @@ class SetupWizard(wx.Dialog):
             self._cli_status.SetLabel(f"{info.label} found:")
             self._cli_detail.SetLabel(self._backend_path)
             self._cli_install_btn.Hide()
-            self._cli_update_btn.Show()
+            self._cli_update_btn.Hide()
             self._cli_check_btn.Hide()
             if on_path:
                 self._cli_path_btn.Hide()
@@ -12565,6 +12572,7 @@ class SetupWizard(wx.Dialog):
                 self._cli_path_btn.Show()
                 hint = "Tab to Add to PATH to make the CLI available in new terminals."
             self._next_btn.Enable(True)
+            self._check_backend_updates(self._backend_path, force_update_check)
         elif not _backend_installs_with_npm(self.backend):
             # This backend does not come from npm: it has an installer of its
             # own. Offer it when the prerequisites are here, and name what is
@@ -12637,6 +12645,45 @@ class SetupWizard(wx.Dialog):
         self._pages[1].Layout()
         self.Layout()
         announce(" ".join(filter(None, (self._cli_status.GetLabel(), hint))))
+
+    def _check_backend_updates(self, binary: str, force: bool = False) -> None:
+        backend = self.backend
+        generation = self._update_check_generation
+
+        def work() -> None:
+            result = self._backend_update_service.check(backend, force=force)
+            wx.CallAfter(self._on_backend_update_check, generation, backend, binary, result)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_backend_update_check(
+        self, generation: int, backend: str, binary: str, result: BackendUpdateResult
+    ) -> None:
+        if (
+            not self
+            or self._step != 1
+            or generation != self._update_check_generation
+            or backend != self.backend
+        ):
+            return
+        label = backend_label(backend)
+        self._cli_update_btn.Hide()
+        self._cli_check_btn.Hide()
+        state = result.state
+        if state is BackendUpdateState.UPDATE_AVAILABLE:
+            self._cli_status.SetLabel(f"{label} update {result.available_version} is available.")
+            self._cli_detail.SetLabel(f"{binary}\n\nChoose Update {label} to install it manually.")
+            self._cli_update_btn.Show()
+        elif state is BackendUpdateState.CURRENT:
+            self._cli_status.SetLabel(f"{label} version {result.installed_version} is current.")
+            self._cli_detail.SetLabel(binary)
+        elif state is BackendUpdateState.FAILED:
+            self._cli_status.SetLabel(f"Could not check {label} for updates.")
+            self._cli_detail.SetLabel(f"{binary}\n\n{result.failure_reason or 'Try Check Again.'}")
+            self._cli_check_btn.Show()
+        self._pages[1].Layout()
+        self.Layout()
+        announce(self._cli_status.GetLabel())
 
     def _cli_log_line(self, text: str) -> None:
         """Append a line of installer output and speak it."""
@@ -12773,6 +12820,7 @@ class SetupWizard(wx.Dialog):
         if updated:
             invalidate_model_options(self.backend)
             announce(f"{label} is up to date.")
+            self._backend_update_service.invalidate(self.backend)
         else:
             self._cli_status.SetLabel(f"The {label} update did not complete.")
             announce(f"The {label} update did not complete. Review the updater output.")
