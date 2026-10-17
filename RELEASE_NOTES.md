@@ -1,5 +1,5 @@
-# BlindPilot 0.47.7
+# BlindPilot 0.47.9
 
-This release hardens the build pipeline; the app itself is unchanged.
+This release adds two security checks to the project; the app itself is unchanged.
 
-- The CI and release workflows now pin every GitHub Action to a full commit SHA instead of a mutable tag, so a moved or compromised tag cannot change what runs, and Dependabot is configured to keep the pins current. Thanks to Farhan Khan for the hardening.
+- CodeQL static analysis now runs from a workflow in this repository — on pushes, pull requests, and a weekly schedule — replacing GitHub's default setup, and every pull request gets a dependency review that fails if the change introduces a known-vulnerable dependency. Thanks to Farhan Khan.

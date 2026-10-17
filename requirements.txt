@@ -1,4 +1,10 @@
-wxPython>=4.2
+# PyPI publishes no Linux wheel for wxPython. The project ships distro
+# wheels as release assets instead; this one matches the supported Linux
+# configuration, Ubuntu 24.04 on CPython 3.12, which is what CI tests.
+# Supersedes the Dependabot bump in #90, which broke Linux for exactly
+# this reason. A future wxPython bump must update this asset name too.
+wxPython @ https://github.com/wxWidgets/Phoenix/releases/download/wxPython-4.3.1/wxpython-4.3.1+ubuntu2404-cp312-cp312-linux_x86_64.whl ; sys_platform == "linux"
+wxPython>=4.3.1 ; sys_platform != "linux"
 httpx>=0.28.1
 # The root certificates a packaged build verifies against. It arrives with
 # httpx anyway, but `certificates.py` imports it by name: the frozen OpenSSL

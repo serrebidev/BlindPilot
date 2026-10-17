@@ -2,6 +2,14 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.47.9 - 2026-10-17
+
+- CodeQL static analysis now runs from a workflow in the repo (push, pull request, and a weekly schedule), replacing GitHub's default setup, and pull requests get a dependency review that fails if a change introduces a known-vulnerable dependency. No app behaviour changes. Thanks to Farhan Khan.
+
+## v0.47.8 - 2026-10-16
+
+- wxPython updated to 4.3.1 on every platform: Windows and macOS from PyPI, Linux from the official distro wheel wxPython publishes for Ubuntu 24.04, since PyPI ships no Linux wheel. Completes the Dependabot bump in #90 without leaving Linux behind. Also carries the ruff and hypothesis updates from #89 and #91.
+
 ## v0.47.7 - 2026-10-16
 
 - CI and release workflows now pin every GitHub Action to a full commit SHA instead of a mutable tag, and Dependabot is configured to keep those pins updated. No app behaviour changes. Thanks to Farhan Khan for the hardening.
