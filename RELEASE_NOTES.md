@@ -1,5 +1,5 @@
-# BlindPilot 0.47.8
+# BlindPilot 0.47.9
 
-This release updates the wxPython toolkit to 4.3.1 on all platforms.
+This release adds two security checks to the project; the app itself is unchanged.
 
-- wxPython 4.3.1 everywhere: Windows and macOS from PyPI, and Linux from the official distro wheel wxPython publishes for Ubuntu 24.04, since PyPI ships no Linux wheel. This completes the Dependabot bump in #90 without leaving Linux on the older 4.2 line. The development dependencies ruff and hypothesis are also at their latest.
+- CodeQL static analysis now runs from a workflow in this repository — on pushes, pull requests, and a weekly schedule — replacing GitHub's default setup, and every pull request gets a dependency review that fails if the change introduces a known-vulnerable dependency. Thanks to Farhan Khan.
