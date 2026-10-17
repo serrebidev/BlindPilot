@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.47.11 - 2026-10-17
+
+- wxPython updated to 4.3.2 on every platform: Windows and macOS from PyPI, Linux from the official distro wheel wxPython publishes for Ubuntu 24.04, since PyPI ships no Linux wheel. Same approach as the 4.3.1 bump in #92.
+
 ## v0.47.10 - 2026-10-17
 
 - Setup wizard now checks whether a backend CLI has an update available: npm-backed backends report the latest version, official-installer backends report installed status only, with bounded caching and a manual refresh. Updates stay manual. Thanks to Farhan Khan.
