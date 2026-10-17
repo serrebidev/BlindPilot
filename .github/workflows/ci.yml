@@ -61,11 +61,14 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-wxgtk4.0 xvfb
+          sudo apt-get install -y --no-install-recommends python3-wxgtk4.0 xvfb libsdl2-2.0-0
           # PyPI has no Linux wheel for wxPython, only a source archive that
           # needs the GTK development headers and the better part of an hour.
-          # Ubuntu ships one already built; the environment is given sight of
-          # it rather than building a second one.
+          # requirements.txt points pip at the distro wheel wxPython itself
+          # publishes instead. Ubuntu's package above provides the GTK
+          # runtime libraries that wheel links against, and libsdl2-2.0-0
+          # covers the SDL2 library the 4.3 wheel needs and nothing else
+          # here pulls in.
           python3 -m venv --system-site-packages .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
