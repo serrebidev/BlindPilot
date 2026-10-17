@@ -1,5 +1,5 @@
-# BlindPilot 0.47.9
+# BlindPilot 0.47.10
 
-This release adds two security checks to the project; the app itself is unchanged.
+This release makes backend updates visible in the setup wizard.
 
-- CodeQL static analysis now runs from a workflow in this repository — on pushes, pull requests, and a weekly schedule — replacing GitHub's default setup, and every pull request gets a dependency review that fails if the change introduces a known-vulnerable dependency. Thanks to Farhan Khan.
+- A shared backend update check reports current, update-available, or failure status accessibly in the setup wizard: npm-backed CLIs are compared against the latest published version, and official-installer backends report installed status only. Results are cached briefly with a manual refresh, and installing an update stays a manual step. Thanks to Farhan Khan.
