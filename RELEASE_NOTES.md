@@ -1,5 +1,5 @@
-# BlindPilot 0.47.10
+# BlindPilot 0.47.11
 
-This release makes backend updates visible in the setup wizard.
+This release updates the GUI toolkit underneath the app.
 
-- A shared backend update check reports current, update-available, or failure status accessibly in the setup wizard: npm-backed CLIs are compared against the latest published version, and official-installer backends report installed status only. Results are cached briefly with a manual refresh, and installing an update stays a manual step. Thanks to Farhan Khan.
+- wxPython is updated to 4.3.2 on every platform: Windows and macOS from PyPI, Linux from the official distro wheel wxPython publishes for Ubuntu 24.04, since PyPI ships no Linux wheel. No app behaviour changes.
