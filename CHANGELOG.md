@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.47.14 - 2026-10-18
+
+- Demon Route is now a built-in Chat provider: pick it under Chat, Accounts and enter one Demon Route API key, with no base URL to type in. It routes to open-weight text models over an OpenAI-compatible endpoint, billed prepaid. It is text only and has no server-side tools, so chats that need tools stay on the providers that offer them.
+
 ## v0.47.13 - 2026-10-17
 
 - Command Code autorouter: per-model outcome feedback over rolling weeks. A model that fails on provider infrastructure twice in a week is now withheld from routing until one success on it clears the record, and `model_leaderboard()` / `leaderboard()` expose which models are on the board week by week. Outcomes are recorded automatically from each turn (success on completion, infra failure on a capacity stop).
