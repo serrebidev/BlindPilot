@@ -53,7 +53,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 # The capability tiers, cheapest first. A tier is a human judgement; only the
 # price ranking inside it is automatic.
@@ -391,6 +391,26 @@ def plan_eligible(min_plan: str, max_plan: str = "go") -> bool:
     return needed <= _PLAN_RANK.get(max_plan, 1)
 
 
+def _leaderboard_rank(*sources: Optional[Iterable[str]]) -> dict:
+    """Map model id (casefolded) to a popularity rank from the given sources.
+
+    Lower is more popular. An empty mapping means "no preference".
+    """
+    rank = {}
+    position = 0
+    for source in sources:
+        if not source:
+            continue
+        for model in source:
+            if not model:
+                continue
+            key = str(model).casefold()
+            if key not in rank:
+                rank[key] = position
+                position += 1
+    return rank
+
+
 def select(
     tier: str,
     catalog: dict,
@@ -401,6 +421,8 @@ def select(
     cooldown: bool = False,
     exclude_models: Optional[set[str]] = None,
     context_tokens: Optional[int] = None,
+    leaderboard: Optional[Iterable[str]] = None,
+    external_leaderboard: Optional[Iterable[str]] = None,
 ) -> Optional[Route]:
     """The cheapest eligible model for a tier, or None when none qualifies.
 
@@ -417,8 +439,11 @@ def select(
         return None
     peak = is_peak(now)
     excluded = {str(m).casefold() for m in exclude_models or ()}
+    penalized = model_penalties(now)
+    popular = _leaderboard_rank(leaderboard, external_leaderboard)
     best_model = ""
     best_cost = float("inf")
+    best_rank = None
     for model_id in _TIER_CANDIDATES.get(tier, ()):
         entry = catalog.get(model_id)
         if not entry:
@@ -434,14 +459,22 @@ def select(
             continue
         if model_id.casefold() in excluded:
             continue
+        if model_id.casefold() in penalized:
+            continue
         if capacity_cooling_down(model_id, now):
             continue
         if not plan_eligible(entry.get("minPlan", ""), _resolve_max_plan(max_plan)):
             continue
         cost = model_cost(entry, peak, context_tokens)
-        if cost < best_cost:
+        rank = popular.get(model_id.casefold(), len(popular) + 1 if popular else 0)
+        if (
+            cost < best_cost
+            or (cost == best_cost and best_rank is not None and rank < best_rank)
+            or (cost == best_cost and best_rank is None and popular and rank < (len(popular) + 1))
+        ):
             best_cost = cost
             best_model = model_id
+            best_rank = rank
     if not best_model:
         return None
     entry = catalog[best_model]
@@ -466,6 +499,9 @@ def route(
     exclude_models: Optional[set[str]] = None,
     context_tokens: Optional[int] = None,
     cancel_event: Optional[threading.Event] = None,
+    leaderboard: Optional[Iterable[str]] = None,
+    external_leaderboard: Optional[Iterable[str]] = None,
+    use_external_leaderboard: bool = False,
 ) -> Route:
     """The model and effort for a task.
 
@@ -489,6 +525,11 @@ def route(
     )
     cooldown = cooling_down(now)
     if active_catalog and (not static or cooldown or catalog is None):
+        if leaderboard is None and external_leaderboard is None and use_external_leaderboard:
+            try:
+                leaderboard = commandcode_leaderboard_models()
+            except Exception:  # noqa: BLE001 - optional data, never fatal
+                leaderboard = None
         chosen = select(
             tier,
             active_catalog,
@@ -498,6 +539,8 @@ def route(
             cooldown=cooldown,
             exclude_models=exclude_models,
             context_tokens=context_tokens,
+            leaderboard=leaderboard,
+            external_leaderboard=external_leaderboard,
         )
         if chosen is not None:
             return chosen
@@ -557,6 +600,7 @@ def best_free_model(
             if model_id not in candidate_ids:
                 candidate_ids.append(model_id)
     max_plan_resolved = _resolve_max_plan(max_plan)
+    penalized = model_penalties(now)
     for model_id in candidate_ids:
         entry = active_catalog.get(model_id)
         if (
@@ -564,6 +608,7 @@ def best_free_model(
             and entry
             and entry.get("free") is True
             and model_id not in _TRAINING_MODELS
+            and model_id.casefold() not in penalized
             and not capacity_cooling_down(model_id, now)
             and plan_eligible(entry.get("minPlan", ""), max_plan_resolved)
         ):
@@ -1078,6 +1123,305 @@ def cooling_down(now: Optional[datetime] = None) -> bool:
     return deadline > moment.astimezone(timezone.utc)
 
 
+# --------------------------------------------------------------------------
+# Model feedback / leaderboard
+#
+# Per-model outcome tracking over rolling weeks, the Python twin of the
+# terminal router's route-feedback log. A model that fails on provider
+# infrastructure twice inside a week is penalised (withheld from selection)
+# until one success on it clears the record, so a flaky upstream never keeps
+# being picked. The same record feeds a week-by-week leaderboard of which
+# models are actually succeeding, so a developer (or a future release check)
+# can see which models are on it and route accordingly.
+# --------------------------------------------------------------------------
+
+_MODEL_FEEDBACK_ENV = "COMMANDCODE_MODEL_FEEDBACK_JSON"
+_MODEL_FEEDBACK_FAILURE_LIMIT = 2
+_MODEL_FEEDBACK_WINDOW_DAYS = 7
+_MODEL_FEEDBACK_RETAIN_WEEKS = 8
+_MODEL_FEEDBACK_LOCK = threading.Lock()
+_MODEL_FEEDBACK_CACHE = _FileCache()
+
+
+def _model_feedback_path() -> Path:
+    override = os.environ.get(_MODEL_FEEDBACK_ENV)
+    if override:
+        return Path(override)
+    try:
+        from accessible_ai.storage.paths import app_data_dir
+
+        return app_data_dir() / "commandcode-model-feedback.json"
+    except Exception:  # noqa: BLE001 - state is best-effort, never fatal
+        return Path.home() / ".blindpilot" / "commandcode-model-feedback.json"
+
+
+def _read_model_feedback(path: Optional[Path] = None) -> list:
+    target = path if path is not None else _model_feedback_path()
+    try:
+        if target.is_file():
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and isinstance(loaded.get("outcomes"), list):
+                return list(loaded["outcomes"])
+            if isinstance(loaded, list):
+                return list(loaded)
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def _model_feedback_file_lock(path: Path):
+    """Cross-process lock mirroring the usage-state one."""
+    lock_path = path.with_name(f".{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class _Ctx:
+        def __enter__(self):
+            self._file = lock_path.open("a+b")
+            self._file.seek(0)
+            if sys.platform == "win32":
+                import msvcrt
+
+                timeout = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        msvcrt.locking(self._file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if time.monotonic() >= timeout:
+                            raise
+                        time.sleep(0.05)
+            else:
+                import fcntl
+
+                timeout = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError:
+                        if time.monotonic() >= timeout:
+                            raise
+                        time.sleep(0.05)
+            return self
+
+        def __exit__(self, *exc):
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    self._file.seek(0)
+                    msvcrt.locking(self._file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            self._file.close()
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            return False
+
+    return _Ctx()
+
+
+def _write_model_feedback(outcomes: list, path: Optional[Path] = None) -> None:
+    target = path if path is not None else _model_feedback_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Prune outcomes older than the retention window so the file stays small.
+    cutoff = datetime.now(timezone.utc) - timedelta(weeks=_MODEL_FEEDBACK_RETAIN_WEEKS)
+    kept: list = []
+    for entry in outcomes:
+        try:
+            moment = datetime.fromisoformat(str(entry.get("time", "")))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            if moment < cutoff:
+                continue
+        except (ValueError, TypeError, AttributeError):
+            pass
+        kept.append(entry)
+    temporary_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump({"outcomes": kept}, temporary, indent=2)
+        os.replace(temporary_path, target)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _update_model_feedback(mutate: Callable[[list], None]) -> bool:
+    """Apply *mutate* to the feedback list under the file lock."""
+    path = _model_feedback_path()
+    with _MODEL_FEEDBACK_LOCK:
+        try:
+            with _model_feedback_file_lock(path):
+                outcomes = _read_model_feedback(path)
+                mutate(outcomes)
+                _write_model_feedback(outcomes, path)
+        except OSError:
+            return False
+    return True
+
+
+def record_model_outcome(
+    model: str,
+    *,
+    success: bool = False,
+    infra_failure: bool = False,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Record one outcome for *model* in the feedback log.
+
+    Returns False when the record could not be written. A success clears the
+    model's accumulated infra failures in the penalty tally (see
+    ``model_penalties``); the raw record is always kept for the leaderboard.
+    """
+    if not model or not str(model).strip():
+        return False
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+
+    def mutate(outcomes: list) -> None:
+        outcomes.append(
+            {
+                "model": str(model).strip(),
+                "time": moment.isoformat(),
+                "success": bool(success),
+                "infraFailure": bool(infra_failure),
+            }
+        )
+
+    return _update_model_feedback(mutate)
+
+
+def _sorted_feedback(now: Optional[datetime] = None) -> list:
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    outcomes = _read_model_feedback()
+    decorated = []
+    for entry in outcomes:
+        try:
+            when = datetime.fromisoformat(str(entry.get("time", "")))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError, AttributeError):
+            continue
+        decorated.append((when, entry))
+    decorated.sort(key=lambda item: item[0])
+    return decorated
+
+
+def model_penalties(now: Optional[datetime] = None) -> set:
+    """Model ids (casefolded) with too many infra failures in the last week.
+
+    A success on a model clears its accumulated failures, mirroring the
+    terminal router's feedback rule.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    cutoff = moment - timedelta(days=_MODEL_FEEDBACK_WINDOW_DAYS)
+    failures: dict = {}
+    for when, entry in _sorted_feedback(now):
+        if when < cutoff:
+            continue
+        model = entry.get("model")
+        if not model:
+            continue
+        key = str(model).casefold()
+        if entry.get("success"):
+            failures.pop(key, None)
+        elif entry.get("infraFailure"):
+            failures[key] = failures.get(key, 0) + 1
+    return {model for model, count in failures.items() if count >= _MODEL_FEEDBACK_FAILURE_LIMIT}
+
+
+def penalized_models(now: Optional[datetime] = None) -> set:
+    """Alias for ``model_penalties``."""
+    return model_penalties(now)
+
+
+def model_leaderboard(*, weeks: int = 4, now: Optional[datetime] = None) -> dict:
+    """Week-by-week leaderboard of model outcomes.
+
+    Returns a mapping of ISO-week key (``YYYY-Www``) to a list of rows sorted
+    by score descending. Each row carries the model id, success/failure/infra
+    counts, attempt count and a simple success-rate score. Weeks with no data
+    are omitted; the keys are ordered most-recent first in the returned dict.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    if weeks < 1:
+        weeks = 1
+    cutoff = moment - timedelta(weeks=weeks)
+    buckets: dict = {}
+    for when, entry in _sorted_feedback(now):
+        if when < cutoff:
+            continue
+        model = entry.get("model")
+        if not model:
+            continue
+        iso = when.isocalendar()
+        key = f"{iso.year}-W{iso.week:02d}"
+        bucket = buckets.setdefault(key, {})
+        stats = bucket.setdefault(
+            str(model),
+            {"successes": 0, "failures": 0, "infra_failures": 0, "attempts": 0},
+        )
+        stats["attempts"] += 1
+        if entry.get("success"):
+            stats["successes"] += 1
+        else:
+            stats["failures"] += 1
+        if entry.get("infraFailure"):
+            stats["infra_failures"] += 1
+
+    result: dict = {}
+    # Order weeks most-recent first.
+    for key in sorted(buckets.keys(), reverse=True):
+        rows = []
+        for model, stats in buckets[key].items():
+            attempts = stats["attempts"] or 1
+            score = (stats["successes"] + 0.5 * (stats["attempts"] - stats["successes"])) / attempts
+            score -= 0.1 * stats["infra_failures"]
+            rows.append(
+                {
+                    "model": model,
+                    "successes": stats["successes"],
+                    "failures": stats["failures"],
+                    "infra_failures": stats["infra_failures"],
+                    "attempts": stats["attempts"],
+                    "score": round(score, 4),
+                }
+            )
+        rows.sort(key=lambda row: (-row["score"], -row["successes"], row["model"]))
+        result[key] = rows
+    return result
+
+
+def leaderboard(*, weeks: int = 4, now: Optional[datetime] = None) -> dict:
+    """Alias for ``model_leaderboard``: which models are on the board, week by week."""
+    return model_leaderboard(weeks=weeks, now=now)
+
+
 def capacity_cooling_down(model: str, now: Optional[datetime] = None) -> bool:
     """Whether a model's providers are still recorded as at capacity."""
     if not model:
@@ -1094,3 +1438,141 @@ def capacity_cooling_down(model: str, now: Optional[datetime] = None) -> bool:
     if deadline is None:
         return False
     return deadline > moment.astimezone(timezone.utc)
+
+
+# --------------------------------------------------------------------------
+# External Command Code leaderboard (OpenRouter)
+#
+# Command Code publishes which models its users actually run, week by week, on
+# OpenRouter. This is a read-only view of that board: it never changes routing
+# on its own, but callers (and a future release check) can consult it.
+# --------------------------------------------------------------------------
+
+_COMMANDCODE_LEADERBOARD_URL = "https://openrouter.ai/apps/url/https%3A%2F%2Fcommandcode.ai%2F"
+_COMMANDCODE_LEADERBOARD_FILE_ENV = "COMMANDCODE_LEADERBOARD_FILE"
+_COMMANDCODE_LEADERBOARD_URL_ENV = "COMMANDCODE_LEADERBOARD_URL"
+_COMMANDCODE_LEADERBOARD_TTL_SECONDS = 3600.0
+_COMMANDCODE_LEADERBOARD_CACHE = _FileCache()
+
+
+def parse_commandcode_leaderboard(html: str) -> list:
+    """Parse the OpenRouter Command Code app page into ranked model rows.
+
+    Each row carries ``rank``, ``name``, ``url`` and ``model`` (the OpenRouter
+    slug taken from the URL). Returns an empty list when nothing parseable is
+    found, so a page change degrades to "no data" rather than an error.
+    """
+    if not html:
+        return []
+    # Prefer the JSON-LD ItemList, which is the stable part of the page.
+    for match in re.finditer(
+        r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            data = json.loads(match.group(1))
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(data, dict) or data.get("@type") != "ItemList":
+            continue
+        rows: list[dict[str, Any]] = []
+        for item in data.get("itemListElement") or []:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            url = item.get("item")
+            if not name or not url:
+                continue
+            slug = str(url).rstrip("/").rsplit("/", 2)
+            model = "/".join(slug[-2:]) if len(slug) >= 2 else str(url).rstrip("/").split("/")[-1]
+            try:
+                rank = int(item.get("position") or len(rows) + 1)
+            except (TypeError, ValueError):
+                rank = len(rows) + 1
+            rows.append(
+                {
+                    "rank": rank,
+                    "name": str(name),
+                    "url": str(url),
+                    "model": model,
+                }
+            )
+        if rows:
+            return sorted(rows, key=lambda row: row["rank"])
+    # Fallback: scrape the visible links in the top-models block.
+    rows = []
+    for match in re.finditer(
+        r'href="(https://openrouter\.ai/[^"]+)"[^>]*>\s*([^<]+?)\s*</a>',
+        html,
+    ):
+        url, name = match.group(1), match.group(2).strip()
+        if not name or "openrouter.ai" not in url:
+            continue
+        if url.endswith("/apps") or "/apps/" in url and url.endswith("commandcode.ai/"):
+            continue
+        slug = url.rstrip("/").rsplit("/", 2)
+        model = "/".join(slug[-2:]) if len(slug) >= 2 else url.rstrip("/").split("/")[-1]
+        if model in {"apps", "models", "rankings"}:
+            continue
+        if any(row["model"] == model for row in rows):
+            continue
+        rows.append({"rank": len(rows) + 1, "name": name, "url": url, "model": model})
+        if len(rows) >= 20:
+            break
+    return rows
+
+
+def _read_commandcode_leaderboard_source() -> str:
+    override_file = os.environ.get(_COMMANDCODE_LEADERBOARD_FILE_ENV)
+    if override_file:
+        try:
+            return Path(override_file).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    url = os.environ.get(_COMMANDCODE_LEADERBOARD_URL_ENV, _COMMANDCODE_LEADERBOARD_URL)
+    try:
+        import urllib.request
+
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "BlindPilot/commandcode-router"}
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read().decode("utf-8", "replace")
+    except (OSError, ValueError, UnicodeDecodeError):
+        return ""
+
+
+def commandcode_leaderboard(*, force: bool = False) -> list:
+    """Top models used by Command Code on OpenRouter, most popular first.
+
+    Network access is best-effort: a failure (or an empty parse) returns an
+    empty list. Results are cached for an hour.
+    """
+    global _COMMANDCODE_LEADERBOARD_CACHE
+    cache = _COMMANDCODE_LEADERBOARD_CACHE
+    if not force and _cache_fresh(
+        cache, "commandcode-leaderboard", None, _COMMANDCODE_LEADERBOARD_TTL_SECONDS
+    ):
+        return list(cache.data.get("rows", []))
+    html = _read_commandcode_leaderboard_source()
+    rows = parse_commandcode_leaderboard(html)
+    _COMMANDCODE_LEADERBOARD_CACHE = _FileCache(
+        "commandcode-leaderboard", None, time.monotonic(), {"rows": rows}
+    )
+    return list(rows)
+
+
+def fetch_commandcode_leaderboard(*, force: bool = False) -> list:
+    """Alias for :func:`commandcode_leaderboard`."""
+    return commandcode_leaderboard(force=force)
+
+
+def commandcode_leaderboard_models(*, force: bool = False) -> list:
+    """Just the OpenRouter model slugs from :func:`commandcode_leaderboard`."""
+    return [row["model"] for row in commandcode_leaderboard(force=force)]
+
+
+# Aliases matching the module's existing naming habits.
+openrouter_commandcode_leaderboard = commandcode_leaderboard
+external_leaderboard = commandcode_leaderboard
