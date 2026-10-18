@@ -53,7 +53,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 # The capability tiers, cheapest first. A tier is a human judgement; only the
 # price ranking inside it is automatic.
@@ -1476,7 +1476,7 @@ def parse_commandcode_leaderboard(html: str) -> list:
             continue
         if not isinstance(data, dict) or data.get("@type") != "ItemList":
             continue
-        rows = []
+        rows: list[dict[str, Any]] = []
         for item in data.get("itemListElement") or []:
             if not isinstance(item, dict):
                 continue
@@ -1487,7 +1487,7 @@ def parse_commandcode_leaderboard(html: str) -> list:
             slug = str(url).rstrip("/").rsplit("/", 2)
             model = "/".join(slug[-2:]) if len(slug) >= 2 else str(url).rstrip("/").split("/")[-1]
             try:
-                rank = int(item.get("position"))
+                rank = int(item.get("position") or len(rows) + 1)
             except (TypeError, ValueError):
                 rank = len(rows) + 1
             rows.append(

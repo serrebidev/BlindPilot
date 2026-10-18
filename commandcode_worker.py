@@ -400,6 +400,7 @@ class CommandcodeWorker(threading.Thread):
         # it. A level sent to a model that takes none ends the run before it
         # starts, so the turn is retried once without it rather than failed.
         self._run_effort = ""
+        self._run_model = ""
         self._effort_refused = False
         self._effort_retried = False
         self._effort_note = ""
@@ -1234,7 +1235,7 @@ class CommandcodeWorker(threading.Thread):
                 self._completed = True
                 self._on_complete(text or "Stopped")
             return
-        if code == 0 and getattr(self, "_run_model", ""):
+        if code == 0 and self._run_model:
             try:
                 record_model_outcome(self._run_model, success=True)
             except Exception:  # noqa: BLE001 - feedback must never mask a turn
