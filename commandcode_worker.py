@@ -58,6 +58,8 @@ from commandcode_router import (
     best_free_model,
     record_capacity_hit,
     record_limit_hit,
+    commandcode_leaderboard_models,
+    record_model_outcome,
     route,
     strongest_effort,
 )
@@ -591,6 +593,7 @@ class CommandcodeWorker(threading.Thread):
                     self._prompt,
                     context_tokens=self._auto_context_tokens,
                     cancel_event=self._cancel_event,
+                    leaderboard=commandcode_leaderboard_models(),
                 )
                 if chosen.model:
                     self._model = chosen.model
@@ -1231,6 +1234,11 @@ class CommandcodeWorker(threading.Thread):
                 self._completed = True
                 self._on_complete(text or "Stopped")
             return
+        if code == 0 and getattr(self, "_run_model", ""):
+            try:
+                record_model_outcome(self._run_model, success=True)
+            except Exception:  # noqa: BLE001 - feedback must never mask a turn
+                pass
         if code in (5, 10):
             # Record every real limit stop, even when replay is unsafe because
             # the turn already produced output or Auto fallback is disabled.
@@ -1271,6 +1279,10 @@ class CommandcodeWorker(threading.Thread):
             # a rate or credit stop is, so the next turn picks a model whose
             # providers are still up.
             record_capacity_hit(self._run_model)
+            try:
+                record_model_outcome(self._run_model, infra_failure=True)
+            except Exception:  # noqa: BLE001 - feedback must never mask a turn
+                pass
             if self._can_retry_after_capacity():
                 target = self._paid_capacity_retry()
                 if target is not None:
@@ -1365,6 +1377,7 @@ class CommandcodeWorker(threading.Thread):
                 exclude_models={self._run_model},
                 context_tokens=self.context_tokens[0] if self.context_tokens else None,
                 cancel_event=self._cancel_event,
+                leaderboard=commandcode_leaderboard_models(),
             )
         except Exception:  # noqa: BLE001 - optional routing must not mask the CLI failure
             return None

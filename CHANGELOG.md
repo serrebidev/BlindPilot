@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## Unreleased
+
+- Command Code autorouter: per-model outcome feedback over rolling weeks. A model that fails on provider infrastructure twice in a week is now withheld from routing until one success on it clears the record, and `model_leaderboard()` / `leaderboard()` expose which models are on the board week by week. Outcomes are recorded automatically from each turn (success on completion, infra failure on a capacity stop).
+
 ## v0.47.9 - 2026-10-17
 
 - CodeQL static analysis now runs from a workflow in the repo (push, pull request, and a weekly schedule), replacing GitHub's default setup, and pull requests get a dependency review that fails if a change introduces a known-vulnerable dependency. No app behaviour changes. Thanks to Farhan Khan.
