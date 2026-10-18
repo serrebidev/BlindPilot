@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.48.0 - 2026-10-18
+
+- Code Blocks (Ctrl+Shift+B) and Links (Ctrl+Shift+L), under Conversation, Find and Browse, provide searchable lists in Agent and Chat mode. Read an item, copy its complete text, or deliberately open a valid web link; other destinations are copy-only. Agent response menus can restrict the list to one response. Code extraction retains the original Markdown before speech cleanup, and interrupted or replayed replies retain their browseable content. Streaming no longer inserts an extra blank line when a chunk already ends with a newline.
+
 ## v0.47.14 - 2026-10-18
 
 - Demon Route is now a built-in Chat provider: pick it under Chat, Accounts and enter one Demon Route API key, with no base URL to type in. It routes to open-weight text models over an OpenAI-compatible endpoint, billed prepaid. It is text only and has no server-side tools, so chats that need tools stay on the providers that offer them.

@@ -418,6 +418,7 @@ def test_stopping_keeps_the_partial_answer_and_is_not_reported_as_an_error():
     assert panel.announced == ["Stopped"]
     assert panel._turns[0].response == "Got partway."
     assert panel._rows[0].payload == "Got partway."
+    assert panel._rows[0].source == "Got partway."
     assert panel._stream_response is None
     assert panel._stopping is False
     assert panel.send_btn.enabled is True
@@ -471,6 +472,38 @@ def test_finished_answer_that_never_streamed_is_still_added_to_the_list():
 
     assert [row.label for row in panel._rows[1:]] == ["FreeBuff: banana"]
     assert panel._rows[0].payload == "banana"
+    assert panel._rows[0].source == "banana"
+
+
+def test_browser_sources_survive_chunked_streams_failures_and_history_replay(monkeypatch):
+    import blindpilot_app as app
+    from conversation_items import collect_items
+
+    monkeypatch.setattr(app.SETTINGS, "live_rows", True)
+    for outcome in ("failure", "replay", "stop"):
+        panel = _stub_panel(app)
+        panel._turns = []
+        panel._stream_response = None
+        panel._response_count = 0
+        panel._streamed_assistant = ""
+        panel._rows = []
+        panel._begin_stream_response = lambda panel=panel: app.SessionPanel._begin_stream_response(
+            panel
+        )
+        for chunk in ("```python\n", 'status = "✅ ready"\n', "```"):
+            app.SessionPanel._on_activity(panel, "assistant", chunk)
+        assert panel._live_answer[2] == '```python\nstatus = "✅ ready"\n```'
+        if outcome == "failure":
+            app.SessionPanel._on_failed(panel, "Connection lost")
+        elif outcome == "replay":
+            app.SessionPanel._on_response_complete(panel, "")
+        else:
+            app.SessionPanel._finish_stopped_turn(panel)
+        header = next(row for row in panel._rows if row.kind == "header")
+        assert (
+            collect_items([("Response 1", header.source)], "code")[0].payload
+            == 'status = "✅ ready"\n'
+        )
 
 
 def test_answer_already_streamed_is_not_added_to_the_list_twice():

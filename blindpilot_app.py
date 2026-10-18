@@ -71,6 +71,7 @@ import claude_session
 import diagnostics
 from certificates import open_url
 from conversation_list import make_conversation_list
+from conversation_items import ConversationItem, ConversationItemsDialog, collect_items
 from app_updater import (
     GITHUB_REPOSITORY,
     ReleaseInfo,
@@ -349,7 +350,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.47.14"
+APP_VERSION = "0.48.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -5454,6 +5455,38 @@ class BugReportDialog(wx.Dialog):
         self.EndModal(wx.ID_OK)
 
 
+def _show_conversation_items(parent: wx.Window, messages: list[tuple[str, str]], kind: str) -> None:
+    title = "Links" if kind == "links" else "Code Blocks"
+    items = collect_items(messages, kind)
+    if not items:
+        announce(f"No {title.lower()} in this conversation or response")
+        return
+    focused = wx.Window.FindFocus()
+
+    def read(item: ConversationItem) -> None:
+        viewer = ReadView(dialog, item.payload, item.label, monospace=kind == "code")
+        try:
+            viewer.ShowModal()
+        finally:
+            viewer.Destroy()
+
+    dialog = ConversationItemsDialog(
+        parent,
+        items,
+        title,
+        links=kind == "links",
+        copy=_copy_to_clipboard,
+        read=read,
+        announce=announce,
+    )
+    try:
+        dialog.ShowModal()
+    finally:
+        dialog.Destroy()
+        if focused and not focused.IsBeingDeleted():
+            focused.SetFocus()
+
+
 class ReadView(wx.Dialog):
     """Modal read-only viewer for a single row's payload. Esc closes.
 
@@ -10339,6 +10372,8 @@ class SessionPanel(wx.Panel):
             for row in self._rows:
                 if row.response_number == self._stream_response and row.kind == "header":
                     row.payload = _strip_noise(partial)
+                    if row.source is None:
+                        row.source = partial
                     break
         self._stream_response = None
         self._refresh_list()
@@ -10926,7 +10961,7 @@ class SessionPanel(wx.Panel):
         if live is None or live[0] != n or live[1] != speaker:
             self._flush_live_answer()
             live = self._live_answer = [n, speaker, "", 0, 0]
-        if live[2] and not text[:1].isspace():
+        if live[2] and not live[2].endswith("\n") and not text[:1].isspace():
             # A chunk that arrived trimmed. A line break keeps a list item or
             # heading that starts it a block of its own, and is otherwise just
             # a space inside the paragraph.
@@ -10962,8 +10997,13 @@ class SessionPanel(wx.Panel):
 
     def _flush_live_answer(self) -> None:
         """Add the last block of the message being streamed; it has ended."""
-        if getattr(self, "_live_answer", None) is not None:
+        live = getattr(self, "_live_answer", None)
+        if live is not None:
             self._add_live_answer_rows(final=True)
+            for row in reversed(self._rows):
+                if row.kind == "header" and row.response_number == live[0]:
+                    row.source = f"{row.source}\n\n{live[2]}" if row.source else live[2]
+                    break
             self._live_answer = None
 
     def _say(self, text: str, kind: str = "assistant") -> bool:
@@ -11052,6 +11092,7 @@ class SessionPanel(wx.Panel):
         for row in self._rows:
             if row.response_number == self._stream_response and row.kind == "header":
                 row.payload = _strip_noise(text)
+                row.source = text
                 break
         # Streaming is best-effort: a backend can finish with text that
         # never arrived as activity. Without this the answer would exist
@@ -11479,6 +11520,20 @@ class SessionPanel(wx.Panel):
         return f"Copied {names.get(row.kind, 'paragraph')}"
 
     # ----- Per-row actions menu -----
+    def open_items(self, kind: str, response_number: int | None = None) -> None:
+        messages = []
+        for row in self._rows:
+            if row.kind not in {"header", "you"}:
+                continue
+            if response_number is not None and row.response_number != response_number:
+                continue
+            source = row.source if row.source is not None else row.payload
+            live = getattr(self, "_live_answer", None)
+            if row.kind == "header" and live is not None and live[0] == row.response_number:
+                source = f"{source}\n\n{live[2]}" if source else live[2]
+            messages.append((row.label, source))
+        _show_conversation_items(self, messages, kind)
+
     def _build_row_menu(self, row: Row) -> wx.Menu:
         """The actions offered for one row.
 
@@ -11494,6 +11549,16 @@ class SessionPanel(wx.Panel):
             self._read_formatted(row)
 
         menu.Bind(wx.EVT_MENU, read_formatted, formatted)
+        for kind, label in (
+            ("code", "Code Blocks in This Response…"),
+            ("links", "Links in This Response…"),
+        ):
+            item = menu.Append(wx.ID_ANY, label)
+            menu.Bind(
+                wx.EVT_MENU,
+                lambda _event, chosen=kind: self.open_items(chosen, row.response_number),
+                item,
+            )
         if row.kind == "code":
             item = menu.Append(wx.ID_ANY, "Save code to file…")
 
@@ -15047,13 +15112,27 @@ class MainFrame(wx.Frame):
             self._new_conversation_active,
         )
         menu.AppendSeparator()
+        browse = wx.Menu()
         add(
-            menu,
+            browse,
             "&Find in Responses…	Ctrl+F",
             "Search the responses in this session",
             self._find_active,
             wx.ID_FIND,
         )
+        self._menu_item(
+            browse,
+            "&Code Blocks…\tCtrl+Shift+B",
+            "Read and copy every code block in this conversation",
+            lambda: self._browse_items_active("code"),
+        )
+        self._menu_item(
+            browse,
+            "&Links…\tCtrl+Shift+L",
+            "Read, copy or open links in this conversation",
+            lambda: self._browse_items_active("links"),
+        )
+        menu.AppendSubMenu(browse, "Find and &Browse")
         add(
             menu,
             "&Jump to Latest Response\tCtrl+R",
@@ -16003,6 +16082,21 @@ class MainFrame(wx.Frame):
         if isinstance(page, SessionPanel):
             page.open_find()
 
+    def _browse_items_active(self, kind: str) -> None:
+        if self._app_mode == APP_MODE_CHAT:
+            panel = self.chat_panel
+            if panel is not None:
+                messages = [
+                    (f"{panel._history_role_label(entry.role)} {index}", entry.content)
+                    for index, entry in enumerate(panel.history_entries, 1)
+                    if entry.role in {"user", "assistant"}
+                ]
+                _show_conversation_items(panel, messages, kind)
+            return
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.open_items(kind)
+
     def _export_active(self) -> None:
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
@@ -16149,6 +16243,7 @@ Ctrl+Shift+I: what agents know: memories, tastes, instructions, skills and setti
 In Claude Code memories, Command Code tastes and Hermes memories, Alt+A adds one and Delete removes one.
 Alt+E edits whatever is selected; in the text, Ctrl+S saves.
 Ctrl+Shift+R: repeat the last announcement.
+Ctrl+Shift+B: browse code blocks. Ctrl+Shift+L: browse links, in Agent or Chat mode.
 Ctrl+Comma: Preferences. F1: this list.
 
 Prompt

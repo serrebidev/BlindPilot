@@ -95,7 +95,7 @@ CONVERSATION_ITEMS = [
     "Saved Prompts",
     "Compact Conversation",
     "Start New Conversation",
-    "Find in Responses",
+    "Find and Browse",
     "Jump to Latest Response",
     "Repeat Last Announcement",
     "Export Conversation",

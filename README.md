@@ -173,6 +173,7 @@ Help, Keyboard Shortcuts (F1) shows all of this inside the app.
 - Ctrl+Shift+H: reopen an old conversation. Ctrl+G: Hermes conversations, including ones still running.
 - Ctrl+Shift+K: shrink this conversation. Ctrl+Shift+N: start a fresh one.
 - Ctrl+F: search the answers. F3 and Shift+F3: next and previous match. Ctrl+R: jump to the latest answer.
+- Ctrl+Shift+B: browse all code blocks. Ctrl+Shift+L: browse links. Both work in Agent and Chat mode, under Conversation, Find and Browse. Filter searches full item text; Read Item reads it, and Copy preserves the code or address. Open Link opens a selected web link only when requested. In the Agent answers, the row's actions menu can limit either list to that response.
 - Ctrl+Shift+R: say the last announcement again, if a keypress cut it off.
 - Ctrl+E: save the conversation as Markdown, a web page, or plain text.
 - Ctrl+Shift+T: how long the current task has been running, what it did last, and how many messages are waiting.

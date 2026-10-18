@@ -122,6 +122,7 @@ class Row:
     response_number: int
     language: Optional[str] = None  # display name, code rows only
     lang_token: Optional[str] = None  # raw fence info word, code rows only
+    source: Optional[str] = None  # original Markdown on headers, before speech cleanup
 
 
 def _is_noise(cp: int) -> bool:
@@ -351,6 +352,7 @@ def parse_response(text: str, response_number: int) -> List[Row]:
         label=f"Response {response_number}",
         payload=full,
         response_number=response_number,
+        source=text or "",
     )
     rows: List[Row] = [header]
     if not full:
