@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.48.1 - 2026-10-18
+
+- The response-menu callbacks for Code Blocks and Links now have explicit parameter types, fixing the Windows CI type-inference failure reported after 0.48.0 was packaged. The shared source and callback behavior are unchanged.
+
 ## v0.48.0 - 2026-10-18
 
 - Code Blocks (Ctrl+Shift+B) and Links (Ctrl+Shift+L), under Conversation, Find and Browse, provide searchable lists in Agent and Chat mode. Read an item, copy its complete text, or deliberately open a valid web link; other destinations are copy-only. Agent response menus can restrict the list to one response. Code extraction retains the original Markdown before speech cleanup, and interrupted or replayed replies retain their browseable content. Streaming no longer inserts an extra blank line when a chunk already ends with a newline.

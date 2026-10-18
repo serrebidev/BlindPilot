@@ -350,7 +350,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.48.0"
+APP_VERSION = "0.48.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -11554,11 +11554,11 @@ class SessionPanel(wx.Panel):
             ("links", "Links in This Response…"),
         ):
             item = menu.Append(wx.ID_ANY, label)
-            menu.Bind(
-                wx.EVT_MENU,
-                lambda _event, chosen=kind: self.open_items(chosen, row.response_number),
-                item,
-            )
+
+            def browse_items(_event: wx.CommandEvent, chosen: str = kind) -> None:
+                self.open_items(chosen, row.response_number)
+
+            menu.Bind(wx.EVT_MENU, browse_items, item)
         if row.kind == "code":
             item = menu.Append(wx.ID_ANY, "Save code to file…")
 
