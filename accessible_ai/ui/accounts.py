@@ -19,6 +19,7 @@ from accessible_ai.models import (
     PROVIDER_CLAUDE,
     PROVIDER_COMMAND_CODE,
     PROVIDER_DEEPSEEK,
+    PROVIDER_DEMON_ROUTE,
     PROVIDER_GEMINI,
     PROVIDER_KIMI,
     PROVIDER_LABELS,
@@ -56,6 +57,7 @@ PROVIDER_ORDER = [
     PROVIDER_MOONSHOT,
     PROVIDER_KIMI,
     PROVIDER_DEEPSEEK,
+    PROVIDER_DEMON_ROUTE,
     PROVIDER_COMMAND_CODE,
     PROVIDER_OPENCODE_GO,
     PROVIDER_OPENAI_COMPATIBLE,
@@ -104,6 +106,10 @@ BUILTIN_PROVIDER_NOTES = {
     ),
     PROVIDER_DEEPSEEK: (
         "DeepSeek connection addresses are built in. Enter an account name and your DeepSeek API key. "
+        "You do not need to enter or verify any URL."
+    ),
+    PROVIDER_DEMON_ROUTE: (
+        "Demon Route connection addresses are built in. Enter an account name and your Demon Route API key. "
         "You do not need to enter or verify any URL."
     ),
     PROVIDER_COMMAND_CODE: (

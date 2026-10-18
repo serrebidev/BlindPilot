@@ -10,6 +10,7 @@ from accessible_ai.models import (
     PROVIDER_CLAUDE,
     PROVIDER_COMMAND_CODE,
     PROVIDER_DEEPSEEK,
+    PROVIDER_DEMON_ROUTE,
     PROVIDER_GEMINI,
     PROVIDER_KIMI,
     PROVIDER_MOONSHOT,
@@ -54,6 +55,9 @@ _BUILTIN_PROVIDERS: dict[str, tuple[str, str]] = {
     # a separate API key, which is why it is a separate provider here.
     PROVIDER_KIMI: ("https://api.moonshot.cn/v1", API_MODE_CHAT),
     PROVIDER_DEEPSEEK: ("https://api.deepseek.com/v1", API_MODE_CHAT),
+    # Demon Route: one prepaid key routing to open-weight models over an
+    # OpenAI-compatible surface. Text only; it has no server-side tools.
+    PROVIDER_DEMON_ROUTE: ("https://api.demonroute.com/v1", API_MODE_CHAT),
 }
 
 BUILTIN_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
