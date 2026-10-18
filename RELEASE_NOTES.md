@@ -1,7 +1,6 @@
-# BlindPilot 0.47.13
+# BlindPilot 0.47.14
 
-This release teaches the Command Code autorouter from experience.
+Chat gains a named Demon Route account type.
 
-- Per-model outcome feedback over rolling weeks: a model that fails on provider infrastructure twice in a week is withheld from routing until one success on it clears the record. Outcomes are recorded automatically from each turn (success on completion, infra failure on a capacity stop), and `model_leaderboard()` / `leaderboard()` expose which models are on the board week by week.
-- OpenRouter's public Command Code usage leaderboard is integrated as a routing input, with cached fetch and parse helpers, so a page change degrades to "no data" rather than an error.
-- Adds the AGENTS.md contributor guide. Thanks to Farhan Khan for the original work in #97, ported onto current main in #98.
+- Demon Route is now a built-in provider under Chat, Accounts: enter an account name and your Demon Route API key, and the connection address (https://api.demonroute.com/v1) is filled in for you. The key is kept in your system's password store, like every other account.
+- One key reaches Demon Route's catalogue of open-weight text models, billed prepaid, and the model list is fetched from the service as usual. Demon Route is text only and offers no server-side tools such as web search or image generation; those stay on OpenRouter and the other providers that have them.
