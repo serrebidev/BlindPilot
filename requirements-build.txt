@@ -1,7 +1,7 @@
 -r requirements.txt
 pyinstaller>=6.22.3
 pytest>=9.1.1
-ruff>=0.17.0
+ruff>=0.17.1
 mypy>=2.4.0
 # A hung test fails in a minute instead of running out GitHub's six-hour
 # default, and the order is shuffled so one test cannot quietly depend on
