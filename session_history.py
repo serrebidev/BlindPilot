@@ -83,8 +83,9 @@ TITLE_LIMIT = 90
 # enormous transcript cannot stall the dialog.
 _MAX_HEAD_LINES = 400
 
-# Transcripts this large are not read back into rows. Nothing legitimate comes
-# close; the guard is against a corrupt or runaway file freezing the GUI.
+# Bound file-based transcript reads so a huge file cannot freeze the GUI.
+# Codex rollouts can legitimately exceed this; its database reader does not
+# read the rollout and applies this guard only when falling back to that file.
 _MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 
 # The same guard for a backend that keeps every conversation in one store: how
@@ -1057,7 +1058,11 @@ def _codex_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     turns = _codex_db_turns(entry)
     if turns:
         return turns
-    if entry.path and Path(entry.path).is_file():
+    if (
+        entry.path
+        and Path(entry.path).is_file()
+        and Path(entry.path).stat().st_size <= _MAX_TRANSCRIPT_BYTES
+    ):
         return _jsonl_turns(_CODEX, entry)
     return []
 
@@ -1635,7 +1640,10 @@ def load_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     # its size is no measure of this one -- and on a machine that has used
     # Hermes for a while the shared store passes this limit, which would hide
     # every conversation at once. Both cap themselves, in rows, while reading.
-    if backend not in (BACKEND_OPENCODE, BACKEND_HERMES) and entry.resumable:
+    # Codex also reads a shared database first. Its rollout may be hundreds of
+    # megabytes of tool output even when the messages in the database are small.
+    # Let its reader apply the file guard only if it needs the rollout fallback.
+    if backend not in (BACKEND_OPENCODE, BACKEND_HERMES, BACKEND_CODEX) and entry.resumable:
         try:
             path = Path(entry.path)
             if path.is_file() and path.stat().st_size > _MAX_TRANSCRIPT_BYTES:

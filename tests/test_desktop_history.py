@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -79,6 +80,46 @@ def test_codex_conversations_come_from_its_databases(home):
 
     turns = session_history.load_turns(entries[1])
     assert [(t.prompt, t.response) for t in turns] == [("Fix the build", "Looking.\n\nFixed.")]
+
+
+def test_codex_database_history_loads_despite_an_oversized_rollout(home, monkeypatch):
+    _codex(home)
+    rollout = home / "large.jsonl"
+    rollout.write_bytes(b"tool output much larger than the displayed conversation")
+    monkeypatch.setattr(session_history, "_MAX_TRANSCRIPT_BYTES", 10)
+    entry = next(e for e in session_history.list_history("codex") if e.session_id == "t-cli")
+
+    turns = session_history.load_turns(replace(entry, path=str(rollout)))
+
+    assert [(t.prompt, t.response) for t in turns] == [("Fix the build", "Looking.\n\nFixed.")]
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+def test_codex_rollout_fallback_still_obeys_the_file_size_guard(home, monkeypatch, oversized):
+    rollout = home / "rollout.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Old conversation"}],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    limit = rollout.stat().st_size - int(oversized)
+    monkeypatch.setattr(session_history, "_MAX_TRANSCRIPT_BYTES", limit)
+    entry = session_history.HistoryEntry("codex", "old", "Old", str(rollout), 0)
+
+    turns = session_history.load_turns(entry)
+
+    assert [(t.prompt, t.response) for t in turns] == (
+        [] if oversized else [("Old conversation", "")]
+    )
 
 
 def test_freebuff_desktop_threads_are_listed_and_read(home, monkeypatch):
