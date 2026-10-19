@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.48.2 - 2026-10-19
+
+- Codex conversations with rollout files larger than 64 MiB can be reopened again: history now loads from Codex's database first, and the file-size guard applies only when falling back to reading the rollout file itself. Thanks to pitermach for PR #101.
+
 ## v0.48.1 - 2026-10-18
 
 - The response-menu callbacks for Code Blocks and Links now have explicit parameter types, fixing the Windows CI type-inference failure reported after 0.48.0 was packaged. The shared source and callback behavior are unchanged.
