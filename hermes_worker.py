@@ -39,7 +39,7 @@ from hermes_backend import (
     split_model_row,
     hermes_installed,
 )
-from markdown_rows import complete_sentences as _complete_sentences
+from markdown_rows import SentenceStreamer
 
 # How long a single read may block. Short enough that cancel is felt promptly,
 # long enough not to spin: the loop simply re-reads until the turn ends.
@@ -638,12 +638,16 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         # the stored id above, which is what survives a restart.
         self._live_session = ""
         self._answer_parts: list[str] = []
-        # How much of the answer has already been handed to the window. Hermes
+        # Hands the answer to the window a sentence at a time. Hermes
         # streams the answer in fragments of a few characters, and a fragment is
         # usually half a word: released as it arrives, a screen reader reads
         # torn words. So a fragment is held until it completes a sentence, and
         # only whole sentences are released while the turn is still running.
-        self._streamed = 0
+        self._fed_parts = 0
+        self._answer_streamer = SentenceStreamer(
+            lambda text: self._on_activity("assistant", text.rstrip()) if text.strip() else None,
+            live_edge=False,
+        )
         self._thinking_parts: list[str] = []
         # Hermes sends the turn's finished reasoning as one replacement event;
         # it wins over the streamed fragments when both arrive.
@@ -1638,17 +1642,16 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
         Always emits. When live rows are switched off in Options the window
         drops them; that setting is not consulted here.
         """
-        pending = "".join(self._answer_parts)[self._streamed :]
-        if not pending:
-            return
-        ready = pending if final else _complete_sentences(pending)
-        if not ready:
-            return
-        self._streamed += len(ready)
-        if ready.strip():
-            # Leading whitespace kept: the window joins these back into the
-            # message, and a paragraph break it drops merges two paragraphs.
-            self._on_activity("assistant", ready.rstrip())
+        # Only the parts the streamer has not seen yet: joining every part
+        # on every fragment made a long answer cost the square of its
+        # length. Leading whitespace is kept by the streamer's emit, as
+        # before: the window joins these back into the message, and a
+        # paragraph break it drops merges two paragraphs.
+        while self._fed_parts < len(self._answer_parts):
+            self._answer_streamer.feed(self._answer_parts[self._fed_parts])
+            self._fed_parts += 1
+        if final:
+            self._answer_streamer.flush()
 
     def _tool_start(self, payload: dict) -> None:
         name = str(payload.get("name") or "tool")

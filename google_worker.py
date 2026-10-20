@@ -64,7 +64,7 @@ from agent_backends import (
     own_group_kwargs,
     subprocess_env,
 )
-from markdown_rows import release_finished, release_remainder
+from markdown_rows import SentenceStreamer
 
 _BYPASS_MODE = "bypassPermissions"
 _STDERR_KEEP = 40
@@ -211,7 +211,8 @@ class _GoogleTurnWorker(_TurnWorker):
         self._error_lock = threading.Lock()
         self._stderr_thread: Optional[threading.Thread] = None
         self._parts: list[str] = []
-        self._streamed = 0
+        self._fed_parts = 0
+        self._answer_streamer = SentenceStreamer(self._say)
         self._started_notified = False
         self._session_seen = ""
         self._completed = False
@@ -423,14 +424,22 @@ class _GoogleTurnWorker(_TurnWorker):
     def _say(self, text: str) -> None:
         self._on_activity("assistant", text)
 
+    def _feed_streamer(self) -> None:
+        # Only the parts the streamer has not seen yet: joining every part
+        # on every delta made a long answer cost the square of its length.
+        while self._fed_parts < len(self._parts):
+            self._answer_streamer.feed(self._parts[self._fed_parts])
+            self._fed_parts += 1
+
     def _add_text(self, text: str) -> None:
         if not text:
             return
         self._parts.append(text)
-        self._streamed = release_finished("".join(self._parts), self._streamed, self._say)
+        self._feed_streamer()
 
     def _release_all(self) -> None:
-        self._streamed = release_remainder("".join(self._parts), self._streamed, self._say)
+        self._feed_streamer()
+        self._answer_streamer.flush()
 
     def _end_paragraph(self) -> None:
         """Close the paragraph a message ended on, so the next one starts fresh."""
@@ -438,7 +447,7 @@ class _GoogleTurnWorker(_TurnWorker):
         text = "".join(self._parts)
         if text.strip() and not text.endswith("\n\n"):
             self._parts.append("\n\n")
-            self._streamed = len(text) + 2
+            self._fed_parts = len(self._parts)
 
     def _complete(self, final: str) -> None:
         self._release_all()

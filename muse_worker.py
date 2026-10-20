@@ -50,7 +50,7 @@ from agent_backends import (
     subagent_status,
 )
 from hermes_backend import JsonRpcCalls, StdioTransport, windows_path_to_wsl
-from markdown_rows import release_finished, release_remainder
+from markdown_rows import SentenceStreamer
 
 from muse_backend import (
     muse_command,
@@ -241,7 +241,8 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._next_access_check = 0.0
         self._turn_id = ""
         self._assistant_parts: list[str] = []
-        self._streamed = 0
+        self._fed_parts = 0
+        self._answer_streamer = SentenceStreamer(self._emit_answer)
         self._tool_names: dict[str, str] = {}
         self._tool_output_parts: dict[str, list[str]] = {}
         # Reasoning/summary deltas held per item until the item completes:
@@ -1510,12 +1511,15 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         self._on_activity("assistant", text)
 
     def _release_streamed(self) -> None:
-        text = "".join(self._assistant_parts)
-        self._streamed = release_finished(text, self._streamed, self._emit_answer)
+        # Only the parts the streamer has not seen yet: joining every part
+        # on every delta made a long answer cost the square of its length.
+        while self._fed_parts < len(self._assistant_parts):
+            self._answer_streamer.feed(self._assistant_parts[self._fed_parts])
+            self._fed_parts += 1
 
     def _release_all(self) -> None:
-        text = "".join(self._assistant_parts)
-        self._streamed = release_remainder(text, self._streamed, self._emit_answer)
+        self._release_streamed()
+        self._answer_streamer.flush()
 
 
 def _skill_invocation(text: str, cwd: str) -> Optional[tuple[str, str]]:

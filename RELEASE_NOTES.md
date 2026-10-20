@@ -1,8 +1,8 @@
-# BlindPilot 0.48.2
+# BlindPilot 0.49.0
 
-Codex conversations with very large rollout files open again.
+Answers are heard while they are being written, closing the gap people noticed between BlindPilot and running the same agent in a terminal.
 
-- **Large Codex histories:** a conversation whose rollout file exceeds 64 MiB no longer fails to reopen when its messages are available in Codex's history database. BlindPilot reads the database first and applies the file-size guard only to the rollout-file fallback, so huge tool output in the rollout no longer blocks loading the conversation.
-- Regression tests cover database loading with an oversized rollout and the file fallback at and above the size limit.
-
-Thanks to pitermach for the fix in #101.
+- **Claude streams token by token:** BlindPilot used to receive Claude's reply only one whole message at a time, so a long answer was silent until the model had finished writing it. Claude is now launched with partial messages turned on, and each finished sentence is spoken the moment it is complete. The whole message that follows says only the part not already heard, so nothing is repeated. If the installed Claude CLI is too old to know the option, BlindPilot notices the error, turns the option off for the rest of the session, and sends the message again.
+- **Codex speaks before an answer item completes:** Codex already sent its answer in small deltas, but BlindPilot held them until the item finished. Those deltas now go out sentence by sentence as they land, with the unfinished tail spoken when the item completes.
+- **Long answers no longer get slower as they grow:** Command Code, Muse Code, Gemini, and Hermes re-joined and re-scanned the entire answer on every token, so the work per token kept rising through a long reply. A shared sentence streamer now keeps only the text not yet spoken and checks for a sentence end only when a new piece could finish one. The release rule is unchanged: a sentence is spoken only once the text after its punctuation has arrived, so a half-written word is never read aloud.
+- New regression tests cover live release for Codex and Claude, including the real Claude stream shape where a thinking block comes first, and prove the streamer releases exactly what the old whole-text rule released.

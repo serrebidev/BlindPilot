@@ -48,6 +48,7 @@ from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 import backend_pool
 import diagnostics
 
+from markdown_rows import SentenceStreamer
 from markdown_rows import complete_sentences as _complete_sentences
 
 
@@ -3924,6 +3925,9 @@ class CodexWorker(_TurnWorker):
         self._assistant_parts: list[str] = []
         self._assistant_delta_seen: set[str] = set()
         self._assistant_streams: dict[str, list[str]] = {}
+        # Live sentence release per message item, so the listener hears a
+        # Codex answer as it is written rather than when its item completes.
+        self._assistant_live: dict[str, SentenceStreamer] = {}
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
 
@@ -4410,12 +4414,7 @@ class CodexWorker(_TurnWorker):
             elif method == "item/completed":
                 self._item_completed(params.get("item") or {})
             elif method == "item/agentMessage/delta":
-                item_id = str(params.get("itemId") or "")
-                delta = str(params.get("delta") or "")
-                if delta:
-                    self._assistant_delta_seen.add(item_id)
-                    self._assistant_streams.setdefault(item_id, []).append(delta)
-                    self._assistant_parts.append(delta)
+                self._agent_delta(params)
             elif method in (
                 "item/reasoning/summaryTextDelta",
                 "item/reasoning/textDelta",
@@ -4816,6 +4815,27 @@ class CodexWorker(_TurnWorker):
                 }
             )
 
+    def _agent_delta(self, params: dict) -> None:
+        """One streamed fragment of a Codex answer, said as it arrives.
+
+        The terminal shows these deltas as they land; holding them until
+        the item completed was the whole wait a listener sat through.
+        Only finished sentences go out, so nothing torn is spoken.
+        """
+        item_id = str(params.get("itemId") or "")
+        delta = str(params.get("delta") or "")
+        if not delta:
+            return
+        self._assistant_delta_seen.add(item_id)
+        self._assistant_streams.setdefault(item_id, []).append(delta)
+        self._assistant_parts.append(delta)
+        live = self._assistant_live.get(item_id)
+        if live is None:
+            live = self._assistant_live[item_id] = SentenceStreamer(
+                lambda text: self._on_activity("assistant", text)
+            )
+        live.feed(delta)
+
     def _item_completed(self, item: dict) -> None:
         self._collab(item)
         kind = item.get("type")
@@ -4824,7 +4844,12 @@ class CodexWorker(_TurnWorker):
             text = str(item.get("text") or "")
             if item_id in self._assistant_delta_seen:
                 streamed = "".join(self._assistant_streams.pop(item_id, []))
-                if streamed:
+                live = self._assistant_live.pop(item_id, None)
+                if live is not None:
+                    # Whatever the last sentence left unfinished is all that
+                    # has not been heard yet; the rest went out live.
+                    live.flush()
+                elif streamed:
                     self._on_activity("assistant", streamed)
             elif text:
                 self._assistant_parts.append(text)

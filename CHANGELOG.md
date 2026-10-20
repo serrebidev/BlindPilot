@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.49.0 - 2026-10-19
+
+- Answers are spoken as they are written instead of waiting for a whole message: Claude is now started with `--include-partial-messages` and Codex answer deltas are released sentence by sentence as they arrive, so the first words of a long reply are heard about as soon as a terminal would show them. A Claude CLI too old for the flag is detected from its error and the turn is retried without it for the rest of the session.
+- Long streamed answers no longer slow down as they grow: Command Code, Muse Code, Gemini/Google, and Hermes used to re-join and re-scan the whole answer on every token, so work grew with the square of the answer's length. A shared `SentenceStreamer` now keeps only the unspoken tail and releases finished sentences on exactly the old rule, so nothing half-written is read aloud.
+
 ## v0.48.2 - 2026-10-19
 
 - Codex conversations with rollout files larger than 64 MiB can be reopened again: history now loads from Codex's database first, and the file-size guard applies only when falling back to reading the rollout file itself. Thanks to pitermach for PR #101.

@@ -111,6 +111,7 @@ def test_the_command_line_is_the_one_a_turn_used_to_build():
         "--output-format",
         "stream-json",
         "--verbose",
+        "--include-partial-messages",
         "--append-system-prompt",
         cs.ASK_THROUGH_THE_TOOL,
         "--permission-prompt-tool",

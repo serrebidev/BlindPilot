@@ -64,7 +64,7 @@ from commandcode_router import (
     strongest_effort,
 )
 from hermes_backend import STDERR_KEEP_LINES
-from markdown_rows import release_finished, release_remainder
+from markdown_rows import SentenceStreamer
 
 # The window's permission vocabulary translated to Command Code's. "bypass" has
 # no --permission-mode value at all -- it is the launch-only --yolo flag -- so
@@ -434,7 +434,8 @@ class CommandcodeWorker(threading.Thread):
         self._assistant_parts: list[str] = []
         self._message_streamed = False
         self._thinking_parts: list[str] = []
-        self._streamed = 0
+        self._fed_parts = 0
+        self._answer_streamer = SentenceStreamer(self._emit_answer)
         self._session_seen = ""
         self._tool_names: dict[str, str] = {}
         self._tool_subjects: dict[str, str] = {}
@@ -743,7 +744,8 @@ class CommandcodeWorker(threading.Thread):
         self._assistant_parts = []
         self._message_streamed = False
         self._thinking_parts = []
-        self._streamed = 0
+        self._fed_parts = 0
+        self._answer_streamer = SentenceStreamer(self._emit_answer)
         self._tool_names = {}
         self._tool_subjects = {}
         self._tool_inputs = {}
@@ -1118,9 +1120,10 @@ class CommandcodeWorker(threading.Thread):
         self._release_all()
         text = "".join(self._assistant_parts)
         if text.strip() and not text.endswith("\n\n"):
-            # Already said, so marked as streamed: only the break is added.
+            # Already said, so only the break is added — and it is marked
+            # fed, so the streamer never says it either.
             self._assistant_parts.append("\n\n")
-            self._streamed = len(text) + 2
+            self._fed_parts = len(self._assistant_parts)
 
     def _generic_event(self, etype: str, event: dict) -> None:
         """Say something for an event kind this file has never heard of.
@@ -1433,13 +1436,22 @@ class CommandcodeWorker(threading.Thread):
     def _emit_answer(self, text: str) -> None:
         self._on_activity("assistant", text)
 
+    def _feed_streamer(self) -> None:
+        """Hand the streamer only the parts it has not seen yet.
+
+        Joining every part on every delta made a long answer cost the
+        square of its length; the streamer keeps just the unreleased tail.
+        """
+        while self._fed_parts < len(self._assistant_parts):
+            self._answer_streamer.feed(self._assistant_parts[self._fed_parts])
+            self._fed_parts += 1
+
     def _release_streamed(self) -> None:
-        text = "".join(self._assistant_parts)
-        self._streamed = release_finished(text, self._streamed, self._emit_answer)
+        self._feed_streamer()
 
     def _release_all(self) -> None:
-        text = "".join(self._assistant_parts)
-        self._streamed = release_remainder(text, self._streamed, self._emit_answer)
+        self._feed_streamer()
+        self._answer_streamer.flush()
 
 
 def _as_int(value: object) -> int:

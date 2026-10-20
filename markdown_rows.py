@@ -459,6 +459,8 @@ _SENTENCE_END_RE = re.compile(r"(?s)^.*(?:[.!?:;…][\"'”’)\]]*(?=\s|$)|\n)"
 # The same, but a stop at the very end of a still-growing stream does not
 # count: the next delta may carry on the word, as "*." then "txt" did.
 _LIVE_SENTENCE_END_RE = re.compile(r"(?s)^.*(?:[.!?:;…][\"'”’)\]]*(?=\s)|\n)")
+# Characters that can end a sentence, for the streamer's cheap first look.
+_SENTENCE_MARKS = ".!?:;…\n\"'”’)]"
 
 
 def complete_sentences(text: str) -> str:
@@ -488,6 +490,53 @@ def release_finished(text: str, streamed: int, emit: Callable[[str], None]) -> i
         return streamed
     emit(spoken)
     return streamed + len(spoken)
+
+
+class SentenceStreamer:
+    """Release a delta stream as finished sentences, incrementally.
+
+    ``release_finished`` takes the whole answer so far, so a caller that
+    calls it per token delta re-joins and re-scans the answer on every
+    delta: work grows with the square of the answer's length, and a long
+    answer gets slower the longer it runs — where a terminal just appends.
+    This keeps only the unreleased tail. ``feed`` is handed each new delta
+    and emits at most the sentences that delta finished; ``flush`` releases
+    what is left when nothing more is coming. The release rule is exactly
+    ``release_finished``'s: a sentence is finished only once the text after
+    its punctuation has arrived, so a torn word is never spoken.
+    """
+
+    def __init__(self, emit: Callable[[str], None], live_edge: bool = True) -> None:
+        self._emit = emit
+        self._pending = ""
+        # Hermes releases with `complete_sentences`, where a stop at the
+        # buffer's end counts; the other backends hold that stop back
+        # because the next delta may carry the word on.
+        self._end_re = _LIVE_SENTENCE_END_RE if live_edge else _SENTENCE_END_RE
+
+    def feed(self, delta: str) -> None:
+        if not delta:
+            return
+        # A delta with no sentence end of its own cannot finish one —
+        # unless it opens with the whitespace a trailing stop was waiting
+        # for. Scanning the whole unreleased tail on every other delta is
+        # what made a long unpunctuated paragraph cost its square again.
+        opens_a_gap = delta[:1].isspace()
+        self._pending += delta
+        if not opens_a_gap and not any(mark in delta for mark in _SENTENCE_MARKS):
+            return
+        match = self._end_re.search(self._pending)
+        spoken = match.group(0).rstrip() if match else ""
+        if not spoken:
+            return
+        self._pending = self._pending[len(spoken) :]
+        self._emit(spoken)
+
+    def flush(self) -> None:
+        # A trailing newline is nothing to say, as in `release_remainder`.
+        if self._pending.strip():
+            self._emit(self._pending)
+        self._pending = ""
 
 
 def release_remainder(text: str, streamed: int, emit: Callable[[str], None]) -> int:

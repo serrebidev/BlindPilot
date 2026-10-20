@@ -70,6 +70,11 @@ class Wants:
 
 ASK_THROUGH_THE_TOOL = ask_through_the_tool("AskUserQuestion")
 
+# Turned off for the rest of the process by the turn that meets a CLI too
+# old to know `--include-partial-messages`, the same way the permission
+# prompt tool is dropped. Read by `build_command` on the next start.
+include_partial_messages = True
+
 
 def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:
     """The command line one process is started with.
@@ -89,6 +94,12 @@ def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:
         "stream-json",
         "--verbose",
     ]
+    if include_partial_messages:
+        # Partial messages are the token-level stream a terminal renders as
+        # it arrives. Without this the CLI only speaks in whole assistant
+        # messages, so the first words of an answer waited for the whole
+        # message however long it ran.
+        cmd.append("--include-partial-messages")
     if prompt_tool:
         cmd.extend(["--append-system-prompt", ASK_THROUGH_THE_TOOL])
         cmd.extend(["--permission-prompt-tool", prompt_tool])

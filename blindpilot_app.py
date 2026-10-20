@@ -167,6 +167,7 @@ from muse_backend import (
 
 from markdown_rows import (
     Row,
+    SentenceStreamer,
     _MD,
     _strip_noise,
     parse_response,
@@ -350,7 +351,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.48.2"
+APP_VERSION = "0.49.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -4728,6 +4729,16 @@ class ClaudeWorker(threading.Thread):
         _CLAUDE_PERMISSION_PROMPT_TOOL = ""
         return True
 
+    @staticmethod
+    def _retry_without_partial_messages(stderr_text: str) -> bool:
+        """Whether this failure was `--include-partial-messages`, now off."""
+        if not claude_session.include_partial_messages:
+            return False
+        if "include-partial-messages" not in stderr_text:
+            return False
+        claude_session.include_partial_messages = False
+        return True
+
     def _handle_control_request(self, event: dict) -> None:
         """Answer one control request from the CLI.
 
@@ -4935,6 +4946,13 @@ class ClaudeWorker(threading.Thread):
         # report.
         tool_names: dict[str, str] = {}
         gap_note_said = False
+        # Partial-message stream, by speaker (the parent tool call for a
+        # subagent): the sentences a text block has already said live, so
+        # its whole-message form says only what is left. The CLI sends that
+        # block's assistant event right after its last delta, one block per
+        # event, so the stream's block index (which counts thinking and tool
+        # blocks) is not needed and would not match the event's own.
+        partial_live: dict[str, SentenceStreamer] = {}
 
         while True:
             timeout: Optional[float] = None
@@ -4993,6 +5011,35 @@ class ClaudeWorker(threading.Thread):
                 if sid:
                     self._on_session(sid)
 
+            elif etype == "stream_event":
+                # Token-level partials (--include-partial-messages): the same
+                # stream a terminal renders as it arrives. Text goes out as
+                # finished sentences; thinking partials wait for the complete
+                # block in the assistant message, as before.
+                inner = event.get("event")
+                if isinstance(inner, dict):
+                    if inner.get("type") == "message_start" and not first_assistant_seen:
+                        first_assistant_seen = True
+                        self._on_started()
+                    elif inner.get("type") == "content_block_delta":
+                        delta = inner.get("delta")
+                        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                            piece = str(delta.get("text") or "")
+                            if piece:
+                                if not first_assistant_seen:
+                                    first_assistant_seen = True
+                                    self._on_started()
+                                kind = (
+                                    "subagent" if event.get("parent_tool_use_id") else "assistant"
+                                )
+                                key = str(event.get("parent_tool_use_id") or "")
+                                live = partial_live.get(key)
+                                if live is None:
+                                    live = partial_live[key] = SentenceStreamer(
+                                        functools.partial(self._on_activity, kind)
+                                    )
+                                live.feed(piece)
+
             elif etype == "rate_limit_event":
                 warning = claude_limit_warning(event.get("rate_limit_info"))
                 if warning:
@@ -5039,10 +5086,19 @@ class ClaudeWorker(threading.Thread):
                         if text:
                             if not from_subagent:
                                 text_parts.append(text)
-                            # Somebody else's running commentary, not this
-                            # turn's reply. Shown as a row either way; in
-                            # Keep up it is what a fan-out would drown in.
-                            self._on_activity("subagent" if from_subagent else "assistant", text)
+                            kind = "subagent" if from_subagent else "assistant"
+                            live = partial_live.pop(
+                                str(event.get("parent_tool_use_id") or ""), None
+                            )
+                            if live is not None:
+                                # Already said live as partials: only the
+                                # unfinished tail is still unheard.
+                                live.flush()
+                            else:
+                                # Somebody else's running commentary, not this
+                                # turn's reply. Shown as a row either way; in
+                                # Keep up it is what a fan-out would drown in.
+                                self._on_activity(kind, text)
                     elif btype == "thinking":
                         # Extended-thinking blocks: Claude reasoning about what to
                         # do next. Surfaced live so the user hears the plan while
@@ -5139,6 +5195,12 @@ class ClaudeWorker(threading.Thread):
                 # and whatever it left running keeps running.
                 break
 
+        # A turn that ended on its result without a final whole message for
+        # a block still owes the listener that block's unfinished tail.
+        for live in partial_live.values():
+            live.flush()
+        partial_live.clear()
+
         if self._cancelled:
             return
 
@@ -5154,6 +5216,9 @@ class ClaudeWorker(threading.Thread):
             if self._retry_without_prompt_tool(stderr_text):
                 # The installed Claude Code is older than the flag. Turn it off
                 # for the rest of the session and send the message again.
+                self._do_run()
+                return
+            if self._retry_without_partial_messages(stderr_text):
                 self._do_run()
                 return
             self._log_unfinished_turn(rc, complete, stderr_text)
