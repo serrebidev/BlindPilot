@@ -16238,7 +16238,19 @@ class MainFrame(wx.Frame):
         # Belt and braces over the per-tab teardown above: a shared app-server
         # belongs to no single tab, so nothing above this stops it.
         backend_pool.stop_all_held_processes()
+        # Closing this window is meant to end the process, and wx ends the
+        # event loop only when the last top-level window is destroyed. Any
+        # other one left standing — a dialog parented to nothing, a window a
+        # platform component kept — leaves BlindPilot running in the
+        # background with no window to show for it, which is the report this
+        # answers. Quitting has no use for any of them, so quitting takes
+        # them all down, and asks the loop to end outright as well rather
+        # than trusting the window count alone.
+        _destroy_other_top_level_windows(self)
         event.Skip()
+        app = wx.GetApp()
+        if app is not None:
+            wx.CallAfter(app.ExitMainLoop)
 
 
 def _bring_to_front() -> None:
@@ -16338,6 +16350,57 @@ Escape answers later or denies. Nothing is allowed by closing a dialog.
 # take the focus of whoever is running it: they are working in another window,
 # and on this application's users that means moving their screen reader too.
 _STARTUP_CHECK = False
+
+
+def _destroy_other_top_level_windows(keep: wx.Window) -> None:
+    """Destroy every top-level window but `keep`, on the way out.
+
+    wx ends the event loop when the last top-level window is destroyed, so
+    one left standing holds the whole process open: the window the person
+    closed is gone, the process is still in the task list. Which window it
+    is depends on the machine — a dialog parented to nothing, a window a
+    platform component kept — so quitting does not go looking for a
+    particular one. It takes them all.
+    """
+    try:
+        windows = list(wx.GetTopLevelWindows())
+    except Exception:
+        # Teardown runs against whatever state the application is in; a wx
+        # that cannot answer is not a reason to stay open.
+        return
+    for window in windows:
+        if window is not keep:
+            try:
+                window.Destroy()
+            except Exception:
+                pass
+
+
+# How long the process may take to die of its own accord once its window
+# has closed, before it is ended outright. Every shutdown step the
+# application owns is bounded in seconds, so this only ever fires when
+# something outside them — a thread a library started and never made a
+# daemon of, which Python waits on before it will exit — would otherwise
+# keep BlindPilot alive indefinitely with no window open.
+_EXIT_WATCHDOG_SECONDS = 15.0
+
+
+def _arm_exit_watchdog(seconds: float = _EXIT_WATCHDOG_SECONDS) -> None:
+    """End the process if it is still alive `seconds` from now.
+
+    Armed once the event loop has returned, by which point everything the
+    application had to save or stop has already happened: a process still
+    alive after the grace is one that is stuck, not one that is finishing.
+    """
+    # Taken now, not at firing time: what ends the process is the exit that
+    # was in force when quitting was decided.
+    exit_now = os._exit
+
+    def force_exit() -> None:
+        time.sleep(seconds)
+        exit_now(0)
+
+    threading.Thread(target=force_exit, name="exit-watchdog", daemon=True).start()
 
 
 def main() -> int:
@@ -16471,4 +16534,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _result = main()
+    # Armed here, at the entry point, and not in main(): main() returning is
+    # the end of the application only when the application is the process.
+    # Anything that calls main() and carries on — a test — keeps its own
+    # lifetime, and no watchdog.
+    _arm_exit_watchdog()
+    sys.exit(_result)
