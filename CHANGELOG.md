@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.49.1 - 2026-10-20
+
+- Quitting ends the process, not just the window: Alt+F4 closed the window but could leave BlindPilot running in the background, because a wx application leaves its event loop only when the last top-level window is destroyed and nothing made the ending certain. The close handler now destroys any other top-level window and asks the event loop to end outright, and an exit watchdog armed at the entry point gives the process a bounded fifteen-second grace after the loop returns before ending it, so a library thread that was never made a daemon can no longer hold BlindPilot open indefinitely. Thanks to Farhan Khan for reporting it.
+
 ## v0.49.0 - 2026-10-19
 
 - Answers are spoken as they are written instead of waiting for a whole message: Claude is now started with `--include-partial-messages` and Codex answer deltas are released sentence by sentence as they arrive, so the first words of a long reply are heard about as soon as a terminal would show them. A Claude CLI too old for the flag is detected from its error and the turn is retried without it for the rest of the session.

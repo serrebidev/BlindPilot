@@ -1,8 +1,8 @@
-# BlindPilot 0.49.0
+# BlindPilot 0.49.1
 
-Answers are heard while they are being written, closing the gap people noticed between BlindPilot and running the same agent in a terminal.
+Quitting now ends the process, not just the window.
 
-- **Claude streams token by token:** BlindPilot used to receive Claude's reply only one whole message at a time, so a long answer was silent until the model had finished writing it. Claude is now launched with partial messages turned on, and each finished sentence is spoken the moment it is complete. The whole message that follows says only the part not already heard, so nothing is repeated. If the installed Claude CLI is too old to know the option, BlindPilot notices the error, turns the option off for the rest of the session, and sends the message again.
-- **Codex speaks before an answer item completes:** Codex already sent its answer in small deltas, but BlindPilot held them until the item finished. Those deltas now go out sentence by sentence as they land, with the unfinished tail spoken when the item completes.
-- **Long answers no longer get slower as they grow:** Command Code, Muse Code, Gemini, and Hermes re-joined and re-scanned the entire answer on every token, so the work per token kept rising through a long reply. A shared sentence streamer now keeps only the text not yet spoken and checks for a sentence end only when a new piece could finish one. The release rule is unchanged: a sentence is spoken only once the text after its punctuation has arrived, so a half-written word is never read aloud.
-- New regression tests cover live release for Codex and Claude, including the real Claude stream shape where a thinking block comes first, and prove the streamer releases exactly what the old whole-text rule released.
+- **Alt+F4 closes BlindPilot for good:** the window closed, but the process could stay running in the background with nothing to show for itself. A wx application leaves its event loop only when the last top-level window is destroyed, so any other window left standing — a dialog parented to nothing, a window kept by a platform component — held the whole process open, and a thread started by a library without being made a daemon held it open after the loop, because Python waits for those before it will exit. The close handler now destroys every other top-level window and asks the event loop to end outright, and an exit watchdog armed when the application starts gives the process a bounded fifteen-second grace to finish once the window is gone before ending it. Everything BlindPilot saves is saved before and during the close, so nothing is lost by the ending being certain.
+- Regression tests pin the close handler's new last steps and the watchdog's grace period, its firing, and that the watchdog itself is a daemon and can never be the thing keeping the process alive.
+
+Thanks to Farhan Khan for reporting the hang in #102.
