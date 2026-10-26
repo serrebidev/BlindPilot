@@ -10,4 +10,4 @@ pytest-timeout>=2.4
 pytest-randomly>=5
 # Earns its place: it found the casefold length bug in _keyed in seconds,
 # on ordinary German text no example test had thought to use.
-hypothesis>=6.170.0
+hypothesis>=6.170.8
