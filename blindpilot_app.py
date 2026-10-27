@@ -352,7 +352,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.50.0"
+APP_VERSION = "0.50.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -17063,13 +17063,12 @@ def main() -> int:
         # Abandoned downloads are tens of megabytes each.
         wx.CallLater(8000, sweep_temporary_files)
     app.MainLoop()
-    # A window destroyed as the loop ended is only queued for deletion. Left
-    # queued, wxMSW tears the app down around it and prints "UnregisterClass
-    # failed ... Class still has open windows". One more idle pass frees it.
-    leftover = list(wx.GetTopLevelWindows())
-    if leftover:
-        for window in leftover:
-            window.Destroy()
+    # The main window, destroyed as the loop ended, is only queued for
+    # deletion. Left queued, wxMSW tears the app down around it and prints
+    # "UnregisterClass failed ... Class still has open windows". One more idle
+    # pass frees it. Only this window: others belong to whoever called main().
+    if any(window is frame for window in wx.GetTopLevelWindows()):
+        frame.Destroy()
         wx.CallAfter(app.ExitMainLoop)
         app.MainLoop()
     return 0

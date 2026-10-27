@@ -1,4 +1,6 @@
-# BlindPilot 0.50.0
+# BlindPilot 0.50.1
+
+This is the first published build of 0.50: the 0.50.0 build stopped on a failing startup test before it was released, and 0.50.1 fixes that test failure with no other change.
 
 Seven new features, from a second look at The Chat Place by Kelly Ford: its 0.1.5 to 0.3.0 releases added things BlindPilot didn't have yet. Each is built BlindPilot's own way, on the tabs, lists and dialogs you already use.
 

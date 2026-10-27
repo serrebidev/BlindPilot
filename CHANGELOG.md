@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.50.1 - 2026-10-27
+
+- The 0.50.0 build was never published: the startup-window cleanup it added swept every top-level window after the event loop, which in the release workflow's test order reached windows left by other tests and a stand-in application without `ExitMainLoop`. It now frees only the main window `main()` created, matched by identity. 0.50.1 carries everything listed under 0.50.0.
+
 ## v0.50.0 - 2026-10-26
 
 Seven features from a second audit of The Chat Place (TheIdeaPlace/AIChat, through its 0.3.0).
