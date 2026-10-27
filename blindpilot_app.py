@@ -50,6 +50,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import wave
 import weakref
 import webbrowser
@@ -72,6 +73,7 @@ import diagnostics
 from certificates import open_url
 from conversation_list import make_conversation_list
 from conversation_items import ConversationItem, ConversationItemsDialog, collect_items
+import remote_sessions
 from task_list import CLAUDE_TASK_TOOLS, TaskList
 from app_updater import (
     GITHUB_REPOSITORY,
@@ -354,7 +356,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.51.0"
+APP_VERSION = "0.52.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2844,6 +2846,26 @@ def relay_message(speaker: str, text: str) -> str:
     return f"{speaker} replied:\n\n{text.strip()}"
 
 
+def _remote_sessions() -> dict:
+    """Claude Code conversations with Remote Control on: session id -> bridge and url."""
+    saved = _load_config().get("remote_control")
+    return dict(saved) if isinstance(saved, dict) else {}
+
+
+def _remember_remote(session_id: str, bridge: str, url: str) -> None:
+    cfg = _load_config()
+    cfg["remote_control"] = {**_remote_sessions(), session_id: {"bridge": bridge, "url": url}}
+    _save_config(cfg)
+
+
+def _forget_remote(session_id: str) -> None:
+    cfg = _load_config()
+    saved = _remote_sessions()
+    if saved.pop(session_id, None) is not None:
+        cfg["remote_control"] = saved
+        _save_config(cfg)
+
+
 # Kinds of agent conversation: (name, role of the session sending first, role
 # of the session it goes to). Choosing one fills in the roles; both stay
 # editable. Modelled on The Chat Place's kinds of conversation.
@@ -4640,8 +4662,11 @@ class ClaudeWorker(threading.Thread):
         held_for: object = None,
         on_unsolicited: Optional[Callable[[], None]] = None,
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
+        remote_control: Optional[dict] = None,
     ):
         super().__init__(daemon=True)
+        # {"enabled", "name", "reattach"}: Remote Control as the tab wants it.
+        self._remote_control = remote_control
         # Asked about a tool the permission mode leaves to a person; returns
         # the control response's own body (allow or deny).
         self._on_permission = on_permission
@@ -5096,6 +5121,34 @@ class ClaudeWorker(threading.Thread):
             self._on_activity("notice", "Claude Code finished the turn without saying anything.")
         return session
 
+    def _apply_remote_control(self, session: claude_session.ClaudeSession) -> None:
+        """Turn Remote Control on or off for this process, when the tab changed it.
+
+        Reported through ``on_remote`` (set by the tab): Claude Code's answer,
+        with ``bridge_session_id`` and ``session_url``, or ``{"error": ...}``.
+        """
+        wanted = self._remote_control
+        if not wanted or bool(wanted.get("enabled")) == session.remote_control_on:
+            return
+        enabled = bool(wanted.get("enabled"))
+        response = session.send_control(
+            "remote_control",
+            timeout=15,
+            **remote_sessions.remote_control_fields(
+                enabled, str(wanted.get("name") or ""), str(wanted.get("reattach") or "")
+            ),
+        )
+        report = getattr(self, "on_remote", None)
+        if response is None or response.get("subtype") == "error":
+            error = "Claude Code did not answer" if response is None else response.get("error")
+            if report:
+                report({"error": str(error or "it was refused")})
+            return
+        session.remote_control_on = enabled
+        body = response.get("response")
+        if report and enabled:
+            report(body if isinstance(body, dict) else {})
+
     def _read_turn(
         self, session: claude_session.ClaudeSession, events: "queue.Queue", mark: int
     ) -> None:
@@ -5103,6 +5156,7 @@ class ClaudeWorker(threading.Thread):
             # Stop landed before there was a process to stop. Sending the
             # prompt now would start the very turn that was called off.
             return
+        self._apply_remote_control(session)
         if self._prompt is not None and not session.send_user(self._prompt):
             self._fail("Could not send the prompt to Claude Code")
             return
@@ -7712,6 +7766,24 @@ def sort_history(entries: List[HistoryEntry], order: str, title) -> List[History
 
 # "All backends" sits first in the backend list; the rest follow BACKEND_IDS.
 _HISTORY_ANY_BACKEND = "All backends"
+_HISTORY_ANY_GROUP = "All groups"
+
+
+def conversation_groups(cfg: dict) -> dict[str, list[str]]:
+    """BlindPilot's own groups: a conversation's history key -> its group names."""
+    saved = cfg.get("conversation_groups")
+    if not isinstance(saved, dict):
+        return {}
+    return {
+        str(key): [str(name) for name in names if str(name).strip()]
+        for key, names in saved.items()
+        if isinstance(names, list) and names
+    }
+
+
+def group_names(groups: dict[str, list[str]]) -> list[str]:
+    """Every group in use, alphabetically. A group nothing is in is gone."""
+    return sorted({name for names in groups.values() for name in names}, key=str.casefold)
 
 
 def _last_exchange(turns: List[HistoryTurn], limit: int = 1200) -> str:
@@ -7781,6 +7853,11 @@ class HistoryDialog(wx.Dialog):
             _HISTORY_SORTS.index(saved_sort) if saved_sort in _HISTORY_SORTS else 0
         )
         self.sort_picker.Bind(wx.EVT_CHOICE, lambda _e: self._on_sort())
+        group_label = wx.StaticText(self, label="Gro&up:")
+        self.group_picker = wx.Choice(self, choices=[_HISTORY_ANY_GROUP])
+        self.group_picker.SetName("Group")
+        self.group_picker.SetSelection(0)
+        self.group_picker.Bind(wx.EVT_CHOICE, lambda _e: self._refresh())
         self.show_hidden = wx.CheckBox(self, label="Show &hidden conversations")
         self.show_hidden.Bind(wx.EVT_CHECKBOX, lambda _e: self._refresh())
 
@@ -7819,6 +7896,9 @@ class HistoryDialog(wx.Dialog):
         self.hide_button.Bind(wx.EVT_BUTTON, lambda _e: self._toggle_hidden())
         buttons.Insert(0, rename_button, 0, wx.RIGHT, self.FromDIP(PAD))
         buttons.Insert(1, self.hide_button, 0, wx.RIGHT, self.FromDIP(PAD))
+        groups_button = wx.Button(self, label="&Groups…")
+        groups_button.Bind(wx.EVT_BUTTON, lambda _e: self._edit_groups())
+        buttons.Insert(2, groups_button, 0, wx.RIGHT, self.FromDIP(PAD))
 
         pad = self.FromDIP(PAD_DIALOG)
         # Rows 0: as many as there are pickers. Fixing it at 2 made wx refuse
@@ -7831,6 +7911,8 @@ class HistoryDialog(wx.Dialog):
         pickers.Add(self.scope_picker, 1, wx.EXPAND)
         pickers.Add(sort_label, 0, wx.ALIGN_CENTER_VERTICAL)
         pickers.Add(self.sort_picker, 1, wx.EXPAND)
+        pickers.Add(group_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        pickers.Add(self.group_picker, 1, wx.EXPAND)
         # The list is what gives the dialog its size; Fit then follows it.
         self.list_box.SetMinSize(self.FromDIP(wx.Size(560, 220)))
 
@@ -7906,6 +7988,7 @@ class HistoryDialog(wx.Dialog):
         hidden = cfg.get("hidden_conversations")
         self._names = dict(names) if isinstance(names, dict) else {}
         self._hidden_keys = set(hidden) if isinstance(hidden, list) else set()
+        self._groups = conversation_groups(cfg)
 
     def _title(self, entry: HistoryEntry) -> str:
         """The name you gave it here, or the one the backend has."""
@@ -7924,6 +8007,9 @@ class HistoryDialog(wx.Dialog):
             parts.append("FreeBuff Desktop, read only")
         if _history_key(entry) in self._hidden():
             parts.append("hidden")
+        groups = getattr(self, "_groups", {}).get(_history_key(entry))
+        if groups:
+            parts.append(("group " if len(groups) == 1 else "groups ") + ", ".join(groups))
         if self._selected_cwd() is None and entry.folder:
             parts.append(entry.folder)
         if self._selected_backend() is None:
@@ -7934,11 +8020,13 @@ class HistoryDialog(wx.Dialog):
         self._read_own_names()
         term = self.filter_box.GetValue().strip().lower()
         hidden = self._hidden() if not self.show_hidden.GetValue() else set()
+        group = self._sync_group_picker()
         matching = [
             entry
             for entry in self._entries
             if (not term or term in self._title(entry).lower())
             and _history_key(entry) not in hidden
+            and (not group or group in self._groups.get(_history_key(entry), []))
         ]
         order = _HISTORY_SORTS[max(0, self.sort_picker.GetSelection())]
         self._shown = sort_history(matching, order, self._title)
@@ -8052,6 +8140,65 @@ class HistoryDialog(wx.Dialog):
         announce(f"Renamed to {self._title(entry)}")
         self.list_box.SetFocus()
 
+    def _sync_group_picker(self) -> str:
+        """Offer every group in use, keeping the one chosen; return it, or ""."""
+        chosen = self.group_picker.GetStringSelection()
+        names = group_names(self._groups)
+        wanted = [_HISTORY_ANY_GROUP, *names]
+        if list(self.group_picker.GetStrings()) != wanted:
+            self.group_picker.Set(wanted)
+        self.group_picker.SetSelection(wanted.index(chosen) if chosen in wanted else 0)
+        return chosen if chosen in names else ""
+
+    def _edit_groups(self) -> None:
+        """Ctrl+G: put this conversation in groups, or take it out of them."""
+        entry = self._current()
+        if entry is None:
+            return
+        key = _history_key(entry)
+        names = group_names(self._groups)
+        current = self._groups.get(key, [])
+        new_group = "New group…"
+        if names:
+            with wx.MultiChoiceDialog(
+                self,
+                f"Groups for {self._title(entry)}. Check every group it belongs in.",
+                "Groups",
+                [*names, new_group],
+            ) as dlg:
+                dlg.SetSelections([names.index(name) for name in current if name in names])
+                if dlg.ShowModal() != wx.ID_OK:
+                    return
+                picked = [([*names, new_group])[index] for index in dlg.GetSelections()]
+        else:
+            picked = [new_group]
+        if new_group in picked:
+            picked.remove(new_group)
+            with wx.TextEntryDialog(self, "Name of the new group:", "New Group") as ask:
+                if ask.ShowModal() != wx.ID_OK:
+                    return
+                name = " ".join(ask.GetValue().split())
+            if name and name not in picked:
+                picked.append(name)
+        cfg = _load_config()
+        groups = conversation_groups(cfg)
+        if picked:
+            groups[key] = picked
+        else:
+            groups.pop(key, None)
+        cfg["conversation_groups"] = groups
+        if not _save_config(cfg):
+            announce(_SAVE_FAILED)
+            self.list_box.SetFocus()
+            return
+        self._refresh(entry)
+        announce(
+            f"In {'groups' if len(picked) > 1 else 'group'} {', '.join(picked)}"
+            if picked
+            else "In no group"
+        )
+        self.list_box.SetFocus()
+
     def _toggle_hidden(self) -> None:
         """Delete: hide this conversation from the list, or bring it back."""
         entry = self._current()
@@ -8106,6 +8253,9 @@ class HistoryDialog(wx.Dialog):
             return
         if self.list_box.HasFocus() and key == wx.WXK_DELETE:
             self._toggle_hidden()
+            return
+        if self.list_box.HasFocus() and key == ord("G") and event.ControlDown():
+            self._edit_groups()
             return
         # Down from the filter box drops straight into the list, so a filter
         # can be typed and its first result reached without hunting for Tab.
@@ -8661,6 +8811,11 @@ class SessionPanel(wx.Panel):
         # Each question and permission request this conversation put to the
         # person, with what they answered: (what was asked, the answer).
         self.decisions: list[tuple[str, str]] = []
+        # Remote Control for this tab's Claude Code conversation: wanted or not,
+        # and the claude.ai session it joins every turn once Claude named it.
+        self.remote_control = False
+        self.remote_bridge = ""
+        self.remote_url = ""
         # Told of each finished turn's answer (None for a stopped or failed
         # one) while this tab is in an agent conversation.
         self.on_turn_answer: Optional[Callable[["SessionPanel", Optional[str]], None]] = None
@@ -9489,6 +9644,141 @@ class SessionPanel(wx.Panel):
             [ConversationItem(line, line) for line in lines], "Properties", "Nothing to show."
         )
 
+    def _on_remote(self, data: dict) -> None:
+        """Claude Code's answer to turning Remote Control on."""
+        error = str(data.get("error") or "")
+        if error:
+            if error != getattr(self, "_remote_error", ""):
+                self._remote_error = error
+                self._announce(f"Could not turn on Remote Control: {error}")
+            return
+        bridge = str(data.get("bridge_session_id") or "")
+        first = bool(bridge) and bridge != self.remote_bridge
+        self.remote_bridge = bridge or self.remote_bridge
+        self.remote_url = str(data.get("session_url") or "") or self.remote_url
+        if self._session_id:
+            _remember_remote(self._session_id, self.remote_bridge, self.remote_url)
+        if first:
+            self._announce(
+                "This session is on Remote Control. Remote Control in Conversation, "
+                "Find and Browse copies its claude.ai address."
+            )
+
+    def remote_control_menu(self) -> None:
+        """Turn Remote Control on or off for this Claude Code tab, or copy its address."""
+        if self.selected_backend() != BACKEND_CLAUDE:
+            self._announce(
+                "Remote Control is a Claude Code feature. Switch this tab to Claude Code."
+            )
+            return
+        if not self.remote_control:
+            answer = wx.MessageBox(
+                "Turn on Remote Control for this session? From your next message, the "
+                "conversation is copied to claude.ai and stays there, and while a turn runs "
+                "anyone signed in to your Claude account can type into it or answer its "
+                "questions from claude.ai or the Claude app.",
+                "Remote Control",
+                wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
+                self,
+            )
+            if answer != wx.YES:
+                return
+            self.remote_control = True
+            self._announce("Remote Control turns on with your next message.")
+            return
+        choices = (["Copy its claude.ai address"] if self.remote_url else []) + [
+            "Turn Remote Control off"
+        ]
+        with wx.SingleChoiceDialog(
+            self, "This session is on Remote Control.", "Remote Control", choices
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            picked = choices[dlg.GetSelection()]
+        if picked.startswith("Copy"):
+            if _copy_to_clipboard(self.remote_url):
+                self._announce(f"Copied {self.remote_url}")
+            return
+        self.remote_control = False
+        if self._session_id:
+            _forget_remote(self._session_id)
+        self._announce("Remote Control turns off with your next message.")
+
+    def list_agents_results(self) -> list[str]:
+        """Each ListAgents result in this conversation, oldest first."""
+        results: list[str] = []
+        listing = False
+        for row in self._rows:
+            if row.kind == "tool":
+                listing = row.label.startswith(f"Using {remote_sessions.LIST_TOOL}")
+            elif row.kind == "result" and listing:
+                results.append(row.payload)
+                listing = False
+        return results
+
+    def other_machines(self) -> None:
+        """Your Claude Code sessions on other computers, through Claude (Ctrl+Shift+U)."""
+        if self.selected_backend() != BACKEND_CLAUDE or not self.remote_control:
+            wx.MessageBox(
+                "Other machines are reached through Claude Code with Remote Control on, "
+                "and each of them needs it on too. Switch this tab to Claude Code and turn "
+                "on Remote Control in Conversation, Find and Browse, then try again.",
+                "Other Machines",
+                wx.OK | wx.ICON_INFORMATION,
+                self,
+            )
+            return
+        found = remote_sessions.latest_list(self.list_agents_results())
+        sessions = found or []
+        if found is None:
+            prompt = "Claude hasn't listed your other computers' sessions here yet."
+        elif not sessions:
+            prompt = (
+                "Claude's latest list had no sessions on other computers. Each needs "
+                "Remote Control on, and its computer awake."
+            )
+        else:
+            prompt = (
+                "Send a message to which session? From Claude's latest list; offline "
+                "often only means between turns, and a message waits for it."
+            )
+        refresh = "Refresh the list (asks Claude)"
+        choices = [session.describe() for session in sessions] + [refresh]
+        with wx.SingleChoiceDialog(self, prompt, "Other Machines", choices) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            index = dlg.GetSelection()
+        if index == len(sessions):
+            if self.deliver(remote_sessions.LIST_PROMPT):
+                self._announce("Asking Claude for your other computers' sessions.")
+            else:
+                self._announce("Error: This session is busy. Try again when its turn ends.")
+            return
+        target = sessions[index]
+        with wx.TextEntryDialog(self, f"Message to {target.name}:", "Other Machines") as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            text = dlg.GetValue().strip()
+        if not text:
+            self._announce("Nothing sent: the message was empty.")
+            return
+        address = remote_sessions.addresses(sessions)[index]
+        if self.deliver(remote_sessions.send_prompt(address, text)):
+            self._announce(f"Claude is sending your message to {target.name}.")
+        else:
+            self._announce("Error: This session is busy. Try again when its turn ends.")
+
+    def copy_session_link(self) -> None:
+        """Copy a Markdown link that reopens this conversation in BlindPilot."""
+        backend = self._session_backend or self.selected_backend()
+        if not self._session_id:
+            self._announce("This session has no conversation to link to yet. Send a message first.")
+            return
+        link = remote_sessions.session_link(backend, self._session_id)
+        title = (self.tab_title or _tab_label("", self.cwd)).replace("]", ")").replace("[", "(")
+        if _copy_to_clipboard(f"[{title}]({link})"):
+            self._announce(f"Copied a link to {title}")
+
     def open_changed_files(self) -> None:
         """What differs from the last commit here (Model menu, Ctrl+Shift+D).
 
@@ -10170,6 +10460,8 @@ class SessionPanel(wx.Panel):
                     self._on_subagent(*(str(arg) for arg in args))
                 elif name == "tasks":
                     self._on_tasks(*args)
+                elif name == "remote":
+                    self._on_remote(cast(dict, args[0]))
                 elif name == "done":
                     self._on_worker_finished()
                 elif name == "late_turn":
@@ -10822,6 +11114,7 @@ class SessionPanel(wx.Panel):
         )
         # Set rather than passed: only the Claude and Codex workers look for it.
         cast(Any, self._worker).on_tasks = lambda *call: self._queue_worker_event("tasks", *call)
+        cast(Any, self._worker).on_remote = lambda data: self._queue_worker_event("remote", data)
         if selected_backend == BACKEND_MUSEAI and send_text is None:
             from museai_worker import MuseAiWorker
 
@@ -10878,7 +11171,17 @@ class SessionPanel(wx.Panel):
                 return {"behavior": "deny", "message": "The tab was closed."}
             return SessionPanel._ask_permission(panel, BACKEND_CLAUDE, tool, payload, suggestions)
 
-        return {"held_for": self, "on_unsolicited": wake, "on_permission": ask}
+        remote = {
+            "enabled": getattr(self, "remote_control", False),
+            "name": getattr(self, "tab_title", "") or _tab_label("", getattr(self, "cwd", "")),
+            "reattach": getattr(self, "remote_bridge", ""),
+        }
+        return {
+            "held_for": self,
+            "on_unsolicited": wake,
+            "on_permission": ask,
+            "remote_control": remote,
+        }
 
     def _start_late_turn(self, generation: int) -> None:
         """Receive what the CLI says with no turn of ours running.
@@ -11225,6 +11528,12 @@ class SessionPanel(wx.Panel):
         self._turns = [Turn(prompt=turn.prompt, response=turn.response) for turn in turns]
         # The task list it left, so Task List and Turn Status pick up there.
         self.task_list = restore_tasks(entry)
+        remote = (
+            _remote_sessions().get(entry.session_id) if entry.backend == BACKEND_CLAUDE else None
+        )
+        self.remote_control = remote is not None
+        self.remote_bridge = str((remote or {}).get("bridge") or "")
+        self.remote_url = str((remote or {}).get("url") or "")
         self.decisions = []
         self._rows = []
         self._displayed = []
@@ -14373,6 +14682,10 @@ class MainFrame(wx.Frame):
         self._agent_menu_items: list[wx.MenuItem] = []
         # The two sessions in an agent conversation, while one runs.
         self._relay: Optional[dict] = None
+        # Session links handed over by a second copy started from a link.
+        self._links_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, lambda _e: self._take_links(), self._links_timer)
+        self._links_timer.Start(1000)
         menubar = wx.MenuBar()
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
@@ -15827,6 +16140,24 @@ class MainFrame(wx.Frame):
             "This session's backend, folder, model, counts and progress, one line each",
             lambda: self._panel_action("open_properties"),
         )
+        add(
+            browse,
+            "Copy Session Lin&k",
+            "Copy a link that reopens this conversation in BlindPilot",
+            lambda: self._panel_action("copy_session_link"),
+        )
+        add(
+            browse,
+            "&Remote Control…",
+            "Reach this Claude Code session from claude.ai while it works, or turn that off",
+            lambda: self._panel_action("remote_control_menu"),
+        )
+        add(
+            browse,
+            "Other &Machines…\tCtrl+Shift+U",
+            "List and message your Claude Code sessions on other computers, through Claude",
+            lambda: self._panel_action("other_machines"),
+        )
         menu.AppendSubMenu(browse, "Find and &Browse")
         add(
             menu,
@@ -17053,7 +17384,44 @@ class MainFrame(wx.Frame):
             getattr(page, name)()
 
     # ----- Cleanup -----
+    def _take_links(self) -> None:
+        """Open each session link a second copy left in the links folder."""
+        for link in take_handed_links():
+            self.open_session_link(link)
+
+    def open_session_link(self, link: str) -> None:
+        """Reopen the conversation a blindpilot:// link names. Nothing else, ever."""
+        parsed = remote_sessions.parse_session_link(link)
+        if parsed is None or parsed[0] not in BACKENDS:
+            announce("That link isn't one BlindPilot knows.")
+            return
+        backend, session_id = parsed
+        for panel in self._session_panels():
+            if panel._session_id == session_id:
+                self._select_session(self.notebook.FindPage(panel))
+                announce(f"{_tab_label(panel.tab_title, panel.cwd)} is already open")
+                return
+
+        def work() -> None:
+            try:
+                entries = list_history(backend, None, limit=1000)
+            except Exception:
+                entries = []
+            entry = next((e for e in entries if e.session_id == session_id), None)
+            _call_after_alive(self._open_linked, entry)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _open_linked(self, entry: Optional[HistoryEntry]) -> None:
+        if entry is None:
+            announce("The conversation that link names was not found on this computer.")
+            return
+        self._resume_history(entry)
+
     def _on_close(self, event: wx.CloseEvent) -> None:
+        timer = getattr(self, "_links_timer", None)
+        if timer is not None:
+            timer.Stop()
         if self.chat_panel is not None:
             self.chat_panel.shutdown()
         # Started together, then waited on together. One after another meant
@@ -17110,6 +17478,38 @@ def _bring_to_front() -> None:
         pass
 
 
+def _links_dir() -> Path:
+    return blindpilot_data_dir() / "links"
+
+
+def hand_over_link(link: str) -> bool:
+    """Leave a session link for the copy already running to open."""
+    try:
+        folder = _links_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{uuid.uuid4().hex}.link").write_text(link, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def take_handed_links() -> list[str]:
+    """The links waiting in the links folder, oldest first; each is taken once."""
+    try:
+        files = sorted(_links_dir().glob("*.link"), key=lambda path: path.stat().st_mtime)
+    except OSError:
+        return []
+    links = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")[:2000]
+            path.unlink()
+        except OSError:
+            continue
+        links.append(text.strip())
+    return links
+
+
 def _raise_running_copy() -> bool:
     """Bring the BlindPilot that is already running to the front (Windows).
 
@@ -17146,12 +17546,12 @@ F6, Shift+F6: move between the tab strip, the responses and the prompt, and read
 Ctrl+T: new session. Ctrl+W: close it. Ctrl+Q: quit.
 Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+Shift+], Ctrl+Shift+[: next and previous tab.
 Ctrl+1 to Ctrl+9: go to that tab.
-Ctrl+Shift+H: Recent Conversations. In its list, F2 renames and Delete hides.
+Ctrl+Shift+H: Recent Conversations. In its list, F2 renames, Delete hides and Ctrl+G sets its groups.
 Ctrl+G: Hermes conversations, when Hermes is the backend.
 Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
 Ctrl+Shift+T: turn status. Ctrl+Shift+J: task list. Ctrl+Shift+D: changed files.
 Ctrl+Shift+X: commands the agent ran. Ctrl+Shift+Y: decisions you made.
-Alt+Enter: this session's properties.
+Alt+Enter: this session's properties. Ctrl+Shift+U: your Claude Code sessions on other computers.
 Ctrl+Shift+S: find in all conversations; Enter on a match reopens it there.
 Ctrl+Shift+O: send a response to another session, once or as an agent conversation.
 Ctrl+Shift+I: what agents know: memories, tastes, instructions, skills and settings.
@@ -17290,8 +17690,14 @@ def main() -> int:
     instance = (
         None if gui_startup_smoke else wx.SingleInstanceChecker(f"{APP_NAME}-{wx.GetUserId()}")
     )
+    # A blindpilot:// session link, when Windows started this copy for one.
+    link = next(
+        (arg for arg in sys.argv[1:] if arg.startswith(f"{remote_sessions.LINK_SCHEME}:")), ""
+    )
     if instance is not None and instance.IsAnotherRunning():
         logging.getLogger("blindpilot").info("another BlindPilot is running; raising it")
+        if link:
+            hand_over_link(link)
         if not _raise_running_copy():
             wx.MessageBox("BlindPilot is already running.", APP_NAME, wx.OK | wx.ICON_INFORMATION)
         return 0
@@ -17358,6 +17764,8 @@ def main() -> int:
         wx.CallLater(1500, frame.Close)
     else:
         frame.Show()
+        if link:
+            wx.CallAfter(frame.open_session_link, link)
         frame.Raise()
         _bring_to_front()
         # An update that failed did so with no window to report to, so its

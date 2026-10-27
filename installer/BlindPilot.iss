@@ -66,5 +66,12 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{a
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
+[Registry]
+; blindpilot:// session links (Copy Session Link) open in BlindPilot, for
+; this user only; uninstalling removes the key.
+Root: HKCU; Subkey: "Software\Classes\blindpilot"; ValueType: string; ValueName: ""; ValueData: "URL:BlindPilot session link"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\blindpilot"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\blindpilot\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent

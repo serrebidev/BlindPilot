@@ -2,6 +2,15 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.52.0 - 2026-10-27
+
+The last of The Chat Place features: Remote Control, other machines, session links and groups.
+
+- Remote Control (Conversation, Find and Browse) for Claude Code tabs, after a confirmation that says the conversation goes to claude.ai and stays there. It sends Claude Code's `remote_control` control request (named, `keep_session_on_exit`, `reattach_session_id`) once per held process before the next message; the answer's `bridge_session_id` and `session_url` are kept per conversation in the config, so a reopened conversation joins the same claude.ai session. Choosing it again copies the address or turns it off. A refusal is said once.
+- Other Machines (Ctrl+Shift+U), in a Claude Code tab with Remote Control on, lists your sessions on other computers from the latest ListAgents result in the conversation, read loosely, and Refresh asks Claude to call ListAgents. A message goes as a turn asking Claude to use SendMessage with your words fenced and unchanged; a name two sessions share is sent with its ref.
+- Copy Session Link copies `[title](blindpilot://open/<backend>/<session id>)`. The installer registers `blindpilot://` for the user (removed on uninstall); a link opening while BlindPilot runs is handed over through a file in its data folder, checked every second. A link only reopens a conversation, or selects the tab it is already in, and anything else is refused.
+- Recent Conversations has groups: Groups (Alt+G, Ctrl+G in the list) sets the selected conversation's groups or makes a new one, Group (Alt+U) shows one group, and each line names its groups. They are kept in the config as `conversation_groups`; empty groups vanish.
+
 ## v0.51.0 - 2026-10-27
 
 The rest of The Chat Place audit, built: GitHub Copilot CLI as a backend, and the lists, roles and automatic review that make sense here.

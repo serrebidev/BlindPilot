@@ -121,6 +121,9 @@ class ClaudeSession:
         self._proc = proc
         self.wants = wants
         self.session_id: Optional[str] = wants.session_id
+        # Whether Remote Control is on for this process; it lasts as long
+        # as the process, so it is asked for once, not every turn.
+        self.remote_control_on = False
         self._write_lock = threading.Lock()
         self._state = threading.Lock()
         self._sink: Optional[queue.Queue] = None

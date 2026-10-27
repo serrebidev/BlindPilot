@@ -135,7 +135,7 @@ Type in the prompt and press Enter to send. Shift+Enter starts a new line. Ctrl+
 Everything is in the menu bar, so if you forget a key, it's there.
 
 - **File:** New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, only when Hermes is the agent), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
-- **Conversation:** Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Task List (Ctrl+Shift+J), Commands (Ctrl+Shift+X), Decisions (Ctrl+Shift+Y), Find in All Conversations (Ctrl+Shift+S), Send Response to Another Session (Ctrl+Shift+O), Properties (Alt+Enter), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
+- **Conversation:** Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Task List (Ctrl+Shift+J), Commands (Ctrl+Shift+X), Decisions (Ctrl+Shift+Y), Find in All Conversations (Ctrl+Shift+S), Send Response to Another Session (Ctrl+Shift+O), Properties (Alt+Enter), Copy Session Link, Remote Control, Other Machines (Ctrl+Shift+U), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
 - **Model:** Backend, Model and Effort (Ctrl+Shift+E), Permission Mode, Session Status, Turn Status (Ctrl+Shift+T), Changed Files (Ctrl+Shift+D), What Agents Know (Ctrl+Shift+I), Backend Settings, Manage Backends, Connect a Provider.
 - **Options:** what gets spoken, sounds, narration, the working sound, Remote Hermes, and Preferences (Ctrl+Comma). On a Mac, Preferences is in the app menu on Cmd+Comma like every other Mac app.
 - **Chat:** accounts, profiles, models and logs for Chat mode. Only works when the Mode box is set to Chat.
@@ -147,7 +147,7 @@ Report a Bug asks what happened, what you expected, and how to make it happen. I
 
 Ctrl+Shift+H lists your old conversations. Sort them newest first, oldest first, by title, or by folder. Type in Filter to narrow the list. Under the list, Last exchange (Alt+T) shows your last message in the selected conversation and the answer to it, so you can tell apart two that started the same way. Enter opens one in a new tab.
 
-F2 renames a conversation. Leave the name blank to go back to the original. Delete hides one, and Show hidden conversations brings it back. Names and hidden conversations are BlindPilot's own; the agents' files aren't touched.
+F2 renames a conversation. Leave the name blank to go back to the original. Delete hides one, and Show hidden conversations brings it back. Groups (Alt+G, or Ctrl+G in the list) puts the selected conversation in one or more groups, or a new one; Group (Alt+U) shows only one group's conversations, and each conversation's line says its groups. A group with nothing left in it disappears. Names, hidden conversations and groups are BlindPilot's own; the agents' files aren't touched.
 
 Ctrl+Shift+S searches the messages of every past conversation, from every backend, not just their titles. Each match says the conversation, its backend, how old it is, and the words around the match. Open Conversation (Enter) reopens it in a new tab with the matching response selected.
 
@@ -168,6 +168,14 @@ Ctrl+Shift+J lists the agent's task list for a longer job: each step, and whethe
 ### Commands, Decisions and Properties
 
 Ctrl+Shift+X lists every command the agent ran in this conversation, newest first, each with done, failed or no result yet; Enter reads the command and its output. Ctrl+Shift+Y lists every question an agent asked you and every permission it asked for, with how you answered. Alt+Enter, Properties, lists this session one line at a time: its title, backend, folder, model, effort, permission mode and session ID, then how many messages, responses, tool steps, commands, code blocks, links and decisions it has, and how far along its task list is. All three are under Conversation, Find and Browse, and copy like the other lists. Commands come from the steps in the list, so they need live activity on in Preferences.
+
+### Remote Control, other machines and session links
+
+Remote Control, in Conversation, Find and Browse, lets you reach a Claude Code session from claude.ai or the Claude app while one of its turns runs. It asks first, because turning it on copies the conversation to claude.ai, where it stays, and anyone signed in to your Claude account can then type into it or answer its questions there. It starts with your next message, and the same claude.ai session is joined every turn, even after you reopen the conversation from Recent Conversations. Choose Remote Control again to copy its claude.ai address or turn it off.
+
+Other Machines (Ctrl+Shift+U) reaches your Claude Code sessions on other computers through Claude, in a Claude Code tab with Remote Control on; they need it on too. The first time, choose Refresh the list, and Claude looks them up. After that the list shows each session's name and whether it's idle, working or offline. Offline often only means between turns. Pick one, type your message, and Claude sends it word for word; a reply comes back into this conversation.
+
+Copy Session Link copies a Markdown link that reopens this conversation in BlindPilot, to paste into a note or another session. With the installer's copy on Windows, opening the link brings BlindPilot forward, starting it if it isn't running, and reopens the conversation in a tab. A link only ever reopens a conversation: it never sends anything.
 
 ### Saved Prompts
 
@@ -201,7 +209,7 @@ Help, Keyboard Shortcuts (F1) shows all of this inside the app.
 - Ctrl+Shift+R: say the last announcement again, if a keypress cut it off.
 - Ctrl+E: save the conversation as Markdown, a web page, or plain text.
 - Ctrl+Shift+T: how long the current task has been running, what it did last, how many messages are waiting, and how far along its task list is. Ctrl+Shift+J: the task list itself.
-- Ctrl+Shift+X: commands the agent ran. Ctrl+Shift+Y: questions and permission requests, with your answers. Alt+Enter: this session's properties.
+- Ctrl+Shift+X: commands the agent ran. Ctrl+Shift+Y: questions and permission requests, with your answers. Alt+Enter: this session's properties. Ctrl+Shift+U: your Claude Code sessions on other computers.
 - Ctrl+Shift+S: search every past conversation's messages. Ctrl+Shift+O: send an answer to another session, once or as an agent conversation.
 - Ctrl+Shift+D: files changed in this folder since the last git commit, with lines added and removed. Enter reads the changes.
 - Ctrl+Shift+I: what the agents know about you: their memories, instructions, skills and settings. Enter reads one. Alt+E edits it right there, and Ctrl+S saves. Alt+A adds a Claude Code memory, Command Code taste, or Hermes memory, and Delete removes one after asking.

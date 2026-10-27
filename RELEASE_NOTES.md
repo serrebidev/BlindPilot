@@ -1,35 +1,26 @@
-# BlindPilot 0.51.0
+# BlindPilot 0.52.0
 
-The rest of what The Chat Place by Kelly Ford does that makes sense for BlindPilot, built BlindPilot's own way. The headline is a new agent: GitHub Copilot CLI.
+The last of the features from The Chat Place by Kelly Ford that fit BlindPilot: reaching your Claude Code sessions from anywhere, links back to a conversation, and groups for your old conversations.
 
-## GitHub Copilot CLI
+## Remote Control
 
-- **A new backend:** pick GitHub Copilot CLI under Model, Backend, and talk to it like any other agent. Its answers stream into the list a sentence at a time, every step it takes is announced ("Reading app.py", "Running: git status"), the agents it hands work to show up in the subagent list, and its to-do list feeds Task List. Model offers auto or any model id you type, with reasoning effort up to max. Messages you send while it works wait their turn.
-- **Setting it up:** Model, Manage Backends installs it with npm and signs you in. Sign-in runs `copilot login` in a terminal, which shows a code to type at github.com/login/device. If you already signed in to the GitHub CLI (gh), Copilot uses that and there's nothing to do.
-- **A Copilot plan is needed:** your GitHub account needs a Copilot plan that includes Copilot CLI; Copilot Free is enough. Without one Copilot refuses every message with "Access denied by policy settings", and BlindPilot tells you to check github.com/settings/copilot instead of just failing.
-- **Permission modes:** Bypass lets it do anything; Plan makes it plan without changing files; Auto turns on Copilot's assisted approval, which judges each risky step for you.
-- **Your old Copilot conversations** show in Recent Conversations (Ctrl+Shift+H) and Find in All Conversations (Ctrl+Shift+S), so you can carry on one you started in a terminal. What Agents Know (Ctrl+Shift+I) lists Copilot's instructions, skills and custom agents, and can add an agent for it.
+- **Reach a Claude Code session from claude.ai:** in a Claude Code tab, choose Remote Control under Conversation, Find and Browse. From your next message, you can follow and type into that session from claude.ai or the Claude app while one of its turns runs.
+- **It asks first:** turning it on copies the conversation to claude.ai, where it stays, and anyone signed in to your Claude account can type into it or answer its questions there. Choose No and nothing changes.
+- **The same session every time:** each turn joins the same claude.ai session, even after you close the tab and reopen the conversation from Recent Conversations. Choose Remote Control again to copy its claude.ai address or turn it off.
 
-## Codex reviews its own requests in Auto
+## Your other computers
 
-In Auto, a Codex step that needs to leave its sandbox, like reaching the network or writing outside the project, used to just fail. Now Codex's automatic approval review looks at it and allows or refuses it for you, and you hear the decision, what it was about, how risky Codex judged it and why. Don't ask still refuses those steps without a review.
+- **Other Machines (Ctrl+Shift+U):** with Remote Control on in a Claude Code tab, reach your Claude Code sessions on your other computers (they need Remote Control on too). The first time, choose Refresh the list and Claude looks them up; after that you get each session's name and whether it's idle, working or offline. Offline often only means between turns, and a message waits for it.
+- **Send a message:** pick a session, type your message, and Claude passes it on word for word. A reply comes back into the conversation you're in.
 
-## More lists to read
+## Session links
 
-All three are under Conversation, Find and Browse, and filter, read and copy like Code Blocks and Links.
+- **Copy Session Link** (Conversation, Find and Browse) copies a Markdown link to this conversation, ready to paste into a note, an email or another session.
+- **Opening one** with the installed copy on Windows brings BlindPilot forward, starting it if it isn't running, and reopens the conversation in a tab, or goes to the tab it's already in. A link only ever reopens a conversation; it never sends anything or runs a turn.
 
-- **Commands (Ctrl+Shift+X):** every command the agent ran in this conversation, newest first, each marked done, failed, or no result yet. Enter reads the command with its output.
-- **Decisions (Ctrl+Shift+Y):** every question an agent asked you and every permission it asked for, with what you answered.
-- **Properties (Alt+Enter):** this session one line at a time: title, backend, folder, model, effort, permission mode and session ID, then how many messages, responses, tool steps, commands, code blocks, links and decisions it has, and how far along its task list is.
+## Groups in Recent Conversations
 
-## Agent conversations, with roles
-
-- **Kind of conversation (Alt+D)** in Send Response to Another Session (Ctrl+Shift+O): Builder and reviewer, Second opinion, Debate, or Plan and do. Each fills in a role for both sessions, which you can change or write yourself.
-- **A third agent (Alt+G):** bring one more session in, with a role of its own. Replies then go round in order, from this session to the receiving one, to the third, and back.
-- **Each agent is told the rules once:** before its first message, who else is in the conversation, that their messages aren't yours, its role, and to end its reply with DONE when they all agree the work is finished. A reply ending in DONE ends the conversation, and you hear who said it.
-
-## Task lists come back
-
-Reopening a Claude Code or Copilot conversation from Recent Conversations brings back the task list it left, so Task List (Ctrl+Shift+J) and Turn Status (Ctrl+Shift+T) pick up where it stopped.
+- **Groups (Alt+G, or Ctrl+G in the list):** put the selected conversation in one or more groups, or make a new one.
+- **Group (Alt+U):** show only one group's conversations. Each conversation's line says which groups it's in, and a group with nothing left in it disappears by itself.
 
 Thanks to Kelly Ford for The Chat Place, whose ideas these are.

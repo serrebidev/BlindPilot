@@ -231,6 +231,9 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
             "Ctrl+Shift+S",
             "Ctrl+Shift+O",
             "Alt+Enter",
+            "Copy Session Lin&k",
+            "&Remote Control…",
+            "Ctrl+Shift+U",
         )
         for item, chord in zip(items[3:], agent_chords, strict=True):
             assert item in frame._agent_menu_items
