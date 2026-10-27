@@ -356,7 +356,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.52.0"
+APP_VERSION = "0.52.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -14682,10 +14682,10 @@ class MainFrame(wx.Frame):
         self._agent_menu_items: list[wx.MenuItem] = []
         # The two sessions in an agent conversation, while one runs.
         self._relay: Optional[dict] = None
-        # Session links handed over by a second copy started from a link.
-        self._links_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, lambda _e: self._take_links(), self._links_timer)
-        self._links_timer.Start(1000)
+        # Session links handed over by a second copy; watched only once the
+        # window is shown (`watch_for_links`), never in a window built and torn
+        # down by a check, where a timer firing mid-teardown crashed macOS.
+        self._links_timer: Optional[wx.Timer] = None
         menubar = wx.MenuBar()
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
@@ -17418,10 +17418,18 @@ class MainFrame(wx.Frame):
             return
         self._resume_history(entry)
 
+    def watch_for_links(self) -> None:
+        """Check every second for session links a second copy handed over."""
+        if self._links_timer is None:
+            self._links_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, lambda _e: self._take_links(), self._links_timer)
+            self._links_timer.Start(1000)
+
     def _on_close(self, event: wx.CloseEvent) -> None:
         timer = getattr(self, "_links_timer", None)
         if timer is not None:
             timer.Stop()
+            self._links_timer = None
         if self.chat_panel is not None:
             self.chat_panel.shutdown()
         # Started together, then waited on together. One after another meant
@@ -17764,6 +17772,7 @@ def main() -> int:
         wx.CallLater(1500, frame.Close)
     else:
         frame.Show()
+        frame.watch_for_links()
         if link:
             wx.CallAfter(frame.open_session_link, link)
         frame.Raise()

@@ -1,4 +1,6 @@
-# BlindPilot 0.52.0
+# BlindPilot 0.52.1
+
+0.52.0 was never published: its Mac build crashed while testing. This is 0.52.0 with that fixed.
 
 The last of the features from The Chat Place by Kelly Ford that fit BlindPilot: reaching your Claude Code sessions from anywhere, links back to a conversation, and groups for your old conversations.
 

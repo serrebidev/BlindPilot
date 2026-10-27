@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.52.1 - 2026-10-27
+
+- The 0.52.0 build was never published: the macOS build crashed in its tests (a bus error, then a segmentation fault at a different test) because every main window started a one-second timer for handed-over session links, and it fired in windows the tests had built and macOS was still tearing down. The timer now starts only once the real window is shown, and stops when it closes.
+
 ## v0.52.0 - 2026-10-27
 
 The last of The Chat Place features: Remote Control, other machines, session links and groups.
