@@ -69,7 +69,7 @@ _TIER_CANDIDATES: dict[str, tuple[str, ...]] = {
     QUICK: (
         "poolside/laguna-s-2.1-free",
         "meta/muse-spark-1.3-contributor",
-        "xiaomi/mimo-v2.5",
+        "xiaomi/mimo-v2.6-flash",
         "qwen/qwen3.7-flash",
         "qwen/qwen3.8-flash",
         "deepseek/deepseek-v4-flash",

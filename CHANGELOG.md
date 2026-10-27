@@ -2,6 +2,20 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.50.0 - 2026-10-26
+
+Seven features from a second audit of The Chat Place (TheIdeaPlace/AIChat, through its 0.3.0).
+
+- Task List (Ctrl+Shift+J, Conversation, Find and Browse) lists the agent's own task list, each step as to do, in progress or done. Claude Code's TaskCreate and TaskUpdate calls and the older TodoWrite are applied only once their result says they worked; Codex's turn/plan/updated replaces the list whole. A newly finished step is announced as "Task done", and Turn Status says how far along the list is. A new conversation starts with no list.
+- Find in All Conversations (Ctrl+Shift+S, Conversation, Find and Browse) searches the messages of every past conversation from every backend, not only their titles, with a progress dialog that can be cancelled. Each match names the conversation, its backend, its age and the words around the match; Open Conversation reopens it in a new tab with the matching response selected.
+- Send Response to Another Session (Ctrl+Shift+O, Conversation, Find and Browse) hands the selected answer, or the newest, to another tab, labelled with which backend and session wrote it and editable before it goes. A busy session is refused rather than interrupted, and a draft in its prompt is kept.
+- Agent conversations: ticking Keep passing replies between the two tabs makes each session's next answer go to the other by itself, up to a hand-off limit (6 by default). It stops at the limit, on an empty or repeated reply, on a failed or stopped turn, or when a session is closed, and says why. Every relayed message starts with who wrote it, so a reply that begins with a slash command cannot run it in the other session.
+- New Session remembers the folders it opened, newest first, in a combo box that starts on the last one; folders that no longer exist are left out.
+- New Session can clone from GitHub (Alt+H) through the GitHub CLI into the projects folder, and can work in a new git worktree (Alt+W) on a named branch, made beside the repository as `<repo>-<branch>`; an existing branch is checked out, a new name is created, and git's refusal is shown in the dialog.
+- Ctrl+Shift+Enter in the prompt saves the message as a saved prompt, asking for its name, then sends it. Escape at the name neither saves nor sends.
+- Command Code's quick routing tier names `xiaomi/mimo-v2.6-flash`: Command Code 1.88.0 retired MiMo 2.5 from its catalog.
+- The packaged startup check no longer ends with wxWidgets' "UnregisterClass failed ... Class still has open windows": a window destroyed as the event loop ended was only queued for deletion, so one more idle pass now frees it before the app is torn down.
+
 ## v0.49.1 - 2026-10-20
 
 - Quitting ends the process, not just the window: Alt+F4 closed the window but could leave BlindPilot running in the background, because a wx application leaves its event loop only when the last top-level window is destroyed and nothing made the ending certain. The close handler now destroys any other top-level window and asks the event loop to end outright, and an exit watchdog armed at the entry point gives the process a bounded fifteen-second grace after the loop returns before ending it, so a library thread that was never made a daemon can no longer hold BlindPilot open indefinitely. Thanks to Farhan Khan for reporting it.

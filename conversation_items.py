@@ -104,6 +104,7 @@ class ConversationItemsDialog(wx.Dialog):
         copy: Callable[[str], bool],
         read: Callable[[ConversationItem], None],
         announce: Callable[[str], None],
+        read_label: str = "&Read Item",
     ):
         super().__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.items = list(items)
@@ -124,7 +125,7 @@ class ConversationItemsDialog(wx.Dialog):
         self.text.SetMinSize(self.FromDIP(wx.Size(650, 140)))
         layout.Add(self.text, 1, wx.EXPAND | wx.ALL, self.FromDIP(12))
         buttons = wx.BoxSizer(wx.HORIZONTAL)
-        self.read_button = wx.Button(self, label="&Read Item")
+        self.read_button = wx.Button(self, label=read_label)
         self.read_button.SetDefault()
         self.read_button.Bind(wx.EVT_BUTTON, self._on_read)
         buttons.Add(self.read_button, 0, wx.RIGHT, self.FromDIP(8))

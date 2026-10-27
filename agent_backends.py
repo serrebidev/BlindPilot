@@ -4424,6 +4424,10 @@ class CodexWorker(_TurnWorker):
                 if delta:
                     item_id = str(params.get("itemId") or "")
                     self._reasoning_streams.setdefault(item_id, []).append(delta)
+            elif method == "turn/plan/updated":
+                report_tasks = getattr(self, "on_tasks", None)
+                if report_tasks:
+                    report_tasks("codex", params.get("plan"))
             elif method == "thread/tokenUsage/updated":
                 usage = params.get("tokenUsage") or {}
                 last = usage.get("last") or {}

@@ -51,6 +51,9 @@ def frame(wx_app):
         "_compact_active",
         "_new_conversation_active",
         "_find_active",
+        "_task_list_active",
+        "_find_in_all_conversations",
+        "_send_to_tab_active",
         "_jump_to_latest_response",
         "_export_active",
     ):

@@ -6,7 +6,7 @@ BlindPilot contributors added the Codex, FreeBuff, opencode, Hermes, Muse Code, 
 
 Chat mode is adapted from AccessibleAI, a sibling project by the same publisher. Its accounts, profiles, provider protocols, credential storage, attachments, and streaming were moved into BlindPilot's main window.
 
-The searchable code-block and link lists were inspired by [The Chat Place](https://github.com/TheIdeaPlace/AIChat), by Kelly Ford. BlindPilot implements them independently using its existing conversation readers and controls.
+The searchable code-block and link lists, the task list, finding in all conversations, sending a reply to another session and agent conversations, New Session's recent folders, GitHub clone and worktrees, and send-and-save prompts were inspired by [The Chat Place](https://github.com/TheIdeaPlace/AIChat), by Kelly Ford. BlindPilot implements them independently using its existing conversation readers and controls.
 
 Claude and Claude Code are Anthropic's. Codex is OpenAI's. Hermes Agent is Nous Research's. FreeBuff and opencode belong to their own projects. The names identify the command-line tools BlindPilot drives; no endorsement is implied.
 

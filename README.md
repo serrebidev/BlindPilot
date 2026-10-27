@@ -131,7 +131,7 @@ Type in the prompt and press Enter to send. Shift+Enter starts a new line. Ctrl+
 Everything is in the menu bar, so if you forget a key, it's there.
 
 - **File:** New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, only when Hermes is the agent), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
-- **Conversation:** Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
+- **Conversation:** Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Task List (Ctrl+Shift+J), Find in All Conversations (Ctrl+Shift+S), Send Response to Another Session (Ctrl+Shift+O), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
 - **Model:** Backend, Model and Effort (Ctrl+Shift+E), Permission Mode, Session Status, Turn Status (Ctrl+Shift+T), Changed Files (Ctrl+Shift+D), What Agents Know (Ctrl+Shift+I), Backend Settings, Manage Backends, Connect a Provider.
 - **Options:** what gets spoken, sounds, narration, the working sound, Remote Hermes, and Preferences (Ctrl+Comma). On a Mac, Preferences is in the app menu on Cmd+Comma like every other Mac app.
 - **Chat:** accounts, profiles, models and logs for Chat mode. Only works when the Mode box is set to Chat.
@@ -145,11 +145,25 @@ Ctrl+Shift+H lists your old conversations. Sort them newest first, oldest first,
 
 F2 renames a conversation. Leave the name blank to go back to the original. Delete hides one, and Show hidden conversations brings it back. Names and hidden conversations are BlindPilot's own; the agents' files aren't touched.
 
+Ctrl+Shift+S searches the messages of every past conversation, from every backend, not just their titles. Each match says the conversation, its backend, how old it is, and the words around the match. Open Conversation (Enter) reopens it in a new tab with the matching response selected.
+
+### New Session
+
+The folder box starts on the folder you opened last, and Up and Down go through the others you've used, newest first. From GitHub (Alt+H) lists your GitHub repositories, or lets you type owner/name, and clones it into your projects folder if it isn't there yet; it needs the GitHub CLI (gh), signed in. Tick Work in a new git worktree (Alt+W) and type a branch name to work on a copy of the repository on that branch, next to the original, so your own folder is left alone. An existing branch is checked out; a new name makes the branch.
+
+### Agent conversations
+
+Ctrl+Shift+O hands the selected answer, or the newest, to another session: a Codex tab can review what Claude Code just wrote, or the other way round. You pick the session and can change the message before it goes; it starts with who wrote it. Tick Keep passing replies between the two tabs to make it an agent conversation: each session's next answer goes to the other by itself, up to the number of hand-offs you choose (6 to start with). Each hand-off is announced. It stops at the limit, when a reply is empty or repeats the last one, when a turn fails, or when you press Stop in either session. Permission prompts and questions still come to you.
+
+### Task List
+
+Ctrl+Shift+J lists the agent's task list for a longer job: each step, and whether it's to do, in progress, or done. Claude Code and Codex keep one. When a step is finished you hear "Task done" and its name, and Turn Status (Ctrl+Shift+T) says how far along the list is.
+
 ### Saved Prompts
 
 Ctrl+Shift+P opens your saved prompts: messages you send a lot, each with a name. Arrow through them and the full text shows underneath. Enter puts the prompt where your cursor is in the prompt box, ready to change and send. Nothing is sent until you press Enter.
 
-New starts from whatever's already in the prompt box, so to save what you just typed, press Ctrl+Shift+P, then New, then OK. Edit changes one, Delete removes one after asking, and Move Up and Move Down put them in your order. Everything saves straight away.
+New starts from whatever's already in the prompt box, so to save what you just typed, press Ctrl+Shift+P, then New, then OK. Or press Ctrl+Shift+Enter in the prompt: it asks for a name, saves the message, and sends it. Escape at the name does neither. Edit changes one, Delete removes one after asking, and Move Up and Move Down put them in your order. Everything saves straight away.
 
 ### Narration
 
@@ -176,13 +190,14 @@ Help, Keyboard Shortcuts (F1) shows all of this inside the app.
 - Ctrl+Shift+B: browse all code blocks. Ctrl+Shift+L: browse links. Both work in Agent and Chat mode, under Conversation, Find and Browse. Filter searches full item text; Read Item reads it, and Copy preserves the code or address. Open Link opens a selected web link only when requested. In the Agent answers, the row's actions menu can limit either list to that response.
 - Ctrl+Shift+R: say the last announcement again, if a keypress cut it off.
 - Ctrl+E: save the conversation as Markdown, a web page, or plain text.
-- Ctrl+Shift+T: how long the current task has been running, what it did last, and how many messages are waiting.
+- Ctrl+Shift+T: how long the current task has been running, what it did last, how many messages are waiting, and how far along its task list is. Ctrl+Shift+J: the task list itself.
+- Ctrl+Shift+S: search every past conversation's messages. Ctrl+Shift+O: send an answer to another session, once or as an agent conversation.
 - Ctrl+Shift+D: files changed in this folder since the last git commit, with lines added and removed. Enter reads the changes.
 - Ctrl+Shift+I: what the agents know about you: their memories, instructions, skills and settings. Enter reads one. Alt+E edits it right there, and Ctrl+S saves. Alt+A adds a Claude Code memory, Command Code taste, or Hermes memory, and Delete removes one after asking.
 - Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
 - Ctrl+/: slash commands. Ctrl+Shift+P: saved prompts. Ctrl+Shift+A: attach files. Ctrl+V: paste a picture as an attachment.
 - Ctrl+.: stop the running task.
-- Enter: send. Shift+Enter: new line. Ctrl+Up or Alt+Up: into the newest answer.
+- Enter: send. Shift+Enter: new line. Ctrl+Shift+Enter: save as a prompt, then send. Ctrl+Up or Alt+Up: into the newest answer.
 - In the answers: Enter reads a row in full. Shift+Enter opens the whole answer as a web page, so you can jump by heading, list, table and link; Escape comes back. C copies a row, Shift+C the whole answer, and Ctrl+Shift+C its last code block. Tab goes back to the prompt.
 - While helper agents are running, a Subagents running list appears above the answers. Enter on one follows what it's doing, live.
 

@@ -206,6 +206,9 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
         "_compact_active",
         "_new_conversation_active",
         "_find_active",
+        "_task_list_active",
+        "_find_in_all_conversations",
+        "_send_to_tab_active",
         "_jump_to_latest_response",
         "_export_active",
     ):
@@ -213,11 +216,17 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
     menu = app.MainFrame._build_conversation_menu(frame)
     try:
         browse = next(item.GetSubMenu() for item in menu.GetMenuItems() if item.GetSubMenu())
-        items = list(browse.GetMenuItems())
+        items = [item for item in browse.GetMenuItems() if not item.IsSeparator()]
         assert items[0] in frame._agent_menu_items
-        for item, chord in zip(items[1:], ("Ctrl+Shift+B", "Ctrl+Shift+L"), strict=True):
+        for item, chord in zip(items[1:3], ("Ctrl+Shift+B", "Ctrl+Shift+L"), strict=True):
             assert item not in frame._agent_menu_items
             assert item.GetItemLabel().endswith(chord)
             assert item.GetAccel() is not None
+        # Task List, Find in All Conversations and Send Response act on Agent
+        # sessions only.
+        agent_chords = ("Ctrl+Shift+J", "Ctrl+Shift+S", "Ctrl+Shift+O")
+        for item, chord in zip(items[3:], agent_chords, strict=True):
+            assert item in frame._agent_menu_items
+            assert item.GetItemLabel().endswith(chord)
     finally:
         menu.Destroy()

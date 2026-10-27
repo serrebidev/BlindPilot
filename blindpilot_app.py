@@ -72,6 +72,7 @@ import diagnostics
 from certificates import open_url
 from conversation_list import make_conversation_list
 from conversation_items import ConversationItem, ConversationItemsDialog, collect_items
+from task_list import CLAUDE_TASK_TOOLS, TaskList
 from app_updater import (
     GITHUB_REPOSITORY,
     ReleaseInfo,
@@ -351,7 +352,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.49.1"
+APP_VERSION = "0.50.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2764,6 +2765,81 @@ def _git(cwd: str, *args: str) -> "subprocess.CompletedProcess[str]":
     )
 
 
+def create_worktree(folder: str, branch: str) -> tuple[str, str]:
+    """A new git worktree for `branch` beside `folder`'s repository.
+
+    Returns (path, "") or ("", why not). The worktree goes next to the
+    repository as ``<repo>-<branch>``, so the folder the person chose stays as
+    it was. An existing branch is checked out there; a new name makes one.
+    """
+    try:
+        top = _git(folder, "rev-parse", "--show-toplevel")
+        if top.returncode:
+            return "", "That folder is not in a git repository."
+        root = os.path.normpath(top.stdout.strip())
+        safe = re.sub(r"[^\w.-]+", "-", branch).strip("-.") or "worktree"
+        path = os.path.join(os.path.dirname(root), f"{os.path.basename(root)}-{safe}")
+        if os.path.exists(path):
+            return "", f"That folder already exists:\n{path}"
+        known = _git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
+        if known.returncode == 0:
+            done = _git(root, "worktree", "add", path, branch)
+        else:
+            done = _git(root, "worktree", "add", "-b", branch, path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", f"git could not make the worktree: {exc}"
+    if done.returncode:
+        return "", (done.stderr or done.stdout).strip() or "git could not make the worktree."
+    return path, ""
+
+
+def search_turns(turns: Sequence[HistoryTurn], term: str) -> list[tuple[int, str, str]]:
+    """Where `term` appears in a conversation: (turn index, snippet, whole text).
+
+    Matched without regard to case, in what was asked and what was answered.
+    The snippet is the match with some words either side, for a list row.
+    """
+    wanted = term.casefold()
+    found: list[tuple[int, str, str]] = []
+    if not wanted:
+        return found
+    for index, turn in enumerate(turns):
+        for who, text in (("You", turn.prompt), ("Answer", turn.response)):
+            at = text.casefold().find(wanted)
+            if at < 0:
+                continue
+            start, end = max(0, at - 60), min(len(text), at + len(term) + 60)
+            snippet = " ".join(text[start:end].split())
+            snippet = ("…" if start else "") + snippet + ("…" if end < len(text) else "")
+            found.append((index, f"{who}: {snippet}", f"{who}: {text}"))
+    return found
+
+
+def relay_message(speaker: str, text: str) -> str:
+    """What one agent's reply says when it is handed to another tab.
+
+    Always prefixed, so a reply that starts with a slash command cannot run it
+    in the other tab.
+    """
+    return f"{speaker} replied:\n\n{text.strip()}"
+
+
+_RECENT_FOLDERS_KEPT = 15
+
+
+def _recent_folders() -> list[str]:
+    """Folders New Session has opened, newest first."""
+    found = _load_config().get("recent_folders")
+    return [f for f in found if isinstance(f, str) and f] if isinstance(found, list) else []
+
+
+def _remember_folder(path: str) -> None:
+    folders = [f for f in _recent_folders() if os.path.normcase(f) != os.path.normcase(path)]
+    cfg = _load_config()
+    cfg["recent_folders"] = [path, *folders][:_RECENT_FOLDERS_KEPT]
+    _save_config(cfg)
+
+
 def changed_files(cwd: str) -> Optional[tuple[str, list[tuple[str, str, bool]]]]:
     """What differs from the last commit in `cwd`'s repository, or None.
 
@@ -4945,6 +5021,9 @@ class ClaudeWorker(threading.Thread):
         # and a refusal that cannot say which tool was refused is not much of a
         # report.
         tool_names: dict[str, str] = {}
+        # tool_use id -> (name, input) for the task-list tools, applied only
+        # once their result says they worked.
+        task_calls: dict[str, tuple[str, dict]] = {}
         gap_note_said = False
         # Partial-message stream, by speaker (the parent tool call for a
         # subagent): the sentences a text block has already said live, so
@@ -5117,6 +5196,8 @@ class ClaudeWorker(threading.Thread):
                         call_id = block.get("id")
                         if isinstance(call_id, str):
                             tool_names[call_id] = name
+                            if name in CLAUDE_TASK_TOOLS and isinstance(params, dict):
+                                task_calls[call_id] = (name, params)
                         self._on_activity(
                             "tool",
                             _tool_use_label(
@@ -5134,6 +5215,10 @@ class ClaudeWorker(threading.Thread):
                         continue
                     if block.get("type") == "tool_result":
                         result = _tool_result_text(block.get("content"))
+                        task_call = task_calls.pop(str(block.get("tool_use_id") or ""), None)
+                        report_tasks = getattr(self, "on_tasks", None)
+                        if task_call and report_tasks and not block.get("is_error"):
+                            report_tasks("claude", task_call[0], task_call[1], result)
                         if not result:
                             continue
                         if not block.get("is_error"):
@@ -7150,6 +7235,54 @@ class ConnectDialog(wx.Dialog):
         self._refresh()
 
 
+class SendToTabDialog(wx.Dialog):
+    """Send a response to another tab, once or as an agent conversation.
+
+    The message is editable before it goes. With the relay box ticked, each
+    tab's next answer is handed to the other, up to the hand-off limit.
+    """
+
+    def __init__(self, parent: wx.Window, tabs: Sequence[str], message: str):
+        super().__init__(
+            parent, title="Send Response to Another Tab",
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+        )  # fmt: skip
+        pad = self.FromDIP(PAD_DIALOG)
+        rows = wx.BoxSizer(wx.VERTICAL)
+        rows.Add(wx.StaticText(self, label="Send &to:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.target = wx.ListBox(self, choices=list(tabs), name="Send to")
+        self.target.SetSelection(0)
+        rows.Add(self.target, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        rows.Add(wx.StaticText(self, label="&Message:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.message = wx.TextCtrl(self, value=message, style=wx.TE_MULTILINE, name="Message")
+        self.message.SetMinSize(self.FromDIP(wx.Size(520, 180)))
+        rows.Add(self.message, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.relay = wx.CheckBox(self, label="&Keep passing replies between the two tabs")
+        rows.Add(self.relay, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        rows.Add(
+            wx.StaticText(self, label="&Hand-offs before stopping:"),
+            0, wx.LEFT | wx.RIGHT | wx.TOP, pad,
+        )  # fmt: skip
+        self.turns = wx.SpinCtrl(self, min=1, max=50, initial=6, name="Hand-offs before stopping")
+        rows.Add(self.turns, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
+        if buttons is not None:
+            ok = self.FindWindowById(wx.ID_OK, self)
+            if ok is not None:
+                ok.SetLabel("&Send")
+            rows.Add(buttons, 0, wx.EXPAND | wx.ALL, pad)
+        self.SetSizerAndFit(rows)
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.target.SetFocus()
+        self.CentreOnParent()
+
+    def _on_key(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        event.Skip()
+
+
 class NewSessionDialog(wx.Dialog):
     """New Session. What it asks for depends on WHERE the session will run.
 
@@ -7194,6 +7327,8 @@ class NewSessionDialog(wx.Dialog):
         self._remote_label = remote_label.strip()
         self.path = ""
         self.title_text = ""
+        self.worktree_box: Optional[wx.CheckBox] = None
+        self.branch_box: Optional[wx.TextCtrl] = None
 
         rows = wx.BoxSizer(wx.VERTICAL)
 
@@ -7227,7 +7362,16 @@ class NewSessionDialog(wx.Dialog):
             else "&Folder for the new session:"
         )
         folder_label = wx.StaticText(self, label=folder_caption)
-        self.folder_box = wx.TextCtrl(self, value="")
+        self.folder_box: wx.TextCtrl | wx.ComboBox
+        if self._remote_label:
+            self.folder_box = wx.TextCtrl(self, value="")
+        else:
+            # Folders used before, newest first: Up and Down walk them, and
+            # the newest is filled in, because it is usually the one wanted.
+            recent = [f for f in _recent_folders() if os.path.isdir(f)]
+            self.folder_box = wx.ComboBox(
+                self, value=recent[0] if recent else "", choices=recent, style=wx.CB_DROPDOWN
+            )
         self.folder_box.SetName(
             "Folder on the remote computer, optional"
             if self._remote_label
@@ -7243,7 +7387,21 @@ class NewSessionDialog(wx.Dialog):
             # in the tab order is a cost a screen reader pays on every visit.
             browse_btn = wx.Button(self, label="&Browse…")
             browse_btn.Bind(wx.EVT_BUTTON, lambda _e: self._browse())
-            folder_row.Add(browse_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+            folder_row.Add(browse_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.FromDIP(PAD))
+            github_btn = wx.Button(self, label="From Git&Hub…")
+            github_btn.Bind(wx.EVT_BUTTON, lambda _e: self._from_github())
+            folder_row.Add(github_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+            self.worktree_box = wx.CheckBox(self, label="Work in a new git &worktree")
+            branch_label = wx.StaticText(self, label="B&ranch for the worktree:")
+            self.branch_box = wx.TextCtrl(self, value="")
+            self.branch_box.SetName("Branch for the worktree")
+            self.branch_box.Disable()
+            self.worktree_box.Bind(
+                wx.EVT_CHECKBOX,
+                lambda _e: (
+                    self.branch_box and self.branch_box.Enable(self.worktree_box.IsChecked())
+                ),
+            )
 
         pad = self.FromDIP(PAD_DIALOG)
         if self._remote_label:
@@ -7255,6 +7413,9 @@ class NewSessionDialog(wx.Dialog):
         else:
             rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, pad)
+            rows.Add(self.worktree_box, 0, wx.LEFT | wx.RIGHT, pad)
+            rows.Add(branch_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(self.branch_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
@@ -7299,6 +7460,58 @@ class NewSessionDialog(wx.Dialog):
         self.folder_box.SetFocus()
         announce(f"Folder set to {path}")
 
+    def _from_github(self) -> None:
+        """Pick one of your GitHub repositories, cloning it into the projects folder."""
+        typed_choice = "Type a repository name (owner/name)…"
+        try:
+            listed = subprocess.run(
+                ["gh", "repo", "list", "--limit", "300", "--json", "nameWithOwner",
+                 "--jq", ".[].nameWithOwner"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=60, **no_window_kwargs(),
+            )  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            self._reject("The GitHub CLI (gh) is not installed. Install it and sign in first.")
+            return
+        if listed.returncode:
+            detail = (listed.stderr or "").strip() or "gh repo list failed."
+            self._reject(f"The GitHub CLI could not list your repositories:\n{detail}")
+            return
+        repos = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+        with wx.SingleChoiceDialog(
+            self, "Repository:", "From GitHub", [typed_choice, *repos]
+        ) as pick:
+            if pick.ShowModal() != wx.ID_OK:
+                return
+            repo = pick.GetStringSelection()
+        if repo == typed_choice:
+            with wx.TextEntryDialog(self, "Repository, as owner/name:", "From GitHub") as ask:
+                if ask.ShowModal() != wx.ID_OK:
+                    return
+                repo = ask.GetValue().strip()
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+            self._reject(f"Not a repository name: {repo}")
+            return
+        target = os.path.join(os.path.expanduser(self._default_dir), repo.split("/")[1])
+        if not os.path.isdir(target):
+            announce(f"Cloning {repo}")
+            try:
+                with wx.BusyInfo(f"Cloning {repo}…", self):
+                    cloned = subprocess.run(
+                        ["gh", "repo", "clone", repo, target],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=900, **no_window_kwargs(),
+                    )  # fmt: skip
+            except (OSError, subprocess.SubprocessError) as exc:
+                self._reject(f"Cloning {repo} failed: {exc}")
+                return
+            if cloned.returncode:
+                self._reject(f"Cloning {repo} failed:\n{(cloned.stderr or '').strip()}")
+                return
+        self.folder_box.SetValue(target)
+        self.folder_box.SetFocus()
+        announce(f"Folder set to {target}")
+
     def _on_ok(self, event: wx.CommandEvent) -> None:
         self.title_text = self.name_box.GetValue().strip()
         # Quotes are stripped because a path copied from Explorer often has them.
@@ -7321,6 +7534,16 @@ class NewSessionDialog(wx.Dialog):
         if not os.path.isdir(path):
             self._reject(f"That folder does not exist:\n{path}")
             return
+        if self.worktree_box is not None and self.worktree_box.IsChecked():
+            branch = self.branch_box.GetValue().strip() if self.branch_box else ""
+            if not branch:
+                self._reject("Type a branch name for the worktree.")
+                return
+            with wx.BusyCursor():
+                path, why = create_worktree(path, branch)
+            if why:
+                self._reject(why)
+                return
         self.path = path
         event.Skip()
 
@@ -8310,6 +8533,11 @@ class SessionPanel(wx.Panel):
         self._question_in_the_answer = ""
 
         self._turns: List[Turn] = []
+        # The agent's own task list, as its task tools last left it.
+        self.task_list = TaskList()
+        # Told of each finished turn's answer (None for a stopped or failed
+        # one) while this tab is in an agent conversation.
+        self.on_turn_answer: Optional[Callable[["SessionPanel", Optional[str]], None]] = None
         self._rows: List[Row] = []  # every row across every response, in order
         self._displayed: List[Row] = []  # rows currently shown (after search)
         # Start offset of each displayed row's line in the text view, kept in
@@ -8990,7 +9218,56 @@ class SessionPanel(wx.Panel):
         queued = len(getattr(self, "_pending_messages", []))
         if queued:
             said += f" {queued} {'message' if queued == 1 else 'messages'} queued."
+        tasks = getattr(self, "task_list", None)
+        if tasks is not None and tasks.progress():
+            said += f" {tasks.progress()}"
         self._announce(said)
+
+    def _on_tasks(self, source: object, *call: object) -> None:
+        """One task-list update from the worker: apply it, say what got done."""
+        if source == "codex":
+            finished = self.task_list.apply_codex(call[0] if call else None)
+        elif len(call) == 3 and isinstance(call[1], dict):
+            finished = self.task_list.apply_claude(str(call[0]), call[1], str(call[2]))
+        else:
+            return
+        for subject in finished:
+            self._announce(f"Task done: {subject}")
+
+    def open_task_list(self) -> None:
+        """The agent's task list, each step with its state (Ctrl+Shift+J)."""
+        tasks = self.task_list.tasks
+        if not tasks:
+            self._announce(
+                "No task list in this conversation yet. Claude Code and Codex keep one "
+                "for longer tasks."
+            )
+            return
+        items = [
+            ConversationItem(line, "\n\n".join(filter(None, (task.subject, task.description))))
+            for line, task in zip(self.task_list.lines(), tasks, strict=True)
+        ]
+
+        def read(item: ConversationItem) -> None:
+            viewer = ReadView(dialog, item.payload, item.label)
+            try:
+                viewer.ShowModal()
+            finally:
+                viewer.Destroy()
+
+        dialog = ConversationItemsDialog(
+            self,
+            items,
+            f"Task List, {self.task_list.progress()}",
+            links=False,
+            copy=_copy_to_clipboard,
+            read=read,
+            announce=announce,
+        )
+        try:
+            dialog.ShowModal()
+        finally:
+            dialog.Destroy()
 
     def open_changed_files(self) -> None:
         """What differs from the last commit here (Model menu, Ctrl+Shift+D).
@@ -9167,6 +9444,62 @@ class SessionPanel(wx.Panel):
         self.prompt.SetFocus()
         self._announce("Prompt inserted. Edit if needed, then press Enter to send.")
 
+    def _save_prompt_and_send(self) -> None:
+        """Ctrl+Shift+Enter: keep this message as a saved prompt, then send it.
+
+        Escape at the name neither saves nor sends.
+        """
+        text = self.prompt.GetValue()
+        if not text.strip():
+            self._announce("Error: Type a message first")
+            return
+        with wx.TextEntryDialog(
+            self, "Name for the saved prompt:", "Send and Save", " ".join(text.split()[:5])
+        ) as ask:
+            if ask.ShowModal() != wx.ID_OK or not ask.GetValue().strip():
+                self.prompt.SetFocus()
+                return
+            name = ask.GetValue().strip()
+        if _store_saved_prompts([*_saved_prompts(), {"name": name, "text": text}]):
+            self._announce(f"Prompt saved: {name}")
+        else:
+            self._announce("Saved prompts could not be written. Sending anyway.")
+        self.prompt.SetFocus()
+        self._on_send()
+
+    def response_text(self) -> str:
+        """The answer text of the selected response, or of the newest one."""
+        number = 0
+        sel = self._selected_row()
+        if sel != wx.NOT_FOUND and self._responses_ctrl().HasFocus():
+            number = self._displayed[sel].response_number
+        headers = [row for row in self._rows if row.kind == "header"]
+        if number:
+            headers = [row for row in headers if row.response_number == number]
+        for row in reversed(headers):
+            text = row.source if row.source else row.payload
+            if text.strip():
+                return text
+        return ""
+
+    def deliver(self, text: str) -> bool:
+        """Send `text` as if typed here, keeping any draft. False if it could not go."""
+        if self._run_in_progress() and self._session_backend not in _QUEUEING_BACKENDS:
+            return False
+        draft, files = self.prompt.GetValue(), self._attachments
+        self.prompt.SetValue(text)
+        self._attachments = []
+        try:
+            if self._run_in_progress():
+                before = len(getattr(self, "_pending_messages", []))
+                self._queue_message()
+                return len(getattr(self, "_pending_messages", [])) > before
+            self._on_send()
+            return self._worker is not None
+        finally:
+            self.prompt.SetValue(draft)
+            self._attachments = files
+
     def _add_attachments(self, paths) -> None:
         added = 0
         for path in paths:
@@ -9312,6 +9645,9 @@ class SessionPanel(wx.Panel):
             self.focus_above_responses()
             return
         if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+            if event.ShiftDown() and event.CmdDown():
+                self._save_prompt_and_send()
+                return
             if event.ShiftDown():
                 event.Skip()  # default: insert newline
                 return
@@ -9593,6 +9929,8 @@ class SessionPanel(wx.Panel):
                     self._on_failed(str(args[0]))
                 elif name == "subagent":
                     self._on_subagent(*(str(arg) for arg in args))
+                elif name == "tasks":
+                    self._on_tasks(*args)
                 elif name == "done":
                     self._on_worker_finished()
                 elif name == "late_turn":
@@ -10243,6 +10581,8 @@ class SessionPanel(wx.Panel):
                 **extra,
             },
         )
+        # Set rather than passed: only the Claude and Codex workers look for it.
+        cast(Any, self._worker).on_tasks = lambda *call: self._queue_worker_event("tasks", *call)
         if selected_backend == BACKEND_MUSEAI and send_text is None:
             from museai_worker import MuseAiWorker
 
@@ -10579,6 +10919,7 @@ class SessionPanel(wx.Panel):
         self._queue_paused = False
         self._session_title = ""
         self._forget_subagents()
+        self.task_list = TaskList()
         self._turns = []
         self._rows = []
         self._displayed = []
@@ -11217,6 +11558,7 @@ class SessionPanel(wx.Panel):
         _notify_if_away(self, f"The turn failed: {message}")
 
     def _on_worker_finished(self) -> None:
+        answered = not self._stopping and not getattr(self, "_turn_failed", False)
         started = getattr(self, "_turn_started_at", None)
         if started is not None:
             self._last_turn_seconds = time.monotonic() - started
@@ -11279,6 +11621,10 @@ class SessionPanel(wx.Panel):
             wx.CallAfter(self._ask_question_left_in_the_answer, written)
         if waiting is not None:
             self._start_late_turn(waiting)
+        report = getattr(self, "on_turn_answer", None)
+        if report is not None and not queued and waiting is None:
+            answer = self._turns[-1].response if answered and self._turns else None
+            wx.CallAfter(report, self, answer)
 
     # ----- List + find -----
     def _show_step_row(self, text: str) -> None:
@@ -13782,6 +14128,8 @@ class MainFrame(wx.Frame):
         # sees. Compact, Connect and Hermes Conversations have refreshers of
         # their own that already know the mode.
         self._agent_menu_items: list[wx.MenuItem] = []
+        # The two sessions in an agent conversation, while one runs.
+        self._relay: Optional[dict] = None
         menubar = wx.MenuBar()
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
@@ -15197,6 +15545,27 @@ class MainFrame(wx.Frame):
             "Read, copy or open links in this conversation",
             lambda: self._browse_items_active("links"),
         )
+        add(
+            browse,
+            "Task L&ist…\tCtrl+Shift+J",
+            "List the agent's task list: each step, and whether it is to do, in progress or done",
+            self._task_list_active,
+        )
+        add(
+            browse,
+            "Find in &All Conversations…\tCtrl+Shift+S",
+            "Search the messages of every past conversation, and reopen one at the match",
+            self._find_in_all_conversations,
+        )
+        # Every top-level menu is at its ten-item ceiling; this acts on a
+        # response, as the lists above do.
+        browse.AppendSeparator()
+        add(
+            browse,
+            "Send Response to An&other Session…\tCtrl+Shift+O",
+            "Hand a response to another session, once or back and forth as an agent conversation",
+            self._send_to_tab_active,
+        )
         menu.AppendSubMenu(browse, "Find and &Browse")
         add(
             menu,
@@ -15829,6 +16198,8 @@ class MainFrame(wx.Frame):
             # Locally a folder is required; remotely an empty one is normal and
             # means "wherever that Hermes runs".
             return
+        if not remote_label:
+            _remember_folder(cwd)
         self._add_session(cwd, session_title=title)
         if title:
             spoken = f"New session: {title}"
@@ -15893,13 +16264,13 @@ class MainFrame(wx.Frame):
         else:
             wx.CallAfter(announce, f"Reopening {title or session_id}")
 
-    def _resume_history(self, entry: HistoryEntry) -> None:
+    def _resume_history(self, entry: HistoryEntry) -> Optional["SessionPanel"]:
         """Open one past conversation in its own tab, ready to be continued."""
         with wx.BusyCursor():
             turns = load_turns(entry)
         if not turns:
             announce(f"Error: {entry.title} could not be read back")
-            return
+            return None
         if not entry.resumable:
             text = "\n\n".join(
                 f"{label}: {value}"
@@ -15912,7 +16283,7 @@ class MainFrame(wx.Frame):
                 dialog.ShowModal()
             finally:
                 dialog.Destroy()
-            return
+            return None
         cwd = self._history_cwd()
         if entry.cwd:
             candidate = entry.cwd
@@ -15934,6 +16305,161 @@ class MainFrame(wx.Frame):
         self._follow_tab_backend()
         responses = "1 response" if len(turns) == 1 else f"{len(turns)} responses"
         wx.CallAfter(announce, f"Resumed {entry.title}, {responses}")
+        return panel
+
+    def _find_in_all_conversations(self) -> None:
+        """Search every past conversation's messages (Ctrl+Shift+S).
+
+        Enter on a result reopens that conversation on the matching response.
+        """
+        with wx.TextEntryDialog(
+            self, "Find in all conversations:", "Find in All Conversations",
+            getattr(self, "_find_all_term", ""),
+        ) as ask:  # fmt: skip
+            if ask.ShowModal() != wx.ID_OK or not ask.GetValue().strip():
+                return
+            term = ask.GetValue().strip()
+        self._find_all_term = term
+        entries = list_history(None, None, limit=1000)
+        results: list[tuple[ConversationItem, HistoryEntry, int]] = []
+        progress = wx.ProgressDialog(
+            "Find in All Conversations", f"Searching for {term}", maximum=max(1, len(entries)),
+            parent=self, style=wx.PD_APP_MODAL | wx.PD_CAN_ABORT | wx.PD_AUTO_HIDE,
+        )  # fmt: skip
+        try:
+            for done, entry in enumerate(entries):
+                if not progress.Update(done, f"Searching {entry.title}")[0]:
+                    break
+                for index, snippet, whole in search_turns(load_turns(entry), term):
+                    label = (
+                        f"{entry.title}, {backend_label(entry.backend)}, "
+                        f"{describe_age(entry.modified)}: {snippet}"
+                    )
+                    results.append((ConversationItem(label, whole), entry, index))
+        finally:
+            progress.Destroy()
+        if not results:
+            announce(f"No conversation mentions {term}")
+            return
+        chosen: list[tuple[HistoryEntry, int]] = []
+        found = {id(item): (entry, index) for item, entry, index in results}
+
+        def open_conversation(item: ConversationItem) -> None:
+            chosen.append(found[id(item)])
+            dialog.EndModal(wx.ID_OK)
+
+        dialog = ConversationItemsDialog(
+            self,
+            [item for item, _entry, _index in results],
+            f"{len(results)} matches for {term}",
+            links=False,
+            copy=_copy_to_clipboard,
+            read=open_conversation,
+            announce=announce,
+            read_label="&Open Conversation",
+        )
+        try:
+            dialog.ShowModal()
+        finally:
+            dialog.Destroy()
+        if not chosen:
+            return
+        entry, index = chosen[0]
+        panel = self._resume_history(entry)
+        if panel is None:
+            return
+        for position, row in enumerate(panel._displayed):
+            if row.kind == "header" and row.response_number == index + 1:
+                wx.CallAfter(panel._focus_row, position)
+                break
+
+    def _send_to_tab_active(self) -> None:
+        """Hand this tab's response to another tab (Ctrl+Shift+O)."""
+        page = self.notebook.GetCurrentPage()
+        if not isinstance(page, SessionPanel):
+            return
+        others = [panel for panel in self._session_panels() if panel is not page]
+        if not others:
+            announce("Open another session first, with Ctrl+T, to send a response to it.")
+            return
+        text = page.response_text()
+        if not text.strip():
+            announce("Error: No response to send yet")
+            return
+        dlg = SendToTabDialog(
+            self,
+            [self._relay_speaker(panel) for panel in others],
+            relay_message(self._relay_speaker(page), text),
+        )
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            target = others[dlg.target.GetSelection()]
+            message = dlg.message.GetValue()
+            relay = dlg.relay.IsChecked()
+            turns = dlg.turns.GetValue()
+        finally:
+            dlg.Destroy()
+        if relay:
+            self._end_relay("")
+        if not target.deliver(message):
+            announce("Error: That session is busy. Try again when its turn ends.")
+            return
+        self._select_session(self.notebook.GetPageIndex(target))
+        if relay:
+            self._relay = {"tabs": (page, target), "left": turns, "count": 0, "last": text}
+            page.on_turn_answer = target.on_turn_answer = self._relay_answer
+            wx.CallAfter(
+                announce,
+                f"Agent conversation started, up to {turns} hand-offs. "
+                "Stop in either session ends it.",
+            )
+        else:
+            wx.CallAfter(announce, f"Sent to {self._relay_speaker(target)}")
+
+    def _relay_speaker(self, panel: "SessionPanel") -> str:
+        """'Codex (my-project)': who a relayed reply came from."""
+        name = _tab_label(getattr(panel, "tab_title", ""), panel.cwd)
+        return f"{backend_label(panel.selected_backend())} ({name})"
+
+    def _relay_answer(self, panel: "SessionPanel", answer: Optional[str]) -> None:
+        """One tab in the agent conversation finished a turn: pass it on, or stop."""
+        relay = getattr(self, "_relay", None)
+        if not relay or panel not in relay["tabs"]:
+            return
+        first, second = relay["tabs"]
+        other = second if panel is first else first
+        if answer is None:
+            self._end_relay("a turn was stopped or failed")
+        elif not answer.strip():
+            self._end_relay("a reply was empty")
+        elif relay["left"] <= 0:
+            self._end_relay(f"{relay['count']} hand-offs, the limit")
+        elif _flatten(answer) == _flatten(relay["last"]):
+            self._end_relay("the replies started repeating")
+        elif not other:
+            self._end_relay("the other session was closed")
+        elif not other.deliver(relay_message(self._relay_speaker(panel), answer)):
+            self._end_relay("the other session could not take the reply")
+        else:
+            relay["left"] -= 1
+            relay["count"] += 1
+            relay["last"] = answer
+            announce(
+                f"Hand-off {relay['count']}: {self._relay_speaker(panel)} passed to "
+                f"{self._relay_speaker(other)}"
+            )
+
+    def _end_relay(self, reason: str) -> None:
+        relay = getattr(self, "_relay", None)
+        self._relay = None
+        if not relay:
+            return
+        for panel in relay["tabs"]:
+            if panel:
+                panel.on_turn_answer = None
+        if reason:
+            announce(f"Agent conversation ended: {reason}.")
 
     def _compact_active(self) -> None:
         """Compact the conversation in the active tab (Ctrl+Shift+K)."""
@@ -16218,6 +16744,11 @@ class MainFrame(wx.Frame):
         if isinstance(page, SessionPanel):
             page._pick_saved_prompt()
 
+    def _task_list_active(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            page.open_task_list()
+
     # ----- Cleanup -----
     def _on_close(self, event: wx.CloseEvent) -> None:
         if self.chat_panel is not None:
@@ -16315,7 +16846,9 @@ Ctrl+1 to Ctrl+9: go to that tab.
 Ctrl+Shift+H: Recent Conversations. In its list, F2 renames and Delete hides.
 Ctrl+G: Hermes conversations, when Hermes is the backend.
 Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
-Ctrl+Shift+T: turn status. Ctrl+Shift+D: changed files.
+Ctrl+Shift+T: turn status. Ctrl+Shift+J: task list. Ctrl+Shift+D: changed files.
+Ctrl+Shift+S: find in all conversations; Enter on a match reopens it there.
+Ctrl+Shift+O: send a response to another session, once or as an agent conversation.
 Ctrl+Shift+I: what agents know: memories, tastes, instructions, skills and settings.
 In Claude Code memories, Command Code tastes and Hermes memories, Alt+A adds one and Delete removes one.
 Alt+E edits whatever is selected; in the text, Ctrl+S saves.
@@ -16324,7 +16857,7 @@ Ctrl+Shift+B: browse code blocks. Ctrl+Shift+L: browse links, in Agent or Chat m
 Ctrl+Comma: Preferences. F1: this list.
 
 Prompt
-Enter: send. Shift+Enter: new line.
+Enter: send. Shift+Enter: new line. Ctrl+Shift+Enter: save as a prompt, then send.
 Ctrl+Shift+P: saved prompts. In its list, Enter inserts one and Delete removes it.
 Ctrl+/: slash commands. Ctrl+Shift+A: attach files. Ctrl+V: paste a picture as an attachment.
 Ctrl+Period: stop the running task.
@@ -16530,6 +17063,15 @@ def main() -> int:
         # Abandoned downloads are tens of megabytes each.
         wx.CallLater(8000, sweep_temporary_files)
     app.MainLoop()
+    # A window destroyed as the loop ended is only queued for deletion. Left
+    # queued, wxMSW tears the app down around it and prints "UnregisterClass
+    # failed ... Class still has open windows". One more idle pass frees it.
+    leftover = list(wx.GetTopLevelWindows())
+    if leftover:
+        for window in leftover:
+            window.Destroy()
+        wx.CallAfter(app.ExitMainLoop)
+        app.MainLoop()
     return 0
 
 
