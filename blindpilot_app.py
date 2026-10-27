@@ -352,7 +352,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.50.1"
+APP_VERSION = "0.50.2"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7391,17 +7391,15 @@ class NewSessionDialog(wx.Dialog):
             github_btn = wx.Button(self, label="From Git&Hub…")
             github_btn.Bind(wx.EVT_BUTTON, lambda _e: self._from_github())
             folder_row.Add(github_btn, 0, wx.ALIGN_CENTER_VERTICAL)
-            self.worktree_box = wx.CheckBox(self, label="Work in a new git &worktree")
+            worktree_box = wx.CheckBox(self, label="Work in a new git &worktree")
             branch_label = wx.StaticText(self, label="B&ranch for the worktree:")
-            self.branch_box = wx.TextCtrl(self, value="")
-            self.branch_box.SetName("Branch for the worktree")
-            self.branch_box.Disable()
-            self.worktree_box.Bind(
-                wx.EVT_CHECKBOX,
-                lambda _e: (
-                    self.branch_box and self.branch_box.Enable(self.worktree_box.IsChecked())
-                ),
+            branch_box = wx.TextCtrl(self, value="")
+            branch_box.SetName("Branch for the worktree")
+            branch_box.Disable()
+            worktree_box.Bind(
+                wx.EVT_CHECKBOX, lambda _e: branch_box.Enable(worktree_box.IsChecked())
             )
+            self.worktree_box, self.branch_box = worktree_box, branch_box
 
         pad = self.FromDIP(PAD_DIALOG)
         if self._remote_label:
@@ -7413,9 +7411,9 @@ class NewSessionDialog(wx.Dialog):
         else:
             rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, pad)
-            rows.Add(self.worktree_box, 0, wx.LEFT | wx.RIGHT, pad)
+            rows.Add(worktree_box, 0, wx.LEFT | wx.RIGHT, pad)
             rows.Add(branch_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
-            rows.Add(self.branch_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            rows.Add(branch_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(name_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(self.name_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(name_help, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
@@ -16405,7 +16403,7 @@ class MainFrame(wx.Frame):
         if not target.deliver(message):
             announce("Error: That session is busy. Try again when its turn ends.")
             return
-        self._select_session(self.notebook.GetPageIndex(target))
+        self._select_session(self.notebook.FindPage(target))
         if relay:
             self._relay = {"tabs": (page, target), "left": turns, "count": 0, "last": text}
             page.on_turn_answer = target.on_turn_answer = self._relay_answer

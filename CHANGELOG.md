@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.50.2 - 2026-10-27
+
+- Send Response to Another Session no longer fails after the message goes: it moved to the receiving session with `GetPageIndex`, which the session book does not have, so the switch and any agent conversation never started. It uses `FindPage`. Found by the Windows type check against wxPython 4.3.2's stubs; New Session's worktree controls are typed as present where they are laid out.
+
 ## v0.50.1 - 2026-10-27
 
 - The 0.50.0 build was never published: the startup-window cleanup it added swept every top-level window after the event loop, which in the release workflow's test order reached windows left by other tests and a stand-in application without `ExitMainLoop`. It now frees only the main window `main()` created, matched by identity. 0.50.1 carries everything listed under 0.50.0.

@@ -1,6 +1,6 @@
-# BlindPilot 0.50.1
+# BlindPilot 0.50.2
 
-This is the first published build of 0.50: the 0.50.0 build stopped on a failing startup test before it was released, and 0.50.1 fixes that test failure with no other change.
+Send Response to Another Session (Ctrl+Shift+O) now works as described below: in 0.50.1 the message reached the other session, but BlindPilot then failed before moving you there, so an agent conversation never started. Nothing else changed since 0.50.1, which was the first published build of 0.50.
 
 Seven new features, from a second look at The Chat Place by Kelly Ford: its 0.1.5 to 0.3.0 releases added things BlindPilot didn't have yet. Each is built BlindPilot's own way, on the tabs, lists and dialogs you already use.
 
