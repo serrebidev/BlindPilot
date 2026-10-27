@@ -133,6 +133,29 @@ def test_codex_permission_modes_translate_to_native_sandboxes():
     )
 
 
+def test_codex_auto_hands_approvals_to_its_automatic_review():
+    """Auto asks, but Codex's own reviewer answers; no other mode uses it."""
+    assert CodexWorker._policy("auto")[0] == "on-request"
+    assert CodexWorker._reviewer("auto") == {"approvalsReviewer": "auto_review"}
+    assert CodexWorker._reviewer("default") == {}
+    assert CodexWorker._policy("dontAsk")[0] == "never"
+
+
+def test_codex_automatic_review_decisions_are_said():
+    line = agent_backends.auto_review_line(
+        {
+            "review": {"status": "denied", "riskLevel": "high", "rationale": "Deletes files"},
+            "action": {"type": "command", "command": "rm -rf build", "cwd": "/p", "source": "x"},
+        }
+    )
+    assert line == "Automatic review denied running rm -rf build, high risk: Deletes files."
+    assert agent_backends.auto_review_line({"review": {"status": "inProgress"}}) == ""
+    assert (
+        agent_backends.auto_review_line({"review": {"status": "approved"}, "action": None})
+        == "Automatic review approved a request."
+    )
+
+
 def test_codex_app_server_prefers_packaged_windows_binary(monkeypatch, tmp_path):
     wrapper = tmp_path / "npm" / "codex.cmd"
     native = (

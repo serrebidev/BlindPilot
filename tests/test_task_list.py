@@ -86,6 +86,65 @@ def test_turn_status_includes_the_task_progress():
     assert spoken == ["No turn is running. Tasks: 1 of 1 done."]
 
 
+def test_a_reopened_claude_conversation_gets_its_task_list_back(tmp_path):
+    import json
+
+    from session_history import HistoryEntry, restore_tasks
+
+    def block(role, **content):
+        return {"type": role, "message": {"role": role, "content": [content]}}
+
+    records = [
+        block("assistant", type="tool_use", id="a", name="TaskCreate", input={"subject": "Plan"}),
+        block("user", type="tool_result", tool_use_id="a", content="Task #1 created successfully"),
+        block("assistant", type="tool_use", id="b", name="TaskCreate", input={"subject": "Ship"}),
+        block("user", type="tool_result", tool_use_id="b", content="Task #2 created successfully"),
+        block(
+            "assistant",
+            type="tool_use",
+            id="c",
+            name="TaskUpdate",
+            input={"taskId": "1", "status": "completed"},
+        ),
+        block(
+            "user", type="tool_result", tool_use_id="c", content=[{"type": "text", "text": "ok"}]
+        ),
+        # A failed call changes nothing.
+        block(
+            "assistant",
+            type="tool_use",
+            id="d",
+            name="TaskUpdate",
+            input={"taskId": "2", "status": "completed"},
+        ),
+        block("user", type="tool_result", tool_use_id="d", content="boom", is_error=True),
+    ]
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+
+    tasks = restore_tasks(HistoryEntry("claude", "s", "t", str(path), 0.0))
+
+    assert tasks.lines() == ["1. Done: Plan", "2. To do: Ship"]
+    assert restore_tasks(HistoryEntry("codex", "s", "t", str(path), 0.0)).lines() == []
+
+
+def test_a_reopened_copilot_conversation_gets_its_checklist_back(tmp_path):
+    import json
+
+    from session_history import HistoryEntry, restore_tasks
+
+    event = {
+        "type": "tool.execution_start",
+        "data": {"toolName": "update_todo", "arguments": {"todos": "- [x] A\n- [ ] B"}},
+    }
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps(event), encoding="utf-8")
+
+    tasks = restore_tasks(HistoryEntry("copilot", "s", "t", str(path), 0.0))
+
+    assert tasks.progress() == "Tasks: 1 of 2 done."
+
+
 def test_a_finished_step_is_announced_from_the_worker_event():
     stub = type("PanelStub", (), {})()
     spoken: list[str] = []

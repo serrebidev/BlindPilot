@@ -90,6 +90,7 @@ from agent_backends import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
+    BACKEND_COPILOT,
     BACKEND_FREEBUFF,
     BACKEND_GEMINI,
     BACKEND_HERMES,
@@ -184,6 +185,7 @@ from session_history import (
     list_history,
     load_turns,
     make_title,
+    restore_tasks,
 )
 
 # Optional macOS-only path for posting NSAccessibility announcements so
@@ -352,7 +354,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.50.2"
+APP_VERSION = "0.51.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1377,13 +1379,21 @@ _NPM_BACKEND_PACKAGES = {
     BACKEND_OPENCODE: "opencode-ai",
     BACKEND_COMMANDCODE: "command-code",
     BACKEND_GEMINI: "@google/gemini-cli",
+    BACKEND_COPILOT: "@github/copilot",
 }
 
 # Backends whose turn is one process per message. A message typed while one
 # runs cannot join it, so it is queued and sent when the turn ends, and Steer
 # stops the turn and resumes with the instruction.
 _QUEUEING_BACKENDS = frozenset(
-    {BACKEND_COMMANDCODE, BACKEND_GEMINI, BACKEND_ANTIGRAVITY, BACKEND_MUSEAI, BACKEND_FREEBUFF}
+    {
+        BACKEND_COMMANDCODE,
+        BACKEND_GEMINI,
+        BACKEND_ANTIGRAVITY,
+        BACKEND_MUSEAI,
+        BACKEND_FREEBUFF,
+        BACKEND_COPILOT,
+    }
 )
 
 
@@ -2295,6 +2305,14 @@ def probe_model_options(
             _remember_model_options(backend, cwd, binary, options)
         return options
 
+    if backend == BACKEND_COPILOT:
+        # No model-list command: "auto" and the configured model, and any id
+        # typed into the picker.
+        from copilot_backend import copilot_model_options
+
+        models, efforts, current_model, current_effort, error = copilot_model_options()
+        return ModelOptions(models, efforts, current_model, current_effort, error)
+
     if backend == BACKEND_COMMANDCODE:
         # The catalog comes from `command-code --list-models`, and the model
         # and effort in use are read out of its stored config rather than
@@ -2363,7 +2381,9 @@ PERMISSION_MODES = [
         "auto",
         "Auto",
         "Auto mode. The backend works inside its workspace sandbox without "
-        "stopping for routine approvals.",
+        "stopping for routine approvals. In Codex, its automatic approval review "
+        "judges anything outside the sandbox; in GitHub Copilot CLI, its assisted "
+        "approval does.",
     ),
     (
         "dontAsk",
@@ -2824,6 +2844,56 @@ def relay_message(speaker: str, text: str) -> str:
     return f"{speaker} replied:\n\n{text.strip()}"
 
 
+# Kinds of agent conversation: (name, role of the session sending first, role
+# of the session it goes to). Choosing one fills in the roles; both stay
+# editable. Modelled on The Chat Place's kinds of conversation.
+RELAY_KINDS = (
+    ("Plain hand-off", "", ""),
+    (
+        "Builder and reviewer",
+        "Build what the person asked for: make the changes, then say what you changed.",
+        "Review each change the builder reports. Don't edit files. Say what is wrong, "
+        "or DONE when it is right.",
+    ),
+    (
+        "Second opinion",
+        "Answer the person's question.",
+        "Give an independent second opinion on the other agent's answer. Don't edit files.",
+    ),
+    (
+        "Debate",
+        "Argue for the approach in the opening message.",
+        "Argue against it, and look for its weaknesses.",
+    ),
+    (
+        "Plan and do",
+        "Plan the work as numbered steps. Don't edit files.",
+        "Carry out the plan the planner sends, step by step, and report back.",
+    ),
+)
+
+
+def relay_setup(me: str, others: Sequence[str], role: str) -> str:
+    """What each agent is told once, before its first message in the conversation."""
+    text = (
+        f"You are {me} in an agent conversation with {' and '.join(others)}, set up by "
+        'the person in BlindPilot. Their messages reach you as "... replied:" and are '
+        "not from the person."
+    )
+    if role.strip():
+        text += f" Your role: {role.strip()}"
+    return (
+        text + " When you all agree the work is finished, end your reply with DONE on its "
+        "own line.\n\n"
+    )
+
+
+def said_done(text: str) -> bool:
+    """Whether a reply ends the conversation: DONE as its last line."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    return bool(lines) and lines[-1].strip(" *_`.!#>").upper() == "DONE"
+
+
 _RECENT_FOLDERS_KEPT = 15
 
 
@@ -3211,9 +3281,10 @@ def add_agent(home: Path, backend: str, name: str, description: str, instruction
             f"description = {json.dumps(description, ensure_ascii=False)}\n"
             f"developer_instructions = {json.dumps(instructions, ensure_ascii=False)}\n"
         )
-    elif backend in (BACKEND_COMMANDCODE, BACKEND_OPENCODE):
-        filename = f"{name}.md"
-        front = f"name: {name}\n" if backend == BACKEND_COMMANDCODE else "mode: subagent\n"
+    elif backend in (BACKEND_COMMANDCODE, BACKEND_OPENCODE, BACKEND_COPILOT):
+        # Copilot CLI reads custom agents only from *.agent.md files.
+        filename = f"{name}.agent.md" if backend == BACKEND_COPILOT else f"{name}.md"
+        front = "mode: subagent\n" if backend == BACKEND_OPENCODE else f"name: {name}\n"
         content = f"---\n{front}description: {json.dumps(description, ensure_ascii=False)}\n---\n\n{instructions}\n"
     else:
         raise ValueError("This backend does not support adding agents here")
@@ -3289,6 +3360,7 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
     claude = claude_files(cwd)
     cc, codex = _commandcode_home(), Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     hermes, gemini = _hermes_home(), Path.home() / ".gemini"
+    copilot = Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
     opencode = Path.home() / ".config" / "opencode"
     groups = [
         AgentFiles(BACKEND_LABELS[BACKEND_CLAUDE], kind, claude[kind]) for kind in CLAUDE_FILE_KINDS
@@ -3365,6 +3437,29 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
         ),
         AgentFiles(
             BACKEND_LABELS[BACKEND_GEMINI], "Skills", _plain_files(gemini.glob("skills/*/SKILL.md"))
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COPILOT],
+            "Instructions",
+            _plain_files(
+                [
+                    copilot / "copilot-instructions.md",
+                    *([project / ".github" / "copilot-instructions.md"] if project else []),
+                    *here,
+                ]
+            ),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COPILOT],
+            "Skills",
+            _plain_files(copilot.glob("skills/*/SKILL.md")),
+        ),
+        AgentFiles(
+            BACKEND_LABELS[BACKEND_COPILOT],
+            "Agents",
+            _plain_files(copilot.glob("agents/*.md"), False),
+            "agent",
+            copilot,
         ),
         AgentFiles(
             BACKEND_LABELS[BACKEND_OPENCODE],
@@ -7265,6 +7360,29 @@ class SendToTabDialog(wx.Dialog):
         )  # fmt: skip
         self.turns = wx.SpinCtrl(self, min=1, max=50, initial=6, name="Hand-offs before stopping")
         rows.Add(self.turns, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+
+        def field(label: str, name: str) -> wx.TextCtrl:
+            rows.Add(wx.StaticText(self, label=label), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            box = wx.TextCtrl(self, name=name)
+            rows.Add(box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
+            return box
+
+        rows.Add(
+            wx.StaticText(self, label="Kin&d of conversation:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad
+        )
+        self.kind = wx.Choice(
+            self, choices=[kind[0] for kind in RELAY_KINDS], name="Kind of conversation"
+        )
+        self.kind.SetSelection(0)
+        self.kind.Bind(wx.EVT_CHOICE, self._on_kind)
+        rows.Add(self.kind, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.first_role = field("&Role of this session:", "Role of this session")
+        self.second_role = field("Role of the recei&ving session:", "Role of the receiving session")
+        rows.Add(wx.StaticText(self, label="Third a&gent:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.third = wx.Choice(self, choices=["None", *tabs], name="Third agent")
+        self.third.SetSelection(0)
+        rows.Add(self.third, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.third_role = field("Rol&e of the third agent:", "Role of the third agent")
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
         if buttons is not None:
             ok = self.FindWindowById(wx.ID_OK, self)
@@ -7275,6 +7393,13 @@ class SendToTabDialog(wx.Dialog):
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self.target.SetFocus()
         self.CentreOnParent()
+
+    def _on_kind(self, _event: Optional[wx.CommandEvent] = None) -> None:
+        _name, first, second = RELAY_KINDS[max(0, self.kind.GetSelection())]
+        self.first_role.SetValue(first)
+        self.second_role.SetValue(second)
+        if first:
+            self.relay.SetValue(True)
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
@@ -8533,6 +8658,9 @@ class SessionPanel(wx.Panel):
         self._turns: List[Turn] = []
         # The agent's own task list, as its task tools last left it.
         self.task_list = TaskList()
+        # Each question and permission request this conversation put to the
+        # person, with what they answered: (what was asked, the answer).
+        self.decisions: list[tuple[str, str]] = []
         # Told of each finished turn's answer (None for a stopped or failed
         # one) while this tab is in an agent conversation.
         self.on_turn_answer: Optional[Callable[["SessionPanel", Optional[str]], None]] = None
@@ -9225,6 +9353,8 @@ class SessionPanel(wx.Panel):
         """One task-list update from the worker: apply it, say what got done."""
         if source == "codex":
             finished = self.task_list.apply_codex(call[0] if call else None)
+        elif source == "copilot":
+            finished = self.task_list.apply_checklist(call[0] if call else None)
         elif len(call) == 3 and isinstance(call[1], dict):
             finished = self.task_list.apply_claude(str(call[0]), call[1], str(call[2]))
         else:
@@ -9237,7 +9367,7 @@ class SessionPanel(wx.Panel):
         tasks = self.task_list.tasks
         if not tasks:
             self._announce(
-                "No task list in this conversation yet. Claude Code and Codex keep one "
+                "No task list in this conversation yet. Claude Code, Codex and Copilot keep one "
                 "for longer tasks."
             )
             return
@@ -9266,6 +9396,98 @@ class SessionPanel(wx.Panel):
             dialog.ShowModal()
         finally:
             dialog.Destroy()
+
+    def command_items(self) -> list[ConversationItem]:
+        """Each command the agent ran, newest first: done, failed or no result yet."""
+        found: list[list[str]] = []  # [command, state, output]
+        for row in self._rows:
+            if row.kind == "tool" and row.label.startswith("Running"):
+                found.append([row.payload.removeprefix("Running:").strip(), "no result yet", ""])
+            elif found and found[-1][1] == "no result yet":
+                if row.kind == "result":
+                    found[-1][1:] = ["done", row.payload]
+                elif row.kind == "tool" and row.label.startswith("Failed"):
+                    found[-1][1:] = ["failed", row.payload]
+        return [
+            ConversationItem(f"{command}, {state}", f"{command}\n\n{output}".strip())
+            for command, state, output in reversed(found)
+        ]
+
+    def _show_items(self, items: list[ConversationItem], title: str, empty: str) -> None:
+        if not items:
+            self._announce(empty)
+            return
+
+        def read(item: ConversationItem) -> None:
+            viewer = ReadView(dialog, item.payload, item.label)
+            try:
+                viewer.ShowModal()
+            finally:
+                viewer.Destroy()
+
+        dialog = ConversationItemsDialog(
+            self,
+            items,
+            title,
+            links=False,
+            copy=_copy_to_clipboard,
+            read=read,
+            announce=announce,
+        )
+        try:
+            dialog.ShowModal()
+        finally:
+            dialog.Destroy()
+
+    def open_commands(self) -> None:
+        """Every command the agent ran, with its output (Ctrl+Shift+X)."""
+        items = self.command_items()
+        self._show_items(
+            items,
+            f"Commands, {len(items)}",
+            "No commands in this conversation yet. Turn on live activity in "
+            "Preferences to keep the agent's steps.",
+        )
+
+    def open_decisions(self) -> None:
+        """Every question and permission request, with the answer (Ctrl+Shift+Y)."""
+        items = [
+            ConversationItem(f"{asked}. {answer}", f"{asked}\n\n{answer}")
+            for asked, answer in reversed(self.decisions)
+        ]
+        self._show_items(
+            items, f"Decisions, {len(items)}", "No decisions in this conversation yet."
+        )
+
+    def property_lines(self) -> list[str]:
+        """This session as "Property: value" lines (Properties, Alt+Enter)."""
+        backend = self._session_backend or self.selected_backend()
+        rows = self._rows
+        sources = [(row.kind, row.source or row.payload) for row in rows if row.kind == "header"]
+        lines = [
+            f"Title: {self.tab_title or 'not named yet'}",
+            f"Backend: {backend_label(backend)}",
+            f"Folder: {self.cwd or 'none'}",
+            f"Model: {self.model or 'the backend default'}",
+            f"Effort: {self.effort or 'the backend default'}",
+            f"Permission mode: {_MODE_LABEL_BY_VALUE.get(self.mode, self.mode)}",
+            f"Session ID: {self._session_id or 'none yet'}",
+            f"Your messages: {sum(row.kind == 'you' for row in rows) or len(self._turns)}",
+            f"Responses: {self._response_count}",
+            f"Tool steps: {sum(row.kind == 'tool' for row in rows)}",
+            f"Commands: {len(self.command_items())}",
+            f"Code blocks: {len(collect_items(sources, 'code'))}",
+            f"Links: {len(collect_items(sources, 'links'))}",
+            f"Decisions: {len(self.decisions)}",
+        ]
+        progress = self.task_list.progress()
+        return lines + ([progress] if progress else [])
+
+    def open_properties(self) -> None:
+        lines = self.property_lines()
+        self._show_items(
+            [ConversationItem(line, line) for line in lines], "Properties", "Nothing to show."
+        )
 
     def open_changed_files(self) -> None:
         """What differs from the last commit here (Model menu, Ctrl+Shift+D).
@@ -9730,6 +9952,14 @@ class SessionPanel(wx.Panel):
                     held["answer"] = self._show_permission_dialog(
                         backend, tool, payload, suggestions
                     )
+                    allowed = held["answer"].get("behavior") == "allow"
+                    asked = "approve its plan" if tool == "ExitPlanMode" else f"use {tool}"
+                    self.decisions.append(
+                        (
+                            f"{backend_label(backend)} asked to {asked}",
+                            "You allowed it" if allowed else "You denied it",
+                        )
+                    )
             finally:
                 answered.set()
 
@@ -9810,8 +10040,19 @@ class SessionPanel(wx.Panel):
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 self._announce("Question left unanswered")
+                for question in questions:
+                    self.decisions.append(
+                        (f"{backend_label(backend)} asked: {question.question}", "Left unanswered")
+                    )
                 return None
             answers = dlg.answers()
+            for question, answer in zip(questions, answers, strict=False):
+                self.decisions.append(
+                    (
+                        f"{backend_label(backend)} asked: {question.question}",
+                        "You answered: " + (", ".join(answer) or "nothing"),
+                    )
+                )
         finally:
             self._question_dialog = None
             dlg.Destroy()
@@ -10918,6 +11159,7 @@ class SessionPanel(wx.Panel):
         self._session_title = ""
         self._forget_subagents()
         self.task_list = TaskList()
+        self.decisions = []
         self._turns = []
         self._rows = []
         self._displayed = []
@@ -10981,6 +11223,9 @@ class SessionPanel(wx.Panel):
         self._session_backend = normalize_backend(entry.backend)
         self._backend = self._session_backend
         self._turns = [Turn(prompt=turn.prompt, response=turn.response) for turn in turns]
+        # The task list it left, so Task List and Turn Status pick up there.
+        self.task_list = restore_tasks(entry)
+        self.decisions = []
         self._rows = []
         self._displayed = []
         self._search_term = ""
@@ -15551,6 +15796,18 @@ class MainFrame(wx.Frame):
         )
         add(
             browse,
+            "Co&mmands…\tCtrl+Shift+X",
+            "List every command the agent ran, with whether it finished and its output",
+            lambda: self._panel_action("open_commands"),
+        )
+        add(
+            browse,
+            "&Decisions…\tCtrl+Shift+Y",
+            "List every question and permission request, with how you answered",
+            lambda: self._panel_action("open_decisions"),
+        )
+        add(
+            browse,
             "Find in &All Conversations…\tCtrl+Shift+S",
             "Search the messages of every past conversation, and reopen one at the match",
             self._find_in_all_conversations,
@@ -15563,6 +15820,12 @@ class MainFrame(wx.Frame):
             "Send Response to An&other Session…\tCtrl+Shift+O",
             "Hand a response to another session, once or back and forth as an agent conversation",
             self._send_to_tab_active,
+        )
+        add(
+            browse,
+            "&Properties…\tAlt+Enter",
+            "This session's backend, folder, model, counts and progress, one line each",
+            lambda: self._panel_action("open_properties"),
         )
         menu.AppendSubMenu(browse, "Find and &Browse")
         add(
@@ -16396,21 +16659,41 @@ class MainFrame(wx.Frame):
             message = dlg.message.GetValue()
             relay = dlg.relay.IsChecked()
             turns = dlg.turns.GetValue()
+            pick = dlg.third.GetSelection()
+            third = others[pick - 1] if pick > 0 else None
+            roles = [dlg.first_role.GetValue(), dlg.second_role.GetValue()]
+            third_role = dlg.third_role.GetValue()
         finally:
             dlg.Destroy()
+        if relay and third is target:
+            announce("Error: The third agent has to be a different session.")
+            return
+        tabs = (page, target, third) if relay and third else (page, target)
         if relay:
             self._end_relay("")
+            roles.append(third_role)
+            relay_state: dict = {
+                "tabs": tabs,
+                "left": turns,
+                "count": 0,
+                "last": text,
+                "roles": {id(panel): role for panel, role in zip(tabs, roles, strict=False)},
+                "told": set(),
+            }
+            message = self._relay_preface(relay_state, target) + message
         if not target.deliver(message):
             announce("Error: That session is busy. Try again when its turn ends.")
             return
         self._select_session(self.notebook.FindPage(target))
         if relay:
-            self._relay = {"tabs": (page, target), "left": turns, "count": 0, "last": text}
-            page.on_turn_answer = target.on_turn_answer = self._relay_answer
+            self._relay = relay_state
+            for panel in tabs:
+                panel.on_turn_answer = self._relay_answer
+            who = f"{len(tabs)} agents" if len(tabs) > 2 else "two agents"
             wx.CallAfter(
                 announce,
-                f"Agent conversation started, up to {turns} hand-offs. "
-                "Stop in either session ends it.",
+                f"Agent conversation between {who} started, up to {turns} hand-offs. "
+                "Stop in any of its sessions ends it.",
             )
         else:
             wx.CallAfter(announce, f"Sent to {self._relay_speaker(target)}")
@@ -16425,19 +16708,25 @@ class MainFrame(wx.Frame):
         relay = getattr(self, "_relay", None)
         if not relay or panel not in relay["tabs"]:
             return
-        first, second = relay["tabs"]
-        other = second if panel is first else first
+        # Replies go round in order: first to second, second to the third if
+        # there is one, and back to the first.
+        tabs = relay["tabs"]
+        other = tabs[(tabs.index(panel) + 1) % len(tabs)]
         if answer is None:
             self._end_relay("a turn was stopped or failed")
         elif not answer.strip():
             self._end_relay("a reply was empty")
+        elif said_done(answer):
+            self._end_relay(f"{self._relay_speaker(panel)} said DONE")
         elif relay["left"] <= 0:
             self._end_relay(f"{relay['count']} hand-offs, the limit")
         elif _flatten(answer) == _flatten(relay["last"]):
             self._end_relay("the replies started repeating")
         elif not other:
             self._end_relay("the other session was closed")
-        elif not other.deliver(relay_message(self._relay_speaker(panel), answer)):
+        elif not other.deliver(
+            self._relay_preface(relay, other) + relay_message(self._relay_speaker(panel), answer)
+        ):
             self._end_relay("the other session could not take the reply")
         else:
             relay["left"] -= 1
@@ -16447,6 +16736,16 @@ class MainFrame(wx.Frame):
                 f"Hand-off {relay['count']}: {self._relay_speaker(panel)} passed to "
                 f"{self._relay_speaker(other)}"
             )
+
+    def _relay_preface(self, relay: dict, panel: "SessionPanel") -> str:
+        """The setup an agent is told before its first message, once; "" after that."""
+        told = relay.get("told")
+        if told is None or id(panel) in told:
+            return ""
+        told.add(id(panel))
+        others = [self._relay_speaker(tab) for tab in relay["tabs"] if tab is not panel]
+        role = relay.get("roles", {}).get(id(panel), "")
+        return relay_setup(self._relay_speaker(panel), others, role)
 
     def _end_relay(self, reason: str) -> None:
         relay = getattr(self, "_relay", None)
@@ -16747,6 +17046,12 @@ class MainFrame(wx.Frame):
         if isinstance(page, SessionPanel):
             page.open_task_list()
 
+    def _panel_action(self, name: str) -> None:
+        """Run one of the current agent tab's list commands by name."""
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            getattr(page, name)()
+
     # ----- Cleanup -----
     def _on_close(self, event: wx.CloseEvent) -> None:
         if self.chat_panel is not None:
@@ -16845,6 +17150,8 @@ Ctrl+Shift+H: Recent Conversations. In its list, F2 renames and Delete hides.
 Ctrl+G: Hermes conversations, when Hermes is the backend.
 Ctrl+Shift+E: model and effort. Ctrl+Shift+M: cycle permission modes.
 Ctrl+Shift+T: turn status. Ctrl+Shift+J: task list. Ctrl+Shift+D: changed files.
+Ctrl+Shift+X: commands the agent ran. Ctrl+Shift+Y: decisions you made.
+Alt+Enter: this session's properties.
 Ctrl+Shift+S: find in all conversations; Enter on a match reopens it there.
 Ctrl+Shift+O: send a response to another session, once or as an agent conversation.
 Ctrl+Shift+I: what agents know: memories, tastes, instructions, skills and settings.

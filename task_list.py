@@ -25,6 +25,7 @@ _CODEX_STATUS = {
 }
 CLAUDE_TASK_TOOLS = frozenset({"TaskCreate", "TaskUpdate", "TodoWrite"})
 _CREATED = re.compile(r"\bTask #(\w+) created", re.IGNORECASE)
+_CHECKLIST = re.compile(r"^\s*[-*]\s*\[([ xX~-])\]\s*(.+)$", re.MULTILINE)
 
 
 @dataclass
@@ -98,6 +99,22 @@ class TaskList:
             (_text(step.get("step")), _CODEX_STATUS.get(_text(step.get("status")), PENDING))
             for step in plan
             if isinstance(step, dict)
+        )
+        return self._newly_done(before)
+
+    def apply_checklist(self, todos: object) -> list[str]:
+        """Replace the list with Copilot's ``update_todo`` checklist; return steps it finished.
+
+        Copilot writes the whole list as Markdown on every call:
+        ``- [ ] Build``, ``- [x] Plan``; ``[~]`` or ``[-]`` reads as in progress.
+        """
+        if not isinstance(todos, str):
+            return []
+        before = {task.task_id: task.status for task in self.tasks}
+        marks = {"x": COMPLETED, "~": IN_PROGRESS, "-": IN_PROGRESS}
+        self.tasks = self._from_steps(
+            (match.group(2).strip(), marks.get(match.group(1).casefold(), PENDING))
+            for match in _CHECKLIST.finditer(todos)
         )
         return self._newly_done(before)
 

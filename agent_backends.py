@@ -358,6 +358,7 @@ BACKEND_MUSEAI = "museai"
 BACKEND_COMMANDCODE = "commandcode"
 BACKEND_GEMINI = "gemini"
 BACKEND_ANTIGRAVITY = "antigravity"
+BACKEND_COPILOT = "copilot"
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
 # package and downloaded executable do contain the live picker catalog, so the
 # adapter discovers that catalog at runtime and writes the same setting the
@@ -893,6 +894,21 @@ BACKENDS = {
         supports_compaction=False,
         login_needs_terminal=True,
     ),
+    BACKEND_COPILOT: BackendInfo(
+        BACKEND_COPILOT,
+        "GitHub Copilot CLI",
+        "copilot",
+        "npm install -g @github/copilot",
+        # GitHub's device flow: Copilot prints a one-time code and the page to
+        # type it into, so the person needs to read its terminal.
+        ("login",),
+        True,
+        True,
+        True,
+        # Its /compact is interactive-only; a headless turn cannot ask for it.
+        supports_compaction=False,
+        login_needs_terminal=True,
+    ),
 }
 
 # Alphabetical by label, so every menu and list of backends reads in the same
@@ -964,6 +980,10 @@ def normalize_backend(value: object) -> str:
         "antigravitycli": BACKEND_ANTIGRAVITY,
         "googleantigravity": BACKEND_ANTIGRAVITY,
         "agy": BACKEND_ANTIGRAVITY,
+        "copilot": BACKEND_COPILOT,
+        "copilotcli": BACKEND_COPILOT,
+        "githubcopilot": BACKEND_COPILOT,
+        "githubcopilotcli": BACKEND_COPILOT,
     }
     return aliases.get(compact, BACKEND_CLAUDE)
 
@@ -1113,6 +1133,10 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
         from google_backend import antigravity_auth_ok
 
         return antigravity_auth_ok(timeout=max(timeout, 30))
+    if backend == BACKEND_COPILOT:
+        from copilot_backend import copilot_auth_ok
+
+        return copilot_auth_ok(timeout=max(timeout, 20))
     binary = find_backend_cli(backend)
     if not binary:
         return False
@@ -2199,6 +2223,10 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         from google_backend import antigravity_account_lines
 
         lines.extend(antigravity_account_lines())
+    elif backend == BACKEND_COPILOT:
+        from copilot_backend import copilot_account_lines
+
+        lines.extend(copilot_account_lines())
     else:
         lines.extend(_opencode_account_lines())
     lines.extend(backend_usage_lines(backend, binary, timeout))
@@ -2369,6 +2397,18 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             home / ".gemini" / "antigravity-cli" / "settings.json",
             "Applies to every project. permissions.allow lists the commands agy may run "
             "unasked in a turn that is not bypassing permissions.",
+        ),
+        SettingsFile(
+            BACKEND_COPILOT,
+            "global",
+            home / ".copilot" / "settings.json",
+            "Applies to every project. Holds Copilot CLI's model and its allowed web addresses.",
+        ),
+        SettingsFile(
+            BACKEND_COPILOT,
+            "global",
+            home / ".copilot" / "mcp-config.json",
+            "Applies to every project. The MCP servers Copilot CLI starts.",
         ),
     ]
     if project is not None:
@@ -3874,6 +3914,48 @@ class _TurnWorker(threading.Thread):
         """Let go of whatever this turn borrowed, however it ended."""
 
 
+def auto_review_line(params: dict) -> str:
+    """What Codex's automatic approval review decided, in one sentence.
+
+    ``item/autoApprovalReview/completed`` (codex-cli 0.164.0, marked unstable):
+    ``review`` holds the status, risk level and rationale; ``action`` what was
+    asked for. Still in progress, or a shape this does not know, says nothing.
+    """
+    review = params.get("review")
+    action = params.get("action")
+    if not isinstance(review, dict):
+        return ""
+    verdict = {
+        "approved": "approved",
+        "denied": "denied",
+        "timedOut": "timed out on",
+        "aborted": "stopped reviewing",
+    }.get(str(review.get("status") or ""))
+    if not verdict:
+        return ""
+    what = "a request"
+    if isinstance(action, dict):
+        kind = action.get("type")
+        if kind == "command" and action.get("command"):
+            what = f"running {subagent_line(action['command'], 120)}"
+        elif kind == "execve" and action.get("program"):
+            what = f"running {action['program']}"
+        elif kind == "applyPatch":
+            what = "a file change"
+        elif kind == "networkAccess" and action.get("host"):
+            what = f"network access to {action['host']}"
+        elif kind == "mcpToolCall" and action.get("toolName"):
+            what = f"the {action['toolName']} tool"
+    line = f"Automatic review {verdict} {what}"
+    risk = review.get("riskLevel")
+    if isinstance(risk, str) and risk:
+        line += f", {risk} risk"
+    rationale = review.get("rationale")
+    if isinstance(rationale, str) and rationale.strip():
+        line += f": {subagent_line(rationale, 200)}"
+    return line + ("" if line.endswith(".") else ".")
+
+
 class CodexWorker(_TurnWorker):
     """Run one Codex turn through the official app-server JSONL protocol."""
 
@@ -4201,9 +4283,22 @@ class CodexWorker(_TurnWorker):
             return "never", {"type": "dangerFullAccess"}
         if mode == "plan":
             return "never", {"type": "readOnly", "networkAccess": False}
-        if mode in ("auto", "dontAsk"):
+        if mode == "dontAsk":
             return "never", {"type": "workspaceWrite", "networkAccess": True}
+        # Auto asks too, but Codex's automatic approval review answers in the
+        # person's place (see `_reviewer`), so a step outside the sandbox is
+        # judged rather than refused or put to somebody.
         return "on-request", {"type": "workspaceWrite", "networkAccess": True}
+
+    @staticmethod
+    def _reviewer(mode: str) -> dict:
+        """Who answers Codex's approval requests: its own reviewer in Auto.
+
+        ``auto_review`` is Codex's risk-judging subagent (app-server
+        ``approvalsReviewer``, codex-cli 0.164.0). Every other mode leaves the
+        requests to the person, Codex's default.
+        """
+        return {"approvalsReviewer": "auto_review"} if mode == "auto" else {}
 
     def _do_run(self) -> None:
         if self._compact and not self._session_id:
@@ -4234,6 +4329,7 @@ class CodexWorker(_TurnWorker):
                     "dangerFullAccess": "danger-full-access",
                 }.get(sandbox_type, "workspace-write"),
                 "serviceName": "blindpilot",
+                **self._reviewer(self._permission_mode),
             }
             if self._model:
                 params["model"] = self._model
@@ -4326,6 +4422,7 @@ class CodexWorker(_TurnWorker):
                     "cwd": self._cwd,
                     "approvalPolicy": approval,
                     "sandboxPolicy": sandbox,
+                    **self._reviewer(self._permission_mode),
                 }
                 if self._model:
                     params["model"] = self._model
@@ -4424,6 +4521,10 @@ class CodexWorker(_TurnWorker):
                 if delta:
                     item_id = str(params.get("itemId") or "")
                     self._reasoning_streams.setdefault(item_id, []).append(delta)
+            elif method == "item/autoApprovalReview/completed":
+                said = auto_review_line(params)
+                if said:
+                    self._on_activity("notice", said)
             elif method == "turn/plan/updated":
                 report_tasks = getattr(self, "on_tasks", None)
                 if report_tasks:
@@ -9021,4 +9122,8 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         from google_worker import AntigravityWorker
 
         return AntigravityWorker
+    if backend == BACKEND_COPILOT:
+        from copilot_backend import CopilotWorker
+
+        return CopilotWorker
     return claude_worker

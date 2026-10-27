@@ -1,29 +1,35 @@
-# BlindPilot 0.50.2
+# BlindPilot 0.51.0
 
-Send Response to Another Session (Ctrl+Shift+O) now works as described below: in 0.50.1 the message reached the other session, but BlindPilot then failed before moving you there, so an agent conversation never started. Nothing else changed since 0.50.1, which was the first published build of 0.50.
+The rest of what The Chat Place by Kelly Ford does that makes sense for BlindPilot, built BlindPilot's own way. The headline is a new agent: GitHub Copilot CLI.
 
-Seven new features, from a second look at The Chat Place by Kelly Ford: its 0.1.5 to 0.3.0 releases added things BlindPilot didn't have yet. Each is built BlindPilot's own way, on the tabs, lists and dialogs you already use.
+## GitHub Copilot CLI
 
-## Agents working together
+- **A new backend:** pick GitHub Copilot CLI under Model, Backend, and talk to it like any other agent. Its answers stream into the list a sentence at a time, every step it takes is announced ("Reading app.py", "Running: git status"), the agents it hands work to show up in the subagent list, and its to-do list feeds Task List. Model offers auto or any model id you type, with reasoning effort up to max. Messages you send while it works wait their turn.
+- **Setting it up:** Model, Manage Backends installs it with npm and signs you in. Sign-in runs `copilot login` in a terminal, which shows a code to type at github.com/login/device. If you already signed in to the GitHub CLI (gh), Copilot uses that and there's nothing to do.
+- **A Copilot plan is needed:** your GitHub account needs a Copilot plan that includes Copilot CLI; Copilot Free is enough. Without one Copilot refuses every message with "Access denied by policy settings", and BlindPilot tells you to check github.com/settings/copilot instead of just failing.
+- **Permission modes:** Bypass lets it do anything; Plan makes it plan without changing files; Auto turns on Copilot's assisted approval, which judges each risky step for you.
+- **Your old Copilot conversations** show in Recent Conversations (Ctrl+Shift+H) and Find in All Conversations (Ctrl+Shift+S), so you can carry on one you started in a terminal. What Agents Know (Ctrl+Shift+I) lists Copilot's instructions, skills and custom agents, and can add an agent for it.
 
-- **Send Response to Another Session (Ctrl+Shift+O):** hand the answer you're on, or the newest one, to another tab. A Codex session can review what Claude Code just wrote, or Hermes can check what Codex planned. Pick the session, change the message if you like, and press Send; it goes labelled with which agent and session wrote it, and you land in that session to hear the reply. A session that is still working is refused rather than interrupted, and anything you were typing there is kept.
-- **Agent conversations:** in the same dialog, tick Keep passing replies between the two tabs and choose how many hand-offs to allow (6 to start). Each session's next answer then goes to the other by itself, and every hand-off is announced. It stops at the limit, when a reply is empty or repeats the last one, when a turn fails, when a session is closed, or the moment you press Stop in either one, and it tells you which. Permission prompts and questions still come to you, and because every relayed message starts with who wrote it, one agent can't run a slash command in the other's session.
+## Codex reviews its own requests in Auto
 
-## Finding your way
+In Auto, a Codex step that needs to leave its sandbox, like reaching the network or writing outside the project, used to just fail. Now Codex's automatic approval review looks at it and allows or refuses it for you, and you hear the decision, what it was about, how risky Codex judged it and why. Don't ask still refuses those steps without a review.
 
-- **Task List (Ctrl+Shift+J):** for a longer job, Claude Code and Codex keep a task list. BlindPilot now keeps it too: each step and whether it's to do, in progress or done, in a list you can filter, read and copy. When a step finishes you hear "Task done" and its name, and Turn Status (Ctrl+Shift+T) says how far along the list is.
-- **Find in All Conversations (Ctrl+Shift+S):** search the words of every past conversation, from every backend, not just their titles. Each match tells you the conversation, the backend, how long ago, and the words around the match. Open Conversation reopens it in a new tab with that response selected. The search can be cancelled from its progress dialog.
+## More lists to read
 
-## Starting work
+All three are under Conversation, Find and Browse, and filter, read and copy like Code Blocks and Links.
 
-- **New Session remembers your folders:** the folder box starts on the folder you opened last, and Up and Down go through the others you've used, newest first.
-- **From GitHub (Alt+H):** pick one of your GitHub repositories, or type owner/name, and BlindPilot clones it into your projects folder if it isn't there yet. It needs the GitHub CLI (gh), signed in.
-- **Work in a new git worktree (Alt+W):** type a branch name and the session works on its own copy of the repository, next to the original, so your folder stays exactly as it was. An existing branch is checked out; a new name makes the branch.
-- **Send and save (Ctrl+Shift+Enter):** in the prompt, saves what you typed as a saved prompt, asking for a name, then sends it. Escape at the name does neither.
+- **Commands (Ctrl+Shift+X):** every command the agent ran in this conversation, newest first, each marked done, failed, or no result yet. Enter reads the command with its output.
+- **Decisions (Ctrl+Shift+Y):** every question an agent asked you and every permission it asked for, with what you answered.
+- **Properties (Alt+Enter):** this session one line at a time: title, backend, folder, model, effort, permission mode and session ID, then how many messages, responses, tool steps, commands, code blocks, links and decisions it has, and how far along its task list is.
 
-## Also fixed
+## Agent conversations, with roles
 
-- Command Code's automatic routing listed MiMo 2.5 for quick tasks, which Command Code 1.88.0 no longer offers; it now uses MiMo 2.6 Flash.
-- The startup check no longer prints a wxWidgets "Class still has open windows" warning on the way out; the last closed windows are now freed before BlindPilot exits.
+- **Kind of conversation (Alt+D)** in Send Response to Another Session (Ctrl+Shift+O): Builder and reviewer, Second opinion, Debate, or Plan and do. Each fills in a role for both sessions, which you can change or write yourself.
+- **A third agent (Alt+G):** bring one more session in, with a role of its own. Replies then go round in order, from this session to the receiving one, to the third, and back.
+- **Each agent is told the rules once:** before its first message, who else is in the conversation, that their messages aren't yours, its role, and to end its reply with DONE when they all agree the work is finished. A reply ending in DONE ends the conversation, and you hear who said it.
+
+## Task lists come back
+
+Reopening a Claude Code or Copilot conversation from Recent Conversations brings back the task list it left, so Task List (Ctrl+Shift+J) and Turn Status (Ctrl+Shift+T) pick up where it stopped.
 
 Thanks to Kelly Ford for The Chat Place, whose ideas these are.

@@ -1,6 +1,6 @@
 # BlindPilot
 
-A screen-reader-first desktop app for AI coding agents. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, muse.ai, Command Code, Gemini CLI, and Antigravity CLI in normal windows, so NVDA, JAWS, and VoiceOver read real buttons, lists and edit boxes instead of a terminal. It runs on Windows, macOS, and Linux. Linux gets the least testing of the three.
+A screen-reader-first desktop app for AI coding agents. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, muse.ai, Command Code, Gemini CLI, Antigravity CLI, and GitHub Copilot CLI in normal windows, so NVDA, JAWS, and VoiceOver read real buttons, lists and edit boxes instead of a terminal. It runs on Windows, macOS, and Linux. Linux gets the least testing of the three.
 
 [![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -15,7 +15,7 @@ BlindPilot is vibe-coded. I use it every day. It started as a fork of [Claude Co
 
 ## What it does
 
-- Runs ten coding agents. Pick one per tab under Model, Backend. New tabs start on whatever agent the tab you're in uses. If your tabs use different agents, each tab's name, its prompt, and its send sound tell you which one you're talking to.
+- Runs eleven coding agents. Pick one per tab under Model, Backend. New tabs start on whatever agent the tab you're in uses. If your tabs use different agents, each tab's name, its prompt, and its send sound tell you which one you're talking to.
 - Doesn't stop to ask permission for every little thing. Every agent runs in Bypass permissions mode out of the box. If you want to approve things yourself, change it under Model, Permission Mode.
 - Splits every answer into rows: one per heading, paragraph, list item, quote, code block, thought, and tool step. Arrow through them like any list.
 - Reads answers out as they arrive, or stays quiet until the whole answer is in. Your choice.
@@ -67,7 +67,7 @@ Your settings are kept in `%APPDATA%\BlindPilot` on Windows, `~/Library/Applicat
 
 ## Set up an agent
 
-The first time you run BlindPilot, a wizard walks you through it. You can get back to it any time from Model, Manage Backends. It finds, installs, updates, and signs in to any of the ten backends. If an agent needs Node.js and you don't have it, the wizard installs that too. Nothing needs admin rights.
+The first time you run BlindPilot, a wizard walks you through it. You can get back to it any time from Model, Manage Backends. It finds, installs, updates, and signs in to any of the eleven backends. If an agent needs Node.js and you don't have it, the wizard installs that too. Nothing needs admin rights.
 
 Sign In runs the agent's own sign-in, reads out the web address, and opens your browser. If the site gives you a code, BlindPilot asks for it and passes it on. Hermes asks its setup questions in a terminal, so for Hermes, Sign In opens a terminal window. Answer the questions there, then choose Already Signed In.
 
@@ -106,6 +106,10 @@ gemini --screen-reader   # choose Sign in with Google, finish in the browser, th
 irm https://antigravity.google/cli/install.ps1 | iex
 agy                      # signs in with your Google account in the browser
 
+# GitHub Copilot CLI
+npm install -g @github/copilot
+copilot login           # type the code it shows at github.com/login/device
+
 # Muse Code, see https://developer.meta.com/ai/products/muse-code/
 # On Windows, run these inside WSL.
 curl -fsSL https://dev.meta.ai/install.sh | bash
@@ -131,7 +135,7 @@ Type in the prompt and press Enter to send. Shift+Enter starts a new line. Ctrl+
 Everything is in the menu bar, so if you forget a key, it's there.
 
 - **File:** New Session (Ctrl+T), Recent Conversations (Ctrl+Shift+H), Hermes Conversations (Ctrl+G, only when Hermes is the agent), Side Chat in This Folder, Next and Previous Session, Set Projects Folder, Create Desktop Shortcut, Close Session (Ctrl+W), Quit (Ctrl+Q).
-- **Conversation:** Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Task List (Ctrl+Shift+J), Find in All Conversations (Ctrl+Shift+S), Send Response to Another Session (Ctrl+Shift+O), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
+- **Conversation:** Stop Task (Ctrl+.), Attach Files (Ctrl+Shift+A), Slash Command (Ctrl+/), Saved Prompts (Ctrl+Shift+P), Compact Conversation (Ctrl+Shift+K), Start New Conversation (Ctrl+Shift+N), Find in Responses (Ctrl+F), Task List (Ctrl+Shift+J), Commands (Ctrl+Shift+X), Decisions (Ctrl+Shift+Y), Find in All Conversations (Ctrl+Shift+S), Send Response to Another Session (Ctrl+Shift+O), Properties (Alt+Enter), Jump to Latest Response (Ctrl+R), Repeat Last Announcement (Ctrl+Shift+R), Export Conversation (Ctrl+E).
 - **Model:** Backend, Model and Effort (Ctrl+Shift+E), Permission Mode, Session Status, Turn Status (Ctrl+Shift+T), Changed Files (Ctrl+Shift+D), What Agents Know (Ctrl+Shift+I), Backend Settings, Manage Backends, Connect a Provider.
 - **Options:** what gets spoken, sounds, narration, the working sound, Remote Hermes, and Preferences (Ctrl+Comma). On a Mac, Preferences is in the app menu on Cmd+Comma like every other Mac app.
 - **Chat:** accounts, profiles, models and logs for Chat mode. Only works when the Mode box is set to Chat.
@@ -153,11 +157,17 @@ The folder box starts on the folder you opened last, and Up and Down go through 
 
 ### Agent conversations
 
-Ctrl+Shift+O hands the selected answer, or the newest, to another session: a Codex tab can review what Claude Code just wrote, or the other way round. You pick the session and can change the message before it goes; it starts with who wrote it. Tick Keep passing replies between the two tabs to make it an agent conversation: each session's next answer goes to the other by itself, up to the number of hand-offs you choose (6 to start with). Each hand-off is announced. It stops at the limit, when a reply is empty or repeats the last one, when a turn fails, or when you press Stop in either session. Permission prompts and questions still come to you.
+Ctrl+Shift+O hands the selected answer, or the newest, to another session: a Codex tab can review what Claude Code just wrote, or the other way round. You pick the session and can change the message before it goes; it starts with who wrote it. Tick Keep passing replies between the two tabs to make it an agent conversation: each session's next answer goes to the other by itself, up to the number of hand-offs you choose (6 to start with). Each hand-off is announced. It stops at the limit, when a reply is empty or repeats the last one, when an agent ends its reply with DONE, when a turn fails, or when you press Stop in any of its sessions. Permission prompts and questions still come to you.
+
+Kind of conversation (Alt+D) fills in a role for each session: Builder and reviewer, Second opinion, Debate, or Plan and do. Change the roles or write your own in Role of this session (Alt+R) and Role of the receiving session (Alt+V). Third agent (Alt+G) brings in one more session, with a role of its own: replies then go round from this session to the receiving one, to the third, and back. Each agent is told once, before its first message, who else is in the conversation, that their messages aren't yours, its role, and to end with DONE when they all agree the work is finished.
 
 ### Task List
 
-Ctrl+Shift+J lists the agent's task list for a longer job: each step, and whether it's to do, in progress, or done. Claude Code and Codex keep one. When a step is finished you hear "Task done" and its name, and Turn Status (Ctrl+Shift+T) says how far along the list is.
+Ctrl+Shift+J lists the agent's task list for a longer job: each step, and whether it's to do, in progress, or done. Claude Code, Codex and GitHub Copilot CLI keep one. When a step is finished you hear "Task done" and its name, and Turn Status (Ctrl+Shift+T) says how far along the list is. Reopening a Claude Code or Copilot conversation from Recent Conversations brings its task list back.
+
+### Commands, Decisions and Properties
+
+Ctrl+Shift+X lists every command the agent ran in this conversation, newest first, each with done, failed or no result yet; Enter reads the command and its output. Ctrl+Shift+Y lists every question an agent asked you and every permission it asked for, with how you answered. Alt+Enter, Properties, lists this session one line at a time: its title, backend, folder, model, effort, permission mode and session ID, then how many messages, responses, tool steps, commands, code blocks, links and decisions it has, and how far along its task list is. All three are under Conversation, Find and Browse, and copy like the other lists. Commands come from the steps in the list, so they need live activity on in Preferences.
 
 ### Saved Prompts
 
@@ -191,6 +201,7 @@ Help, Keyboard Shortcuts (F1) shows all of this inside the app.
 - Ctrl+Shift+R: say the last announcement again, if a keypress cut it off.
 - Ctrl+E: save the conversation as Markdown, a web page, or plain text.
 - Ctrl+Shift+T: how long the current task has been running, what it did last, how many messages are waiting, and how far along its task list is. Ctrl+Shift+J: the task list itself.
+- Ctrl+Shift+X: commands the agent ran. Ctrl+Shift+Y: questions and permission requests, with your answers. Alt+Enter: this session's properties.
 - Ctrl+Shift+S: search every past conversation's messages. Ctrl+Shift+O: send an answer to another session, once or as an agent conversation.
 - Ctrl+Shift+D: files changed in this folder since the last git commit, with lines added and removed. Enter reads the changes.
 - Ctrl+Shift+I: what the agents know about you: their memories, instructions, skills and settings. Enter reads one. Alt+E edits it right there, and Ctrl+S saves. Alt+A adds a Claude Code memory, Command Code taste, or Hermes memory, and Delete removes one after asking.
@@ -214,6 +225,8 @@ On a Mac, Ctrl is Cmd. Two keys are different so macOS doesn't eat them: Recent 
 - **muse.ai:** Meta's personal agent. It runs on Meta's computers, not yours, so it can't see your files; paste in what it needs. Picking it opens your main chat. New Conversation starts a side chat. Replies can take minutes, so BlindPilot waits up to an hour. Stop ends the wait, not the work; the answer still lands in your muse.ai chat. Model, muse.ai has Approvals, Schedules, Feed, Ideas, and Goals.
 - **Command Code:** messages sent while it's working are queued and sent in order when it finishes. `/queue list`, `/queue clear` and `/queue resume` manage them. Every one of its slash commands works. Model follows your Command Code CLI setting by default. Choose **Auto (choose for each task)** under Model, or type `/model auto`, to let BlindPilot switch models and providers for this tab, including free models; Model, Session Status reports the latest route. Before each turn and retry, Auto checks the CLI's current `--list-models` in the background and selects only priced, eligible entries. Stop cancels a model-list check in progress before the prompt starts. If the check fails, it uses the CLI default; list membership does not guarantee server acceptance. If an Auto turn hits a rate or credit limit before answering or running a tool, BlindPilot announces one retry on a model the live list and installed catalog confirm is free. During the recorded cooldown, Auto also chooses a confirmed free model for later tasks, including heavier ones, and says when it makes that tradeoff. If no free model can be confirmed or routing fails, Auto says it is using the Command Code default. If a limit cannot be retried because work already started or no free model is confirmed, BlindPilot says why. Manual model choices never switch automatically.
 - **Gemini CLI** and **Antigravity CLI:** sign in with Google. They don't shrink conversations.
+- **GitHub Copilot CLI:** sign in with `copilot login`, which shows a code to type at github.com/login/device; a GitHub CLI (gh) sign-in or a `GH_TOKEN` works too. Your GitHub account needs a Copilot plan that allows Copilot CLI (Copilot Free is enough); without one, Copilot refuses every message with "Access denied by policy settings", and BlindPilot says where to check. Messages sent while it works are queued. In Auto, Copilot's own assisted approval judges each risky step. Its past conversations are in Recent Conversations, and custom agents you add under What Agents Know are saved as `.agent.md` files it reads. It doesn't shrink conversations.
+- **Codex in Auto:** steps that need to leave the sandbox go to Codex's automatic approval review instead of failing or asking you. Each decision is announced, with its risk level and reason.
 
 ## Chat mode
 
@@ -322,6 +335,7 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. It runs the tests and t
 | Command Code | Headless JSON CLI, one process per message | Yes, with reasoning effort | Yes | Yes | In writing only |
 | Gemini CLI | Headless stream-json CLI, one process per message | Model yes (its auto, pro, flash and flash-lite choices), effort no | Yes | No | In writing only |
 | Antigravity CLI | Print mode with stream-json in and out, one process per message | Yes, with reasoning effort up to max | Yes | No | In writing only |
+| GitHub Copilot CLI | Prompt mode with JSON events, one process per message | Model yes (auto or any model id), with reasoning effort up to max | Yes. Auto turns on Copilot's assisted approval | No | In writing only |
 
 "In writing only" means the backend has no question tool BlindPilot can intercept (Command Code withholds it from headless runs), so questions are detected from the end of the answer text. Claude Code and Codex are told in their system instructions to use their question tool; on Codex this is appended to your own `developer_instructions`.
 

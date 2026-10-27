@@ -294,10 +294,16 @@ def test_add_agent_rejects_empty_fields_and_preserves_duplicate(tmp_path):
 def test_empty_agent_groups_can_be_opened_to_add(tmp_path, monkeypatch):
     monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("COPILOT_HOME", raising=False)
     groups = [group for group in app.agent_files(None) if group.kind == "Agents"]
     assert {group.backend for group in groups} == {
         app.BACKEND_LABELS[backend]
-        for backend in (app.BACKEND_CODEX, app.BACKEND_COMMANDCODE, app.BACKEND_OPENCODE)
+        for backend in (
+            app.BACKEND_CODEX,
+            app.BACKEND_COMMANDCODE,
+            app.BACKEND_OPENCODE,
+            app.BACKEND_COPILOT,
+        )
     }
     assert all(group.editable == "agent" and group.files == [] for group in groups)
 
@@ -329,15 +335,16 @@ def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("COPILOT_HOME", raising=False)
     _write(tmp_path / ".commandcode" / "AGENTS.md")
     (tmp_path / "hermes").mkdir()
     _write(tmp_path / ".gemini" / "GEMINI.md")
 
     names = [f"{g.backend} {g.kind}" for g in app.agent_files(None)]
 
-    claude, cc, codex, hermes, gemini, opencode = (
+    claude, cc, codex, hermes, gemini, opencode, copilot = (
         app.BACKEND_LABELS[b]
-        for b in ("claude", "commandcode", "codex", "hermes", "gemini", "opencode")
+        for b in ("claude", "commandcode", "codex", "hermes", "gemini", "opencode", "copilot")
     )
     # Editable kinds remain reachable when empty; other empty kinds stay hidden.
     # The backend order follows BACKEND_LABELS.
@@ -348,6 +355,7 @@ def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path
         f"{cc} Instructions",
         f"{cc} Agents",
         f"{gemini} Instructions",
+        f"{copilot} Agents",
         f"{hermes} Memories",
         f"{opencode} Agents",
     ]

@@ -80,6 +80,7 @@ def frame(monkeypatch):
     stub.spoken = spoken
     stub._relay_speaker = lambda panel: app.MainFrame._relay_speaker(stub, panel)
     stub._end_relay = lambda reason: app.MainFrame._end_relay(stub, reason)
+    stub._relay_preface = lambda relay, panel: app.MainFrame._relay_preface(stub, relay, panel)
     return stub
 
 
@@ -130,6 +131,46 @@ def test_a_session_that_cannot_take_the_reply_ends_it(frame):
     assert (
         frame.spoken[-1] == "Agent conversation ended: the other session could not take the reply."
     )
+
+
+def test_three_agents_take_turns_and_each_is_told_its_role_once(frame):
+    first, second, third = _Panel(), _Panel(), _Panel()
+    for panel, place in ((first, "api"), (second, "web"), (third, "docs")):
+        panel.cwd = f"/work/{place}"
+    frame._relay = {
+        "tabs": (first, second, third),
+        "left": 5,
+        "count": 0,
+        "last": "opening",
+        "roles": {id(second): "Review", id(third): "Write the docs"},
+        "told": {id(second)},  # told with the opening message
+    }
+
+    app.MainFrame._relay_answer(frame, second, "Fix line 3")
+    app.MainFrame._relay_answer(frame, third, "Documented")
+    app.MainFrame._relay_answer(frame, first, "Fixed")
+    app.MainFrame._relay_answer(frame, second, "Looks right")
+
+    assert len(first.sent) == 1 and len(second.sent) == 1
+    assert third.sent[0].startswith("You are Claude Code (docs) in an agent conversation with ")
+    assert "Your role: Write the docs" in third.sent[0]
+    assert third.sent[0].endswith("Claude Code (web) replied:\n\nFix line 3")
+    assert "Your role" not in first.sent[0]
+    # The second already knew its role, so its message is the reply alone.
+    assert second.sent == ["Claude Code (api) replied:\n\nFixed"]
+    # Told once: the third agent's second message is the reply alone.
+    assert third.sent[1] == "Claude Code (web) replied:\n\nLooks right"
+    assert frame._relay["count"] == 4
+
+
+def test_a_reply_ending_in_done_ends_the_conversation(frame):
+    first, second = _start(frame)
+
+    app.MainFrame._relay_answer(frame, first, "All checks pass.\n\n**DONE**")
+
+    assert second.sent == []
+    assert frame.spoken[-1] == "Agent conversation ended: Claude Code (api) said DONE."
+    assert not app.said_done("We are not DONE yet")
 
 
 def test_recent_folders_are_newest_first_without_duplicates(monkeypatch):

@@ -30,6 +30,7 @@ NUMBER_WORDS = (
     "eight",
     "nine",
     "ten",
+    "eleven",
 )
 
 

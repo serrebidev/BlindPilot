@@ -222,9 +222,16 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
             assert item not in frame._agent_menu_items
             assert item.GetItemLabel().endswith(chord)
             assert item.GetAccel() is not None
-        # Task List, Find in All Conversations and Send Response act on Agent
-        # sessions only.
-        agent_chords = ("Ctrl+Shift+J", "Ctrl+Shift+S", "Ctrl+Shift+O")
+        # Task List, Commands, Decisions, Find in All Conversations, Send
+        # Response and Properties act on Agent sessions only.
+        agent_chords = (
+            "Ctrl+Shift+J",
+            "Ctrl+Shift+X",
+            "Ctrl+Shift+Y",
+            "Ctrl+Shift+S",
+            "Ctrl+Shift+O",
+            "Alt+Enter",
+        )
         for item, chord in zip(items[3:], agent_chords, strict=True):
             assert item in frame._agent_menu_items
             assert item.GetItemLabel().endswith(chord)

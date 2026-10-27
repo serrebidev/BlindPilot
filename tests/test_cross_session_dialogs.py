@@ -107,5 +107,18 @@ def test_the_send_dialog_offers_the_other_sessions_and_an_editable_message(frame
         assert dlg.message.GetValue() == "Claude replied:\n\nHi"
         assert not dlg.relay.IsChecked()
         assert dlg.turns.GetValue() == 6
+        assert dlg.third.GetStrings() == ["None", "Codex (api)", "Claude Code (web)"]
+    finally:
+        dlg.Destroy()
+
+
+def test_a_kind_of_conversation_fills_in_the_roles_and_turns_the_relay_on(frame):
+    dlg = SendToTabDialog(frame, ["Codex (api)"], "Hi")
+    try:
+        dlg.kind.SetSelection(1)  # Builder and reviewer
+        dlg._on_kind()
+        assert dlg.first_role.GetValue().startswith("Build what the person asked for")
+        assert "DONE" in dlg.second_role.GetValue()
+        assert dlg.relay.IsChecked()
     finally:
         dlg.Destroy()

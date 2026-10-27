@@ -63,6 +63,7 @@ from agent_backends import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
+    BACKEND_COPILOT,
     BACKEND_FREEBUFF,
     BACKEND_HERMES,
     BACKEND_IDS,
@@ -72,6 +73,7 @@ from agent_backends import (
     normalize_backend,
 )
 from markdown_rows import strip_noise
+from task_list import CLAUDE_TASK_TOOLS, TaskList
 
 # How long a title may be before it is cut. Long enough to tell two similar
 # conversations apart when they are read out, short enough that arrowing
@@ -681,6 +683,56 @@ _COMMANDCODE = _JsonlFormat(
     paths=_commandcode_paths,
     session_of=_commandcode_session,
     message_of=_commandcode_message,
+)
+
+
+# ----- GitHub Copilot CLI -----
+#
+# One folder per conversation, ``~/.copilot/session-state/<id>/``, its events
+# in ``events.jsonl`` -- the same envelope the live stream uses. ``session.start``
+# names the id and folder; ``user.message`` and ``assistant.message`` are the
+# conversation. A subagent's messages carry ``parentToolCallId`` and stay out.
+
+
+def _copilot_paths(_cwd: Optional[str]) -> List[Path]:
+    home = os.environ.get("COPILOT_HOME", "").strip()
+    root = Path(home) if home else _home() / ".copilot"
+    return _globbed(root / "session-state", "*/events.jsonl")
+
+
+def _copilot_session(_path: Path, record: dict) -> Optional[tuple[str, str]]:
+    if record.get("type") != "session.start":
+        return None
+    data = record.get("data")
+    if not isinstance(data, dict):
+        return None
+    context = data.get("context")
+    cwd = context.get("cwd") if isinstance(context, dict) else ""
+    return str(data.get("sessionId") or ""), str(cwd or "")
+
+
+def _copilot_message(record: dict) -> tuple[str, str]:
+    """(role, text) for a Copilot session event, or ("", "")."""
+    data = record.get("data")
+    if not isinstance(data, dict) or record.get("agentId") or data.get("parentToolCallId"):
+        return "", ""
+    kind = record.get("type")
+    text = data.get("content")
+    if not isinstance(text, str):
+        return "", ""
+    if kind == "user.message":
+        text = clean_user_text(text)
+        return ("user", text) if text else ("", "")
+    if kind == "assistant.message" and text.strip():
+        return "assistant", text
+    return "", ""
+
+
+_COPILOT = _JsonlFormat(
+    backend=BACKEND_COPILOT,
+    paths=_copilot_paths,
+    session_of=_copilot_session,
+    message_of=_copilot_message,
 )
 
 
@@ -1573,6 +1625,7 @@ _LISTERS: dict[str, Callable[[Optional[str]], List[HistoryEntry]]] = {
     BACKEND_MUSE: _muse_entries,
     BACKEND_MUSEAI: _museai_entries,
     BACKEND_COMMANDCODE: partial(_jsonl_entries, _COMMANDCODE),
+    BACKEND_COPILOT: partial(_jsonl_entries, _COPILOT),
 }
 
 # Readers are given the whole entry rather than its path, because opencode and
@@ -1587,6 +1640,7 @@ _READERS: dict[str, Callable[[HistoryEntry], List[HistoryTurn]]] = {
     BACKEND_MUSE: _muse_turns,
     BACKEND_MUSEAI: _museai_turns,
     BACKEND_COMMANDCODE: partial(_jsonl_turns, _COMMANDCODE),
+    BACKEND_COPILOT: partial(_jsonl_turns, _COPILOT),
 }
 
 
@@ -1660,6 +1714,53 @@ def load_turns(entry: HistoryEntry) -> List[HistoryTurn]:
     except OSError:
         return []
     return [turn for turn in turns if turn.prompt.strip() or turn.response.strip()]
+
+
+def restore_tasks(entry: HistoryEntry) -> TaskList:
+    """The task list a past conversation left, replayed from its transcript.
+
+    Claude Code's task tools (tool_use, then the tool_result that gives
+    TaskCreate its id) and Copilot's update_todo checklists. Other backends,
+    and a transcript too large to read, give an empty list.
+    """
+    tasks = TaskList()
+    backend = normalize_backend(entry.backend)
+    path = Path(entry.path)
+    try:
+        if backend not in (BACKEND_CLAUDE, BACKEND_COPILOT) or (
+            path.stat().st_size > _MAX_TRANSCRIPT_BYTES
+        ):
+            return tasks
+    except OSError:
+        return tasks
+    calls: dict[str, tuple[str, dict]] = {}
+    for record in _iter_jsonl(path):
+        if backend == BACKEND_COPILOT:
+            data = record.get("data")
+            if record.get("type") == "tool.execution_start" and isinstance(data, dict):
+                arguments = data.get("arguments")
+                if data.get("toolName") == "update_todo" and isinstance(arguments, dict):
+                    tasks.apply_checklist(arguments.get("todos"))
+            continue
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else ():
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") in CLAUDE_TASK_TOOLS:
+                params = block.get("input")
+                calls[str(block.get("id"))] = (
+                    str(block["name"]),
+                    params if isinstance(params, dict) else {},
+                )
+            elif block.get("type") == "tool_result" and not block.get("is_error"):
+                call = calls.pop(str(block.get("tool_use_id")), None)
+                if call is not None:
+                    result = _content_text(block.get("content"), ("text",))
+                    if isinstance(block.get("content"), str):
+                        result = block["content"]
+                    tasks.apply_claude(call[0], call[1], result)
+    return tasks
 
 
 def describe_age(modified: float, now: Optional[float] = None) -> str:
