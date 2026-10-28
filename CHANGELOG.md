@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.52.3 - 2026-10-28
+
+- Command Code sign-in now asks the server whether the key still works: the check runs `whoami` instead of `status`, which only read the credential file, so a key the server has revoked no longer reads as verified and then fails every turn. Only a definitive refusal (401 / not authenticated) counts as signed out; an offline machine still falls back to the credential file. Signing in now clears the stale credential first (`logout` before `login`), so a revoked key can actually be replaced from the wizard. Thanks to Farhan Khan.
+
 ## v0.52.2 - 2026-10-27
 
 Installing Muse or muse.ai on a fresh computer works again, on Windows, macOS and Linux:
