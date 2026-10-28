@@ -54,13 +54,23 @@ def test_muse_install_argv_posix_uses_the_official_installer(monkeypatch):
     assert f"curl -fsSL {app.MUSE_INSTALL_SH_URL} | bash" in argv[-1]
 
 
+def _posix_muse_backend(monkeypatch, tmp_path):
+    """Run muse_backend's POSIX branch with tmp_path as the home folder.
+
+    Forced explicitly: on a Windows runner the real branch is the WSL
+    one, and Path.home() there ignores $HOME, so both are patched.
+    """
+    monkeypatch.setattr(muse_backend.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(muse_backend.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("MUSE_INSTALL_DIR", raising=False)
+
+
 def test_muse_cli_path_finds_the_installers_folder_without_path(monkeypatch, tmp_path):
     """The launcher counts as installed even when PATH never heard of it."""
     launcher = tmp_path / ".local" / "bin" / "muse"
     launcher.parent.mkdir(parents=True)
     launcher.write_text("#!/bin/sh\n")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MUSE_INSTALL_DIR", raising=False)
+    _posix_muse_backend(monkeypatch, tmp_path)
     monkeypatch.setattr("shutil.which", lambda _name: None)
 
     assert muse_backend.muse_cli_path() == str(launcher)
@@ -72,7 +82,7 @@ def test_muse_cli_path_honours_muse_install_dir(monkeypatch, tmp_path):
     custom.mkdir()
     launcher = custom / "muse"
     launcher.write_text("#!/bin/sh\n")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _posix_muse_backend(monkeypatch, tmp_path)
     monkeypatch.setenv("MUSE_INSTALL_DIR", str(custom))
     monkeypatch.setattr("shutil.which", lambda _name: None)
 
@@ -80,7 +90,7 @@ def test_muse_cli_path_honours_muse_install_dir(monkeypatch, tmp_path):
 
 
 def test_muse_cli_path_still_prefers_path(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _posix_muse_backend(monkeypatch, tmp_path)
     monkeypatch.setattr("shutil.which", lambda _name: "/opt/bin/muse")
 
     assert muse_backend.muse_cli_path() == "/opt/bin/muse"
@@ -91,7 +101,7 @@ def test_museai_argv_uses_uv_from_the_per_user_bin(monkeypatch, tmp_path):
     uv = tmp_path / ".local" / "bin" / "uv"
     uv.parent.mkdir(parents=True)
     uv.write_text("")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(museai_backend.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(museai_backend.shutil, "which", lambda _name: None)
 
     argv = museai_backend.museai_install_argv()
@@ -109,7 +119,7 @@ def test_museai_argv_skips_the_windows_store_stub(monkeypatch, tmp_path):
         "py": "C:/Windows/py.exe",
     }
     monkeypatch.setattr(museai_backend.shutil, "which", lambda name: found.get(name))
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(museai_backend.Path, "home", lambda: tmp_path)
 
     argv = museai_backend.museai_install_argv()
 
@@ -120,7 +130,7 @@ def test_museai_argv_skips_the_windows_store_stub(monkeypatch, tmp_path):
 def test_museai_argv_is_none_with_no_uv_and_no_real_python(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(museai_backend.shutil, "which", lambda _name: None)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(museai_backend.Path, "home", lambda: tmp_path)
 
     assert museai_backend.museai_install_argv() is None
 
