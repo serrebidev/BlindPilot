@@ -98,7 +98,8 @@ def test_muse_cli_path_still_prefers_path(monkeypatch, tmp_path):
 
 def test_museai_argv_uses_uv_from_the_per_user_bin(monkeypatch, tmp_path):
     """uv installed by its own installer counts even off the GUI's PATH."""
-    uv = tmp_path / ".local" / "bin" / "uv"
+    name = "uv.exe" if museai_backend.platform.system() == "Windows" else "uv"
+    uv = tmp_path / ".local" / "bin" / name
     uv.parent.mkdir(parents=True)
     uv.write_text("")
     monkeypatch.setattr(museai_backend.Path, "home", lambda: tmp_path)
