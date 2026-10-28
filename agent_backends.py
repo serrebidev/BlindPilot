@@ -698,6 +698,11 @@ class BackendInfo:
     # the CLI opens -- so its terminal runs hidden like FreeBuff's and the
     # wizard waits for the command to finish instead of for the user.
     login_terminal_hidden: bool = False
+    # A command to run before signing in. Command Code's `login` answers
+    # "Already logged in" and exits whenever a credential file exists, so a key
+    # the server has revoked can never be replaced from the wizard. Its own
+    # troubleshooting says `logout` then `login`; this is that first half.
+    login_reset_args: tuple[str, ...] = ()
     # Whether the backend takes an attachment's BYTES rather than its path.
     # The CLI backends run on this machine, so naming the file is enough for
     # them. Hermes may be running somewhere else entirely -- in WSL, or on
@@ -839,6 +844,7 @@ BACKENDS = {
         # than a console window to tab past.
         login_needs_terminal=True,
         login_terminal_hidden=True,
+        login_reset_args=("logout",),
     ),
     BACKEND_GEMINI: BackendInfo(
         BACKEND_GEMINI,
