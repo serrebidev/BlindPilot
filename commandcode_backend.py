@@ -95,7 +95,17 @@ def _says_signed_out(text: str) -> bool:
     lowered = text.casefold()
     return any(
         phrase in lowered
-        for phrase in ("not authenticated", "not logged in", "no account", "signed out")
+        for phrase in (
+            "not authenticated",
+            "not logged in",
+            "no account",
+            "signed out",
+            # What the server says about a key it has revoked: `whoami` exits
+            # non-zero carrying the 401 it got, where `status` only reads the
+            # credential file and calls the dead key verified.
+            "401",
+            "invalid 'authorization'",
+        )
     )
 
 
@@ -110,20 +120,24 @@ def _after(text: str, marker: str) -> str:
 def commandcode_auth_ok(timeout: int = 12) -> bool:
     """Best-effort, non-interactive sign-in check.
 
-    Command Code answers this with ``command-code status``, whose exit code is
-    the signal (its documented exit 3 is "not authenticated") and whose output
-    names the account otherwise. A definitive answer from the CLI wins: exit 3
-    means signed out even when a stale ``auth.json`` is still on disk, which is
-    exactly what a logout leaves behind. The credential file is consulted only
-    when the CLI could not be run at all, so a release that stops answering in
-    a shape this reads still never reports a signed-in user as signed out.
+    The question goes to the server, as ``command-code whoami``. Its ``status``
+    subcommand only reads the credential file: a key the server has revoked
+    still prints "Authentication verified" there, so the wizard let the user
+    through to turns that died on exit 3 with nothing in the app able to
+    replace the key. whoami makes the same round-trip a turn does, so a
+    refused key is caught before the wizard says the sign-in worked.
+
+    A definitive refusal wins even when a stale ``auth.json`` is still on disk,
+    which is exactly what a revoked key leaves behind. The credential file is
+    consulted only when the CLI could not be run at all, or could not reach the
+    server, so an offline machine never reports a signed-in user as signed out.
     """
     binary = agent_backends.find_backend_cli(BACKEND_COMMANDCODE)
     if binary:
-        code, text = _probe(binary, ["status"], timeout)
-        if code == 0 and not _says_signed_out(text):
+        code, text = _probe(binary, ["whoami"], timeout)
+        if code == 0:
             return True
-        if code is not None:
+        if code is not None and _says_signed_out(text):
             return False
     return commandcode_credentials() is not None
 
@@ -132,16 +146,16 @@ def commandcode_account_lines() -> list[str]:
     """The sign-in report, as the lines ``/status`` prints them."""
     binary = agent_backends.find_backend_cli(BACKEND_COMMANDCODE)
     if binary:
-        code, text = _probe(binary, ["status"], 20)
-        if code == 0 and not _says_signed_out(text):
+        code, text = _probe(binary, ["whoami"], 20)
+        if code == 0:
             lines = ["Signed in: yes"]
-            account = _after(text, "Authenticated as")
-            provider = _after(text, "Provider")
+            account = _after(text, "Name:")
             if account:
                 lines.append(f"Account: {account}")
-            if provider:
-                lines.append(f"Provider: {provider}")
+            lines.append("Provider: Command Code")
             return lines
+        if code is not None and _says_signed_out(text):
+            return ["Signed in: no"]
     credentials = commandcode_credentials()
     if credentials:
         name = str(credentials.get("userName") or "").strip()

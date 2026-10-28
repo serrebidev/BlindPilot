@@ -22,7 +22,9 @@ import session_history
 from agent_backends import BACKEND_COMMANDCODE, BACKEND_IDS, BACKENDS
 from commandcode_worker import CommandcodeWorker
 
-STATUS_SIGNED_IN = "\u221a Authenticated as person\n  Provider: Command Code\n"
+WHOAMI_SIGNED_IN = (
+    "User Information:\n Name: person\n Email: person@example.com\n Username: person\n"
+)
 
 
 def test_agent_command_discovery_closes_its_pipes(monkeypatch):
@@ -196,12 +198,12 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _fake_probe(status=(0, STATUS_SIGNED_IN), models=(0, CATALOG)):
+def _fake_probe(whoami=(0, WHOAMI_SIGNED_IN), models=(0, CATALOG)):
     def probe(_binary, args, _timeout):
         if args == ["--version"]:
             return 0, "1.53.1"
-        if args == ["status"]:
-            return status
+        if args == ["whoami"]:
+            return whoami
         if args == ["--list-models"]:
             return models
         return 1, ""
@@ -250,6 +252,16 @@ def test_sign_in_is_run_in_a_terminal_ink_can_use():
     info = BACKENDS[BACKEND_COMMANDCODE]
     assert info.login_needs_terminal is True
     assert info.login_terminal_hidden is True
+
+
+def test_signing_in_clears_the_credential_that_blocks_it():
+    """`login` answers "Already logged in" and exits while auth.json exists.
+
+    A key the server revoked therefore could never be replaced from the
+    wizard, and the turn that follows keeps failing with exit 3. Command
+    Code's own troubleshooting says `logout` then `login`.
+    """
+    assert BACKENDS[BACKEND_COMMANDCODE].login_reset_args == ("logout",)
 
 
 def test_capabilities_match_what_headless_mode_supports():
@@ -333,7 +345,12 @@ def test_a_missing_cli_is_reported_not_guessed(home, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_signed_in_comes_from_the_status_command(home, monkeypatch):
+def test_signed_in_is_asked_of_the_server(home, monkeypatch):
+    """`status` only reads auth.json, so a revoked key still reads as verified.
+
+    `whoami` makes the round-trip a turn makes, which is the only answer that
+    knows whether the server still accepts the key.
+    """
     _wire(monkeypatch)
     assert commandcode_backend.commandcode_auth_ok() is True
     assert commandcode_backend.commandcode_account_lines()[0] == "Signed in: yes"
@@ -342,18 +359,28 @@ def test_signed_in_comes_from_the_status_command(home, monkeypatch):
     assert "Provider: Command Code" in fields
 
 
-def test_a_refused_status_is_signed_out_despite_a_stored_credential(home, monkeypatch):
-    """Exit 3 is Command Code's own "not authenticated" and outranks auth.json.
-
-    A logout leaves the credential file behind, and the old fallback read that
-    file as proof of a live sign-in.
-    """
-    _wire(monkeypatch, status=(3, "not authenticated"))
+def test_a_revoked_key_is_signed_out_despite_a_stored_credential(home, monkeypatch):
+    """A 401 outranks auth.json, which is what a revoked key leaves behind."""
+    _wire(
+        monkeypatch,
+        whoami=(1, "Error: 401 Invalid 'Authorization' header or token."),
+    )
     home.joinpath(".commandcode").mkdir(parents=True)
     home.joinpath(".commandcode", "auth.json").write_text(
         json.dumps({"userName": "person"}), encoding="utf-8"
     )
     assert commandcode_backend.commandcode_auth_ok() is False
+    assert commandcode_backend.commandcode_account_lines() == ["Signed in: no"]
+
+
+def test_a_server_that_cannot_be_reached_is_not_a_signed_out_user(home, monkeypatch):
+    """An offline machine keeps its answer; only the server refusing counts."""
+    _wire(monkeypatch, whoami=(1, "Error: Connection error."))
+    home.joinpath(".commandcode").mkdir(parents=True)
+    home.joinpath(".commandcode", "auth.json").write_text(
+        json.dumps({"userName": "person"}), encoding="utf-8"
+    )
+    assert commandcode_backend.commandcode_auth_ok() is True
 
 
 def test_no_cli_at_all_falls_back_to_the_stored_credential(home, monkeypatch):
@@ -366,8 +393,8 @@ def test_no_cli_at_all_falls_back_to_the_stored_credential(home, monkeypatch):
     assert commandcode_backend.commandcode_auth_ok() is True
 
 
-def test_no_credential_and_no_status_means_signed_out(home, monkeypatch):
-    _wire(monkeypatch, status=(3, "not authenticated"))
+def test_no_credential_and_no_whoami_means_signed_out(home, monkeypatch):
+    _wire(monkeypatch, whoami=(3, 'Not authenticated. Please run "cmdc login" first.'))
     assert commandcode_backend.commandcode_auth_ok() is False
     assert commandcode_backend.commandcode_account_lines() == ["Signed in: no"]
 

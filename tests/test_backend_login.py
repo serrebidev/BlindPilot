@@ -327,6 +327,34 @@ def test_module_alias_still_exposes_the_login_runner():
     assert blindpilot_app.BackendLogin is BackendLogin
 
 
+def test_a_stale_credential_is_cleared_before_signing_in(monkeypatch):
+    """Command Code's `login` exits "Already logged in" while auth.json exists.
+
+    The reset runs first, and its failure is not the sign-in's failure: the
+    command that follows is what decides that.
+    """
+    calls = []
+
+    def record(args, **_kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(blindpilot_app.subprocess, "run", record)
+    blindpilot_app._clear_stale_login("command-code", ("logout",))
+    assert calls == [["command-code", "logout"]]
+
+    calls.clear()
+    blindpilot_app._clear_stale_login("command-code", ())
+    assert calls == []
+
+
+def test_a_reset_that_cannot_run_does_not_stop_the_sign_in(monkeypatch):
+    def explode(_args, **_kwargs):
+        raise OSError("no such file")
+
+    monkeypatch.setattr(blindpilot_app.subprocess, "run", explode)
+    blindpilot_app._clear_stale_login("command-code", ("logout",))
+
+
 if __name__ == "__main__":
     import pytest
 

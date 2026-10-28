@@ -12828,6 +12828,10 @@ _LOOPBACK_PROGRESS = "Waiting for the sign-in page to open…"
 # sign-in landed either way.
 _HIDDEN_LOGIN_TIMEOUT = 300.0
 
+# How long the pre-sign-in reset is given. It deletes a file and, at most, tells
+# the server the old key is gone; it never waits for a person.
+_LOGIN_RESET_TIMEOUT = 30.0
+
 # How long, and how often, the wizard asks a terminal sign-in whether it has
 # landed (see SetupWizard._watch_for_sign_in). Ten minutes covers a browser
 # sign-in with two-factor; five seconds keeps agy's `models` check infrequent.
@@ -12856,6 +12860,29 @@ def _first_login_url(text: str) -> str:
             continue
         return url
     return ""
+
+
+def _clear_stale_login(binary: str, reset_args: tuple[str, ...]) -> None:
+    """Run a backend's pre-sign-in reset, if it has one.
+
+    Command Code keeps its credential file until `logout` deletes it, and
+    `login` refuses to start while one exists ("Already logged in"), so a key
+    the server has revoked could never be replaced from the wizard. Its own
+    troubleshooting says `logout` then `login`. Failure is not reported: the
+    sign-in that follows is what says whether it worked.
+    """
+    if not reset_args:
+        return
+    try:
+        subprocess.run(
+            [binary, *reset_args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=_LOGIN_RESET_TIMEOUT,
+            **no_window_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def _terminal_running(terminal: object) -> bool:
@@ -14000,6 +14027,7 @@ class SetupWizard(wx.Dialog):
             if binary is None:
                 wx.CallAfter(self._on_login_terminal_opened, "", False)
                 return
+            _clear_stale_login(binary, BACKENDS[self.backend].login_reset_args)
             if BACKENDS[self.backend].login_terminal_hidden:
                 self._run_hidden_login(binary)
                 return
