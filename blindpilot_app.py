@@ -356,7 +356,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.52.1"
+APP_VERSION = "0.52.2"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1223,6 +1223,13 @@ def install_hermes(log: Callable[[str], None]) -> Optional[str]:
 
 MUSE_INSTALL_SH_URL = "https://dev.meta.ai/install.sh"
 
+# uv's official installers. BlindPilot installs uv itself when a backend's
+# Python tooling is needed on a computer that has neither uv nor a Python:
+# a fresh computer has neither, and without a bootstrap the muse.ai install
+# could only tell the user to go and fetch the tooling by hand.
+UV_INSTALL_PS1_URL = "https://astral.sh/uv/install.ps1"
+UV_INSTALL_SH_URL = "https://astral.sh/uv/install.sh"
+
 # Antigravity CLI ships Google's own per-platform script installers (not npm):
 # a native agy binary in ~/.local/bin, or %LOCALAPPDATA%\agy\bin on Windows,
 # that updates itself from then on.
@@ -1270,8 +1277,10 @@ def _muse_install_argv() -> Optional[List[str]]:
     WSL is here, and cannot happen at all if it is not.
     """
     if platform.system() == "Windows":
-        if not muse_installed():
-            return None
+        # The only prerequisite is WSL itself. This used to also require
+        # Muse to be installed already, which made a first install on a
+        # fresh computer impossible: the installer was refused exactly
+        # when there was nothing installed yet.
         launcher = muse_wsl_exe()
         if launcher is None:
             return None
@@ -1703,6 +1712,24 @@ def _install_failure_message(backend: str) -> str:
     )
 
 
+def _install_uv(log: Callable[[str], None]) -> bool:
+    """Install uv with its official installer. True when uv exists afterwards.
+
+    The installer's exit code is advisory, like the other script
+    installers: a `uv` that discovery can find afterwards is the fact
+    that counts.
+    """
+    from museai_backend import find_uv
+
+    argv = _script_installer_argv(f"irm {UV_INSTALL_PS1_URL} | iex", UV_INSTALL_SH_URL)
+    if argv is None:
+        return False
+    log("Installing uv, the tool manager muse-cli is installed with...")
+    if _run_logged_process(argv, log) is None:
+        return False
+    return find_uv() is not None
+
+
 def install_museai(log: Callable[[str], None], upgrade: bool = False) -> Optional[str]:
     """Install or upgrade muse-cli, the client muse.ai is driven through.
 
@@ -1713,6 +1740,12 @@ def install_museai(log: Callable[[str], None], upgrade: bool = False) -> Optiona
 
     label = backend_label(BACKEND_MUSEAI)
     argv = museai_install_argv(upgrade=upgrade)
+    if argv is None:
+        # Neither uv nor a usable Python: a fresh computer. Install uv with
+        # its official installer -- the same script-installer pattern the
+        # other backends use -- then ask again.
+        if _install_uv(log):
+            argv = museai_install_argv(upgrade=upgrade)
     if argv is None:
         log(MUSEAI_MISSING_PREREQ)
         return None

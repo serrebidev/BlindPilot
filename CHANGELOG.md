@@ -2,6 +2,14 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.52.2 - 2026-10-27
+
+Installing Muse or muse.ai on a fresh computer works again, on Windows, macOS and Linux:
+
+- On Windows, installing Muse Code was refused unless Muse was already installed inside WSL, so a first install could never start. WSL itself is now the only prerequisite.
+- On macOS and Linux, Muse's installer puts its launcher in ~/.local/bin and only fixes the PATH of shells opened afterwards; BlindPilot looked on PATH alone and reported even a successful install as missing. The installer's folder (and $MUSE_INSTALL_DIR) is now checked directly.
+- muse.ai's client, muse-cli, installs with uv or pip, and a fresh computer has neither. BlindPilot now installs uv with its official installer first, then muse-cli through it. The python.exe a fresh Windows offers is the Microsoft Store stub and is no longer mistaken for a Python; a uv already installed per-user is found even when the app's PATH does not include it.
+
 ## v0.52.1 - 2026-10-27
 
 - The 0.52.0 build was never published: the macOS build crashed in its tests (a bus error, then a segmentation fault at a different test) because every main window started a one-second timer for handed-over session links, and it fired in windows the tests had built and macOS was still tearing down. The timer now starts only once the real window is shown, and stops when it closes.

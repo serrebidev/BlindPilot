@@ -27,6 +27,7 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import json
+import platform
 import re
 import shutil
 import sys
@@ -531,21 +532,61 @@ def museai_latest_seq(session_id: str) -> int:
     return max(seqs, default=0)
 
 
+def find_uv() -> Optional[str]:
+    """uv on PATH, or in the per-user bin folder its own installer uses.
+
+    A GUI process inherits a PATH that often lacks ~/.local/bin, so the
+    folder is checked directly as well -- the same allowance the Muse
+    launcher discovery makes for the folder its installer writes to.
+    """
+    found = shutil.which("uv")
+    if found:
+        return found
+    name = "uv.exe" if platform.system() == "Windows" else "uv"
+    candidate = Path.home() / ".local" / "bin" / name
+    return str(candidate) if candidate.is_file() else None
+
+
+def _usable_python(candidate: Optional[str]) -> Optional[str]:
+    """A Python that is really Python, or None.
+
+    The python.exe a fresh Windows puts on PATH is the Microsoft Store
+    stub: running it opens the Store instead of running anything, so a
+    path under WindowsApps is not a Python BlindPilot can install with.
+    """
+    if not candidate:
+        return None
+    if platform.system() == "Windows" and "windowsapps" in candidate.lower():
+        return None
+    return candidate
+
+
 def museai_install_argv(upgrade: bool = False) -> Optional[list[str]]:
-    """How to install (or upgrade) muse-cli: uv first, then pip for this user."""
-    uv = shutil.which("uv")
+    """How to install (or upgrade) muse-cli: uv first, then pip for this user.
+
+    None when this machine has neither uv nor a usable Python; the caller
+    answers that by installing uv itself, so a fresh computer -- which has
+    neither -- still gets muse-cli automatically.
+    """
+    uv = find_uv()
     if uv:
         return [uv, "tool", "upgrade" if upgrade else "install", "muse-cli"]
     # A frozen build's sys.executable is BlindPilot itself, not a Python.
     python = None if getattr(sys, "frozen", False) else sys.executable
-    python = python or shutil.which("python3") or shutil.which("python") or shutil.which("py")
+    python = _usable_python(python)
+    if python is None:
+        for name in ("python3", "python", "py"):
+            python = _usable_python(shutil.which(name))
+            if python:
+                break
     if not python:
         return None
     return [python, "-m", "pip", "install", "--user", "--upgrade", "muse-cli"]
 
 
 MUSEAI_MISSING_PREREQ = (
-    "muse.ai needs muse-cli, a Python package. Install uv "
-    "(https://docs.astral.sh/uv/) or Python, then choose Install again, or run: "
-    "uv tool install muse-cli"
+    "muse.ai needs muse-cli, a Python package, and BlindPilot could not "
+    "install uv (the tool that installs it) automatically. Install uv "
+    "(https://docs.astral.sh/uv/) or Python yourself, then choose Install "
+    "again, or run: uv tool install muse-cli"
 )

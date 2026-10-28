@@ -122,6 +122,21 @@ _WSL_MUSE: Optional[str] = None
 _WSL_MUSE_CHECKED = False
 
 
+def _posix_launcher_fallback() -> Optional[str]:
+    """The launcher where the official installer puts it, PATH or no PATH.
+
+    The installer drops the launcher in $MUSE_INSTALL_DIR or ~/.local/bin
+    and adds that folder to the PATH of shells started afterwards. A process
+    already running -- or a GUI process whose inherited PATH never held the
+    folder -- cannot see the launcher through `which`, so the folder is
+    checked directly. The WSL probe makes the same allowance with its `ls`.
+    """
+    install_dir = os.environ.get("MUSE_INSTALL_DIR")
+    folder = Path(install_dir) if install_dir else Path.home() / ".local" / "bin"
+    candidate = folder / MUSE_LAUNCHER
+    return str(candidate) if candidate.is_file() else None
+
+
 def muse_cli_path() -> Optional[str]:
     """The launcher's path as a report can show it, or None when not installed.
 
@@ -133,7 +148,7 @@ def muse_cli_path() -> Optional[str]:
         return wsl_muse_path()
     from shutil import which
 
-    return which(MUSE_LAUNCHER)
+    return which(MUSE_LAUNCHER) or _posix_launcher_fallback()
 
 
 def muse_installed() -> bool:
@@ -206,9 +221,7 @@ def muse_command(cwd: Optional[str] = None) -> Optional[list[str]]:
             command += ["--cd", windows_path_to_wsl(absolute)]
         command += ["-e", path]
         return command
-    from shutil import which
-
-    found = which(MUSE_LAUNCHER)
+    found = muse_cli_path()
     if not found:
         return None
     return [found]
