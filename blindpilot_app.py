@@ -2899,6 +2899,96 @@ def _forget_remote(session_id: str) -> None:
         _save_config(cfg)
 
 
+def _saved_session_rules() -> dict:
+    """Rules each conversation has been allowed for its session, by id."""
+    saved = _load_config().get("session_permissions")
+    return saved if isinstance(saved, dict) else {}
+
+
+def _remember_session_rules(session_id: str, new_lines: list[str]) -> None:
+    """Keep what "Allow for this session" granted, so it can be listed later.
+
+    The grants themselves live in the backend's own session and are never
+    written to a settings file; this record is only so Chat Permissions can
+    say what was allowed, including after the conversation is reopened.
+    """
+    if not session_id or not new_lines:
+        return
+    saved = _saved_session_rules()
+    lines = list(saved.get(session_id) or [])
+    for line in new_lines:
+        if line not in lines:
+            lines.append(line)
+    cfg = _load_config()
+    cfg["session_permissions"] = {**saved, session_id: lines[-200:]}
+    _save_config(cfg)
+
+
+def _permission_update_lines(suggestions: list) -> list[str]:
+    """What a batch of permission updates grants, as lines to read back.
+
+    Claude Code suggests the updates when it asks; "Allow for this session"
+    forwards them with their destination rewritten to the session. The
+    shapes are Claude Code's own: addRules/replaceRules carry rules with a
+    tool name and an optional rule content, addDirectories carries folders,
+    setMode carries a mode.
+    """
+    lines: list[str] = []
+    for update in suggestions:
+        if not isinstance(update, dict):
+            continue
+        kind = update.get("type")
+        if kind in ("addRules", "replaceRules"):
+            behavior = str(update.get("behavior") or "allow")
+            verb = {"allow": "Allow", "ask": "Ask about", "deny": "Never allow"}.get(
+                behavior, behavior.capitalize()
+            )
+            for rule in update.get("rules") or []:
+                if not isinstance(rule, dict):
+                    continue
+                tool = str(rule.get("toolName") or "a tool")
+                content = str(rule.get("ruleContent") or "")
+                lines.append(f"{verb}: {tool}({content})" if content else f"{verb}: {tool}")
+        elif kind == "addDirectories":
+            for folder in update.get("directories") or []:
+                lines.append(f"Work in the folder {folder}")
+        elif kind == "setMode":
+            lines.append(f"Permission mode set to {update.get('mode')}")
+    return lines
+
+
+def _claude_settings_rule_lines(cwd: str) -> list[str]:
+    """The permission rules in Claude Code's own settings files, with sources.
+
+    Your settings, then the working folder's shared and local settings --
+    the files Claude Code reads for a session in this folder. Read only:
+    BlindPilot never writes to them. A file that cannot be read or parsed
+    is skipped rather than guessed at.
+    """
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    files = [home / "settings.json"]
+    if cwd:
+        files += [
+            Path(cwd) / ".claude" / "settings.json",
+            Path(cwd) / ".claude" / "settings.local.json",
+        ]
+    lines: list[str] = []
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        permissions = data.get("permissions") if isinstance(data, dict) else None
+        if not isinstance(permissions, dict):
+            continue
+        for key, verb in (("allow", "Allow"), ("ask", "Ask about"), ("deny", "Never allow")):
+            for rule in permissions.get(key) or []:
+                lines.append(f"{verb}: {rule} (from {path})")
+        for folder in permissions.get("additionalDirectories") or []:
+            lines.append(f"Work in the folder {folder} (from {path})")
+    return lines
+
+
 # Kinds of agent conversation: (name, role of the session sending first, role
 # of the session it goes to). Choosing one fills in the roles; both stay
 # editable. Modelled on The Chat Place's kinds of conversation.
@@ -6874,6 +6964,7 @@ class QuestionDialog(wx.Dialog):
         self._pickers: list[Optional[wx.Window]] = []
         self._texts: list[wx.TextCtrl] = []
         self._labels: list[wx.StaticText] = []
+        self._previews: list[Optional[wx.TextCtrl]] = []
         pad = self.FromDIP(PAD_DIALOG)
         # The typed answer sits one dialog margin further in than its
         # question, so it reads as belonging to it.
@@ -6960,6 +7051,24 @@ class QuestionDialog(wx.Dialog):
             self._labels.append(label)
             self._texts.append(entry)
 
+            # Some options carry a preview: what picking that one would
+            # mean, as a mock-up or a sketch. It follows the choice, so it
+            # sits under the answer box and is refilled as the choice moves.
+            preview: Optional[wx.TextCtrl] = None
+            if any(option.preview for option in question.options):
+                sizer.Add(
+                    wx.StaticText(self, label="Pre&view:"),
+                    0,
+                    wx.LEFT | wx.RIGHT,
+                    indent,
+                )
+                preview = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
+                preview.SetName(f"Preview for {question.question}")
+                preview.SetMinSize(self.FromDIP(wx.Size(520, 110)))
+                sizer.Add(preview, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, indent)
+            self._previews.append(preview)
+
+        self._update_previews()
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
         ok = self.FindWindowById(wx.ID_OK)
         if isinstance(ok, wx.Button):
@@ -7003,9 +7112,29 @@ class QuestionDialog(wx.Dialog):
             return True
         return question.allow_custom and len(question.options) in self._picked(index)
 
+    def _preview_text(self, index: int) -> str:
+        """The preview of the option currently picked for one question.
+
+        The first picked option that has one wins; "Other" and a question
+        with nothing picked have none, and the box reads empty rather than
+        keeping the last option's preview under a different choice.
+        """
+        question = self._questions[index]
+        for picked in self._picked(index):
+            if picked < len(question.options) and question.options[picked].preview:
+                return question.options[picked].preview
+        return ""
+
+    def _update_previews(self) -> None:
+        for index, preview in enumerate(self._previews):
+            if preview is not None:
+                preview.ChangeValue(self._preview_text(index))
+                preview.SetInsertionPoint(0)
+
     def _on_choice(self, event: wx.CommandEvent) -> None:
         """Show the text box as soon as "Other" is chosen, and say so."""
         event.Skip()
+        self._update_previews()
         changed = False
         for index in range(len(self._questions)):
             wanted = self._wants_custom(index)
@@ -7447,6 +7576,10 @@ class SendToTabDialog(wx.Dialog):
         )  # fmt: skip
         self.turns = wx.SpinCtrl(self, min=1, max=50, initial=6, name="Hand-offs before stopping")
         rows.Add(self.turns, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.manual = wx.CheckBox(self, label="&Ask me before each hand-off")
+        self.manual.Enable(False)
+        rows.Add(self.manual, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
+        self.relay.Bind(wx.EVT_CHECKBOX, self._on_relay_toggle)
 
         def field(label: str, name: str) -> wx.TextCtrl:
             rows.Add(wx.StaticText(self, label=label), 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
@@ -7481,12 +7614,16 @@ class SendToTabDialog(wx.Dialog):
         self.target.SetFocus()
         self.CentreOnParent()
 
+    def _on_relay_toggle(self, _event: Optional[wx.CommandEvent] = None) -> None:
+        self.manual.Enable(self.relay.IsChecked())
+
     def _on_kind(self, _event: Optional[wx.CommandEvent] = None) -> None:
         _name, first, second = RELAY_KINDS[max(0, self.kind.GetSelection())]
         self.first_role.SetValue(first)
         self.second_role.SetValue(second)
         if first:
             self.relay.SetValue(True)
+            self._on_relay_toggle()
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
@@ -9660,6 +9797,11 @@ class SessionPanel(wx.Panel):
             f"Effort: {self.effort or 'the backend default'}",
             f"Permission mode: {_MODE_LABEL_BY_VALUE.get(self.mode, self.mode)}",
             f"Session ID: {self._session_id or 'none yet'}",
+            *(
+                [f"Remote Control: {'on' if self.remote_control else 'off'}"]
+                if backend == BACKEND_CLAUDE
+                else []
+            ),
             f"Your messages: {sum(row.kind == 'you' for row in rows) or len(self._turns)}",
             f"Responses: {self._response_count}",
             f"Tool steps: {sum(row.kind == 'tool' for row in rows)}",
@@ -9675,6 +9817,44 @@ class SessionPanel(wx.Panel):
         lines = self.property_lines()
         self._show_items(
             [ConversationItem(line, line) for line in lines], "Properties", "Nothing to show."
+        )
+
+    def chat_permission_lines(self) -> list[str]:
+        """What this session may do without asking, as lines to read.
+
+        The mode first, then the rules granted for this session from the
+        permission dialog, then -- for Claude Code -- the rules in Claude
+        Code's own settings files that apply to this folder, which
+        BlindPilot only ever reads.
+        """
+        backend = self._session_backend or self.selected_backend()
+        lines = [
+            f"Backend: {backend_label(backend)}",
+            f"Permission mode: {_MODE_LABEL_BY_VALUE.get(self.mode, self.mode)}",
+            f"Folder: {self.cwd or 'none'}",
+            "Allowed for this session, by you:",
+        ]
+        granted = list(getattr(self, "_session_permission_rule_lines", None) or [])
+        if self._session_id:
+            for line in _saved_session_rules().get(self._session_id) or []:
+                if line not in granted:
+                    granted.append(line)
+        lines += granted or ["Nothing beyond the permission mode."]
+        lines.append(
+            "Session grants last while this conversation runs here and are "
+            "never written to a settings file."
+        )
+        if backend == BACKEND_CLAUDE:
+            lines += ["Rules in Claude Code's own settings that apply to this folder:"]
+            lines += _claude_settings_rule_lines(self.cwd) or ["None found."]
+            lines.append("Change those in Claude Code, for example with /permissions.")
+        return lines
+
+    def open_chat_permissions(self) -> None:
+        self._show_items(
+            [ConversationItem(line, line) for line in self.chat_permission_lines()],
+            "Chat Permissions",
+            "Nothing to show.",
         )
 
     def _on_remote(self, data: dict) -> None:
@@ -10334,6 +10514,18 @@ class SessionPanel(wx.Panel):
                 for update in suggestions
                 if isinstance(update, dict)
             ]
+            # Keep a readable record of the grant for Chat Permissions; the
+            # grant itself stays in the backend's session, this is only the
+            # list of what was handed over.
+            granted = _permission_update_lines(suggestions)
+            if granted:
+                mine = getattr(self, "_session_permission_rule_lines", None)
+                if mine is None:
+                    mine = self._session_permission_rule_lines = []
+                for line in granted:
+                    if line not in mine:
+                        mine.append(line)
+                _remember_session_rules(self._session_id or "", granted)
             return {"behavior": "allow", "updatedPermissions": for_session}
         if plan:
             self._announce("Kept planning")
@@ -16197,9 +16389,22 @@ class MainFrame(wx.Frame):
         )
         add(
             browse,
+            "Pass On the Waiting &Reply…",
+            "Send on the reply an agent conversation is holding for your approval",
+            self._pass_on_waiting_reply,
+        )
+        add(
+            browse,
             "&Properties…\tAlt+Enter",
             "This session's backend, folder, model, counts and progress, one line each",
             lambda: self._panel_action("open_properties"),
+        )
+        add(
+            browse,
+            "Chat &Permissions…",
+            "What this session may do without asking: its mode, what you allowed for it, "
+            "and the rules in Claude Code's own settings",
+            lambda: self._panel_action("open_chat_permissions"),
         )
         add(
             browse,
@@ -17050,6 +17255,7 @@ class MainFrame(wx.Frame):
             target = others[dlg.target.GetSelection()]
             message = dlg.message.GetValue()
             relay = dlg.relay.IsChecked()
+            manual = dlg.manual.IsChecked()
             turns = dlg.turns.GetValue()
             pick = dlg.third.GetSelection()
             third = others[pick - 1] if pick > 0 else None
@@ -17071,6 +17277,8 @@ class MainFrame(wx.Frame):
                 "last": text,
                 "roles": {id(panel): role for panel, role in zip(tabs, roles, strict=False)},
                 "told": set(),
+                "manual": manual,
+                "waiting": None,
             }
             message = self._relay_preface(relay_state, target) + message
         if not target.deliver(message):
@@ -17085,7 +17293,8 @@ class MainFrame(wx.Frame):
             wx.CallAfter(
                 announce,
                 f"Agent conversation between {who} started, up to {turns} hand-offs. "
-                "Stop in any of its sessions ends it.",
+                + ("Each reply waits for you to pass it on. " if manual else "")
+                + "Stop in any of its sessions ends it.",
             )
         else:
             wx.CallAfter(announce, f"Sent to {self._relay_speaker(target)}")
@@ -17116,6 +17325,16 @@ class MainFrame(wx.Frame):
             self._end_relay("the replies started repeating")
         elif not other:
             self._end_relay("the other session was closed")
+        elif relay.get("manual"):
+            # The reply waits for the person: Pass On the Waiting Reply
+            # shows it to them, lets them change it, and sends it. The
+            # hand-off is only counted once it actually goes.
+            relay["waiting"] = (panel, other, answer)
+            announce(
+                f"{self._relay_speaker(panel)} answered. The reply is waiting to be "
+                f"passed to {self._relay_speaker(other)}: Pass On the Waiting Reply, "
+                "in Conversation, Find and Browse, sends it."
+            )
         elif not other.deliver(
             self._relay_preface(relay, other) + relay_message(self._relay_speaker(panel), answer)
         ):
@@ -17128,6 +17347,38 @@ class MainFrame(wx.Frame):
                 f"Hand-off {relay['count']}: {self._relay_speaker(panel)} passed to "
                 f"{self._relay_speaker(other)}"
             )
+
+    def _pass_on_waiting_reply(self) -> None:
+        """Send on a reply an agent conversation is holding for approval."""
+        relay = getattr(self, "_relay", None)
+        waiting = relay.get("waiting") if relay else None
+        if not waiting:
+            announce("No reply is waiting to be passed on.")
+            return
+        panel, other, answer = waiting
+        dlg = SendToTabDialog(
+            self,
+            [self._relay_speaker(other)],
+            relay_message(self._relay_speaker(panel), answer),
+        )
+        try:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            message = dlg.message.GetValue()
+        finally:
+            dlg.Destroy()
+        relay["waiting"] = None
+        if not other or not other.deliver(self._relay_preface(relay, other) + message):
+            self._end_relay("the other session could not take the reply")
+            return
+        relay["left"] -= 1
+        relay["count"] += 1
+        relay["last"] = answer
+        self._select_session(self.notebook.FindPage(other))
+        announce(
+            f"Hand-off {relay['count']}: {self._relay_speaker(panel)} passed to "
+            f"{self._relay_speaker(other)}"
+        )
 
     def _relay_preface(self, relay: dict, panel: "SessionPanel") -> str:
         """The setup an agent is told before its first message, once; "" after that."""

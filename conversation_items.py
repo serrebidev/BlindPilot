@@ -25,6 +25,15 @@ _WEB_ADDRESS = re.compile(r"https?://[^\s<>\x00-\x1f`\"']+", re.IGNORECASE)
 class ConversationItem:
     label: str
     payload: str
+    # For a link, the words the link was written with, when it had any;
+    # empty for code blocks and for bare addresses.
+    text: str = ""
+
+
+def markdown_link(item: ConversationItem) -> str:
+    """An item as a Markdown link: its words, or the address when it had none."""
+    words = (item.text or item.payload).replace("[", "(").replace("]", ")")
+    return f"[{words}]({item.payload})"
 
 
 def can_open_link(address: str) -> bool:
@@ -52,7 +61,7 @@ def collect_items(messages: Sequence[tuple[str, str]], kind: str) -> list[Conver
         if not can_open_link(address):
             notes += ", copy only"
         label = f"{source}: {words + ' — ' if words else ''}{address}{notes}"
-        items.append(ConversationItem(label, address))
+        items.append(ConversationItem(label, address, words))
 
     def bare_links(text: str, source: str, in_code: bool = False) -> None:
         for match in _WEB_ADDRESS.finditer(text):
@@ -133,10 +142,14 @@ class ConversationItemsDialog(wx.Dialog):
         self.copy_button.Bind(wx.EVT_BUTTON, self._on_copy)
         buttons.Add(self.copy_button, 0, wx.RIGHT, self.FromDIP(8))
         self.open_button = None
+        self.markdown_button = None
         if links:
             self.open_button = wx.Button(self, label="&Open Link")
             self.open_button.Bind(wx.EVT_BUTTON, self._on_open)
             buttons.Add(self.open_button, 0, wx.RIGHT, self.FromDIP(8))
+            self.markdown_button = wx.Button(self, label="Copy as &Markdown")
+            self.markdown_button.Bind(wx.EVT_BUTTON, self._on_copy_markdown)
+            buttons.Add(self.markdown_button, 0, wx.RIGHT, self.FromDIP(8))
         buttons.Add(wx.Button(self, wx.ID_CANCEL, label="Close"))
         layout.Add(buttons, 0, wx.ALIGN_RIGHT | wx.ALL, self.FromDIP(12))
         self.SetSizerAndFit(layout)
@@ -172,6 +185,8 @@ class ConversationItemsDialog(wx.Dialog):
         self.copy_button.Enable(item is not None)
         if self.open_button is not None:
             self.open_button.Enable(item is not None and can_open_link(item.payload))
+        if self.markdown_button is not None:
+            self.markdown_button.Enable(item is not None)
 
     def _on_read(self, _event=None) -> None:
         item = self._selected()
@@ -190,6 +205,15 @@ class ConversationItemsDialog(wx.Dialog):
         item = self._selected()
         if item and can_open_link(item.payload) and not wx.LaunchDefaultBrowser(item.payload):
             self._announce("Error: Could not open link")
+
+    def _on_copy_markdown(self, _event=None) -> None:
+        item = self._selected()
+        if item:
+            self._announce(
+                "Copied Markdown link"
+                if self._copy(markdown_link(item))
+                else "Error: Could not access clipboard"
+            )
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.CmdDown() and event.GetKeyCode() == ord("C"):

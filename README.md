@@ -28,7 +28,7 @@ BlindPilot is vibe-coded. I use it every day. It started as a fork of [Claude Co
 - Shows the helper agents (subagents) a task has running, and what each one is doing.
 - Attaches files and pasted pictures.
 - Keeps a list of messages you send all the time, by name, so you can drop one into the prompt with one key.
-- Searches answers. Copies a code block, an answer, or the whole conversation. Saves a conversation as Markdown, a web page, or plain text.
+- Searches answers. Copies a code block, an answer, or the whole conversation. Saves a conversation as Markdown, a web page, or plain text. The Links list can also copy a link as Markdown, words and address together.
 - Lists the models and effort levels each agent offers.
 - Warns you once when a Claude Code plan limit (five-hour or weekly) is getting close or has run out, with how full it is and when it resets.
 - Plays sounds for sent, working, answered, and failed, if you want them.
@@ -159,6 +159,8 @@ The folder box starts on the folder you opened last, and Up and Down go through 
 
 Ctrl+Shift+O hands the selected answer, or the newest, to another session: a Codex tab can review what Claude Code just wrote, or the other way round. You pick the session and can change the message before it goes; it starts with who wrote it. Tick Keep passing replies between the two tabs to make it an agent conversation: each session's next answer goes to the other by itself, up to the number of hand-offs you choose (6 to start with). Each hand-off is announced. It stops at the limit, when a reply is empty or repeats the last one, when an agent ends its reply with DONE, when a turn fails, or when you press Stop in any of its sessions. Permission prompts and questions still come to you.
 
+Tick Ask me before each hand-off to hold every reply instead: when an agent answers, you hear that its reply is waiting, and Pass On the Waiting Reply (Conversation, Find and Browse) shows it to you, lets you change it, and sends it on. The hand-off counts only once it goes.
+
 Kind of conversation (Alt+D) fills in a role for each session: Builder and reviewer, Second opinion, Debate, or Plan and do. Change the roles or write your own in Role of this session (Alt+R) and Role of the receiving session (Alt+V). Third agent (Alt+G) brings in one more session, with a role of its own: replies then go round from this session to the receiving one, to the third, and back. Each agent is told once, before its first message, who else is in the conversation, that their messages aren't yours, its role, and to end with DONE when they all agree the work is finished.
 
 ### Task List
@@ -168,6 +170,8 @@ Ctrl+Shift+J lists the agent's task list for a longer job: each step, and whethe
 ### Commands, Decisions and Properties
 
 Ctrl+Shift+X lists every command the agent ran in this conversation, newest first, each with done, failed or no result yet; Enter reads the command and its output. Ctrl+Shift+Y lists every question an agent asked you and every permission it asked for, with how you answered. Alt+Enter, Properties, lists this session one line at a time: its title, backend, folder, model, effort, permission mode and session ID, then how many messages, responses, tool steps, commands, code blocks, links and decisions it has, and how far along its task list is. All three are under Conversation, Find and Browse, and copy like the other lists. Commands come from the steps in the list, so they need live activity on in Preferences.
+
+Chat Permissions, also under Conversation, Find and Browse, lists what this session may do without asking: its permission mode, the rules you granted it with Allow for this session (kept with the conversation, so they are still listed after you reopen it), and, for Claude Code, the rules in Claude Code's own settings files that apply to this folder, each named with the file it came from. BlindPilot only reads those files; change them in Claude Code, for example with /permissions.
 
 ### Remote Control, other machines and session links
 
@@ -192,6 +196,8 @@ Switch to Keep up when an agent runs a pile of steps at once and your screen rea
 ### Questions and permissions
 
 When an agent asks you something, you get a dialog. If it writes a question into its answer instead of asking properly, BlindPilot notices that too and opens the same dialog. What you type goes back as your next message. A friendly "Want me to run the tests too?" at the end of a finished task is left alone. Turn the whole thing off under Options if you'd rather a task just end.
+
+Some answers carry a preview: a longer sketch of what choosing that one would mean. When any answer in a question has one, a Preview box under the answers shows the preview of the answer you are on, and follows as you move.
 
 If you're not in Bypass permissions and Claude Code wants to do something it needs your OK for, you get the whole request to read line by line, then Allow, Allow for this session, or Deny. Deny is the default, and you can tell Claude why. In Plan mode the plan opens the same way: approve it, or keep planning and say what to change. Escape denies. Closing a dialog never allows anything.
 

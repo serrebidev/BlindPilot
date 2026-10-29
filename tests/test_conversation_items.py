@@ -209,6 +209,7 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
         "_task_list_active",
         "_find_in_all_conversations",
         "_send_to_tab_active",
+        "_pass_on_waiting_reply",
         "_jump_to_latest_response",
         "_export_active",
     ):
@@ -223,14 +224,17 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
             assert item.GetItemLabel().endswith(chord)
             assert item.GetAccel() is not None
         # Task List, Commands, Decisions, Find in All Conversations, Send
-        # Response and Properties act on Agent sessions only.
+        # Response, Pass On the Waiting Reply, Properties and Chat
+        # Permissions act on Agent sessions only.
         agent_chords = (
             "Ctrl+Shift+J",
             "Ctrl+Shift+X",
             "Ctrl+Shift+Y",
             "Ctrl+Shift+S",
             "Ctrl+Shift+O",
+            "Pass On the Waiting &Reply…",
             "Alt+Enter",
+            "Chat &Permissions…",
             "Copy Session Lin&k",
             "&Remote Control…",
             "Ctrl+Shift+U",
@@ -240,3 +244,30 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
             assert item.GetItemLabel().endswith(chord)
     finally:
         menu.Destroy()
+
+
+def test_markdown_link_uses_the_links_words():
+    from conversation_items import ConversationItem, markdown_link
+
+    item = ConversationItem(
+        "Claude: release notes — https://example.com", "https://example.com", "release notes"
+    )
+    assert markdown_link(item) == "[release notes](https://example.com)"
+
+
+def test_markdown_link_falls_back_to_the_address_and_tames_brackets():
+    from conversation_items import ConversationItem, markdown_link
+
+    bare = ConversationItem("Claude: https://example.com", "https://example.com")
+    assert markdown_link(bare) == "[https://example.com](https://example.com)"
+    bracketed = ConversationItem("x", "https://example.com", "see [draft] notes")
+    assert markdown_link(bracketed) == "[see (draft) notes](https://example.com)"
+
+
+def test_collected_links_keep_their_words():
+    items = collect_items(
+        [("Claude", "Read the [guide](https://example.com/guide) first.")], "links"
+    )
+    assert len(items) == 1
+    assert items[0].text == "guide"
+    assert items[0].payload == "https://example.com/guide"

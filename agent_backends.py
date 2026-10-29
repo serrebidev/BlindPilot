@@ -471,10 +471,16 @@ def ignore_subagents(_agent_id: str, _name: str, _status: str, _line: str) -> No
 
 @dataclass(frozen=True)
 class QuestionOption:
-    """One answer a backend offers for a question."""
+    """One answer a backend offers for a question.
+
+    `preview` is the longer text some providers attach to an option to show
+    what choosing it would mean (Claude Code's AskUserQuestion sends one, a
+    mock-up or a plan sketch); most options from most providers have none.
+    """
 
     label: str
     description: str = ""
+    preview: str = ""
 
 
 @dataclass(frozen=True)
@@ -3121,7 +3127,11 @@ def _question_options(raw: object) -> tuple[QuestionOption, ...]:
     if not isinstance(raw, list):
         return ()
     return tuple(
-        QuestionOption(str(option["label"]), str(option.get("description") or ""))
+        QuestionOption(
+            str(option["label"]),
+            str(option.get("description") or ""),
+            str(option.get("preview") or ""),
+        )
         for option in raw
         if isinstance(option, dict) and option.get("label")
     )

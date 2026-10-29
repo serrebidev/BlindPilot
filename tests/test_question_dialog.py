@@ -247,3 +247,39 @@ def test_a_question_only_written_into_the_answer_says_the_turn_ended(frame):
         assert dlg._texts[0].IsShown()
     finally:
         dlg.Destroy()
+
+
+def test_option_previews_follow_the_choice(frame):
+    questions = (
+        Question(
+            question="Which layout?",
+            options=(
+                QuestionOption("Wide", "Two columns.", preview="Wide: [list | detail]"),
+                QuestionOption("Narrow", "One column."),
+                QuestionOption("Stacked", "Rows.", preview="Stacked: list over detail"),
+            ),
+        ),
+    )
+    dlg = _dialog(frame, questions)
+    try:
+        preview = dlg._previews[0]
+        assert preview is not None
+        # The first option starts chosen, so its preview is what shows.
+        assert preview.GetValue() == "Wide: [list | detail]"
+        dlg._pickers[0].SetSelection(2)
+        dlg._update_previews()
+        assert preview.GetValue() == "Stacked: list over detail"
+        # An option with no preview leaves the box empty, not stale.
+        dlg._pickers[0].SetSelection(1)
+        dlg._update_previews()
+        assert preview.GetValue() == ""
+    finally:
+        dlg.Destroy()
+
+
+def test_no_preview_box_when_no_option_has_one(frame):
+    dlg = _dialog(frame)
+    try:
+        assert dlg._previews == [None, None]
+    finally:
+        dlg.Destroy()

@@ -3145,3 +3145,19 @@ def test_status_carries_the_usage_windows(monkeypatch):
         },
     )
     assert "Five-hour limit" in _status_lines(backend_status(BACKEND_CLAUDE))
+
+
+def test_question_options_keep_their_previews():
+    raw = [
+        {
+            "question": "Which plan?",
+            "multiSelect": False,
+            "options": [
+                {"label": "Small", "description": "One file.", "preview": "plan: edit one file"},
+                {"label": "Big", "description": "Many files."},
+            ],
+        }
+    ]
+    questions = agent_backends._questions(raw, multi_key="multiSelect")
+    assert questions[0].options[0].preview == "plan: edit one file"
+    assert questions[0].options[1].preview == ""
