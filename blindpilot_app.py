@@ -356,7 +356,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.52.4"
+APP_VERSION = "0.52.5"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -10519,9 +10519,10 @@ class SessionPanel(wx.Panel):
             # list of what was handed over.
             granted = _permission_update_lines(suggestions)
             if granted:
-                mine = getattr(self, "_session_permission_rule_lines", None)
+                mine: list[str] | None = getattr(self, "_session_permission_rule_lines", None)
                 if mine is None:
-                    mine = self._session_permission_rule_lines = []
+                    mine = []
+                    self._session_permission_rule_lines = mine
                 for line in granted:
                     if line not in mine:
                         mine.append(line)
@@ -17351,11 +17352,10 @@ class MainFrame(wx.Frame):
     def _pass_on_waiting_reply(self) -> None:
         """Send on a reply an agent conversation is holding for approval."""
         relay = getattr(self, "_relay", None)
-        waiting = relay.get("waiting") if relay else None
-        if not waiting:
+        if not relay or not relay.get("waiting"):
             announce("No reply is waiting to be passed on.")
             return
-        panel, other, answer = waiting
+        panel, other, answer = relay["waiting"]
         dlg = SendToTabDialog(
             self,
             [self._relay_speaker(other)],

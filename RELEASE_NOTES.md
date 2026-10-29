@@ -1,4 +1,6 @@
-# BlindPilot 0.52.4
+# BlindPilot 0.52.5
+
+This replaces 0.52.4, which was published and pulled within the hour: it shipped while the full test suite was red (type errors in the new code). Same features, gate green this time.
 
 Four features from the latest The Chat Place (the app formerly called AIChat, now at 0.3.3), audited against BlindPilot and added where they fit its tab-based GUI.
 

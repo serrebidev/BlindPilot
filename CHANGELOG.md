@@ -2,7 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## v0.52.4 - 2026-10-28
+## v0.52.5 - 2026-10-28
+
+The 0.52.4 build was published and then pulled within the hour: the release workflow shipped it while the full test workflow was red — type errors (mypy) in the new hand-off and Chat Permissions code on Windows, and one timing failure on Linux. The features were fine; the gate was not run before tagging. 0.52.5 is the same release with the type errors fixed and the whole suite green on all three platforms before the tag.
+
+## v0.52.4 - 2026-10-28 (pulled)
 
 Another audit of The Chat Place (formerly AIChat, now at 0.3.3) against BlindPilot. Four of its newer ideas fit BlindPilot's tab GUI and are in; the rest of its recent work is its single live session list, which BlindPilot covers differently (tabs, Recent Conversations, background notifications).
 
