@@ -1,9 +1,10 @@
-# BlindPilot 0.52.3
+# BlindPilot 0.52.4
 
-A Command Code key the server has revoked can be recovered from BlindPilot again.
+Four features from the latest The Chat Place (the app formerly called AIChat, now at 0.3.3), audited against BlindPilot and added where they fit its tab-based GUI.
 
-- **The sign-in check asks the server:** it runs `whoami`, the same round-trip a turn makes, instead of `status`, which only read the credential file on disk. A revoked key no longer shows as "Authentication verified" in the wizard and then fails every turn with "not signed in".
-- **Offline is not signed out:** only a definitive refusal from the server counts as signed out. If the server cannot be reached, the credential file is still consulted, as before.
-- **Signing in clears the stale key first:** Command Code's `login` used to answer "Already logged in" and do nothing while a credential file existed. The wizard now runs `logout` before `login`, following Command Code's own troubleshooting, so the browser sign-in page opens and the key can be replaced.
+- **Chat Permissions:** Conversation, Find and Browse, then Chat Permissions shows what this conversation's agent may do without asking — the approvals you granted for this session, remembered by BlindPilot, plus the allow, ask and deny rules and extra working folders from Claude's own settings files, each line naming the file it came from. It is an honest inventory, not an editor: session grants live inside the agent's own process, and BlindPilot never writes to Claude's settings files.
+- **Question previews:** when Claude asks a question and an option carries a preview (a code block, a layout), the question dialog now shows it in a read-only Preview box that follows the option you pick.
+- **Ask before each hand-off:** agent conversations gain a checkbox, "Ask me before each hand-off". With it on, a finished reply waits instead of being delivered, and Pass On the Waiting Reply in Find and Browse sends it to the other session — after editing it, if you want.
+- **Copy links as Markdown:** links collected from a response can now be copied as Markdown, so pasting gives the link's words over its address instead of a bare URL. Properties also reports whether Remote Control is on for a Claude conversation.
 
-Thanks to Farhan Khan for reporting and fixing this.
+The rest of The Chat Place's recent work is its single window holding every session at once, sorted into needs-you, working and idle. BlindPilot covers the same ground with tabs, Recent Conversations and its background notifications, so that design stays theirs.

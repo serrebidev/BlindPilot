@@ -2,6 +2,15 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.52.4 - 2026-10-28
+
+Another audit of The Chat Place (formerly AIChat, now at 0.3.3) against BlindPilot. Four of its newer ideas fit BlindPilot's tab GUI and are in; the rest of its recent work is its single live session list, which BlindPilot covers differently (tabs, Recent Conversations, background notifications).
+
+- Chat Permissions, in Find and Browse: what this conversation's agent may do without asking — the session approvals granted in this app, remembered here, plus the allow, ask and deny rules and extra folders from Claude's settings files, each line naming the file it came from. Nothing is written to any settings file.
+- Question dialogs show a Preview box when an option carries one, following the option you pick — Claude's AskUserQuestion can attach a preview (code, a layout) to a choice.
+- Agent conversations can ask before each hand-off: turn on "Ask me before each hand-off" and a reply waits instead of being delivered; Pass On the Waiting Reply in Find and Browse sends it on, edited first if you want.
+- Links collected from a response can be copied as Markdown, pasting as the link's words over its address. Properties also reports Remote Control on or off for Claude conversations.
+
 ## v0.52.3 - 2026-10-28
 
 - Command Code sign-in now asks the server whether the key still works: the check runs `whoami` instead of `status`, which only read the credential file, so a key the server has revoked no longer reads as verified and then fails every turn. Only a definitive refusal (401 / not authenticated) counts as signed out; an offline machine still falls back to the credential file. Signing in now clears the stale credential first (`logout` before `login`), so a revoked key can actually be replaced from the wizard. Thanks to Farhan Khan.
