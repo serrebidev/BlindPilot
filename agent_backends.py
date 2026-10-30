@@ -6170,6 +6170,7 @@ class _ConPtyTerminal:
         ctypes = self._ctypes
         kernel32 = ctypes.windll.kernel32
         empty_since: Optional[float] = None
+        idle_since: Optional[float] = None
         while True:
             if self._closed:
                 return None
@@ -6189,13 +6190,22 @@ class _ConPtyTerminal:
                 ):
                     return None
                 return self._decoder.decode(buffer.raw[: read.value])
+            delay = 0.01
             if self.isalive():
                 empty_since = None
+                # A live but silent terminal (an agent thinking, a prompt
+                # waiting) was polled 100 times a second for as long as
+                # it sat there. Back off once it has been quiet a second;
+                # arriving data is still picked up within 50 ms.
+                if idle_since is None:
+                    idle_since = time.monotonic()
+                elif time.monotonic() - idle_since > 1.0:
+                    delay = 0.05
             elif empty_since is None:
                 empty_since = time.monotonic()
             elif time.monotonic() - empty_since > 0.5:
                 return None
-            time.sleep(0.01)
+            time.sleep(delay)
 
     def write(self, text: str) -> None:
         if self._closed:
@@ -6297,7 +6307,10 @@ def _spawn_freebuff_pty(
                     # keeping the terminal off the screen for the whole run.
                     pass
                 quick = now - started < 8 or grace_until is not None
-                time.sleep(0.005 if quick else 0.25)
+                # 25 ms still catches a console within a frame or two of
+                # it appearing; the old 5 ms cadence held a core busy in
+                # EnumWindows sweeps for the whole fast phase.
+                time.sleep(0.025 if quick else 0.25)
 
         threading.Thread(target=hide_terminal, daemon=True).start()
 
@@ -6411,7 +6424,7 @@ def _spawn_hidden_console(args: list[str], cwd: str) -> object:
                 # Never let this thread die: it is the only thing keeping the
                 # console off screen for the whole run.
                 pass
-            time.sleep(0.005 if time.monotonic() - started < 8 else 0.25)
+            time.sleep(0.025 if time.monotonic() - started < 8 else 0.25)
 
     threading.Thread(target=watch, daemon=True).start()
     return _HiddenConsoleProcess(proc)

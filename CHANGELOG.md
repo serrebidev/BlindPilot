@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.52.6 - 2026-10-30
+
+CPU audit of agent mode on Windows. Two polling loops were far hotter than they needed to be: the hidden-console watchers swept every window on the desktop 200 times a second for the first 8 seconds of each agent run (now 40 times a second, still fast enough to catch a console as it appears), and the terminal output reader polled its pipe 100 times a second for as long as a session sat idle (now it backs off to 20 times a second once the terminal has been quiet for a second). Chat mode measured clean: no CPU at idle, and streamed replies are parsed incrementally rather than re-parsed per chunk.
+
 ## v0.52.5 - 2026-10-28
 
 The 0.52.4 build was published and then pulled within the hour: the release workflow shipped it while the full test workflow was red — type errors (mypy) in the new hand-off and Chat Permissions code on Windows, and one timing failure on Linux. The features were fine; the gate was not run before tagging. 0.52.5 is the same release with the type errors fixed and the whole suite green on all three platforms before the tag.
