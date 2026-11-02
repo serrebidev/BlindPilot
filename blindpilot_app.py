@@ -13713,6 +13713,7 @@ class SetupWizard(wx.Dialog):
         announce(f"Step {step + 1} of {n}: {title}")
         page = self._book.GetPage(step)
         if page is not None:
+
             def _focus() -> None:
                 for child in page.GetChildren():
                     if hasattr(child, "SetFocus") and child.IsEnabled() and child.IsShown():
