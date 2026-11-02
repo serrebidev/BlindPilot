@@ -1,3 +1,11 @@
+# BlindPilot 0.54.0
+
+The Muser backend added in 0.53.0 is removed again, at the owner's request, for now.
+
+- Muser no longer appears as a backend to pick, install, update or sign in to.
+- The muse.ai backend is unchanged, and no other backend is affected.
+- Conversations that used Muser no longer appear in Recent Conversations.
+
 # BlindPilot 0.53.0
 
 A twelfth agent joins the list: Muser (https://github.com/nyarurant/muser), the muse.ai coding agent that runs on your own PC. This is muse.ai with full agent mode — the muse.ai backend BlindPilot already had runs its agent on Meta's machine and can only chat.

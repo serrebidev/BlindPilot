@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.54.0 - 2026-11-01
+
+The Muser backend added in v0.53.0 is removed again, at the owner's request, for now. The muse.ai backend is unchanged, and no other backend is affected; Muser no longer appears as a backend to pick, install, update or sign in to, and its conversations no longer appear in Recent Conversations.
+
 ## v0.53.0 - 2026-11-01
 
 New backend: Muser (https://github.com/nyarurant/muser), the muse.ai coding agent that runs on your own PC — full agent mode, unlike the muse.ai backend, whose agent runs on Meta's machine and can only chat. Windows only; the wizard installs it with npm (Node.js 22 or later), updates it, and signs it in with `muser login`, which covers both the muse.ai web sign-in and registering the PC as a Muse device. Turns run as `muser exec --json`, one process per message, resumed by session id; tool steps are announced as they happen and the answer arrives whole at the end of the turn, with cited sources listed. Permission modes map onto Muser's (Plan read-only, Accept edits is auto-edit, Auto and Bypass run with everything automatic — Muser has no reviewer mode). Muse picks its own model, so there is no model picker. Its conversations are in Recent Conversations with their task lists, its weekly muse.ai usage shows in Session Status, and its settings, instructions, skills and agent types are in Backend Settings and What Agents Know.

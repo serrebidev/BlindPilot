@@ -100,7 +100,6 @@ from agent_backends import (
     BACKEND_LABELS,
     BACKEND_MUSE,
     BACKEND_MUSEAI,
-    BACKEND_MUSER,
     BACKEND_OPENCODE,
     BACKEND_PITCH_ORDER,
     BACKENDS,
@@ -357,7 +356,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.53.0"
+APP_VERSION = "0.54.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1392,7 +1391,6 @@ _NPM_BACKEND_PACKAGES = {
     BACKEND_COMMANDCODE: "command-code",
     BACKEND_GEMINI: "@google/gemini-cli",
     BACKEND_COPILOT: "@github/copilot",
-    BACKEND_MUSER: "muser-cli",
 }
 
 # Backends whose turn is one process per message. A message typed while one
@@ -1406,7 +1404,6 @@ _QUEUEING_BACKENDS = frozenset(
         BACKEND_MUSEAI,
         BACKEND_FREEBUFF,
         BACKEND_COPILOT,
-        BACKEND_MUSER,
     }
 )
 
@@ -3429,10 +3426,8 @@ def add_agent(home: Path, backend: str, name: str, description: str, instruction
             f"description = {json.dumps(description, ensure_ascii=False)}\n"
             f"developer_instructions = {json.dumps(instructions, ensure_ascii=False)}\n"
         )
-    elif backend in (BACKEND_COMMANDCODE, BACKEND_OPENCODE, BACKEND_COPILOT, BACKEND_MUSER):
-        # Copilot CLI reads custom agents only from *.agent.md files. Muser's
-        # agent types are Claude Code format, the same name/description
-        # frontmatter Command Code's .md files carry.
+    elif backend in (BACKEND_COMMANDCODE, BACKEND_OPENCODE, BACKEND_COPILOT):
+        # Copilot CLI reads custom agents only from *.agent.md files.
         filename = f"{name}.agent.md" if backend == BACKEND_COPILOT else f"{name}.md"
         front = "mode: subagent\n" if backend == BACKEND_OPENCODE else f"name: {name}\n"
         content = f"---\n{front}description: {json.dumps(description, ensure_ascii=False)}\n---\n\n{instructions}\n"
@@ -3511,7 +3506,6 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
     cc, codex = _commandcode_home(), Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     hermes, gemini = _hermes_home(), Path.home() / ".gemini"
     copilot = Path(os.environ.get("COPILOT_HOME") or Path.home() / ".copilot")
-    muser_home = Path.home() / ".muser"
     opencode = Path.home() / ".config" / "opencode"
     groups = [
         AgentFiles(BACKEND_LABELS[BACKEND_CLAUDE], kind, claude[kind]) for kind in CLAUDE_FILE_KINDS
@@ -3611,35 +3605,6 @@ def agent_files(cwd: Optional[str]) -> list[AgentFiles]:
             _plain_files(copilot.glob("agents/*.md"), False),
             "agent",
             copilot,
-        ),
-        AgentFiles(
-            BACKEND_LABELS[BACKEND_MUSER],
-            "Instructions",
-            _plain_files(
-                [
-                    muser_home / "instructions.md",
-                    *([project / ".muser" / "instructions.md"] if project else []),
-                    *here,
-                    *([project / "CLAUDE.md", project / "MUSE.md"] if project else []),
-                ]
-            ),
-        ),
-        AgentFiles(
-            BACKEND_LABELS[BACKEND_MUSER],
-            "Skills",
-            _plain_files(muser_home.glob("skills/*/SKILL.md")),
-        ),
-        AgentFiles(
-            BACKEND_LABELS[BACKEND_MUSER],
-            "Agents",
-            _plain_files(muser_home.glob("agents/*.md"), False),
-            "agent",
-            muser_home,
-        ),
-        AgentFiles(
-            BACKEND_LABELS[BACKEND_MUSER],
-            "Project Agents",
-            _plain_files((project / ".muser" / "agents").glob("*.md")) if project else [],
         ),
         AgentFiles(
             BACKEND_LABELS[BACKEND_OPENCODE],
@@ -9715,11 +9680,6 @@ class SessionPanel(wx.Panel):
             finished = self.task_list.apply_codex(call[0] if call else None)
         elif source == "copilot":
             finished = self.task_list.apply_checklist(call[0] if call else None)
-        elif source == "muser":
-            # Muser's list is {content, status} rows, TodoWrite's own shape.
-            finished = self.task_list.apply_claude(
-                "TodoWrite", {"todos": call[0] if call else None}
-            )
         elif len(call) == 3 and isinstance(call[1], dict):
             finished = self.task_list.apply_claude(str(call[0]), call[1], str(call[2]))
         else:
@@ -9732,8 +9692,8 @@ class SessionPanel(wx.Panel):
         tasks = self.task_list.tasks
         if not tasks:
             self._announce(
-                "No task list in this conversation yet. Claude Code, Codex, Copilot and Muser "
-                "keep one for longer tasks."
+                "No task list in this conversation yet. Claude Code, Codex and Copilot keep one "
+                "for longer tasks."
             )
             return
         items = [
@@ -13711,23 +13671,6 @@ class SetupWizard(wx.Dialog):
             wx.CallAfter(self._check_signin)
         self.Layout()
         announce(f"Step {step + 1} of {n}: {title}")
-        page = self._book.GetPage(step)
-        if page is not None:
-
-            def _focus() -> None:
-                for child in page.GetChildren():
-                    if hasattr(child, "SetFocus") and child.IsEnabled() and child.IsShown():
-                        try:
-                            child.SetFocus()
-                            return
-                        except Exception:
-                            continue
-                try:
-                    page.SetFocus()
-                except Exception:
-                    pass
-
-            wx.CallAfter(_focus)
 
     def _go(self, direction: int) -> None:
         target = self._step + direction
