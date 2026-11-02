@@ -1,6 +1,6 @@
 -r requirements.txt
 pyinstaller>=6.22.3
-pytest>=9.1.1
+pytest>=9.2.0
 ruff>=0.17.3
 mypy>=2.4.0
 # A hung test fails in a minute instead of running out GitHub's six-hour
