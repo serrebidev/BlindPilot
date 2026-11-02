@@ -1,3 +1,7 @@
+# BlindPilot 0.54.1
+
+- Fixed: a GitHub Copilot turn could never start — the worker thread crashed on start with an AttributeError before the turn ran. Copilot turns now start normally.
+
 # BlindPilot 0.54.0
 
 The Muser backend added in 0.53.0 is removed again, at the owner's request, for now.

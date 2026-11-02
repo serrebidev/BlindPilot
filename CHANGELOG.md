@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.54.1 - 2026-11-02
+
+Fix: a Copilot turn could never start. The Copilot worker stored its own "started" flag under the name threading.Thread uses for its internal Event, so starting the worker thread raised AttributeError and the turn died before it ran. The flag now uses the same name as the other workers, and regression tests cover it.
+
 ## v0.54.0 - 2026-11-01
 
 The Muser backend added in v0.53.0 is removed again, at the owner's request, for now. The muse.ai backend is unchanged, and no other backend is affected; Muser no longer appears as a backend to pick, install, update or sign in to, and its conversations no longer appear in Recent Conversations.

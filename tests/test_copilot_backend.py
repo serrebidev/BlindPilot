@@ -8,6 +8,7 @@ release.
 from __future__ import annotations
 
 import json
+import threading
 
 import agent_backends
 import copilot_backend
@@ -215,3 +216,27 @@ def test_saved_copilot_sessions_are_listed_and_read_back(tmp_path, monkeypatch):
     assert [(turn.prompt, turn.response) for turn in turns] == [
         ("Fix the build", "On it.\n\nFixed.")
     ]
+
+
+def test_the_worker_keeps_threadings_started_event():
+    # _setup once stored its own flag under _started, the name
+    # threading.Thread uses for the Event .start() consults; the bool
+    # made every Copilot turn crash inside .start() before it ran.
+    worker, _said = _worker()
+    assert isinstance(worker._started, threading.Event)
+
+
+def test_notify_started_fires_on_started_exactly_once():
+    fired: list[str] = []
+    worker, _said = _worker(on_started=lambda: fired.append("started"))
+    worker._notify_started()
+    worker._notify_started()
+    assert fired == ["started"]
+
+
+def test_the_worker_thread_starts(monkeypatch):
+    worker, _said = _worker()
+    monkeypatch.setattr(worker, "run", lambda: None)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()

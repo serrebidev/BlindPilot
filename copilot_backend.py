@@ -248,7 +248,9 @@ class CopilotWorker(_TurnWorker):
         self._stderr_thread: Optional[threading.Thread] = None
         self._parts: list[str] = []
         self._streamer = SentenceStreamer(lambda text: self._on_activity("assistant", text))
-        self._started = False
+        # Not _started: threading.Thread owns that name for its own Event,
+        # and overwriting it makes .start() raise AttributeError.
+        self._started_notified = False
         self._completed = False
         self._message_id = ""
         self._streamed: set[str] = set()
@@ -369,8 +371,8 @@ class CopilotWorker(_TurnWorker):
     # -- events ---------------------------------------------------------------
 
     def _notify_started(self) -> None:
-        if not self._started:
-            self._started = True
+        if not self._started_notified:
+            self._started_notified = True
             self._accepting_input.set()
             self._on_started()
 
