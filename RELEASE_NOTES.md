@@ -1,4 +1,4 @@
-# BlindPilot 0.52.6
+# BlindPilot 0.53.0
 
 A performance fix for agent mode on Windows, from a CPU audit. Two background loops ran far more often than they needed to:
 
