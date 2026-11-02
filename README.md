@@ -1,6 +1,6 @@
 # BlindPilot
 
-A screen-reader-first desktop app for AI coding agents. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, muse.ai, Command Code, Gemini CLI, Antigravity CLI, and GitHub Copilot CLI in normal windows, so NVDA, JAWS, and VoiceOver read real buttons, lists and edit boxes instead of a terminal. It runs on Windows, macOS, and Linux. Linux gets the least testing of the three.
+A screen-reader-first desktop app for AI coding agents. It runs Claude Code, Codex, FreeBuff, opencode, Hermes, Muse Code, muse.ai, Command Code, Gemini CLI, Antigravity CLI, GitHub Copilot CLI, and Muser in normal windows, so NVDA, JAWS, and VoiceOver read real buttons, lists and edit boxes instead of a terminal. It runs on Windows, macOS, and Linux. Linux gets the least testing of the three.
 
 [![Join SerrebiProjects on Telegram](https://img.shields.io/badge/Telegram-SerrebiProjects-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SerrebiProjects)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -15,7 +15,7 @@ BlindPilot is vibe-coded. I use it every day. It started as a fork of [Claude Co
 
 ## What it does
 
-- Runs eleven coding agents. Pick one per tab under Model, Backend. New tabs start on whatever agent the tab you're in uses. If your tabs use different agents, each tab's name, its prompt, and its send sound tell you which one you're talking to.
+- Runs twelve coding agents. Pick one per tab under Model, Backend. New tabs start on whatever agent the tab you're in uses. If your tabs use different agents, each tab's name, its prompt, and its send sound tell you which one you're talking to.
 - Doesn't stop to ask permission for every little thing. Every agent runs in Bypass permissions mode out of the box. If you want to approve things yourself, change it under Model, Permission Mode.
 - Splits every answer into rows: one per heading, paragraph, list item, quote, code block, thought, and tool step. Arrow through them like any list.
 - Reads answers out as they arrive, or stays quiet until the whole answer is in. Your choice.
@@ -67,7 +67,7 @@ Your settings are kept in `%APPDATA%\BlindPilot` on Windows, `~/Library/Applicat
 
 ## Set up an agent
 
-The first time you run BlindPilot, a wizard walks you through it. You can get back to it any time from Model, Manage Backends. It finds, installs, updates, and signs in to any of the eleven backends. If an agent needs Node.js and you don't have it, the wizard installs that too. Nothing needs admin rights.
+The first time you run BlindPilot, a wizard walks you through it. You can get back to it any time from Model, Manage Backends. It finds, installs, updates, and signs in to any of the twelve backends. If an agent needs Node.js and you don't have it, the wizard installs that too. Nothing needs admin rights.
 
 Sign In runs the agent's own sign-in, reads out the web address, and opens your browser. If the site gives you a code, BlindPilot asks for it and passes it on. Hermes asks its setup questions in a terminal, so for Hermes, Sign In opens a terminal window. Answer the questions there, then choose Already Signed In.
 
@@ -119,6 +119,10 @@ muse login
 uv tool install muse-cli
 muse-cli auth export     # copies your muse.ai sign-in out of Chrome
 
+# Muser, the muse.ai coding agent for your own PC (Windows only), see https://github.com/nyarurant/muser
+npm install -g muser-cli
+muser login              # signs in to muse.ai in Edge and registers this PC
+
 # Hermes Agent, see https://hermes-agent.nousresearch.com/docs
 hermes status     # shows the provider and model it will use
 hermes model      # pick one, if none is set yet
@@ -165,7 +169,7 @@ Kind of conversation (Alt+D) fills in a role for each session: Builder and revie
 
 ### Task List
 
-Ctrl+Shift+J lists the agent's task list for a longer job: each step, and whether it's to do, in progress, or done. Claude Code, Codex and GitHub Copilot CLI keep one. When a step is finished you hear "Task done" and its name, and Turn Status (Ctrl+Shift+T) says how far along the list is. Reopening a Claude Code or Copilot conversation from Recent Conversations brings its task list back.
+Ctrl+Shift+J lists the agent's task list for a longer job: each step, and whether it's to do, in progress, or done. Claude Code, Codex, GitHub Copilot CLI and Muser keep one. When a step is finished you hear "Task done" and its name, and Turn Status (Ctrl+Shift+T) says how far along the list is. Reopening a Claude Code, Copilot or Muser conversation from Recent Conversations brings its task list back.
 
 ### Commands, Decisions and Properties
 
@@ -239,6 +243,7 @@ On a Mac, Ctrl is Cmd. Two keys are different so macOS doesn't eat them: Recent 
 - **muse.ai:** Meta's personal agent. It runs on Meta's computers, not yours, so it can't see your files; paste in what it needs. Picking it opens your main chat. New Conversation starts a side chat. Replies can take minutes, so BlindPilot waits up to an hour. Stop ends the wait, not the work; the answer still lands in your muse.ai chat. Model, muse.ai has Approvals, Schedules, Feed, Ideas, and Goals.
 - **Command Code:** messages sent while it's working are queued and sent in order when it finishes. `/queue list`, `/queue clear` and `/queue resume` manage them. Every one of its slash commands works. Model follows your Command Code CLI setting by default. Choose **Auto (choose for each task)** under Model, or type `/model auto`, to let BlindPilot switch models and providers for this tab, including free models; Model, Session Status reports the latest route. Before each turn and retry, Auto checks the CLI's current `--list-models` in the background and selects only priced, eligible entries. Stop cancels a model-list check in progress before the prompt starts. If the check fails, it uses the CLI default; list membership does not guarantee server acceptance. If an Auto turn hits a rate or credit limit before answering or running a tool, BlindPilot announces one retry on a model the live list and installed catalog confirm is free. During the recorded cooldown, Auto also chooses a confirmed free model for later tasks, including heavier ones, and says when it makes that tradeoff. If no free model can be confirmed or routing fails, Auto says it is using the Command Code default. If a limit cannot be retried because work already started or no free model is confirmed, BlindPilot says why. Manual model choices never switch automatically.
 - **Gemini CLI** and **Antigravity CLI:** sign in with Google. They don't shrink conversations.
+- **Muser:** Muse working as a coding agent on your own PC, through your muse.ai sign-in — not the muse.ai backend above, whose agent runs on Meta's machine and cannot touch your files. Windows only, and it needs Node.js 22 or later. Sign in with `muser login`: it opens Edge for the muse.ai sign-in and registers this PC as a Muse device, both in the one flow. Muse picks its own model. Messages sent while it works are queued. Permission modes map onto Muser's own: Plan is read-only, Accept edits lets it edit without asking, and Auto and Bypass Permissions both run with everything automatic — Muser has no reviewer mode, so nothing judges a step before it runs in those two. Steps it takes are announced as they happen, the answer arrives whole when the turn ends, and any sources it cites are listed at the end of the answer. Its past conversations are in Recent Conversations, and its instructions, skills and agent types are under What Agents Know. It doesn't shrink conversations.
 - **GitHub Copilot CLI:** sign in with `copilot login`, which shows a code to type at github.com/login/device; a GitHub CLI (gh) sign-in or a `GH_TOKEN` works too. Your GitHub account needs a Copilot plan that allows Copilot CLI (Copilot Free is enough); without one, Copilot refuses every message with "Access denied by policy settings", and BlindPilot says where to check. Messages sent while it works are queued. In Auto, Copilot's own assisted approval judges each risky step. Its past conversations are in Recent Conversations, and custom agents you add under What Agents Know are saved as `.agent.md` files it reads. It doesn't shrink conversations.
 - **Codex in Auto:** steps that need to leave the sandbox go to Codex's automatic approval review instead of failing or asking you. Each decision is announced, with its risk level and reason.
 
@@ -350,6 +355,7 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. It runs the tests and t
 | Gemini CLI | Headless stream-json CLI, one process per message | Model yes (its auto, pro, flash and flash-lite choices), effort no | Yes | No | In writing only |
 | Antigravity CLI | Print mode with stream-json in and out, one process per message | Yes, with reasoning effort up to max | Yes | No | In writing only |
 | GitHub Copilot CLI | Prompt mode with JSON events, one process per message | Model yes (auto or any model id), with reasoning effort up to max | Yes. Auto turns on Copilot's assisted approval | No | In writing only |
+| Muser | `muser exec --json`, one process per message | No, Muse picks its own | Yes. Plan is read-only, Accept edits is Muser's auto-edit, Auto and Bypass run with everything automatic | No | In writing only |
 
 "In writing only" means the backend has no question tool BlindPilot can intercept (Command Code withholds it from headless runs), so questions are detected from the end of the answer text. Claude Code and Codex are told in their system instructions to use their question tool; on Codex this is appended to your own `developer_instructions`.
 
@@ -362,6 +368,7 @@ Notes per backend:
 - **Hermes:** `tui_gateway` JSON-RPC, one connection per conversation. BlindPilot announces the capability for blocking prompts, so questions, dangerous-command approvals and secret requests arrive as requests this window answers. Reopening a conversation parked on a question hands it back. Prompts with no UI here (Hermes' in-app terminal or browser preview, password-manager entries) are declined. The reasoning channel carries a spinner, so it's filtered.
 - **Muse Code:** the CLI ships for macOS and Linux only, so on Windows it's reached inside WSL through the same bridge Hermes uses, with the working directory translated. Turns run over MSP. A Muse Spark access refusal is reported instead of hanging the turn.
 - **muse.ai:** through `muse-cli`, one process per message, waiting up to an hour. A compatibility hook for muse-cli 0.3.2 lets `muse-cli watch` subscribe the way the web client does, for live activity. API contracts are in [`docs/museai-gateway.md`](docs/museai-gateway.md).
+- **Muser:** `muser exec --json` per message, the prompt on stdin, resumed by the session id its first line reports. Tool calls and Muse-side steps arrive as their own JSON lines and are narrated as activity; the reply arrives whole in the final result line, with the week's usage before and after. The turn's task list is read from the transcript Muser writes (`%LOCALAPPDATA%\muser\transcripts`), which is also what Recent Conversations reads back.
 - **Command Code:** `-p` per message, resumed by the session id it reports. BlindPilot adds queueing, Steer (stop and resume with the new instruction), and runs console-only commands (`/context`, `/usage`, `/status`, `/export`, `/todos`) in the console off screen against the same conversation. `/compact` writes a new session and leaves the original listed.
 - **Remote Hermes:** Hermes issues a short-lived single-use ticket per WebSocket connection; BlindPilot logs in and fetches one each time. The login session is sent with the connection so cookie-affinity load balancers and authenticating proxies land it on the process that issued the ticket. `websocket-client` is only needed for this path; if it's missing BlindPilot says so and keeps running.
 

@@ -26,6 +26,10 @@ Where each backend keeps its history:
   has ever run, opened read-only. It is the odd one out even among these: there
   is no file per conversation, and Hermes titles its own, so nothing has to be
   scanned to build the list.
+* Muser — ``sessions.json`` under ``%LOCALAPPDATA%\\muser``, an index of
+  every conversation (id, folder, title, last-touched stamp), plus one
+  transcript per conversation in ``transcripts/<id>.jsonl``, one JSON record
+  per turn holding the prompt and the reply side by side.
 * Muse — ``session-index.db`` under its data directory
   (``~/.local/share/muse``), one row per conversation, plus a ``session.jsonl``
   event log per session under ``sessions/``. On Windows both live inside the
@@ -69,6 +73,7 @@ from agent_backends import (
     BACKEND_IDS,
     BACKEND_MUSE,
     BACKEND_MUSEAI,
+    BACKEND_MUSER,
     BACKEND_OPENCODE,
     normalize_backend,
 )
@@ -734,6 +739,72 @@ _COPILOT = _JsonlFormat(
     session_of=_copilot_session,
     message_of=_copilot_message,
 )
+
+
+# ----- Muser -----
+#
+# Muser keeps an index rather than a file per conversation header:
+# ``sessions.json`` in its data folder names every conversation's id, folder,
+# title and last-touched stamp (milliseconds), and each conversation's
+# transcript sits beside it in ``transcripts/<id>.jsonl`` -- one record per
+# turn, the prompt and the reply side by side in the same record. A record
+# also carries the turn's final task list (``todos``), which restore_tasks
+# replays. Sessions with a ``parent`` are a parallel agent's side chats, not
+# conversations the person had, and stay out of the list.
+
+
+def _muser_dir() -> Path:
+    # LOCALAPPDATA names the folder on Windows; without it (or in a test
+    # that has cleared it) the folder is where Windows puts it by default,
+    # under the home this module has been pointed at.
+    root = os.environ.get("LOCALAPPDATA", "").strip()
+    return Path(root) / "muser" if root else _home() / "AppData" / "Local" / "muser"
+
+
+def _muser_entries(cwd: Optional[str]) -> List[HistoryEntry]:
+    root = _muser_dir()
+    try:
+        found = json.loads((root / "sessions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries: List[HistoryEntry] = []
+    for session in found if isinstance(found, list) else []:
+        if not isinstance(session, dict) or session.get("parent"):
+            continue
+        session_id = str(session.get("id") or "")
+        if not session_id or not session.get("turns"):
+            continue
+        session_cwd = str(session.get("cwd") or "")
+        if cwd and not _same_dir(session_cwd, cwd):
+            continue
+        updated = session.get("updated")
+        modified = updated / 1000 if isinstance(updated, (int, float)) else 0.0
+        entries.append(
+            HistoryEntry(
+                backend=BACKEND_MUSER,
+                session_id=session_id,
+                title=make_title(str(session.get("title") or "")) or "Untitled Muser conversation",
+                path=str(root / "transcripts" / f"{session_id}.jsonl"),
+                modified=modified,
+                cwd=session_cwd,
+                folder=_folder_name(session_cwd),
+            )
+        )
+    return entries
+
+
+def _muser_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    turns: List[HistoryTurn] = []
+    for record in _iter_jsonl(Path(entry.path)):
+        prompt = record.get("user")
+        if not isinstance(prompt, str):
+            continue
+        response = record.get("reply")
+        if not isinstance(response, str) or not response.strip():
+            error = record.get("error")
+            response = error if isinstance(error, str) else ""
+        turns.append(HistoryTurn(prompt=clean_user_text(prompt), response=response))
+    return turns
 
 
 # ----- Hermes -----
@@ -1626,6 +1697,7 @@ _LISTERS: dict[str, Callable[[Optional[str]], List[HistoryEntry]]] = {
     BACKEND_MUSEAI: _museai_entries,
     BACKEND_COMMANDCODE: partial(_jsonl_entries, _COMMANDCODE),
     BACKEND_COPILOT: partial(_jsonl_entries, _COPILOT),
+    BACKEND_MUSER: _muser_entries,
 }
 
 # Readers are given the whole entry rather than its path, because opencode and
@@ -1641,6 +1713,7 @@ _READERS: dict[str, Callable[[HistoryEntry], List[HistoryTurn]]] = {
     BACKEND_MUSEAI: _museai_turns,
     BACKEND_COMMANDCODE: partial(_jsonl_turns, _COMMANDCODE),
     BACKEND_COPILOT: partial(_jsonl_turns, _COPILOT),
+    BACKEND_MUSER: _muser_turns,
 }
 
 
@@ -1720,14 +1793,16 @@ def restore_tasks(entry: HistoryEntry) -> TaskList:
     """The task list a past conversation left, replayed from its transcript.
 
     Claude Code's task tools (tool_use, then the tool_result that gives
-    TaskCreate its id) and Copilot's update_todo checklists. Other backends,
-    and a transcript too large to read, give an empty list.
+    TaskCreate its id), Copilot's update_todo checklists, and Muser's
+    per-turn ``todos`` lists, whose last one is the list the conversation
+    ended with. Other backends, and a transcript too large to read, give an
+    empty list.
     """
     tasks = TaskList()
     backend = normalize_backend(entry.backend)
     path = Path(entry.path)
     try:
-        if backend not in (BACKEND_CLAUDE, BACKEND_COPILOT) or (
+        if backend not in (BACKEND_CLAUDE, BACKEND_COPILOT, BACKEND_MUSER) or (
             path.stat().st_size > _MAX_TRANSCRIPT_BYTES
         ):
             return tasks
@@ -1735,6 +1810,11 @@ def restore_tasks(entry: HistoryEntry) -> TaskList:
         return tasks
     calls: dict[str, tuple[str, dict]] = {}
     for record in _iter_jsonl(path):
+        if backend == BACKEND_MUSER:
+            todos = record.get("todos")
+            if isinstance(todos, list):
+                tasks.apply_claude("TodoWrite", {"todos": todos})
+            continue
         if backend == BACKEND_COPILOT:
             data = record.get("data")
             if record.get("type") == "tool.execution_start" and isinstance(data, dict):

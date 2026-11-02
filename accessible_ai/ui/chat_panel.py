@@ -214,6 +214,7 @@ class ChatPanel(wx.Panel):
             style=wx.LB_EXTENDED,
             size=wx.Size(-1, panel.FromDIP(ATTACHMENT_LIST_HEIGHT)),
         )
+        self.attachment_list.SetName("Attachments")
         outer.Add(self.attachment_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self.attachment_label.Hide()
         self.attachment_list.Hide()

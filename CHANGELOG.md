@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.53.0 - 2026-11-01
+
+New backend: Muser (https://github.com/nyarurant/muser), the muse.ai coding agent that runs on your own PC — full agent mode, unlike the muse.ai backend, whose agent runs on Meta's machine and can only chat. Windows only; the wizard installs it with npm (Node.js 22 or later), updates it, and signs it in with `muser login`, which covers both the muse.ai web sign-in and registering the PC as a Muse device. Turns run as `muser exec --json`, one process per message, resumed by session id; tool steps are announced as they happen and the answer arrives whole at the end of the turn, with cited sources listed. Permission modes map onto Muser's (Plan read-only, Accept edits is auto-edit, Auto and Bypass run with everything automatic — Muser has no reviewer mode). Muse picks its own model, so there is no model picker. Its conversations are in Recent Conversations with their task lists, its weekly muse.ai usage shows in Session Status, and its settings, instructions, skills and agent types are in Backend Settings and What Agents Know.
+
 ## v0.52.6 - 2026-10-30
 
 CPU audit of agent mode on Windows. Two polling loops were far hotter than they needed to be: the hidden-console watchers swept every window on the desktop 200 times a second for the first 8 seconds of each agent run (now 40 times a second, still fast enough to catch a console as it appears), and the terminal output reader polled its pipe 100 times a second for as long as a session sat idle (now it backs off to 20 times a second once the terminal has been quiet for a second). Chat mode measured clean: no CPU at idle, and streamed replies are parsed incrementally rather than re-parsed per chunk.

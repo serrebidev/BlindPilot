@@ -22,6 +22,7 @@ from google_worker import AntigravityWorker, GeminiWorker
 from hermes_worker import HermesWorker
 from muse_worker import MuseWorker
 from museai_worker import MuseAiWorker
+from muser_backend import MuserWorker
 
 WORKERS = [
     blindpilot_app.ClaudeWorker,
@@ -35,6 +36,7 @@ WORKERS = [
     GeminiWorker,
     AntigravityWorker,
     CopilotWorker,
+    MuserWorker,
 ]
 
 

@@ -359,6 +359,9 @@ BACKEND_COMMANDCODE = "commandcode"
 BACKEND_GEMINI = "gemini"
 BACKEND_ANTIGRAVITY = "antigravity"
 BACKEND_COPILOT = "copilot"
+# Muser, the muse.ai coding agent that runs on this machine -- not muse.ai
+# itself (BACKEND_MUSEAI), whose agent runs on Meta's machine.
+BACKEND_MUSER = "muser"
 # FreeBuff has no model-list or model-selection CLI flags. Its installed
 # package and downloaded executable do contain the live picker catalog, so the
 # adapter discovers that catalog at runtime and writes the same setting the
@@ -921,6 +924,24 @@ BACKENDS = {
         supports_compaction=False,
         login_needs_terminal=True,
     ),
+    BACKEND_MUSER: BackendInfo(
+        BACKEND_MUSER,
+        "Muser",
+        "muser",
+        "npm install -g muser-cli (Windows only; needs Node.js 22 or later)",
+        # `muser login` onboards both missing steps: the muse.ai web sign-in
+        # (it opens an Edge window) and registering this PC as a Muse device.
+        # The flow reports its progress in its terminal, so the person gets
+        # the terminal to follow it in.
+        ("login",),
+        # Muse picks its own model and effort; neither is BlindPilot's to set.
+        False,
+        False,
+        True,
+        supports_compaction=False,
+        login_needs_terminal=True,
+        login_opens_browser=True,
+    ),
 }
 
 # Alphabetical by label, so every menu and list of backends reads in the same
@@ -996,6 +1017,8 @@ def normalize_backend(value: object) -> str:
         "copilotcli": BACKEND_COPILOT,
         "githubcopilot": BACKEND_COPILOT,
         "githubcopilotcli": BACKEND_COPILOT,
+        "muser": BACKEND_MUSER,
+        "musercli": BACKEND_MUSER,
     }
     return aliases.get(compact, BACKEND_CLAUDE)
 
@@ -1149,6 +1172,11 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
         from copilot_backend import copilot_auth_ok
 
         return copilot_auth_ok(timeout=max(timeout, 20))
+    if backend == BACKEND_MUSER:
+        # `muser doctor` starts Node and asks the gateway; give it room.
+        from muser_backend import muser_auth_ok
+
+        return muser_auth_ok(timeout=max(timeout, 20))
     binary = find_backend_cli(backend)
     if not binary:
         return False
@@ -2239,6 +2267,10 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         from copilot_backend import copilot_account_lines
 
         lines.extend(copilot_account_lines())
+    elif backend == BACKEND_MUSER:
+        from muser_backend import muser_account_lines
+
+        lines.extend(muser_account_lines())
     else:
         lines.extend(_opencode_account_lines())
     lines.extend(backend_usage_lines(backend, binary, timeout))
@@ -2422,6 +2454,24 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             home / ".copilot" / "mcp-config.json",
             "Applies to every project. The MCP servers Copilot CLI starts.",
         ),
+        SettingsFile(
+            BACKEND_MUSER,
+            "global",
+            home / ".muser" / "config.json",
+            "Applies to every project. Muser's language and its parallel-agent limits.",
+        ),
+        SettingsFile(
+            BACKEND_MUSER,
+            "global",
+            home / ".muser" / "mcp.json",
+            "Applies to every project. The MCP servers Muser starts.",
+        ),
+        SettingsFile(
+            BACKEND_MUSER,
+            "global",
+            home / ".muser" / "permissions.json",
+            "Muser's approval mode per folder: default, auto-edit, plan or bypass.",
+        ),
     ]
     if project is not None:
         entries += [
@@ -2468,6 +2518,13 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
                 "this folder",
                 project / ".gemini" / "settings.json",
                 "Shared: committed to this repository, and overrides your own settings here.",
+            ),
+            SettingsFile(
+                BACKEND_MUSER,
+                "this folder",
+                project / ".muser" / "instructions.md",
+                "Shared: instructions Muser reads in this folder, on top of any "
+                "AGENTS.md or CLAUDE.md here.",
             ),
         ]
     return entries
@@ -9155,4 +9212,8 @@ def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorker
         from copilot_backend import CopilotWorker
 
         return CopilotWorker
+    if backend == BACKEND_MUSER:
+        from muser_backend import MuserWorker
+
+        return MuserWorker
     return claude_worker

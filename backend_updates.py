@@ -49,6 +49,7 @@ _NPM_PACKAGES = {
     agent_backends.BACKEND_COMMANDCODE: "command-code",
     agent_backends.BACKEND_GEMINI: "@google/gemini-cli",
     agent_backends.BACKEND_COPILOT: "@github/copilot",
+    agent_backends.BACKEND_MUSER: "muser-cli",
 }
 
 

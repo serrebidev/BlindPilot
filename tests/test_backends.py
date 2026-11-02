@@ -2680,6 +2680,12 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path, fa
     import museai_backend
 
     monkeypatch.setattr(museai_backend, "museai_status", lambda timeout=20: {"vm_id": "vm"})
+    # Muser, like Muse above, gets an adapter-level answer rather than the
+    # machine's real one (this machine has a real Muser signed in).
+    import muser_backend
+
+    monkeypatch.setattr(muser_backend, "muser_auth_ok", lambda timeout=20: True)
+    monkeypatch.setattr(muser_backend, "muser_account_lines", lambda: ["Signed in: yes"])
     # Gemini CLI's Google sign-in is the credentials it cached; agy answers
     # `agy models` only when it is signed in.
     gemini = tmp_path / ".gemini"

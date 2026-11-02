@@ -303,6 +303,7 @@ def test_empty_agent_groups_can_be_opened_to_add(tmp_path, monkeypatch):
             app.BACKEND_COMMANDCODE,
             app.BACKEND_OPENCODE,
             app.BACKEND_COPILOT,
+            app.BACKEND_MUSER,
         )
     }
     assert all(group.editable == "agent" and group.files == [] for group in groups)
@@ -342,9 +343,18 @@ def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path
 
     names = [f"{g.backend} {g.kind}" for g in app.agent_files(None)]
 
-    claude, cc, codex, hermes, gemini, opencode, copilot = (
+    claude, cc, codex, hermes, gemini, opencode, copilot, muser = (
         app.BACKEND_LABELS[b]
-        for b in ("claude", "commandcode", "codex", "hermes", "gemini", "opencode", "copilot")
+        for b in (
+            "claude",
+            "commandcode",
+            "codex",
+            "hermes",
+            "gemini",
+            "opencode",
+            "copilot",
+            "muser",
+        )
     )
     # Editable kinds remain reachable when empty; other empty kinds stay hidden.
     # The backend order follows BACKEND_LABELS.
@@ -357,6 +367,7 @@ def test_every_backend_is_listed_in_backend_order_with_only_what_it_has(tmp_path
         f"{gemini} Instructions",
         f"{copilot} Agents",
         f"{hermes} Memories",
+        f"{muser} Agents",
         f"{opencode} Agents",
     ]
 

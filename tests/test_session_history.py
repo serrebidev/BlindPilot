@@ -54,6 +54,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # installer ran here, 15 tests in this file answered with the machine's own
     # conversations. The override test below sets it back on purpose.
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    # Muser's store is addressed through LOCALAPPDATA, which every Windows
+    # machine sets: cleared, the reader falls back to the throwaway home.
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
     return tmp_path
 
 
