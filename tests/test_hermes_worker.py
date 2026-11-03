@@ -398,3 +398,47 @@ def test_a_turn_cancelled_during_the_slash_check_sends_no_prompt():
     assert [m.get("method") for m in transport.sent] == ["complete.slash"]
     assert calls == []
     assert failures == []
+
+
+# --------------------------------------------------------------------------
+# The live edge
+# --------------------------------------------------------------------------
+
+
+def test_a_stop_inside_a_token_at_the_buffer_edge_waits_for_the_next_delta():
+    """`v0.22.` at the end of a fragment is not a finished sentence.
+
+    The next fragment carries the token on. With the live-edge rule the
+    worker releases one intact chunk; the end-tolerant rule would release
+    `v0.22.` and `6, done.` as two, tearing the version in half and letting
+    the row builder split it across two rows.
+    """
+    rows: list[tuple[str, str]] = []
+    completed: list[str] = []
+
+    worker = HermesWorker(
+        "hi",
+        None,
+        ".",
+        "default",
+        **_callbacks(
+            on_activity=lambda kind, text: rows.append((kind, text)),
+            on_complete=completed.append,
+        ),
+    )
+    worker._transport = _ScriptedTransport(
+        [
+            _event("message.delta", {"text": "v0.22."}),
+            _event("message.delta", {"text": "6, done."}),
+            _event("message.complete", {"status": "complete", "text": "v0.22.6, done."}),
+        ]
+    )
+    worker._do_run = worker._consume_turn
+
+    escaped = _drive(worker)
+
+    assert not escaped, f"the error escaped the worker: {escaped}"
+    assert completed == ["v0.22.6, done."]
+    assert [text for kind, text in rows if kind == "assistant"] == ["v0.22.6, done."], (
+        f"the token was torn across fragments: {rows}"
+    )
