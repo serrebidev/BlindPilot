@@ -20,7 +20,11 @@ from __future__ import annotations
 
 import pytest
 
-from agent_backends import is_an_offer_to_carry_on, trailing_question
+from agent_backends import (
+    is_an_offer_to_carry_on,
+    questions_written_in_the_answer,
+    trailing_question,
+)
 
 
 def test_a_turn_that_ends_on_a_question_is_found():
@@ -149,3 +153,94 @@ def test_an_offer_that_names_a_fork_is_still_a_question():
 
 def test_markdown_around_a_sign_off_does_not_hide_it():
     assert is_an_offer_to_carry_on("**Want me to commit it?**")
+
+
+# ----- The block a turn writes its questions into, options and all -----
+#
+# Command Code cannot be asked through a question tool at all, so on that
+# backend a block written into the reply is the only way any options reach the
+# dialog. Everywhere else it is a second way to say the same thing.
+_BLOCK = (
+    "```questions\n"
+    '[{"question": "Tabs or spaces?", "header": "Indent",\n'
+    '  "options": [{"label": "Tabs", "description": "One per level."},\n'
+    '              {"label": "Spaces"}]}]\n'
+    "```\n"
+)
+
+
+def test_a_question_block_carries_its_questions_and_their_options():
+    questions = questions_written_in_the_answer("Settling two things.\n\n" + _BLOCK)
+
+    assert len(questions) == 1
+    assert questions[0].question == "Tabs or spaces?"
+    assert questions[0].header == "Indent"
+    assert [option.label for option in questions[0].options] == ["Tabs", "Spaces"]
+    assert questions[0].options[0].description == "One per level."
+
+
+def test_a_block_asks_every_question_in_it():
+    text = (
+        "```questions\n"
+        '[{"question": "Which name?"}, {"question": "Which path?", '
+        '"options": [{"label": "/a"}, {"label": "/b"}]}]\n'
+        "```\n"
+    )
+
+    questions = questions_written_in_the_answer(text)
+
+    assert [question.question for question in questions] == ["Which name?", "Which path?"]
+
+
+def test_a_block_can_ask_for_more_than_one_answer():
+    text = (
+        "```questions\n"
+        '[{"question": "Which of these?", "multiSelect": true, '
+        '"options": [{"label": "a"}, {"label": "b"}]}]\n'
+        "```\n"
+    )
+
+    assert questions_written_in_the_answer(text)[0].multi_select is True
+
+
+def test_a_question_with_no_options_has_none_to_offer():
+    text = '```questions\n[{"question": "What should it be called?"}]\n```\n'
+
+    questions = questions_written_in_the_answer(text)
+
+    assert len(questions) == 1
+    assert questions[0].options == ()
+    # Nothing to pick from, so typing is the only answer left.
+    assert questions[0].allow_custom is True
+
+
+def test_a_reply_with_no_block_has_no_questions_to_read():
+    assert questions_written_in_the_answer("Which name do you want?") == ()
+
+
+def test_a_block_that_is_not_json_is_ignored():
+    # A block with nothing usable in it leaves the prose reading to try, which
+    # is what the turn would have had without a block at all.
+    assert questions_written_in_the_answer("```questions\nnot json at all\n```\n") == ()
+
+
+def test_a_fence_that_does_not_say_questions_is_not_a_block():
+    # Every other fenced block in a reply is somebody's code sample.
+    text = '```json\n[{"question": "Not this one?"}]\n```\n'
+
+    assert questions_written_in_the_answer(text) == ()
+
+
+def test_the_last_block_is_the_one_asked():
+    draft = '```questions\n[{"question": "The draft?"}]\n```\n'
+    revision = '```questions\n[{"question": "The revision?"}]\n```\n'
+
+    questions = questions_written_in_the_answer(draft + "\n" + revision)
+
+    assert [question.question for question in questions] == ["The revision?"]
+
+
+def test_a_block_is_not_read_as_prose_as_well():
+    # The prose reading takes fenced code out, so a turn that asked with a
+    # block is not asked a second time over the question mark inside it.
+    assert trailing_question(_BLOCK) == ""

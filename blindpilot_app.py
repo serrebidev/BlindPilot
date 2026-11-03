@@ -122,6 +122,7 @@ from agent_backends import (
     migrate_macos_legacy_dirs,
     is_an_offer_to_carry_on,
     no_window_kwargs,
+    questions_written_in_the_answer,
     trailing_question,
     codex_model_options,
     compaction_request,
@@ -8972,8 +8973,10 @@ class SessionPanel(wx.Panel):
         # so a question left in the answer as well is not asked over again.
         self._structured_question_asked = False
         # A question the finished turn only wrote into its answer, waiting to
-        # be put to the person once the turn is fully done.
-        self._question_in_the_answer = ""
+        # be put to the person once the turn is fully done: a string when the
+        # question was read out of prose, or the block's own Question list,
+        # which is what carries options for the dialog to offer.
+        self._question_in_the_answer: str | Sequence[Question] = ""
 
         self._turns: List[Turn] = []
         # The agent's own task list, as its task tools last left it.
@@ -10578,7 +10581,7 @@ class SessionPanel(wx.Panel):
         self._announce("Answer sent")
         return answers
 
-    def _ask_question_left_in_the_answer(self, question: str) -> None:
+    def _ask_question_left_in_the_answer(self, question: str | Sequence[Question]) -> None:
         """Put a question the turn only wrote down in front of the person.
 
         The same dialog a backend's own question tool opens, because it is the
@@ -10586,13 +10589,27 @@ class SessionPanel(wx.Panel):
         this turn has already ended, so there is nothing holding a reply — what
         is typed is sent as the next turn, which is what typing it into the
         message box would have done.
+
+        What arrives is either a block the turn wrote, which carries its own
+        questions and their options, or a bare question read out of prose,
+        which has nothing to offer but a text field.
         """
         if not self or self._run_in_progress():
             # Something was sent between the turn ending and this being posted.
             # That message is the answer now, whatever it says.
             return
-        answers = self._show_question_dialog([Question(question=question)], ended_turn=True)
-        answer = answers[0][0].strip() if answers and answers[0] else ""
+        questions = (Question(question=question),) if isinstance(question, str) else tuple(question)
+        if not questions:
+            return
+        answers = self._show_question_dialog(questions, ended_turn=True)
+        if not answers:
+            return
+        # One line per question, in the order they were asked: the order every
+        # provider that takes a list of answers here already uses.
+        said = [
+            "; ".join(part.strip() for part in (group or []) if part.strip()) for group in answers
+        ]
+        answer = "\n".join(part for part in said if part).strip()
         if not answer or not self.prompt:
             return
         # The answer goes out through the message box, which may already hold
@@ -12231,10 +12248,16 @@ class SessionPanel(wx.Panel):
         # Kept rather than asked here: the turn is still finishing, and a modal
         # over a run that has not reported itself done would be answered into a
         # turn that cannot take it.
-        self._question_in_the_answer = question_left_in_the_answer(
+        # A block written into the reply carries real options, so the dialog
+        # can offer them to pick from; the prose reading is the fallback, and
+        # is all a backend with no question tool of its own can give.
+        asked_properly = getattr(self, "_structured_question_asked", False)
+        replaying = getattr(self, "_replaying", False)
+        block = () if (asked_properly or replaying) else questions_written_in_the_answer(text)
+        self._question_in_the_answer = block or question_left_in_the_answer(
             text,
-            asked_properly=getattr(self, "_structured_question_asked", False),
-            replaying=getattr(self, "_replaying", False),
+            asked_properly=asked_properly,
+            replaying=replaying,
         )
         # A reopened conversation completes with no text: nothing new was said,
         # the rows are the transcript that was just replayed. Announcing a
