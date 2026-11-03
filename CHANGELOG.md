@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.54.4 - 2026-11-03
+
+A fix from Devin Prater (PR #122, landed as #123): the Hermes worker released a streamed answer the moment a sentence end reached the end of its buffer, so any token whose dot landed on a fragment boundary — a version number, a date, a file name, a list marker — was emitted mid-token and torn across two rows. The worker now uses the live-edge rule the other workers already use: while the stream is growing, a stop needs an actual following space before anything is released. The final text is unchanged.
+
 ## v0.54.1 - 2026-11-02
 
 Fix: a Copilot turn could never start. The Copilot worker stored its own "started" flag under the name threading.Thread uses for its internal Event, so starting the worker thread raised AttributeError and the turn died before it ran. The flag now uses the same name as the other workers, and regression tests cover it.

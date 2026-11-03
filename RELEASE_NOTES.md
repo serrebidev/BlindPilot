@@ -1,3 +1,7 @@
+# BlindPilot 0.54.4
+
+- Fixed: Hermes conversations could tear a token in half while streaming. Hermes delivers a reply in small fragments, and the worker released text as soon as a sentence end reached the end of its buffer — so a version number like 3.14.9, a date, a file name or a list marker whose dot landed on a fragment boundary was announced mid-token and split across two rows. The worker now holds a stop at the live edge until the next fragment shows whether the token continues, the same rule the other backends use. The final text is unchanged. Contributed by Devin Prater (PR #122, landed as #123).
+
 # BlindPilot 0.54.3
 
 - New: a reply can now carry its questions as a structured questions block with labelled options, so a backend that cannot ask through a question tool (such as Command Code) can offer choices in the question dialog instead of only a text field. Multiple questions and multi-select are supported, and a question with no options stays free text.
