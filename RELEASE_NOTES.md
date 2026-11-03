@@ -1,3 +1,8 @@
+# BlindPilot 0.55.0
+
+- Fixed: the Codex model picker offered the catalog bundled inside the installed CLI, so a model the service retired stayed on offer — and a new one stayed hidden — until the CLI itself was updated. The list is now read from the service's refreshed catalog; models Codex marks hidden (including its internal codex-auto-review) are no longer offered, and if the service cannot be reached the bundled copy is used with a spoken note that it may be out of date.
+- New: a window left open re-reads each tab's model list on a timer and announces which models were added or dropped. The interval is a Preferences setting, 15 minutes by default; set it to 0 to turn the background read off. From Farhan Khan, PR #124.
+
 # BlindPilot 0.54.4
 
 - Fixed: Hermes conversations could tear a token in half while streaming. Hermes delivers a reply in small fragments, and the worker released text as soon as a sentence end reached the end of its buffer — so a version number like 3.14.9, a date, a file name or a list marker whose dot landed on a fragment boundary was announced mid-token and split across two rows. The worker now holds a stop at the live edge until the next fragment shows whether the token continues, the same rule the other backends use. The final text is unchanged. Contributed by Devin Prater (PR #122, landed as #123).
