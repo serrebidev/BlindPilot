@@ -1,3 +1,7 @@
+# BlindPilot 0.54.3
+
+- New: a reply can now carry its questions as a structured questions block with labelled options, so a backend that cannot ask through a question tool (such as Command Code) can offer choices in the question dialog instead of only a text field. Multiple questions and multi-select are supported, and a question with no options stays free text.
+
 # BlindPilot 0.54.2
 
 - Updated dependencies: pyobjc-framework-cocoa to 13.0 on macOS, and mypy, pytest and hypothesis to their latest versions for development and testing. No feature changes.
