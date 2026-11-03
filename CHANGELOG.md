@@ -2,6 +2,11 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## Unreleased
+
+- Codex's model list is now read from the refreshed catalog (`codex debug models`) instead of the copy bundled inside the installed CLI (`--bundled`), which skipped the refresh. A model OpenAI retired stayed on offer until the Codex CLI itself was updated, and a new one stayed hidden until then. Models Codex marks hidden are no longer offered either — its own internal codex-auto-review was — and when the service cannot be reached the installed copy is used, with a spoken note that the list may be out of date.
+- A window left open re-reads each tab's model list on a timer and says which models were added or dropped, so a model retired mid-session is heard about rather than discovered when /model is next opened. The interval is in Preferences, 15 minutes by default; 0 turns the background read off. Command Code and opencode already read their lists live.
+
 ## v0.54.4 - 2026-11-03
 
 A fix from Devin Prater (PR #122, landed as #123): the Hermes worker released a streamed answer the moment a sentence end reached the end of its buffer, so any token whose dot landed on a fragment boundary — a version number, a date, a file name, a list marker — was emitted mid-token and torn across two rows. The worker now uses the live-edge rule the other workers already use: while the stream is growing, a stop needs an actual following space before anything is released. The final text is unchanged.

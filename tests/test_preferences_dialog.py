@@ -78,6 +78,16 @@ class _FrameStub:
 
         self.earcons = Earcons()
 
+        # The catalog timer is arm/re-arm/disarm work on a real wx.Timer, which
+        # a stub window cannot own; recording the call is what this checks.
+        self._model_timer = None
+        self.timers_synced = 0
+
+        def _sync_model_timer():
+            self.timers_synced += 1
+
+        self._sync_model_timer = _sync_model_timer
+
         class _Notebook:
             def GetPageCount(self):
                 return 0
@@ -112,8 +122,21 @@ def test_the_dialog_reads_the_live_settings(wx_app):
         assert dialog.sound_cues == app.SETTINGS.sound_cues
         assert dialog.progress_cue == app.SETTINGS.progress_cue
         assert dialog.progress_interval == app.SETTINGS.progress_cue_seconds
+        assert dialog.model_refresh_minutes == app.SETTINGS.model_refresh_minutes
         assert dialog.text_view == app.SETTINGS.text_view
         assert dialog.appearance == app.SETTINGS.appearance
+    finally:
+        dialog.Destroy()
+
+
+def test_the_model_refresh_interval_always_comes_back_valid(wx_app):
+    dialog = app.PreferencesDialog(None)
+
+    try:
+        dialog._model_refresh.SetValue(99999)
+        assert dialog.model_refresh_minutes == app.MODEL_REFRESH_MINUTES_MAX
+        dialog._model_refresh.SetValue(0)
+        assert dialog.model_refresh_minutes == 0
     finally:
         dialog.Destroy()
 
@@ -191,6 +214,7 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
         appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30
+        model_refresh_minutes = 0
         check_updates_startup = False
 
     app.MainFrame._apply_preferences(frame, _Dialog())
@@ -207,6 +231,11 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
     assert app.SETTINGS.read_back_sent is False
     assert app.SETTINGS.progress_cue == app.CUE_OFF
     assert app.SETTINGS.progress_cue_seconds == 30
+    assert app.SETTINGS.model_refresh_minutes == 0
+
+    # The catalog timer followed the new interval, rather than waiting for the
+    # next start to notice that it was switched off.
+    assert frame.timers_synced == 1
 
     # Every menu item followed its setting.
     assert not frame._rows_item.IsChecked()
@@ -304,6 +333,7 @@ def test_changing_the_appearance_says_it_takes_effect_next_launch(wx_app, monkey
         appearance = app.APPEARANCE_DARK
         progress_cue = app.SETTINGS.progress_cue
         progress_interval = app.SETTINGS.progress_cue_seconds
+        model_refresh_minutes = app.SETTINGS.model_refresh_minutes
         check_updates_startup = True
 
     app.MainFrame._apply_preferences(frame, _Dialog())
