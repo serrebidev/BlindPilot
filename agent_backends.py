@@ -638,6 +638,43 @@ def is_an_offer_to_carry_on(question: str) -> bool:
     return not _A_FORK.search(text)
 
 
+# A question block a turn can write into its reply: a fenced code block whose
+# info string is `questions`, carrying the same JSON a backend's question tool
+# sends. Command Code has no way to be asked through a tool at all -- its
+# ask_user_question is withheld from a headless run, because a headless run
+# answers its own prompts by taking the first option, and switching it on would
+# settle the question with nobody hearing it. Everywhere else the tool is what
+# carries the options, so a backend that cannot be asked through one has no way
+# to offer any. A written block does, and it is the same shape all four
+# providers already send, so the dialog reads it with the very code that reads
+# theirs: the same questions, the same options, the same answers back.
+_QUESTION_BLOCK = re.compile(
+    r"```[ \t]*questions[ \t]*\r?\n(?P<body>.*?)```", re.DOTALL | re.IGNORECASE
+)
+
+
+def questions_written_in_the_answer(text: str) -> tuple[Question, ...]:
+    """The questions a turn wrote into its reply as a structured block.
+
+    Empty when there is no block, when the block is not the JSON it claims to
+    be, or when nothing in it is a question. In every one of those cases the
+    prose reading is what is left to try, so a malformed block degrades to
+    exactly what the turn would have done without one rather than losing the
+    question it was trying to ask.
+
+    The last block wins: a turn that revised its own questions is asked the
+    revision, not the draft it first wrote.
+    """
+    blocks = list(_QUESTION_BLOCK.finditer(text))
+    if not blocks:
+        return ()
+    try:
+        raw = json.loads(blocks[-1].group("body"))
+    except (ValueError, TypeError):
+        return ()
+    return _questions(raw, multi_key="multiSelect", id_key="id")
+
+
 def question_summary(questions: Sequence[Question], answers: Optional[list[list[str]]]) -> str:
     """One row for the transcript saying what was asked and what was said.
 
