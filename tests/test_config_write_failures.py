@@ -311,6 +311,7 @@ def test_applying_preferences_that_cannot_be_saved_says_so(
         appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30
+        model_refresh_minutes = app.SETTINGS.model_refresh_minutes
         check_updates_startup = False
 
     app.MainFrame._apply_preferences(frame, _Dialog())

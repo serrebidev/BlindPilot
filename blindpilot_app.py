@@ -2056,6 +2056,14 @@ AUTO_MODEL_CHOICE = "Auto (choose for each task)"
 # deliberately loaded only when /model or /models is opened, keeping normal
 # application startup fast and quiet.
 PROBE_TTL_SECONDS = 900
+# How often a background timer re-reads a tab's model catalog, in minutes, and
+# the range Preferences offers. The probe costs a provider CLI start each time
+# -- and on opencode that can mean starting its server -- so 0 turns the
+# refresh off for anyone who would rather not pay that, and the default is the
+# probe's own TTL so a cached answer is refreshed just as it would go stale.
+MODEL_REFRESH_MINUTES_DEFAULT = PROBE_TTL_SECONDS // 60
+MODEL_REFRESH_MINUTES_MIN = 0
+MODEL_REFRESH_MINUTES_MAX = 240
 
 
 def _keep_choice(current: str) -> str:
@@ -4077,6 +4085,21 @@ def _valid_cue_seconds(value: object) -> int:
     return max(CUE_SECONDS_MIN, min(CUE_SECONDS_MAX, seconds))
 
 
+def _valid_model_refresh_minutes(value: object) -> int:
+    """The background model-refresh interval in minutes, whatever config holds.
+
+    A hand-edited or newer-version config must not stop the app from starting,
+    so anything unreadable falls back to the default, and anything outside the
+    offered range is clamped into it -- a negative reading as "off" rather than
+    as a refresh that never runs.
+    """
+    try:
+        minutes = int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return MODEL_REFRESH_MINUTES_DEFAULT
+    return max(MODEL_REFRESH_MINUTES_MIN, min(MODEL_REFRESH_MINUTES_MAX, minutes))
+
+
 def _valid_chat_model_order(value: object) -> str:
     """Return a supported model-catalog ordering, newest first by default."""
     orders = {order for order, _label, _help in CHAT_MODEL_ORDERS}
@@ -4150,6 +4173,11 @@ class _Settings:
         self.read_back_sent = bool(cfg.get("read_back_sent", True))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
+        # Minutes between background re-reads of a tab's model catalog; 0 turns
+        # it off. Off is a real choice: each read is a provider CLI start.
+        self.model_refresh_minutes = _valid_model_refresh_minutes(
+            cfg.get("model_refresh_minutes", MODEL_REFRESH_MINUTES_DEFAULT)
+        )
         # Read again in main() before the first window, which is the only
         # point wxWidgets lets it be set. Kept here so Preferences can show
         # and save it like the rest.
@@ -4170,6 +4198,7 @@ class _Settings:
         cfg["read_back_sent"] = self.read_back_sent
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
+        cfg["model_refresh_minutes"] = self.model_refresh_minutes
         cfg["appearance"] = self.appearance
         return _save_config(cfg)
 
@@ -9058,6 +9087,12 @@ class SessionPanel(wx.Panel):
         # What the CLI last reported it is using, for when we pass no flag.
         self._cli_model = ""
         self._cli_effort = ""
+        # The model catalog this tab last read, and whether a background
+        # refresh is already out. The list is kept so a change can be told from
+        # the same list being read again; None means nothing has been read yet,
+        # which is not a change worth announcing.
+        self._known_models: Optional[List[str]] = None
+        self._model_refresh_running = False
         self._attachments: List[str] = []
 
         self.backend_status = wx.StaticText(
@@ -9495,6 +9530,76 @@ class SessionPanel(wx.Panel):
             return
         self._cli_model = options.current_model
         self._cli_effort = options.current_effort
+        # The list this read produced is what the picker now offers, so it
+        # becomes the baseline a later background read compares against. A read
+        # that came back with nothing -- a probe that failed, or a backend with
+        # no list of its own -- is not a baseline: it would make the next good
+        # read look like the whole list had just been added.
+        if options.models:
+            self._known_models = list(options.models)
+
+    def refresh_models_in_background(self) -> None:
+        """Re-read this tab's model catalog, off the UI thread, and say changes.
+
+        A window left open used to read the catalog only when /model opened or
+        the backend changed, so a model retired upstream stayed on offer until
+        somebody happened to open the picker. The window's timer calls this
+        instead, and it is a no-op while the cached answer is inside the
+        interval the person set, so running it often costs nothing. Zero means
+        the refresh is off altogether.
+        """
+        if self._model_refresh_running:
+            return
+        minutes = SETTINGS.model_refresh_minutes
+        if minutes <= 0:
+            return
+        backend = self.selected_backend()
+        if cached_model_options(self.cwd, minutes * 60, backend) is not None:
+            return
+        self._model_refresh_running = True
+
+        def work() -> None:
+            options = probe_model_options(self.cwd, backend=backend)
+            wx.CallAfter(self._models_refreshed, backend, options)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _models_refreshed(self, backend: str, options: "ModelOptions") -> None:
+        if not self:  # tab closed while the probe was running
+            return
+        self._model_refresh_running = False
+        provider = normalize_backend(backend)
+        if provider != self.selected_backend():
+            return
+        # Read before the new list is recorded, so this compare is against what
+        # the tab last showed rather than the list that has just replaced it.
+        previous = self._known_models
+        self._remember_cli_model(options, provider)
+        self._announce_model_changes(provider, options.models, previous)
+
+    def _announce_model_changes(
+        self, backend: str, models: List[str], previous: Optional[List[str]]
+    ) -> None:
+        """Say which models the backend gained or lost since this tab last read.
+
+        Nothing is said the first time. That list is what /model already offers,
+        not news, and a listener should not be greeted by it on the first tick.
+        After that any difference is real -- a model retired upstream, or one
+        the service has just added -- and a listener, who cannot see the list
+        change, has no other way to learn it. A read that came back with
+        nothing is not a change; it is a probe that failed.
+        """
+        if previous is None or not models or previous == models:
+            return
+        added = [model for model in models if model not in previous]
+        gone = [model for model in previous if model not in models]
+        said = []
+        if gone:
+            said.append(f"no longer offers {', '.join(gone)}")
+        if added:
+            said.append(f"now offers {', '.join(added)}")
+        if said:
+            self._on_activity("notice", f"{backend_label(backend)} {'; '.join(said)}.")
 
     def open_model_dialog(self, force_refresh: bool = False) -> None:
         """/model — offer the two combo boxes, filled from the CLI.
@@ -11239,6 +11344,9 @@ class SessionPanel(wx.Panel):
             self._auto_check_announced = False
             self._cli_model = ""
             self._cli_effort = ""
+            # The next backend's catalog is not comparable to the last one's,
+            # so the first read after the switch is not a change to announce.
+            self._known_models = None
             self.backend_status.SetLabel(f"Backend: {backend_label(selected_backend)}")
             self._announce(
                 f"Starting a new {backend_label(selected_backend)} conversation in this tab"
@@ -14833,6 +14941,34 @@ class PreferencesDialog(wx.Dialog):
         )
 
         root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, pad)
+        refresh_row = wx.BoxSizer(wx.HORIZONTAL)
+        refresh_row.Add(
+            wx.StaticText(
+                panel,
+                label=(
+                    "Re-read the model list every N minutes "
+                    f"({MODEL_REFRESH_MINUTES_MIN} turns it off):"
+                ),
+            ),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.RIGHT,
+            self.FromDIP(PAD),
+        )
+        self._model_refresh = wx.SpinCtrl(
+            panel,
+            min=MODEL_REFRESH_MINUTES_MIN,
+            max=MODEL_REFRESH_MINUTES_MAX,
+            initial=SETTINGS.model_refresh_minutes,
+        )
+        self._model_refresh.SetToolTip(
+            "BlindPilot re-reads each open tab's model list so a model retired "
+            "upstream drops out of the picker, and says so. Each read starts the "
+            "provider's command-line tool; 0 stops the background read."
+        )
+        refresh_row.Add(self._model_refresh, 0)
+        root.Add(refresh_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.ALL, pad)
         self._updates = wx.CheckBox(panel, label="Check for updates at startup")
         self._updates.SetValue(bool(_load_config().get("check_for_updates_at_startup", True)))
         root.Add(self._updates, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
@@ -14913,6 +15049,10 @@ class PreferencesDialog(wx.Dialog):
         return _valid_cue_seconds(self._interval.GetValue())
 
     @property
+    def model_refresh_minutes(self) -> int:
+        return _valid_model_refresh_minutes(self._model_refresh.GetValue())
+
+    @property
     def check_updates_startup(self) -> bool:
         return self._updates.GetValue()
 
@@ -14963,6 +15103,10 @@ class MainFrame(wx.Frame):
         # window is shown (`watch_for_links`), never in a window built and torn
         # down by a check, where a timer firing mid-teardown crashed macOS.
         self._links_timer: Optional[wx.Timer] = None
+        # Re-reads every tab's model catalog on a timer, so a model retired
+        # upstream drops out of the picker on a window left open. Watched only
+        # once the window is shown, like the links timer above.
+        self._model_timer: Optional[wx.Timer] = None
         menubar = wx.MenuBar()
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
@@ -15789,6 +15933,7 @@ class MainFrame(wx.Frame):
         SETTINGS.read_back_sent = dialog.read_back_sent
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
+        SETTINGS.model_refresh_minutes = dialog.model_refresh_minutes
         changed_appearance = dialog.appearance != SETTINGS.appearance
         SETTINGS.appearance = dialog.appearance
         changed_text_view = SETTINGS.text_view != self._text_view_item.IsChecked()
@@ -15817,6 +15962,9 @@ class MainFrame(wx.Frame):
         if changed_text_view:
             for page in self._session_panels():
                 page.apply_view_mode()
+        # The catalog timer follows the new interval at once, so a change from
+        # 15 minutes to 0, or the other way, is not left until the next start.
+        self._sync_model_timer()
 
         cfg = _load_config()
         cfg["check_for_updates_at_startup"] = dialog.check_updates_startup
@@ -17760,11 +17908,49 @@ class MainFrame(wx.Frame):
             self.Bind(wx.EVT_TIMER, lambda _e: self._take_links(), self._links_timer)
             self._links_timer.Start(1000)
 
+    def watch_model_catalogs(self) -> None:
+        """Re-read every tab's model catalog on the interval Preferences sets.
+
+        Started with the window rather than at import, so a window built and
+        torn down by a startup check never arms a timer that would fire during
+        teardown.
+        """
+        self._sync_model_timer()
+
+    def _sync_model_timer(self) -> None:
+        """Arm, re-arm or disarm the catalog timer to match the setting.
+
+        One timer is kept and restarted rather than a new one made each time,
+        so no second binding is left for a timer that is no longer watched. A
+        setting of 0 stops it: the refresh is then not merely slower, it is off.
+        """
+        minutes = SETTINGS.model_refresh_minutes
+        if minutes <= 0:
+            if self._model_timer is not None:
+                self._model_timer.Stop()
+                self._model_timer = None
+            return
+        if self._model_timer is None:
+            self._model_timer = wx.Timer(self)
+            self.Bind(wx.EVT_TIMER, lambda _e: self._refresh_model_catalogs(), self._model_timer)
+        self._model_timer.Start(minutes * 60 * 1000)
+
+    def _refresh_model_catalogs(self) -> None:
+        """Ask each open tab to re-read its catalog; a fresh one is a no-op."""
+        for page in self._session_panels():
+            refresh = getattr(page, "refresh_models_in_background", None)
+            if refresh is not None:
+                refresh()
+
     def _on_close(self, event: wx.CloseEvent) -> None:
         timer = getattr(self, "_links_timer", None)
         if timer is not None:
             timer.Stop()
             self._links_timer = None
+        timer = getattr(self, "_model_timer", None)
+        if timer is not None:
+            timer.Stop()
+            self._model_timer = None
         if self.chat_panel is not None:
             self.chat_panel.shutdown()
         # Started together, then waited on together. One after another meant
@@ -18108,6 +18294,7 @@ def main() -> int:
     else:
         frame.Show()
         frame.watch_for_links()
+        frame.watch_model_catalogs()
         if link:
             wx.CallAfter(frame.open_session_link, link)
         frame.Raise()
