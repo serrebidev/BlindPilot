@@ -10598,9 +10598,7 @@ class SessionPanel(wx.Panel):
             # Something was sent between the turn ending and this being posted.
             # That message is the answer now, whatever it says.
             return
-        questions = (
-            (Question(question=question),) if isinstance(question, str) else tuple(question)
-        )
+        questions = (Question(question=question),) if isinstance(question, str) else tuple(question)
         if not questions:
             return
         answers = self._show_question_dialog(questions, ended_turn=True)
@@ -10609,8 +10607,7 @@ class SessionPanel(wx.Panel):
         # One line per question, in the order they were asked: the order every
         # provider that takes a list of answers here already uses.
         said = [
-            "; ".join(part.strip() for part in (group or []) if part.strip())
-            for group in answers
+            "; ".join(part.strip() for part in (group or []) if part.strip()) for group in answers
         ]
         answer = "\n".join(part for part in said if part).strip()
         if not answer or not self.prompt:
