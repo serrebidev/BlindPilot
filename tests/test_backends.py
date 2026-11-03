@@ -126,6 +126,71 @@ def test_codex_catalog_includes_all_reported_reasoning_levels(monkeypatch, tmp_p
     assert error == ""
 
 
+# A stand-in for the two forms of `codex debug models`: the refreshing form
+# (no extra flags) and the installed-release copy (`--bundled`). Each entry is
+# the JSON that form would print, or None for a form that cannot be run.
+def _codex_models_run(payloads: dict[tuple[str, ...], object]):
+    calls: list[tuple[str, ...]] = []
+
+    def run(command, **_kwargs):
+        extra = tuple(command[3:])
+        calls.append(extra)
+        payload = payloads.get(extra)
+        if payload is None:
+            raise OSError("Codex could not be asked")
+        return SimpleNamespace(stdout=json.dumps(payload))
+
+    return run, calls
+
+
+def test_codex_offers_only_the_models_the_service_still_lists(monkeypatch, tmp_path):
+    """The bug this closes: a model the service retired stayed on offer, and a
+    hidden internal one was offered at all, because BlindPilot read the copy
+    bundled in the installed binary instead of the refreshed catalog."""
+    live = {
+        "models": [
+            {"slug": "gpt-6-sol", "visibility": "list"},
+            {"slug": "gpt-reserve", "visibility": "hide"},
+            {"slug": "codex-auto-review", "visibility": "hide"},
+        ]
+    }
+    bundled = {
+        "models": [
+            {"slug": "gpt-6-sol", "visibility": "list"},
+            {"slug": "gpt-5.5", "visibility": "list"},
+        ]
+    }
+    run, calls = _codex_models_run({(): live, ("--bundled",): bundled})
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "codex")
+    monkeypatch.setattr(agent_backends.subprocess, "run", run)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing"))
+
+    models, _efforts, _current, _effort, error = codex_model_options()
+
+    assert models == ["gpt-6-sol"]
+    assert error == ""
+    assert calls[0] == (), "the refreshing form must be asked first"
+    assert ("--bundled",) not in calls, (
+        "the installed copy must not be read when the service answers"
+    )
+
+
+def test_codex_falls_back_to_the_installed_copy_when_the_service_is_unreachable(
+    monkeypatch, tmp_path
+):
+    bundled = {"models": [{"slug": "gpt-6-sol", "visibility": "list"}]}
+    run, calls = _codex_models_run({("--bundled",): bundled})
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "codex")
+    monkeypatch.setattr(agent_backends.subprocess, "run", run)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing"))
+
+    models, _efforts, _current, _effort, error = codex_model_options()
+
+    assert models == ["gpt-6-sol"]
+    assert calls == [(), ("--bundled",)]
+    assert "refresh" in error and "installed release" in error
+
+
 def test_codex_permission_modes_translate_to_native_sandboxes():
     assert CodexWorker._policy("plan") == (
         "never",

@@ -2574,17 +2574,17 @@ def _codex_app_server_binary(binary: str) -> str:
     return str(candidates[0]) if candidates else binary
 
 
-def codex_model_options(
-    cwd: Optional[str] = None,
-) -> tuple[list[str], list[str], str, str, str]:
-    """Read Codex's installed model catalog and configured defaults."""
-    binary = find_backend_cli(BACKEND_CODEX)
-    efforts: list[str] = []
-    if not binary:
-        return [], efforts, "", "", "Codex was not found."
+def _codex_model_payload(binary: str, cwd: Optional[str], extra: Sequence[str]) -> object:
+    """Run one form of `codex debug models` and decode its JSON, or None.
+
+    ``extra`` is what tells the two apart: empty is the refreshing form, and
+    ``--bundled`` is the copy compiled into the installed binary. A failure of
+    either - offline, a timeout, output that is no longer JSON - is reported as
+    None rather than raising, so the caller can try the other.
+    """
     try:
         result = subprocess.run(
-            [binary, "debug", "models", "--bundled"],
+            [binary, "debug", "models", *extra],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -2594,26 +2594,65 @@ def codex_model_options(
             env=subprocess_env(binary),
             **no_window_kwargs(),
         )
-        payload = json.loads(result.stdout)
+        return json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return [], efforts, "", "", "Could not read the model list from Codex."
+        return None
 
-    entries = payload if isinstance(payload, list) else payload.get("models", [])
+
+def _codex_catalog(payload: object) -> tuple[list[str], list[str]]:
+    """(models, efforts) out of a `debug models` payload.
+
+    Only the models Codex's own picker shows are kept. The catalog also carries
+    entries marked ``visibility: "hide"`` - models being retired, and internal
+    ones like codex-auto-review - and offering one means choosing it, waiting on
+    a model the service refuses, and losing the message.
+    """
     models: list[str] = []
-    if isinstance(entries, list):
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            model = entry.get("slug") or entry.get("id") or entry.get("model")
-            if isinstance(model, str) and model and model not in models:
-                models.append(model)
-            supported = entry.get("supported_reasoning_levels") or []
-            if isinstance(supported, list):
-                for level in supported:
-                    effort = level.get("effort") if isinstance(level, dict) else level
-                    if isinstance(effort, str) and effort and effort not in efforts:
-                        efforts.append(effort)
+    efforts: list[str] = []
+    entries = payload if isinstance(payload, list) else None
+    if entries is None and isinstance(payload, dict):
+        entries = payload.get("models", [])
+    if not isinstance(entries, list):
+        return models, efforts
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("visibility", "list") != "list":
+            continue
+        model = entry.get("slug") or entry.get("id") or entry.get("model")
+        if isinstance(model, str) and model and model not in models:
+            models.append(model)
+        supported = entry.get("supported_reasoning_levels") or []
+        if isinstance(supported, list):
+            for level in supported:
+                effort = level.get("effort") if isinstance(level, dict) else level
+                if isinstance(effort, str) and effort and effort not in efforts:
+                    efforts.append(effort)
+    return models, efforts
 
+
+def codex_model_options(
+    cwd: Optional[str] = None,
+) -> tuple[list[str], list[str], str, str, str]:
+    """Read Codex's live model catalog and configured defaults.
+
+    `debug models` refreshes the catalog from the service before dumping it, so
+    a model the service has retired drops out and a new one appears without
+    waiting for the next Codex release. `--bundled` skips that refresh and dumps
+    only the copy compiled into the installed binary, which is how a removed
+    model used to stay on offer until the CLI itself was updated; it is kept as
+    the fallback for a machine that cannot reach the service.
+    """
+    binary = find_backend_cli(BACKEND_CODEX)
+    efforts: list[str] = []
+    if not binary:
+        return [], efforts, "", "", "Codex was not found."
+
+    stale = False
+    models, efforts = _codex_catalog(_codex_model_payload(binary, cwd, ()))
+    if not models:
+        models, fallback_efforts = _codex_catalog(_codex_model_payload(binary, cwd, ("--bundled",)))
+        if models:
+            stale = True
+            efforts = fallback_efforts or efforts
     if not efforts:
         efforts = ["low", "medium", "high", "xhigh"]
 
@@ -2630,7 +2669,14 @@ def codex_model_options(
             current_effort = config["model_reasoning_effort"]
     except (OSError, ValueError):
         pass
-    error = "" if models else "Codex returned an empty model catalog."
+    if not models:
+        error = "Codex returned an empty model catalog."
+    elif stale:
+        # Read from the installed release because the service could not be
+        # reached, so a model removed upstream may still be listed here.
+        error = "Could not refresh Codex's model list; showing the installed release's copy."
+    else:
+        error = ""
     return models, efforts, current_model, current_effort, error
 
 
