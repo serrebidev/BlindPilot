@@ -129,10 +129,19 @@ def test_codex_catalog_includes_all_reported_reasoning_levels(monkeypatch, tmp_p
 # A stand-in for the two forms of `codex debug models`: the refreshing form
 # (no extra flags) and the installed-release copy (`--bundled`). Each entry is
 # the JSON that form would print, or None for a form that cannot be run.
+#
+# Only the model probe is recorded and answered. Building the child's
+# environment runs the user's own login shell for its PATH on POSIX, through
+# the same `subprocess.run`, and recording that made the call list carry
+# `printf '%s\n' "$PATH"` ahead of the probe on Linux and macOS while passing
+# on Windows, where the PATH is read from the environment instead. Anything
+# that is not the probe is answered empty, which is a PATH with nothing in it.
 def _codex_models_run(payloads: dict[tuple[str, ...], object]):
     calls: list[tuple[str, ...]] = []
 
     def run(command, **_kwargs):
+        if tuple(command[1:3]) != ("debug", "models"):
+            return SimpleNamespace(stdout="", returncode=0)
         extra = tuple(command[3:])
         calls.append(extra)
         payload = payloads.get(extra)
@@ -141,6 +150,20 @@ def _codex_models_run(payloads: dict[tuple[str, ...], object]):
         return SimpleNamespace(stdout=json.dumps(payload))
 
     return run, calls
+
+
+def test_the_codex_call_list_ignores_a_command_that_is_not_the_model_probe():
+    """The fake must not record the login-shell PATH probe as a model read.
+
+    That probe only happens where `platform.system()` is not Windows, so a test
+    that records every call passes here and fails on Linux and macOS.
+    """
+    run, calls = _codex_models_run({(): {"models": [{"slug": "gpt-6-sol"}]}})
+
+    run(["codex", "debug", "models"])
+    run(["/bin/sh", "-l", "-c", "printf '%s\\n' \"$PATH\""])
+
+    assert calls == [()]
 
 
 def test_codex_offers_only_the_models_the_service_still_lists(monkeypatch, tmp_path):
