@@ -1,3 +1,7 @@
+# BlindPilot 0.54.2
+
+- Updated dependencies: pyobjc-framework-cocoa to 13.0 on macOS, and mypy, pytest and hypothesis to their latest versions for development and testing. No feature changes.
+
 # BlindPilot 0.54.1
 
 - Fixed: a GitHub Copilot turn could never start — the worker thread crashed on start with an AttributeError before the turn ran. Copilot turns now start normally.
