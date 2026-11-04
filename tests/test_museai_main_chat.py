@@ -199,6 +199,24 @@ def test_clearing_an_unanswered_main_chat_cancels_its_queued_follow(monkeypatch,
             frame.Destroy()
 
 
+def test_pending_main_chat_send_is_discarded_after_backend_switch(monkeypatch, tmp_path):
+    with _running_app():
+        frame = _frame(monkeypatch, tmp_path)
+        try:
+            panel = frame.notebook.GetCurrentPage()
+            panel._backend = panel._session_backend = "museai"
+            panel._museai_main_serial = 3
+            sends = []
+            monkeypatch.setattr(panel, "send_now", lambda: sends.append(True))
+
+            panel._backend = "codex"
+            panel._send_museai_pending(3)
+
+            assert sends == []
+        finally:
+            frame.Destroy()
+
+
 def test_a_failed_main_chat_lookup_keeps_the_prompt_without_sending_to_a_side_chat(
     monkeypatch, tmp_path
 ):
