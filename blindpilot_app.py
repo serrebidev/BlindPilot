@@ -6221,6 +6221,8 @@ class MuseAiDialog(wx.Dialog):
         self.goal = goal
         self.chat_request: Optional[tuple[str, str, str]] = None
         self.items: list[dict] = []
+        self._action_serial = 0
+        self._busy = False
         pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(wx.StaticText(self, label=f"&{view.title()}:"), 0, wx.ALL, pad)
@@ -6272,29 +6274,76 @@ class MuseAiDialog(wx.Dialog):
         if self.decide:
             self.decide.Bind(wx.EVT_BUTTON, lambda _e: self._decide())
             buttons.Add(self.decide, 0, wx.RIGHT, pad)
-        refresh = wx.Button(self, label="Re&fresh")
-        refresh.Bind(wx.EVT_BUTTON, lambda _e: self._refresh())
-        buttons.Add(refresh, 0, wx.RIGHT, pad)
+        self.refresh_button = wx.Button(self, label="Re&fresh")
+        self.refresh_button.Bind(wx.EVT_BUTTON, lambda _e: self._refresh())
+        buttons.Add(self.refresh_button, 0, wx.RIGHT, pad)
         buttons.Add(wx.Button(self, wx.ID_CANCEL, "Close"))
         sizer.Add(buttons, 0, wx.ALL, pad)
         self.SetSizerAndFit(sizer)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
         self._refresh()
-        (self.list if self.items else refresh).SetFocus()
+        self.list.SetFocus()
         self.CentreOnParent()
+
+    def _start_action(
+        self, label: str, work: Callable[[], object], done: Callable[[object], None]
+    ) -> None:
+        self._action_serial += 1
+        serial = self._action_serial
+        self._busy = True
+        self.status.SetLabel(label)
+        announce(label)
+        self.list.Enable(False)
+        self._selection_changed()
+
+        def run() -> None:
+            try:
+                result, error = work(), ""
+            except Exception as exc:
+                result, error = None, str(exc)
+            _call_after_alive(self._action_finished, serial, label, result, error, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _action_finished(
+        self,
+        serial: int,
+        label: str,
+        result: object,
+        error: str,
+        done: Callable[[object], None],
+    ) -> None:
+        if not self or serial != self._action_serial:
+            return
+        self._busy = False
+        self.list.Enable(True)
+        self._selection_changed()
+        if error:
+            message = f"{label}: {error}"
+            self.status.SetLabel(message)
+            announce(message)
+            return
+        done(result)
+
+    def Destroy(self) -> bool:  # type: ignore[override]
+        self._action_serial += 1
+        return super().Destroy()
 
     def _refresh(self) -> None:
         from museai_backend import museai_items, museai_item_title, museai_goal_suggestions
 
         self.items = []
         self.list.Clear()
-        try:
-            with wx.BusyCursor():
-                self.items = (
-                    museai_goal_suggestions(self.goal)
-                    if self.view == "suggestions" and self.goal is not None
-                    else museai_items(self.view)
-                )
+
+        def load() -> object:
+            return (
+                museai_goal_suggestions(self.goal)
+                if self.view == "suggestions" and self.goal is not None
+                else museai_items(self.view)
+            )
+
+        def loaded(value: object) -> None:
+            self.items = value if isinstance(value, list) else []
             self.list.Set([museai_item_title(self.view, item) for item in self.items])
             if self.items:
                 self.list.SetSelection(0)
@@ -6303,15 +6352,29 @@ class MuseAiDialog(wx.Dialog):
                 if self.items
                 else f"No {self.view}."
             )
-        except ValueError as exc:
-            self.items = []
-            self.list.Clear()
-            message = f"Could not read muse.ai {self.view}: {exc}"
-        self.status.SetLabel(message)
-        self._selection_changed()
-        announce(message)
+            self.status.SetLabel(message)
+            self._selection_changed()
+            announce(message)
+
+        self._start_action(f"Loading muse.ai {self.view}…", load, loaded)
 
     def _selection_changed(self) -> None:
+        if self._busy:
+            for button in (
+                self.read,
+                self.discuss,
+                self.run,
+                self.links,
+                self.history,
+                self.manage,
+                self.suggestions,
+                self.dismiss,
+                self.decide,
+                self.refresh_button,
+            ):
+                if button:
+                    button.Enable(False)
+            return
         selected = self.list.GetSelection()
         valid = 0 <= selected < len(self.items)
         self.read.Enable(valid)
@@ -6360,14 +6423,18 @@ class MuseAiDialog(wx.Dialog):
         item = self._selected()
         if item is None:
             return
-        try:
-            with wx.BusyCursor():
-                item = museai_read_item(self.view, item)
-            text = f"I'd like to discuss this muse.ai {self.view} item:\n\n{museai_item_text(self.view, item)}\n\nMy question: "
-            self.chat_request = ("draft", text, museai_item_title(self.view, item))
+
+        def prepare() -> object:
+            read = museai_read_item(self.view, item)
+            text = f"I'd like to discuss this muse.ai {self.view} item:\n\n{museai_item_text(self.view, read)}\n\nMy question: "
+            return (text, museai_item_title(self.view, read))
+
+        def prepared(value: object) -> None:
+            text, title = value
+            self.chat_request = ("draft", text, title)
             self.EndModal(wx.ID_OK)
-        except ValueError as exc:
-            announce(f"Could not prepare the discussion: {exc}")
+
+        self._start_action("Preparing discussion…", prepare, prepared)
 
     def _open_link(self) -> None:
         from museai_backend import museai_item_links
@@ -6384,88 +6451,111 @@ class MuseAiDialog(wx.Dialog):
                 if dialog.ShowModal() != wx.ID_OK:
                     return
                 url = urls[dialog.GetSelection()]
-        if not _open_web_page(url):
-            announce("Could not open this link in your browser.")
+
+        def opened(ok: object) -> None:
+            if not ok:
+                message = "Could not open this link in your browser."
+                self.status.SetLabel(message)
+                announce(message)
+
+        self._start_action("Opening link…", lambda: _open_web_page(url), opened)
 
     def _run(self) -> None:
         from museai_backend import (
             museai_read_item,
             museai_run_idea,
             museai_run_schedule,
-            museai_action_session,
             museai_goal_decide,
-            museai_item_title,
             _museai_id,
         )
 
         item = self._selected()
         if item is None or not self.run or not self.run.IsEnabled():
             return
-        try:
-            if self.view == "suggestions":
-                assert self.goal is not None
-                result = museai_goal_decide(
+
+        if self.view == "suggestions":
+            if self.goal is None:
+                return
+            self._start_action(
+                "Accepting suggestion…",
+                lambda: museai_goal_decide(
                     _museai_id(self.goal, "goal_id", "id"), item, "accepted"
-                )
-            elif self.view == "schedules":
-                with wx.BusyCursor():
-                    result = museai_run_schedule(item)
-            else:
-                parts = None
-                if self.view == "ideas":
-                    with wx.BusyCursor():
-                        item = museai_read_item(self.view, item)
-                    choices = [
-                        part
-                        for part in item.get("items", [])
-                        if isinstance(part, dict)
-                        and part.get("selectable") is not False
-                        and part.get("id")
-                    ]
-                    if choices:
-                        with wx.SingleChoiceDialog(
-                            self,
-                            "What would you like to run?",
-                            museai_item_title(self.view, item),
-                            ["Whole idea", "Choose parts…"],
-                        ) as dialog:
-                            if dialog.ShowModal() != wx.ID_OK:
-                                return
-                            selected = dialog.GetSelection()
-                        if selected == 1:
-                            labels = [
-                                str((part.get("content") or {}).get("title") or part["id"])
-                                for part in choices
-                            ]
-                            with wx.MultiChoiceDialog(
-                                self, "Choose parts to run:", "Run selected parts", labels
-                            ) as dialog:
-                                dialog.SetSelections(
-                                    [
-                                        i
-                                        for i, part in enumerate(choices)
-                                        if part.get("isSelected") is not False
-                                    ]
-                                )
-                                if dialog.ShowModal() != wx.ID_OK:
-                                    return
-                                parts = [str(choices[i]["id"]) for i in dialog.GetSelections()]
-                with wx.BusyCursor():
-                    result = museai_run_idea(item, parts)
-            announce("muse.ai accepted the action.")
-            session = museai_action_session(result)
-            if session:
-                self.chat_request = ("follow", session, museai_item_title(self.view, item))
-                self.EndModal(wx.ID_OK)
-            elif self.view == "suggestions" or (
-                self.view == "schedules" and item.get("execution_target") == "main"
-            ):
-                self.chat_request = ("main", "", museai_item_title(self.view, item))
-                self.EndModal(wx.ID_OK)
-            else:
-                self._refresh()
-        except ValueError as exc:
-            announce(f"Could not confirm the action: {exc} Check its status before trying again.")
+                ),
+                lambda result: self._run_finished(result, item),
+            )
+        elif self.view == "schedules":
+            self._start_action(
+                "Running schedule…",
+                lambda: museai_run_schedule(item),
+                lambda result: self._run_finished(result, item),
+            )
+        elif self.view == "ideas":
+            self._start_action(
+                "Loading idea…",
+                lambda: museai_read_item(self.view, item),
+                self._choose_idea_run,
+            )
+        else:
+            self._start_action(
+                "Running action…",
+                lambda: museai_run_idea(item, None),
+                lambda result: self._run_finished(result, item),
+            )
+
+    def _choose_idea_run(self, value: object) -> None:
+        from museai_backend import museai_run_idea, museai_item_title
+
+        item = value
+        choices = [
+            part
+            for part in item.get("items", [])
+            if isinstance(part, dict) and part.get("selectable") is not False and part.get("id")
+        ]
+        parts = None
+        if choices:
+            with wx.SingleChoiceDialog(
+                self,
+                "What would you like to run?",
+                museai_item_title(self.view, item),
+                ["Whole idea", "Choose parts…"],
+            ) as dialog:
+                if dialog.ShowModal() != wx.ID_OK:
+                    return
+                selected = dialog.GetSelection()
+            if selected == 1:
+                labels = [
+                    str((part.get("content") or {}).get("title") or part["id"]) for part in choices
+                ]
+                with wx.MultiChoiceDialog(
+                    self, "Choose parts to run:", "Run selected parts", labels
+                ) as dialog:
+                    dialog.SetSelections(
+                        [i for i, part in enumerate(choices) if part.get("isSelected") is not False]
+                    )
+                    if dialog.ShowModal() != wx.ID_OK:
+                        return
+                    parts = [str(choices[i]["id"]) for i in dialog.GetSelections()]
+        self._start_action(
+            "Running idea…",
+            lambda: museai_run_idea(item, parts),
+            lambda result: self._run_finished(result, item),
+        )
+
+    def _run_finished(self, result: object, item: dict) -> None:
+        from museai_backend import museai_action_session, museai_item_title
+
+        announce("muse.ai accepted the action.")
+        session = museai_action_session(result)
+        if session:
+            self.chat_request = ("follow", session, museai_item_title(self.view, item))
+            self.EndModal(wx.ID_OK)
+        elif self.view == "suggestions" or (
+            self.view == "schedules" and item.get("execution_target") == "main"
+        ):
+            self.chat_request = ("main", "", museai_item_title(self.view, item))
+            self.EndModal(wx.ID_OK)
+        else:
+            self._refresh()
 
     def _history(self) -> None:
         from museai_backend import museai_schedule_history, museai_item_title
@@ -6473,15 +6563,15 @@ class MuseAiDialog(wx.Dialog):
         item = self._selected()
         if item is None:
             return
-        try:
-            with wx.BusyCursor():
-                text = museai_schedule_history(item)
+
+        def show(value: object) -> None:
+            text = str(value)
             with ReadView(
                 self, text, f"Run history: {museai_item_title(self.view, item)}"
             ) as dialog:
                 dialog.ShowModal()
-        except ValueError as exc:
-            announce(f"Could not read run history: {exc}")
+
+        self._start_action("Loading run history…", lambda: museai_schedule_history(item), show)
 
     def _suggestions(self) -> None:
         item = self._selected()
@@ -6502,18 +6592,20 @@ class MuseAiDialog(wx.Dialog):
         item = self._selected()
         if item is None or self.goal is None or item.get("status") != "suggested":
             return
-        try:
-            with wx.BusyCursor():
-                museai_goal_decide(_museai_id(self.goal, "goal_id", "id"), item, "dismissed")
+
+        def dismissed(_value: object) -> None:
             self._refresh()
             announce("Suggestion dismissed.")
-        except ValueError as exc:
-            announce(f"Could not dismiss the suggestion: {exc}")
+
+        self._start_action(
+            "Dismissing suggestion…",
+            lambda: museai_goal_decide(_museai_id(self.goal, "goal_id", "id"), item, "dismissed"),
+            dismissed,
+        )
 
     def _manage_goal(self) -> None:
         from museai_backend import (
             museai_goal_status,
-            museai_goal_edit,
             museai_goal_delete,
             museai_read_item,
         )
@@ -6533,50 +6625,65 @@ class MuseAiDialog(wx.Dialog):
             if dialog.ShowModal() != wx.ID_OK:
                 return
             choice = dialog.GetSelection()
-        try:
-            if choice == 0:
-                with wx.BusyCursor():
-                    item = museai_read_item("goals", item)
-                with wx.TextEntryDialog(
-                    self, "Goal title:", "Edit goal", str(item.get("title", ""))
-                ) as dialog:
-                    if dialog.ShowModal() != wx.ID_OK:
-                        return
-                    title = dialog.GetValue()
-                with wx.TextEntryDialog(
-                    self,
-                    "Goal description:",
-                    "Edit goal",
-                    str(item.get("description", "")),
-                    style=wx.OK | wx.CANCEL | wx.TE_MULTILINE,
-                ) as dialog:
-                    if dialog.ShowModal() != wx.ID_OK:
-                        return
-                    description = dialog.GetValue()
-                with wx.BusyCursor():
-                    museai_goal_edit(item, title, description)
-            elif choice == 5:
-                if (
-                    wx.MessageBox(
-                        f"Delete the goal {item.get('title', '')}?",
-                        "Delete goal",
-                        wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
-                        self,
-                    )
-                    != wx.YES
-                ):
-                    return
-                with wx.BusyCursor():
-                    museai_goal_delete(item)
-            else:
-                with wx.BusyCursor():
-                    museai_goal_status(
-                        item, ["", "active", "paused", "completed", "retired"][choice]
-                    )
-            self._refresh()
-            announce("Goal updated.")
-        except ValueError as exc:
-            announce(f"Could not update the goal: {exc}")
+        if choice == 0:
+            self._start_action(
+                "Loading goal…",
+                lambda: museai_read_item("goals", item),
+                self._edit_goal,
+            )
+            return
+        if (
+            choice == 5
+            and wx.MessageBox(
+                f"Delete the goal {item.get('title', '')}?",
+                "Delete goal",
+                wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
+                self,
+            )
+            != wx.YES
+        ):
+            return
+        if choice == 5:
+            self._start_action(
+                "Updating goal…", lambda: museai_goal_delete(item), self._goal_updated
+            )
+        else:
+            status = ["", "active", "paused", "completed", "retired"][choice]
+            self._start_action(
+                "Updating goal…",
+                lambda: museai_goal_status(item, status),
+                self._goal_updated,
+            )
+
+    def _edit_goal(self, value: object) -> None:
+        from museai_backend import museai_goal_edit
+
+        item = value
+        with wx.TextEntryDialog(
+            self, "Goal title:", "Edit goal", str(item.get("title", ""))
+        ) as dialog:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            title = dialog.GetValue()
+        with wx.TextEntryDialog(
+            self,
+            "Goal description:",
+            "Edit goal",
+            str(item.get("description", "")),
+            style=wx.OK | wx.CANCEL | wx.TE_MULTILINE,
+        ) as dialog:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            description = dialog.GetValue()
+        self._start_action(
+            "Saving goal…",
+            lambda: museai_goal_edit(item, title, description),
+            self._goal_updated,
+        )
+
+    def _goal_updated(self, _value: object) -> None:
+        self._refresh()
+        announce("Goal updated.")
 
     def _read(self) -> None:
         from museai_backend import museai_read_item, museai_item_text, museai_item_title
@@ -6584,15 +6691,17 @@ class MuseAiDialog(wx.Dialog):
         selected = self.list.GetSelection()
         if not 0 <= selected < len(self.items):
             return
-        try:
-            with wx.BusyCursor():
-                item = museai_read_item(self.view, self.items[selected])
+
+        source = self.items[selected]
+
+        def show(value: object) -> None:
+            item = value
             with ReadView(
                 self, museai_item_text(self.view, item), museai_item_title(self.view, item)
             ) as dialog:
                 dialog.ShowModal()
-        except ValueError as exc:
-            announce(f"Could not read this item: {exc}")
+
+        self._start_action("Reading item…", lambda: museai_read_item(self.view, source), show)
 
     def _decide(self) -> None:
         from museai_backend import museai_decide, museai_item_text, museai_allowed_decisions
@@ -6626,13 +6735,16 @@ class MuseAiDialog(wx.Dialog):
         if decision not in allowed:
             announce("This approval needs a different choice in the muse.ai app.")
             return
-        try:
-            with wx.BusyCursor():
-                museai_decide(str(item["approval_id"]), decision, reason)
+
+        def decided(_value: object) -> None:
             announce("Allowed once" if decision == "allow_once" else "Denied")
             self._refresh()
-        except ValueError as exc:
-            announce(f"Could not send the approval decision: {exc}")
+
+        self._start_action(
+            "Sending approval decision…",
+            lambda: museai_decide(str(item["approval_id"]), decision, reason),
+            decided,
+        )
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if (
