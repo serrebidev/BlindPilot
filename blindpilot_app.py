@@ -15655,6 +15655,8 @@ class MainFrame(wx.Frame):
         self._history_open_serial = 0
         self._history_open_cancel: Optional[threading.Event] = None
         self._history_open_progress: Optional[wx.Dialog] = None
+        self._agent_files_cache: dict[str, list[AgentFiles]] = {}
+        self._agent_files_serial = 0
         # Session links handed over by a second copy; watched only once the
         # window is shown (`watch_for_links`), never in a window built and torn
         # down by a check, where a timer firing mid-teardown crashed macOS.
@@ -16269,6 +16271,8 @@ class MainFrame(wx.Frame):
                 self._set_status_text(message)
                 wx.MessageBox(message, "Chat Mode", wx.OK | wx.ICON_ERROR, self)
 
+        if mode != self._app_mode:
+            self._agent_files_serial += 1
         self._app_mode = mode
         show_agent = mode == APP_MODE_AGENT
         self.tab_switcher.Show(show_agent)
@@ -17374,9 +17378,109 @@ class MainFrame(wx.Frame):
         """
         page = self.notebook.GetCurrentPage()
         cwd = page.cwd if isinstance(page, SessionPanel) else None
-        group_at = 0
+        self._agent_files_return_focus = wx.Window.FindFocus()
+        key = os.path.normcase(os.path.abspath(cwd)) if cwd else ""
+        self._agent_files_serial += 1
+        serial = self._agent_files_serial
+        groups = self._agent_files_cache.get(key)
+        if groups is None:
+            self._load_agent_files(cwd, page, 0)
+            return
+        self._show_agent_files(cwd, page, serial, groups, 0)
+
+    def _load_agent_files(
+        self,
+        cwd: Optional[str],
+        page: Optional[wx.Window],
+        group_at: int,
+        open_group: Optional[tuple[str, str]] = None,
+        selected_key: Optional[str] = None,
+    ) -> None:
+        """Discover agent files off the GUI thread, then show the current request."""
+        self._agent_files_serial += 1
+        serial = self._agent_files_serial
+        key = os.path.normcase(os.path.abspath(cwd)) if cwd else ""
+        self._agent_files_cache.pop(key, None)
+        self._announce_setting("Looking for what agents know…")
+
+        def work() -> None:
+            try:
+                groups = agent_files(cwd)
+                error = ""
+            except Exception as exc:
+                groups, error = [], str(exc)
+            _call_after_alive(
+                self._agent_files_loaded,
+                serial,
+                cwd,
+                page,
+                group_at,
+                open_group,
+                selected_key,
+                groups,
+                error,
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _agent_files_loaded(
+        self,
+        serial: int,
+        cwd: Optional[str],
+        page: Optional[wx.Window],
+        group_at: int,
+        open_group: Optional[tuple[str, str]],
+        selected_key: Optional[str],
+        groups: list[AgentFiles],
+        error: str,
+    ) -> None:
+        if (
+            not self
+            or serial != self._agent_files_serial
+            or self._app_mode != APP_MODE_AGENT
+            or self.notebook.GetCurrentPage() is not page
+        ):
+            return
+        if error:
+            self._announce_setting(f"Error: could not list what agents know: {error}")
+            self._restore_agent_files_focus(page)
+            return
+        key = os.path.normcase(os.path.abspath(cwd)) if cwd else ""
+        self._agent_files_cache[key] = groups
+        self._set_status_text("What Agents Know is ready")
+        self._show_agent_files(cwd, page, serial, groups, group_at, open_group, selected_key)
+
+    def _restore_agent_files_focus(self, page: Optional[wx.Window]) -> None:
+        focus = getattr(self, "_agent_files_return_focus", None)
+        if self.notebook.GetCurrentPage() is page and focus and focus.IsShownOnScreen():
+            focus.SetFocus()
+
+    def _show_agent_files(
+        self,
+        cwd: Optional[str],
+        page: Optional[wx.Window],
+        serial: int,
+        groups: list[AgentFiles],
+        group_at: int,
+        open_group: Optional[tuple[str, str]] = None,
+        selected_key: Optional[str] = None,
+    ) -> None:
+        if open_group:
+            selected_group_at = next(
+                (
+                    at
+                    for at, group in enumerate(groups)
+                    if (group.backend, group.kind) == open_group
+                ),
+                None,
+            )
+            if selected_group_at is not None and self._agent_files_of(
+                cwd, page, groups, selected_group_at, selected_key
+            ):
+                return
+            if selected_group_at is not None:
+                group_at = selected_group_at
         while True:
-            groups = agent_files(cwd)
             message = "What your coding agents keep about you on this computer. Enter lists one."
             agents = [
                 f"{g.backend} {g.kind.lower()} {len(g.files)}"
@@ -17389,29 +17493,44 @@ class MainFrame(wx.Frame):
                 self,
                 message,
                 "What Agents Know",
-                [f"{g.backend} {g.kind.lower()}, {len(g.files)}" for g in groups],
+                [f"{g.backend} {g.kind.lower()}, {len(g.files)}" for g in groups]
+                + ["Refresh the list"],
             ) as dlg:
-                dlg.SetSelection(min(group_at, len(groups) - 1))
+                dlg.SetSelection(min(group_at, len(groups)))
                 if dlg.ShowModal() != wx.ID_OK:
                     break
-                group_at = dlg.GetSelection()
-            self._agent_files_of(cwd, groups[group_at].backend, groups[group_at].kind)
+                chosen = dlg.GetSelection()
+            if chosen == len(groups):
+                self._agent_files_cache.pop(
+                    os.path.normcase(os.path.abspath(cwd)) if cwd else "", None
+                )
+                self._load_agent_files(cwd, page, group_at)
+                return
+            group_at = chosen
+            if self._agent_files_of(cwd, page, groups, group_at):
+                return
+        self._restore_agent_files_focus(page)
 
-    def _agent_files_of(self, cwd: Optional[str], backend: str, kind: str) -> None:
+    def _agent_files_of(
+        self,
+        cwd: Optional[str],
+        page: Optional[wx.Window],
+        groups: list[AgentFiles],
+        group_at: int,
+        selected_key: Optional[str] = None,
+    ) -> bool:
         add_labels = {
             "memory": "&Add Memory…",
             "taste": "&Add Taste…",
             "hermes": "&Add Memory…",
             "agent": "&Add Agent…",
         }
+        group = groups[group_at]
+        backend, kind = group.backend, group.kind
         title = f"{backend} {kind.lower()}"
-        file_at = 0
+        keys = [key for key, _label in group.files]
+        file_at = keys.index(selected_key) if selected_key in keys else 0
         while True:
-            group = next(
-                (g for g in agent_files(cwd) if (g.backend, g.kind) == (backend, kind)), None
-            )
-            if group is None:
-                return
             files = group.files
             labels = [label for _key, label in files]
             with AgentFileList(
@@ -17422,13 +17541,8 @@ class MainFrame(wx.Frame):
             if action == wx.ID_ADD:
                 added = self._add_entry(cwd, group)
                 if added:
-                    keys = [
-                        key
-                        for g in agent_files(cwd)
-                        if (g.backend, g.kind) == (backend, kind)
-                        for key, _label in g.files
-                    ]
-                    file_at = keys.index(added) if added in keys else file_at
+                    self._load_agent_files(cwd, page, group_at, (backend, kind), added)
+                    return True
             elif action == wx.ID_DELETE:
                 key, label = files[file_at]
                 if (
@@ -17443,6 +17557,8 @@ class MainFrame(wx.Frame):
                     try:
                         delete_entry(key, group.editable)
                         announce("Deleted")
+                        self._load_agent_files(cwd, page, group_at, (backend, kind))
+                        return True
                     except (OSError, IndexError) as exc:
                         announce(f"Error: could not delete it: {exc}")
             elif action in (wx.ID_OPEN, wx.ID_EDIT):
@@ -17452,20 +17568,30 @@ class MainFrame(wx.Frame):
                 except (OSError, IndexError) as exc:
                     announce(f"Error: could not read it: {exc}")
                     continue
+                saved = False
+
+                def save(text: str, entry_key: str = key, editable: str = group.editable) -> None:
+                    nonlocal saved
+                    save_entry(entry_key, editable, text)
+                    saved = True
+
                 view = ReadView(
                     self,
                     text,
                     path,
                     edit_path=path,
-                    on_save=functools.partial(save_entry, key, group.editable),
+                    on_save=save,
                     start_editing=action == wx.ID_EDIT,
                 )
                 try:
                     view.ShowModal()
                 finally:
                     view.Destroy()
+                if saved:
+                    self._load_agent_files(cwd, page, group_at, (backend, kind), key)
+                    return True
             else:
-                return
+                return False
 
     def _add_entry(self, cwd: Optional[str], group: AgentFiles) -> Optional[str]:
         """Ask for a new entry and save it; its key, or None."""
@@ -18433,6 +18559,7 @@ class MainFrame(wx.Frame):
         self._follow_tab_backend()
 
     def _on_tab_changed(self, event: wx.BookCtrlEvent) -> None:
+        self._agent_files_serial += 1
         event.Skip()
         self._sync_tab_switcher()
         sel = self.notebook.GetSelection()
@@ -18721,6 +18848,7 @@ class MainFrame(wx.Frame):
                 refresh()
 
     def _on_close(self, event: wx.CloseEvent) -> None:
+        self._agent_files_serial = getattr(self, "_agent_files_serial", 0) + 1
         timer = getattr(self, "_links_timer", None)
         if timer is not None:
             timer.Stop()
