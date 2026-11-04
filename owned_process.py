@@ -109,7 +109,9 @@ class _WindowsJob:
             raise ctypes.WinError(error)
 
     def assign(self, proc: subprocess.Popen) -> None:
-        self.assign_handle(proc._handle)
+        # _handle is the Windows-only Popen attribute; typeshed does not
+        # declare it on Popen[Any], and this class is Windows-only too.
+        self.assign_handle(int(proc._handle))  # type: ignore[attr-defined]
 
     def assign_handle(self, handle: int) -> None:
         if not self._kernel.AssignProcessToJobObject(self._handle, handle):

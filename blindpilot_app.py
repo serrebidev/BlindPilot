@@ -486,7 +486,7 @@ def _measured_call_after(callback, *args, **kwargs):
     return _ORIGINAL_CALL_AFTER(_gui_work(f"CallAfter: {name}", lambda: callback(*args, **kwargs)))
 
 
-wx.CallAfter = _measured_call_after
+wx.CallAfter = _measured_call_after  # type: ignore[assignment]
 
 
 def _measured_call_later(milliseconds, callback, *args, **kwargs):
@@ -497,7 +497,7 @@ def _measured_call_later(milliseconds, callback, *args, **kwargs):
     )
 
 
-wx.CallLater = _measured_call_later
+wx.CallLater = _measured_call_later  # type: ignore[misc, assignment]
 
 
 ORIGINAL_APP_CREDIT = (
@@ -6506,7 +6506,7 @@ class MuseAiDialog(wx.Dialog):
             return (text, museai_item_title(self.view, read))
 
         def prepared(value: object) -> None:
-            text, title = value
+            text, title = cast("tuple[str, str]", value)
             self.chat_request = ("draft", text, title)
             self.EndModal(wx.ID_OK)
 
@@ -6552,11 +6552,10 @@ class MuseAiDialog(wx.Dialog):
         if self.view == "suggestions":
             if self.goal is None:
                 return
+            goal = self.goal
             self._start_action(
                 "Accepting suggestion…",
-                lambda: museai_goal_decide(
-                    _museai_id(self.goal, "goal_id", "id"), item, "accepted"
-                ),
+                lambda: museai_goal_decide(_museai_id(goal, "goal_id", "id"), item, "accepted"),
                 lambda result: self._run_finished(result, item),
             )
         elif self.view == "schedules":
@@ -6581,7 +6580,7 @@ class MuseAiDialog(wx.Dialog):
     def _choose_idea_run(self, value: object) -> None:
         from museai_backend import museai_run_idea, museai_item_title
 
-        item = value
+        item = cast(dict, value)
         choices = [
             part
             for part in item.get("items", [])
@@ -6621,7 +6620,7 @@ class MuseAiDialog(wx.Dialog):
         from museai_backend import museai_action_session, museai_item_title
 
         announce("muse.ai accepted the action.")
-        session = museai_action_session(result)
+        session = museai_action_session(cast(dict, result))
         if session:
             self.chat_request = ("follow", session, museai_item_title(self.view, item))
             self.EndModal(wx.ID_OK)
@@ -6668,6 +6667,7 @@ class MuseAiDialog(wx.Dialog):
         item = self._selected()
         if item is None or self.goal is None or item.get("status") != "suggested":
             return
+        goal = self.goal
 
         def dismissed(_value: object) -> None:
             self._refresh()
@@ -6675,7 +6675,7 @@ class MuseAiDialog(wx.Dialog):
 
         self._start_action(
             "Dismissing suggestion…",
-            lambda: museai_goal_decide(_museai_id(self.goal, "goal_id", "id"), item, "dismissed"),
+            lambda: museai_goal_decide(_museai_id(goal, "goal_id", "id"), item, "dismissed"),
             dismissed,
         )
 
@@ -6734,7 +6734,7 @@ class MuseAiDialog(wx.Dialog):
     def _edit_goal(self, value: object) -> None:
         from museai_backend import museai_goal_edit
 
-        item = value
+        item = cast(dict, value)
         with wx.TextEntryDialog(
             self, "Goal title:", "Edit goal", str(item.get("title", ""))
         ) as dialog:
@@ -6771,7 +6771,7 @@ class MuseAiDialog(wx.Dialog):
         source = self.items[selected]
 
         def show(value: object) -> None:
-            item = value
+            item = cast(dict, value)
             with ReadView(
                 self, museai_item_text(self.view, item), museai_item_title(self.view, item)
             ) as dialog:
@@ -8250,7 +8250,7 @@ class NewSessionDialog(wx.Dialog):
                     timeout=10, **no_window_kwargs(),
                 )  # fmt: skip
             else:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
         except (OSError, subprocess.SubprocessError):
             pass
         if process.poll() is None:
@@ -16033,6 +16033,8 @@ class MainFrame(wx.Frame):
         self._history_open_serial = 0
         self._history_open_cancel: Optional[threading.Event] = None
         self._history_open_progress: Optional[wx.Dialog] = None
+        self._history_open_message: Optional[wx.StaticText] = None
+        self._history_open_cancel_button: Optional[wx.Button] = None
         self._agent_files_cache: dict[str, list[AgentFiles]] = {}
         self._agent_files_serial = 0
         # Session links handed over by a second copy; watched only once the
@@ -18492,14 +18494,16 @@ class MainFrame(wx.Frame):
         if not self or serial != self._history_open_serial or self._history_open_cancel is None:
             return
         progress = wx.Dialog(self, title="Open Conversation")
-        progress.message = wx.StaticText(progress, label=f"Loading {title}")
-        progress.message.SetName("Loading conversation")
-        progress.cancel_button = wx.Button(progress, label="Cancel opening")
-        progress.cancel_button.Bind(wx.EVT_BUTTON, lambda _event: self._cancel_history_open(serial))
+        message = wx.StaticText(progress, label=f"Loading {title}")
+        message.SetName("Loading conversation")
+        cancel_button = wx.Button(progress, label="Cancel opening")
+        cancel_button.Bind(wx.EVT_BUTTON, lambda _event: self._cancel_history_open(serial))
+        self._history_open_message = message
+        self._history_open_cancel_button = cancel_button
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(progress.message, 0, wx.ALL, progress.FromDIP(PAD_DIALOG))
+        sizer.Add(message, 0, wx.ALL, progress.FromDIP(PAD_DIALOG))
         sizer.Add(
-            progress.cancel_button,
+            cancel_button,
             0,
             wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM,
             progress.FromDIP(PAD_DIALOG),
@@ -18529,12 +18533,14 @@ class MainFrame(wx.Frame):
         if not self or serial != self._history_open_serial:
             return
         cancel = self._history_open_cancel
-        progress = self._history_open_progress
         if cancel is not None:
             cancel.set()
-        if progress is not None:
-            progress.message.SetLabel("Cancelling; the loaded conversation will be discarded")
-            progress.cancel_button.Disable()
+        if self._history_open_message is not None:
+            self._history_open_message.SetLabel(
+                "Cancelling; the loaded conversation will be discarded"
+            )
+        if self._history_open_cancel_button is not None:
+            self._history_open_cancel_button.Disable()
 
     def _history_open_loaded(self, serial, cancel, entry, turns, error, on_open) -> None:
         if not self or serial != self._history_open_serial:
@@ -18542,6 +18548,8 @@ class MainFrame(wx.Frame):
         self._history_open_cancel = None
         progress = self._history_open_progress
         self._history_open_progress = None
+        self._history_open_message = None
+        self._history_open_cancel_button = None
         cancelled = cancel.is_set()
         if progress is not None:
             progress.Destroy()

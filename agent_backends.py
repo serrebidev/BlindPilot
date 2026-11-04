@@ -6083,7 +6083,7 @@ class _ConPtyTerminal:
         self._output_read = output_read
         self._pseudo = handle()
         self._process = None
-        self._job = None
+        self._job: Optional[_WindowsJob] = None
         try:
             pseudo = handle()
             result = kernel32.CreatePseudoConsole(
