@@ -87,6 +87,12 @@ unverified.
 
 **Work:** Load turns on a worker and keep the agreed progress dialog while results arrive.
 
+**Status:** Implemented in `c59676a`; focused history, Muse.ai, link, and
+callback-lifetime suite passed (`28 passed`), Ruff, compileall, and
+`git diff --check` passed. A modeless, keyboard-cancelable progress dialog
+keeps history loading responsive. Real screen-reader/device behavior remains
+unverified.
+
 ## 11. Warm FreeBuff discovery outside tab creation
 
 **Ticket:** [#16](https://github.com/thebetterfarhan/BlindPilot/issues/16)
