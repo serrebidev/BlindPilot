@@ -157,6 +157,7 @@ def test_a_refused_folder_is_said_once_by_the_dialog(frame, spoken, monkeypatch)
 
     dlg = _open(frame)
     try:
+        dlg.folder_box.SetValue("")
         event = wx.CommandEvent(wx.EVT_BUTTON.typeId, wx.ID_OK)
         dlg._on_ok(event)
         assert shown == ["Type a folder path, or use the Browse button."]
