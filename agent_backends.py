@@ -622,48 +622,31 @@ def is_an_offer_to_carry_on(question: str) -> bool:
 # to offer any. A written block does, and it is the same shape all four
 # providers already send, so the dialog reads it with the very code that reads
 # theirs: the same questions, the same options, the same answers back.
-#
-# Either fence character opens one, and the closer has to be the one that
-# opened it. A turn that writes about the block -- quoting one, showing it in a
-# diff -- has to reach for `~~~` to keep the sample it is writing from ending
-# early, so a block fenced that way is read just the same.
 _QUESTION_BLOCK = re.compile(
-    r"(?P<fence>```|~~~)[ \t]*questions[ \t]*\r?\n(?P<body>.*?)(?P=fence)",
-    re.DOTALL | re.IGNORECASE,
+    r"```[ \t]*questions[ \t]*\r?\n(?P<body>.*?)```", re.DOTALL | re.IGNORECASE
 )
 
 
 def questions_written_in_the_answer(text: str) -> tuple[Question, ...]:
     """The questions a turn wrote into its reply as a structured block.
 
-    Empty when there is no block, when no block is the JSON it claims to be, or
-    when nothing in any of them is a question. In every one of those cases the
+    Empty when there is no block, when the block is not the JSON it claims to
+    be, or when nothing in it is a question. In every one of those cases the
     prose reading is what is left to try, so a malformed block degrades to
     exactly what the turn would have done without one rather than losing the
     question it was trying to ask.
 
-    The last usable block wins, not simply the last block. A turn that asked
-    its question and then went on to write about the block itself -- which is
-    what happened the first time this was watched, the question followed by
-    four samples of one shown in a diff -- would otherwise lose the question it
-    had already asked to the prose that came after it, and be dropped back to
-    the prose reading for no reason.
-
-    A single question written as one object rather than a one-item list is
-    taken as well, since that is what one question looks like when it is
-    written out.
+    The last block wins: a turn that revised its own questions is asked the
+    revision, not the draft it first wrote.
     """
-    for block in reversed(list(_QUESTION_BLOCK.finditer(text))):
-        try:
-            raw = json.loads(block.group("body"))
-        except (ValueError, TypeError):
-            continue
-        if isinstance(raw, dict):
-            raw = [raw]
-        questions = _questions(raw, multi_key="multiSelect", id_key="id")
-        if questions:
-            return questions
-    return ()
+    blocks = list(_QUESTION_BLOCK.finditer(text))
+    if not blocks:
+        return ()
+    try:
+        raw = json.loads(blocks[-1].group("body"))
+    except (ValueError, TypeError):
+        return ()
+    return _questions(raw, multi_key="multiSelect", id_key="id")
 
 
 def question_summary(questions: Sequence[Question], answers: Optional[list[list[str]]]) -> str:
@@ -6604,9 +6587,6 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
     or one started for a different conversation, simply starts its own.
     """
     global _freebuff_prewarm_generation
-    binary = find_backend_cli(BACKEND_FREEBUFF)
-    if not binary:
-        return
     # Resolved the same way the turn resolves it, or a fresh install with no
     # recorded choice prewarms under "" and the turn, looking for the
     # preferred model, kills the waiting terminal every time.
@@ -6628,6 +6608,9 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
     def work() -> None:
         if delay:
             time.sleep(delay)
+        binary = find_backend_cli(BACKEND_FREEBUFF)
+        if not binary:
+            return
         # Claiming a terminal must wait for an in-progress spawn to publish
         # it. Otherwise Send launches a second CLI and chat discovery can
         # follow the idle background chat forever. Delayed starts must also
@@ -6635,9 +6618,9 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
         with _FREEBUFF_PREWARM_LOCK:
             if generation != _freebuff_prewarm_generation:
                 return
-            launch()
+            launch(binary)
 
-    def launch() -> None:
+    def launch(binary: str) -> None:
         chat = _freebuff_resume_chat_path(cwd, session_id) if session_id else None
         if session_id and chat is None:
             return
