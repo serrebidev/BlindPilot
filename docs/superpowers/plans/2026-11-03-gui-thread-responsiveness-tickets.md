@@ -99,11 +99,23 @@ unverified.
 
 **Work:** Run login-shell executable discovery off-thread so creating or switching to a tab stays responsive.
 
+**Status:** Implemented in `1f145de`; CLI discovery now runs in the prewarm
+worker and stale results are discarded before launch. Focused prewarm tests,
+Ruff, formatting, compileall, and `git diff --check` passed. The later full
+gate passed after the baseline test-fixture repair in `8208075` (`2732 passed,
+17 skipped`). Real screen-reader/device behavior remains unverified.
+
 ## 12. Warm Ctrl+Shift+I Claude-files discovery off-thread
 
 **Ticket:** [#17](https://github.com/thebetterfarhan/BlindPilot/issues/17)
 
 **Work:** Read globs and front matter once per folder on a worker, cache results, and support explicit refresh.
+
+**Status:** Implemented in `01f72d2`; discovery runs on a worker, caches by
+normalized folder, refreshes explicitly, reloads after edits, and discards
+stale results. The full gate passed (`2732 passed, 17 skipped`); Ruff,
+formatting, compileall, and `git diff --check` passed. Real screen-reader/device
+behavior remains unverified.
 
 ## 13. Move repository list/clone off-thread
 
