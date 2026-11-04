@@ -456,19 +456,18 @@ def over_budget_work() -> list[tuple[str, float]]:
     return list(_over_budget_work)
 
 
-def _gui_work(name: str, action: Callable[[], None]) -> Callable[[], None]:
+def _gui_work(name: str, action: Callable[..., object]) -> Callable[..., None]:
     """Wrap a GUI-thread callback so what it spends is measured and recorded.
 
-    The returned callable takes no arguments, which is what a menu binding
-    hands its handler. Over-budget work is logged at DEBUG -- the harness, on
-    with BLINDPILOT_LOG_LEVEL=DEBUG -- and filed in `over_budget_work`.
+    Event and CallAfter arguments pass through unchanged. Over-budget work is
+    logged at DEBUG and filed in `over_budget_work`.
     """
     logger = logging.getLogger("blindpilot.timing")
 
-    def run() -> None:
+    def run(*args: object, **kwargs: object) -> None:
         started = time.monotonic()
         try:
-            action()
+            action(*args, **kwargs)
         finally:
             spent = (time.monotonic() - started) * 1000.0
             if spent > GUI_BUDGET_MS:
@@ -476,6 +475,29 @@ def _gui_work(name: str, action: Callable[[], None]) -> Callable[[], None]:
                 logger.debug("%s spent %.0f ms on the GUI thread", name, spent)
 
     return run
+
+
+_ORIGINAL_CALL_AFTER = wx.CallAfter
+_ORIGINAL_CALL_LATER = wx.CallLater
+
+
+def _measured_call_after(callback, *args, **kwargs):
+    name = getattr(callback, "__qualname__", getattr(callback, "__name__", "callback"))
+    return _ORIGINAL_CALL_AFTER(_gui_work(f"CallAfter: {name}", lambda: callback(*args, **kwargs)))
+
+
+wx.CallAfter = _measured_call_after
+
+
+def _measured_call_later(milliseconds, callback, *args, **kwargs):
+    name = getattr(callback, "__qualname__", getattr(callback, "__name__", "callback"))
+    return _ORIGINAL_CALL_LATER(
+        milliseconds,
+        _gui_work(f"CallLater: {name}", lambda: callback(*args, **kwargs)),
+    )
+
+
+wx.CallLater = _measured_call_later
 
 
 ORIGINAL_APP_CREDIT = (
@@ -13617,7 +13639,9 @@ class SessionPanel(wx.Panel):
         def read_formatted(_event: wx.CommandEvent) -> None:
             self._read_formatted(row)
 
-        menu.Bind(wx.EVT_MENU, read_formatted, formatted)
+        menu.Bind(
+            wx.EVT_MENU, _gui_work("Read response as formatted page", read_formatted), formatted
+        )
         for kind, label in (
             ("code", "Code Blocks in This Response…"),
             ("links", "Links in This Response…"),
@@ -13627,28 +13651,32 @@ class SessionPanel(wx.Panel):
             def browse_items(_event: wx.CommandEvent, chosen: str = kind) -> None:
                 self.open_items(chosen, row.response_number)
 
-            menu.Bind(wx.EVT_MENU, browse_items, item)
+            menu.Bind(wx.EVT_MENU, _gui_work(label, browse_items), item)
         if row.kind == "code":
             item = menu.Append(wx.ID_ANY, "Save code to file…")
 
             def save_code(_event: wx.CommandEvent) -> None:
                 self._action_save_code(row)
 
-            menu.Bind(wx.EVT_MENU, save_code, item)
+            menu.Bind(wx.EVT_MENU, _gui_work("Save code to file", save_code), item)
         insert_item = menu.Append(wx.ID_ANY, "Insert into prompt")
 
         def insert(_event: wx.CommandEvent) -> None:
             self._action_insert(row)
 
-        menu.Bind(wx.EVT_MENU, insert, insert_item)
+        menu.Bind(wx.EVT_MENU, _gui_work("Insert response into prompt", insert), insert_item)
         copy_item = menu.Append(wx.ID_ANY, "Copy whole response")
 
         def copy_response(_event: wx.CommandEvent) -> None:
             self._action_copy_response(row)
 
-        menu.Bind(wx.EVT_MENU, copy_response, copy_item)
+        menu.Bind(wx.EVT_MENU, _gui_work("Copy whole response", copy_response), copy_item)
         copy_all_item = menu.Append(wx.ID_ANY, "Copy whole conversation")
-        menu.Bind(wx.EVT_MENU, lambda _e: self._action_copy_conversation(), copy_all_item)
+        menu.Bind(
+            wx.EVT_MENU,
+            _gui_work("Copy whole conversation", lambda _e: self._action_copy_conversation()),
+            copy_all_item,
+        )
         return menu
 
     def _show_row_menu(self) -> None:
@@ -16120,7 +16148,7 @@ class MainFrame(wx.Frame):
             def set_order(_event: wx.CommandEvent, selected: str = order) -> None:
                 self._set_chat_model_order(selected)
 
-            self.Bind(wx.EVT_MENU, set_order, item)
+            self.Bind(wx.EVT_MENU, _gui_work("Chat model order", set_order), item)
         chat_menu.AppendSubMenu(
             model_order_menu,
             "Model &order",
@@ -16205,67 +16233,121 @@ class MainFrame(wx.Frame):
         self._refresh_connect_item()
         self._refresh_hermes_sessions_item()
         self._refresh_mode_items()
-        self.Bind(wx.EVT_MENU, lambda _e: self._toggle_live_rows(), self._rows_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._toggle_speak_live(), self._speak_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._toggle_show_thinking(), self._thinking_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._toggle_sounds(), self._sounds_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._toggle_text_view(), self._text_view_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._choose_progress_cue(CUE_LOOP), self._cue_loop_item)
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._choose_progress_cue(CUE_PERIODIC),
+            _gui_work("Show live rows", lambda _e: self._toggle_live_rows()),
+            self._rows_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Speak live rows", lambda _e: self._toggle_speak_live()),
+            self._speak_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Show thinking", lambda _e: self._toggle_show_thinking()),
+            self._thinking_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Toggle sounds", lambda _e: self._toggle_sounds()),
+            self._sounds_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Toggle text view", lambda _e: self._toggle_text_view()),
+            self._text_view_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Progress cue: loop", lambda _e: self._choose_progress_cue(CUE_LOOP)),
+            self._cue_loop_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work(
+                "Progress cue: periodic",
+                lambda _e: self._choose_progress_cue(CUE_PERIODIC),
+            ),
             self._cue_periodic_item,
         )
-        self.Bind(wx.EVT_MENU, lambda _e: self._choose_progress_cue(CUE_OFF), self._cue_off_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._configure_cue_interval(), cue_interval_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._configure_remote_hermes(), remote_hermes_item)
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._use_silent_until_response_mode(),
+            _gui_work("Progress cue: off", lambda _e: self._choose_progress_cue(CUE_OFF)),
+            self._cue_off_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Configure cue interval", lambda _e: self._configure_cue_interval()),
+            cue_interval_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Configure remote Hermes", lambda _e: self._configure_remote_hermes()),
+            remote_hermes_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work(
+                "Use silent until response",
+                lambda _e: self._use_silent_until_response_mode(),
+            ),
             silent_response_item,
         )
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._show_chat_accounts(),
+            _gui_work("Show Chat accounts", lambda _e: self._show_chat_accounts()),
             self._chat_accounts_item,
         )
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._show_chat_profiles(),
+            _gui_work("Show Chat profiles", lambda _e: self._show_chat_profiles()),
             self._chat_profiles_item,
         )
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._show_chat_conversations(),
+            _gui_work("Show Chat conversations", lambda _e: self._show_chat_conversations()),
             self._chat_conversations_item,
         )
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._refresh_chat_models(),
+            _gui_work("Refresh Chat models", lambda _e: self._refresh_chat_models()),
             self._chat_refresh_item,
         )
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._set_chat_history_view("list"),
+            _gui_work("Chat history list view", lambda _e: self._set_chat_history_view("list")),
             self._chat_history_list_item,
         )
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._set_chat_history_view("text"),
+            _gui_work("Chat history text view", lambda _e: self._set_chat_history_view("text")),
             self._chat_history_text_item,
         )
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._show_chat_diagnostics(),
+            _gui_work("Show Chat diagnostics", lambda _e: self._show_chat_diagnostics()),
             self._chat_diagnostics_item,
         )
-        self.Bind(wx.EVT_MENU, lambda _e: self._show_preferences(), preferences_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._show_about(), about_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._open_log_folder(), logs_item)
-        self.Bind(wx.EVT_MENU, lambda _e: self._show_update_dialog(), update_item)
         self.Bind(
             wx.EVT_MENU,
-            lambda _e: self._toggle_automatic_updates(),
+            _gui_work("Show preferences", lambda _e: self._show_preferences()),
+            preferences_item,
+        )
+        self.Bind(wx.EVT_MENU, _gui_work("Show about", lambda _e: self._show_about()), about_item)
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Open log folder", lambda _e: self._open_log_folder()),
+            logs_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Check for updates", lambda _e: self._show_update_dialog()),
+            update_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Toggle automatic updates", lambda _e: self._toggle_automatic_updates()),
             self._automatic_updates_item,
         )
 
@@ -17567,7 +17649,9 @@ class MainFrame(wx.Frame):
             def set_backend(_event: wx.CommandEvent, chosen: str = backend) -> None:
                 self._set_backend(chosen)
 
-            self.Bind(wx.EVT_MENU, set_backend, item)
+            self.Bind(
+                wx.EVT_MENU, _gui_work(f"Backend: {BACKEND_LABELS[backend]}", set_backend), item
+            )
         return menu
 
     def _build_permission_mode_menu(self) -> wx.Menu:
@@ -17585,7 +17669,7 @@ class MainFrame(wx.Frame):
             def set_mode(_event: wx.CommandEvent, mode: str = value) -> None:
                 self._set_mode_active(mode)
 
-            self.Bind(wx.EVT_MENU, set_mode, item)
+            self.Bind(wx.EVT_MENU, _gui_work(f"Permission mode: {label}", set_mode), item)
         return menu
 
     def _refresh_mode_items(self) -> None:
@@ -18131,7 +18215,7 @@ class MainFrame(wx.Frame):
             def set_narration(_event: wx.CommandEvent, chosen: str = mode) -> None:
                 self._set_narration(chosen)
 
-            self.Bind(wx.EVT_MENU, set_narration, item)
+            self.Bind(wx.EVT_MENU, _gui_work(f"Narration: {label}", set_narration), item)
         return menu
 
     def _set_narration(self, mode: str) -> None:
@@ -18158,7 +18242,7 @@ class MainFrame(wx.Frame):
             def toggle_cue(_event: wx.CommandEvent, key: str = cue) -> None:
                 self._toggle_sound_cue(key)
 
-            self.Bind(wx.EVT_MENU, toggle_cue, item)
+            self.Bind(wx.EVT_MENU, _gui_work(f"Sound cue: {label}", toggle_cue), item)
         return menu
 
     def _toggle_sound_cue(self, cue: str) -> None:
@@ -19151,7 +19235,11 @@ class MainFrame(wx.Frame):
         """Check every second for session links a second copy handed over."""
         if self._links_timer is None:
             self._links_timer = wx.Timer(self)
-            self.Bind(wx.EVT_TIMER, lambda _e: self._take_links(), self._links_timer)
+            self.Bind(
+                wx.EVT_TIMER,
+                _gui_work("Timer: refresh links", lambda _e: self._take_links()),
+                self._links_timer,
+            )
             self._links_timer.Start(1000)
 
     def watch_model_catalogs(self) -> None:
@@ -19178,7 +19266,13 @@ class MainFrame(wx.Frame):
             return
         if self._model_timer is None:
             self._model_timer = wx.Timer(self)
-            self.Bind(wx.EVT_TIMER, lambda _e: self._refresh_model_catalogs(), self._model_timer)
+            self.Bind(
+                wx.EVT_TIMER,
+                _gui_work(
+                    "Timer: refresh model catalogs", lambda _e: self._refresh_model_catalogs()
+                ),
+                self._model_timer,
+            )
         self._model_timer.Start(minutes * 60 * 1000)
 
     def _refresh_model_catalogs(self) -> None:
