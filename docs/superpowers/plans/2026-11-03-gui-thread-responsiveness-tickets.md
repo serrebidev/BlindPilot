@@ -25,11 +25,19 @@ full repository gate and real screen-reader checks remain outstanding.
 
 **Work:** Close promptly; clean up only BlindPilot-owned process trees off-thread. Resolve Windows Job Object ownership at process creation; define safe macOS/Linux behavior; never kill an unverifiable process by PID.
 
+**Status:** Implemented in `facc89b`; focused integration suite passed (`270
+passed, 1 skipped`), Ruff checks and `git diff --check` passed. macOS/Linux
+process-tree cleanup and real screen-reader/device behavior remain unverified.
+
 ## 04. Move Ctrl+Shift+S conversation search off-thread
 
 **Ticket:** [#9](https://github.com/thebetterfarhan/BlindPilot/issues/9)
 
 **Work:** Scan up to 1,000 transcripts on a worker; retain cancellable progress UI and fill results when ready.
+
+**Status:** Implemented in `151b03a`; focused suite passed (`97 passed`), Ruff
+checks and `git diff --check` passed. Real screen-reader/device behavior remains
+unverified.
 
 ## 05. Move Ctrl+Shift+D changed-file discovery off-thread
 
