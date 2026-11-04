@@ -9363,6 +9363,10 @@ class SessionPanel(wx.Panel):
         self._session_id: Optional[str] = None
         self._backend = normalize_backend(self._get_backend())
         self._session_backend = self._backend
+        self._museai_main_required = False
+        self._museai_main_loading = False
+        self._museai_main_serial = 0
+        self._museai_pending_send = False
         # The conversation's name as the tab shows it; the frame keeps it.
         self.tab_title = self._session_title
         self._worker: Optional[AgentWorker] = None
@@ -9733,11 +9737,16 @@ class SessionPanel(wx.Panel):
     def set_backend(self, backend: str) -> None:
         """Point this tab's next turn at ``backend``; other tabs keep theirs."""
         self._backend = normalize_backend(backend)
+        if self._backend != BACKEND_MUSEAI:
+            self._museai_main_serial += 1
+            self._museai_main_loading = False
+            self._museai_main_required = False
+            self._museai_pending_send = False
         self.backend_changed()
         if self._backend == BACKEND_MUSEAI:
             self.open_museai_main()
 
-    def open_museai_main(self) -> None:
+    def open_museai_main(self, resume_pending: bool = False) -> None:
         """Selecting muse.ai resumes its main conversation, without sending anything."""
         from museai_backend import museai_config_path, museai_main_session_id
 
@@ -9745,18 +9754,48 @@ class SessionPanel(wx.Panel):
         if self._run_in_progress():
             self._announce("Stop the running task before opening muse.ai's main chat")
             return
-        with wx.BusyCursor():
-            session = museai_main_session_id() if museai_config_path().is_file() else None
-            if not session:
-                self._announce(
-                    "Error: muse.ai's main chat could not be opened. Check your sign-in."
-                )
-                return
-            entry = HistoryEntry(BACKEND_MUSEAI, session, "Main chat", "", 0, folder="muse.ai")
-            turns = load_turns(entry)
+        if self._museai_main_loading:
+            self._museai_pending_send |= resume_pending
+            return
+        self._museai_main_loading = True
+        self._museai_pending_send = resume_pending
+        self._museai_main_serial += 1
+        serial = self._museai_main_serial
+        self._announce("Loading muse.ai's main chat")
+
+        def work() -> None:
+            try:
+                session = museai_main_session_id() if museai_config_path().is_file() else None
+                if not session:
+                    raise ValueError("Check your sign-in.")
+                entry = HistoryEntry(BACKEND_MUSEAI, session, "Main chat", "", 0, folder="muse.ai")
+                turns = load_turns(entry)
+                error = ""
+            except Exception as exc:
+                entry, turns, error = None, [], str(exc)
+            _call_after_alive(self._museai_main_loaded, serial, entry, turns, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _museai_main_loaded(self, serial: int, entry, turns, error: str) -> None:
+        if not self or serial != self._museai_main_serial:
+            return
+        self._museai_main_loading = False
+        if self._backend != BACKEND_MUSEAI:
+            return
+        if error or entry is None:
+            self._museai_pending_send = False
+            self._announce(
+                f"Error: muse.ai's main chat could not be opened. {error or 'Check your sign-in.'}"
+            )
+            return
+        resume_pending = self._museai_pending_send
+        self._museai_pending_send = False
         self._museai_main_required = False
         self.model = self.effort = self._cli_model = self._cli_effort = ""
         self.restore_history(entry, turns)
+        if resume_pending:
+            wx.CallAfter(self.send_now)
 
     def show_backend_in_prompt(self, shown: bool) -> None:
         """Name the prompt after the backend it sends to, while tabs are mixed.
@@ -11829,7 +11868,7 @@ class SessionPanel(wx.Panel):
 
         selected_backend = self.selected_backend()
         if selected_backend == BACKEND_MUSEAI and getattr(self, "_museai_main_required", False):
-            self.open_museai_main()
+            self.open_museai_main(resume_pending=True)
             if self._museai_main_required:
                 return
         if selected_backend != self._session_backend:
@@ -12303,8 +12342,11 @@ class SessionPanel(wx.Panel):
             # queued leaves that event writing into a list with nothing in it.
             self._announce("Error: Stop the running task before starting a new conversation")
             return
+        self._museai_main_serial += 1
         self._session_id = None
         self._museai_main_required = False
+        self._museai_main_loading = False
+        self._museai_pending_send = False
         self._drop_held_backends()
         # The name from the New Session dialog belonged to the conversation
         # just abandoned. Keeping it would hand that name to the NEXT
@@ -12367,6 +12409,9 @@ class SessionPanel(wx.Panel):
         Adopting the backend's own session id is what makes the next message a
         continuation of it rather than the start of something new.
         """
+        self._museai_main_serial += 1
+        self._museai_main_loading = False
+        self._museai_pending_send = False
         self._session_id = entry.session_id
         self._museai_main_required = False
         self._pending_messages = []
@@ -16878,23 +16923,46 @@ class MainFrame(wx.Frame):
         if not request:
             return
         kind, value, title = request
-        from museai_backend import museai_main_session_id
+        serial = getattr(self, "_museai_active_serial", 0) + 1
+        self._museai_active_serial = serial
+        self._announce_setting("Loading muse.ai conversation")
 
-        session = museai_main_session_id() if kind in ("draft", "main") else value
-        if not session:
-            announce("Could not open the muse.ai main chat. The discussion was not sent.")
+        def work() -> None:
+            try:
+                if kind in ("draft", "main"):
+                    from museai_backend import museai_main_session_id
+
+                    session = museai_main_session_id()
+                else:
+                    session = value
+                if not session:
+                    raise ValueError("Could not open the muse.ai main chat.")
+                entry = HistoryEntry(
+                    backend=BACKEND_MUSEAI,
+                    session_id=session,
+                    title=f"Discuss: {title}" if kind == "draft" else title,
+                    path="",
+                    modified=time.time(),
+                    folder="muse.ai",
+                    cwd="",
+                )
+                turns = load_turns(entry)
+                error = ""
+            except Exception as exc:
+                entry, turns, session, error = None, [], None, str(exc)
+            _call_after_alive(
+                self._museai_chat_loaded, serial, kind, value, entry, turns, session, error
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _museai_chat_loaded(self, serial, kind, value, entry, turns, session, error) -> None:
+        if not self or serial != getattr(self, "_museai_active_serial", 0):
             return
-        entry = HistoryEntry(
-            backend=BACKEND_MUSEAI,
-            session_id=session,
-            title=f"Discuss: {title}" if kind == "draft" else title,
-            path="",
-            modified=time.time(),
-            folder="muse.ai",
-            cwd="",
-        )
-        with wx.BusyCursor():
-            turns = load_turns(entry)
+        if error or entry is None:
+            message = f"Error: Could not open the muse.ai conversation. {error} The discussion was not sent."
+            self._announce_setting(message)
+            return
         panel = self._add_session(self._history_cwd(), open_main_chat=False)
         panel.restore_history(entry, turns)
         self._follow_tab_backend()
