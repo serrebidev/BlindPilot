@@ -7,6 +7,7 @@ previous conversation, which nobody would see until they read the transcript.
 from __future__ import annotations
 
 import inspect
+import threading
 from pathlib import Path
 
 import pytest
@@ -85,9 +86,44 @@ def test_dropping_stops_every_backend_this_panel_held():
             backend_pool.HeldProcess(hermes, adapter),
         )
         app.SessionPanel._drop_held_backends(panel)
+        assert pool.held_count() == 0
+        pool.drop_all()
         assert claude.stops == 1
         assert hermes.stops == 1
     finally:
+        pool.drop_all()
+
+
+def test_dropping_a_conversation_does_not_wait_for_process_stop():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def stop(_handle: object) -> None:
+        entered.set()
+        assert release.wait(5)
+
+    adapter = backend_pool.Adapter(
+        alive=lambda _h: True,
+        interrupt=lambda _h, _t: True,
+        stop=stop,
+        busy=lambda _h: False,
+    )
+    panel = type("_Panel", (), {})()
+    pool = backend_pool.pool()
+    key = backend_pool.pool_key(app.BACKEND_CLAUDE, panel)
+    pool.keep(key, backend_pool.HeldProcess(object(), adapter))
+    caller = threading.Thread(
+        target=lambda: app.SessionPanel._drop_held_backends(panel), daemon=True
+    )
+    caller.start()
+    try:
+        assert entered.wait(2)
+        caller.join(timeout=0.5)
+        assert not caller.is_alive(), "the conversation drop waited for process stop"
+        assert pool.take(key) is None
+    finally:
+        release.set()
+        caller.join(timeout=2)
         pool.drop_all()
 
 

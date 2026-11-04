@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import threading
 
 import backend_pool
 
@@ -161,6 +162,78 @@ def test_dropping_stops_the_process_and_forgets_it():
     pool.drop(key)
     assert handle.stops == 1
     assert pool.take(key) is None
+
+
+def test_async_drop_forgets_the_process_before_stop_finishes():
+    pool = backend_pool.BackendPool()
+    key = backend_pool.pool_key("claude", _Panel())
+    entered = threading.Event()
+    release = threading.Event()
+    stopped_on = []
+
+    def stop(_handle: object) -> None:
+        stopped_on.append(threading.current_thread())
+        entered.set()
+        assert release.wait(5)
+
+    pool.keep(key, backend_pool.HeldProcess(_FakeHandle(), _adapter()._replace(stop=stop)))
+    caller = threading.Thread(target=lambda: pool.drop_async(key), daemon=True)
+    caller.start()
+    try:
+        assert entered.wait(2)
+        caller.join(timeout=0.5)
+        assert not caller.is_alive(), "dropping waited for the backend to stop"
+        assert pool.held_count() == 0
+        assert pool.take(key) is None
+        assert stopped_on[0] is not caller
+        assert stopped_on[0].daemon
+    finally:
+        release.set()
+        caller.join(timeout=2)
+        pool.drop_all()
+
+
+def test_drop_all_waits_for_a_previous_async_drop():
+    pool = backend_pool.BackendPool()
+    key = backend_pool.pool_key("codex")
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def stop(_handle: object) -> None:
+        entered.set()
+        assert release.wait(5)
+
+    pool.keep(key, backend_pool.HeldProcess(_FakeHandle(), _adapter()._replace(stop=stop)))
+    pool.drop_async(key)
+    assert entered.wait(2)
+    shutdown = threading.Thread(target=lambda: (pool.drop_all(), finished.set()), daemon=True)
+    shutdown.start()
+    try:
+        assert not finished.wait(0.05), "shutdown returned while a process was stopping"
+    finally:
+        release.set()
+        shutdown.join(timeout=2)
+    assert finished.is_set()
+
+
+def test_async_drop_after_shutdown_stops_before_returning():
+    pool = backend_pool.BackendPool()
+    pool.drop_all()
+    key = backend_pool.pool_key("codex")
+    handle = _FakeHandle()
+    stopped_on = []
+
+    def stop(handle: _FakeHandle) -> None:
+        stopped_on.append(threading.current_thread())
+        handle.stop()
+
+    pool.keep(key, backend_pool.HeldProcess(handle, _adapter()._replace(stop=stop)))
+    pool.drop_async(key)
+    assert stopped_on == [threading.current_thread()]
+    assert handle.stops == 1
+    assert pool.held_count() == 0
+    assert not pool._stopping
 
 
 def test_dropping_a_key_nobody_held_does_nothing():

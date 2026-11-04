@@ -12179,7 +12179,7 @@ class SessionPanel(wx.Panel):
         for backend in (BACKEND_CLAUDE, BACKEND_HERMES, BACKEND_FREEBUFF):
             # A key never held is a documented no-op, so this stays correct
             # while Hermes and FreeBuff still start fresh each turn.
-            shared.drop(backend_pool.pool_key(backend, self))
+            shared.drop_async(backend_pool.pool_key(backend, self))
         # A wake-up queued by the process that just went belonged to the
         # conversation it went with. Read through getattr because this also
         # runs on half-built panels and on test stand-ins.
