@@ -49,6 +49,14 @@ from certificates import certificate_context
 HERMES_SOURCE_DIRNAME = "hermes-agent"
 HERMES_GATEWAY_MODULE = "tui_gateway.entry"
 
+# The subprotocol a running gateway's WebSocket answers to, and the bounded
+# wait for asking Hermes whether one is already running. The protocol name is
+# Hermes' own (``gateway.session_contract.CANONICAL_GATEWAY_PROTOCOL``
+# upstream); it is spelled out here because the check below runs against an
+# installed Hermes, whose modules BlindPilot cannot import.
+GATEWAY_WS_PROTOCOL = "hermes-gateway-v1"
+GATEWAY_ATTACH_TIMEOUT = 20.0
+
 # Hermes writes warnings to stderr that have nothing to do with the protocol:
 # SQLite build advisories, optional-tool notices, MCP server descriptions.
 # Treating those as failures would break sessions that are working fine, so
@@ -990,6 +998,104 @@ class JsonRpcCalls:
         return frame
 
 
+# Hermes' own client bootstrap, run under Hermes' interpreter: it discovers
+# the gateway already owning this profile's home and mints the one-shot
+# session ticket for attaching to it. BlindPilot reuses that machinery rather
+# than reimplementing discovery -- the private control socket, the ticket
+# grant and the endpoint validation are all Hermes-internal and move with it.
+# Prints one JSON line: {"url": ..., "protocols": [...]} or {"error": ...}.
+_BOOTSTRAP_PROBE = """
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("gateway_bootstrap", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    result = module.bootstrap(False)
+except Exception as exc:
+    print(json.dumps({"error": str(exc)}))
+else:
+    print(json.dumps(result))
+"""
+
+
+def running_gateway_target() -> Optional[tuple[str, list[str]]]:
+    """Where to attach to a gateway already running for this home, if any.
+
+    Returns ``(url, subprotocols)`` for the running gateway's WebSocket, or
+    ``None`` when no gateway owns the home -- or when the installed Hermes
+    predates the attach machinery, in which case the caller falls back to
+    starting a gateway of its own exactly as before.
+
+    Only the native path is probed: a Hermes inside WSL (driven from a
+    Windows desktop) has no interpreter visible on this side, so it keeps
+    the spawn path and the refusal message below. ponytail: probe through
+    wsl.exe if a WSL user hits the refusal.
+    """
+    python = hermes_python()
+    root = hermes_source_root()
+    if not python or root is None:
+        return None
+    script = root / "ui-tui" / "scripts" / "gateway_bootstrap.py"
+    if not script.is_file():
+        return None
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    existing = env.get("PYTHONPATH", "").strip()
+    env["PYTHONPATH"] = f"{root}{os.pathsep}{existing}" if existing else str(root)
+    env["HERMES_PYTHON_SRC_ROOT"] = str(root)
+    try:
+        completed = subprocess.run(
+            [python, "-c", _BOOTSTRAP_PROBE, str(script)],
+            capture_output=True,
+            timeout=GATEWAY_ATTACH_TIMEOUT,
+            env=env,
+            **_text_output_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in reversed(completed.stdout.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            result = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(result, dict):
+            return None
+        url = result.get("url")
+        protocols = result.get("protocols")
+        if (
+            isinstance(url, str)
+            and url.startswith(("ws://", "wss://"))
+            and isinstance(protocols, list)
+            and protocols
+            and all(isinstance(item, str) for item in protocols)
+            and GATEWAY_WS_PROTOCOL in protocols
+        ):
+            return url, list(protocols)
+        return None
+    return None
+
+
+def local_transport(cwd: str) -> "Transport":
+    """The transport for a Hermes on this machine.
+
+    A gateway already running for the configured home owns that home's
+    sessions and database, and a second gateway is refused -- so attach to
+    the running one when there is one, and only spawn a private gateway
+    when there is not.
+    """
+    target = running_gateway_target()
+    if target is not None:
+        url, protocols = target
+        return WebSocketTransport(url, "", subprotocols=protocols)
+    return StdioTransport(cwd)
+
+
 class StdioTransport:
     """A JSON-RPC host as a child process, spoken to over its pipes.
 
@@ -1198,6 +1304,17 @@ class StdioTransport:
         return proc is not None and proc.poll() is None and not self._closed
 
     def failure_detail(self) -> str:
+        # The raw gateway-exit line names Hermes' lock files and tells a
+        # terminal user to "attach to it instead" -- an instruction this app
+        # already tried to follow before spawning. Say the actionable part.
+        if self._peer == "Hermes" and any(
+            "owned by a running gateway" in line for line in self._stderr
+        ):
+            return (
+                "Hermes is already running for this profile, and Blind Pilot "
+                "could not attach to it. Close the other Hermes window or "
+                "stop its gateway, then try again."
+            )
         detail = "\n".join(self._stderr[-6:]).strip()
         return detail or f"{self._peer} closed the connection before the turn completed"
 
@@ -1242,8 +1359,13 @@ class WebSocketTransport:
         token: str = "",
         credential: str = "token",
         username: str = "",
+        subprotocols: Optional[Sequence[str]] = None,
     ) -> None:
         self._base_url = url
+        # A gateway on this machine is attached to, not signed into: its
+        # one-shot ticket travels as a WebSocket subprotocol (Hermes' own
+        # attach shape), not as a query credential, and there is no token.
+        self._subprotocols = list(subprotocols) if subprotocols else None
         self._token = token
         self._credential = credential if credential in REMOTE_CREDENTIALS else "token"
         self._username = username or "hermes"
@@ -1272,7 +1394,9 @@ class WebSocketTransport:
             ) from exc
         signed_in = False
         cookies = ""
-        if self._credential == "password":
+        if self._subprotocols:
+            url = self._base_url
+        elif self._credential == "password":
             # A Hermes reachable from another machine requires its own login,
             # and the ticket it then issues lives thirty seconds -- so it is
             # minted here, immediately before use, rather than stored.
@@ -1288,6 +1412,8 @@ class WebSocketTransport:
         # same client the sign-in did rather than as a stranger asking for a
         # ticket nobody minted for it. See `_cookie_header`.
         extra: dict = {"cookie": cookies} if cookies else {}
+        if self._subprotocols:
+            extra["subprotocols"] = list(self._subprotocols)
         try:
             self._ws = create_connection(
                 url,
@@ -1300,6 +1426,7 @@ class WebSocketTransport:
                 sslopt={"context": certificate_context()},
                 **extra,
             )
+
         except Exception as exc:  # noqa: BLE001 - any failure is "cannot reach it"
             self._error = str(exc)
             status = _handshake_status(exc)
@@ -1322,6 +1449,18 @@ class WebSocketTransport:
                     refuser=_refusal_evidence(exc),
                 )
             ) from exc
+        if self._subprotocols:
+            # The gateway echoes the canonical protocol when it accepted the
+            # ticket; anything else answered the upgrade, and talking to it
+            # as if it were the gateway would fail later and worse.
+            answered = getattr(self._ws, "subprotocol", None)
+            if answered is not None and answered != GATEWAY_WS_PROTOCOL:
+                self.close()
+                raise OSError(
+                    "The running Hermes gateway answered with an unexpected "
+                    f"protocol ({answered}); it may be a different Hermes "
+                    "version than the one installed."
+                )
         self._closing.clear()
         self._reader = threading.Thread(target=self._read_forever, daemon=True)
         self._reader.start()
@@ -1571,7 +1710,7 @@ def hermes_session_catalog(
     else:
         if not hermes_installed():
             return [], set(), "Hermes Agent was not found on this computer."
-        transport = StdioTransport(cwd or str(Path.home()))
+        transport = local_transport(cwd or str(Path.home()))
     try:
         transport.start()  # type: ignore[attr-defined]
     except OSError as exc:
@@ -1676,7 +1815,7 @@ def hermes_model_options(
     else:
         if not hermes_installed():
             return [], [], "", "", "Hermes Agent was not found on this computer."
-        transport = StdioTransport(cwd or str(Path.home()))
+        transport = local_transport(cwd or str(Path.home()))
     try:
         transport.start()  # type: ignore[attr-defined]
     except OSError as exc:

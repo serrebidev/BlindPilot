@@ -33,9 +33,9 @@ from agent_backends import (
 )
 from hermes_backend import (
     JsonRpcCalls,
-    StdioTransport,
     Transport,
     WebSocketTransport,
+    local_transport,
     split_model_row,
     hermes_installed,
 )
@@ -858,7 +858,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
                     "Hermes Agent is not installed. See https://hermes-agent.nousresearch.com/docs"
                 )
                 return False
-            transport = StdioTransport(self._cwd)
+            transport = local_transport(self._cwd)
         try:
             transport.start()
         except OSError as exc:

@@ -2183,3 +2183,137 @@ def test_a_failed_wsl_python_probe_is_retried_not_cached(monkeypatch):
     assert hermes_backend._WSL_PYTHON_CHECKED is False
     assert hermes_backend.wsl_hermes_python() is None
     assert len(attempts) == 2
+
+
+def _bootstrap_root(tmp_path, monkeypatch):
+    """A fake Hermes source tree carrying the attach bootstrap script."""
+    script = tmp_path / "ui-tui" / "scripts" / "gateway_bootstrap.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# fake\n", encoding="utf-8")
+    monkeypatch.setattr(hermes_backend, "hermes_python", lambda: "hermes-python")
+    monkeypatch.setattr(hermes_backend, "hermes_source_root", lambda: tmp_path)
+    return tmp_path
+
+
+def test_a_running_gateway_is_attached_to_not_refused(tmp_path, monkeypatch):
+    """Issue #127: a gateway already owning the home is attached to.
+
+    Blind Pilot used to spawn a second gateway against the same home, and
+    Hermes refused it with a raw [gateway-exit] line. The bootstrap Hermes
+    ships for its own clients now runs first, and its target wins.
+    """
+    _bootstrap_root(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {
+            "url": "ws://127.0.0.1:9119/api/ws",
+            "protocols": ["hermes-gateway-v1", "hermes-gateway-ticket.abc"],
+        }
+    )
+    monkeypatch.setattr(hermes_backend.subprocess, "run", lambda *_a, **_k: _completed(payload))
+
+    assert hermes_backend.running_gateway_target() == (
+        "ws://127.0.0.1:9119/api/ws",
+        ["hermes-gateway-v1", "hermes-gateway-ticket.abc"],
+    )
+    transport = hermes_backend.local_transport(".")
+    assert isinstance(transport, hermes_backend.WebSocketTransport)
+    assert transport._subprotocols == [
+        "hermes-gateway-v1",
+        "hermes-gateway-ticket.abc",
+    ]
+
+
+def test_no_running_gateway_falls_back_to_spawning_its_own(tmp_path, monkeypatch):
+    _bootstrap_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        hermes_backend.subprocess,
+        "run",
+        lambda *_a, **_k: _completed(json.dumps({"error": "gateway absent: not ready"})),
+    )
+
+    assert hermes_backend.running_gateway_target() is None
+    assert isinstance(hermes_backend.local_transport("."), hermes_backend.StdioTransport)
+
+
+def test_an_old_hermes_without_the_bootstrap_script_is_not_probed(tmp_path, monkeypatch):
+    monkeypatch.setattr(hermes_backend, "hermes_python", lambda: "hermes-python")
+    monkeypatch.setattr(hermes_backend, "hermes_source_root", lambda: tmp_path)
+
+    def _run(*_args, **_kwargs):
+        raise AssertionError("an old Hermes must not be probed")
+
+    monkeypatch.setattr(hermes_backend.subprocess, "run", _run)
+    assert hermes_backend.running_gateway_target() is None
+
+
+def test_attach_dials_with_subprotocols_and_no_query_credential(monkeypatch):
+    opened = {}
+
+    class _FakeSocket:
+        subprotocol = "hermes-gateway-v1"
+
+        def recv(self):
+            raise OSError("closed")
+
+        def close(self):
+            return None
+
+    def _fake_create(url, timeout=None, **kwargs):
+        opened["url"] = url
+        opened["kwargs"] = kwargs
+        return _FakeSocket()
+
+    monkeypatch.setitem(
+        sys.modules, "websocket", types.SimpleNamespace(create_connection=_fake_create)
+    )
+    transport = hermes_backend.WebSocketTransport(
+        "ws://127.0.0.1:9119/api/ws",
+        "",
+        subprotocols=["hermes-gateway-v1", "hermes-gateway-ticket.abc"],
+    )
+    transport.start()
+
+    assert opened["url"] == "ws://127.0.0.1:9119/api/ws"
+    assert opened["kwargs"]["subprotocols"] == [
+        "hermes-gateway-v1",
+        "hermes-gateway-ticket.abc",
+    ]
+
+
+def test_attach_refuses_an_unexpected_protocol(monkeypatch):
+    class _FakeSocket:
+        subprotocol = "something-else"
+
+        def recv(self):
+            raise OSError("closed")
+
+        def close(self):
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "websocket",
+        types.SimpleNamespace(create_connection=lambda *_a, **_k: _FakeSocket()),
+    )
+    transport = hermes_backend.WebSocketTransport(
+        "ws://127.0.0.1:9119/api/ws",
+        "",
+        subprotocols=["hermes-gateway-v1", "hermes-gateway-ticket.abc"],
+    )
+    try:
+        transport.start()
+    except OSError as exc:
+        assert "unexpected protocol" in str(exc)
+    else:  # pragma: no cover - the assertion above is the test
+        raise AssertionError("an unexpected protocol must refuse the attach")
+
+
+def test_the_gateway_refusal_is_translated_for_the_user():
+    transport = hermes_backend.StdioTransport(".")
+    transport._stderr = [
+        "[gateway-exit] refused: /Users/dev/.hermes is owned by a running "
+        "gateway; attach to it instead"
+    ]
+    detail = transport.failure_detail()
+    assert "already running" in detail
+    assert "gateway-exit" not in detail
