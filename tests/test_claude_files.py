@@ -9,6 +9,8 @@ description, so the list reads like an index rather than a column of paths.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 try:
@@ -22,6 +24,189 @@ import blindpilot_app as app
 def _write(path, text=""):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+class _FilesFrame:
+    _claude_files_active = app.MainFrame._claude_files_active
+    _load_agent_files = app.MainFrame._load_agent_files
+    _agent_files_loaded = app.MainFrame._agent_files_loaded
+    _show_agent_files = app.MainFrame._show_agent_files
+    _restore_agent_files_focus = app.MainFrame._restore_agent_files_focus
+
+    def __init__(self):
+        self.alive = True
+        self._app_mode = app.APP_MODE_AGENT
+        self.page = object()
+        self.notebook = self
+        self._agent_files_cache = {}
+        self._agent_files_serial = 0
+        self.messages = []
+        self.shown = []
+
+    def __bool__(self):
+        return self.alive
+
+    def GetCurrentPage(self):
+        return self.page
+
+    def _announce_setting(self, message):
+        self.messages.append(message)
+
+    def _set_status_text(self, message):
+        self.messages.append(message)
+
+
+def test_agent_discovery_runs_on_worker_and_only_current_page_receives_it(monkeypatch, tmp_path):
+    frame = _FilesFrame()
+    queued = threading.Event()
+    callbacks = []
+    worker_ids = []
+    groups = [app.AgentFiles("Claude Code", "Memories", [])]
+
+    def discover(_cwd):
+        worker_ids.append(threading.get_ident())
+        return groups
+
+    def enqueue(callback, *args):
+        callbacks.append((callback, args))
+        queued.set()
+
+    monkeypatch.setattr(app, "agent_files", discover)
+    monkeypatch.setattr(app, "_call_after_alive", enqueue)
+    monkeypatch.setattr(frame, "_show_agent_files", lambda *args: frame.shown.append(args))
+    cwd = str(tmp_path)
+
+    frame._load_agent_files(cwd, frame.page, 0)
+    assert queued.wait(5)
+    assert worker_ids != [threading.get_ident()]
+    assert frame.shown == []
+    callback, args = callbacks.pop(0)
+    callback(*args)
+
+    assert frame._agent_files_cache[app.os.path.normcase(app.os.path.abspath(cwd))] is groups
+    assert len(frame.shown) == 1
+    assert frame.messages == ["Looking for what agents know…", "What Agents Know is ready"]
+
+
+def test_old_agent_discovery_cannot_fill_replaced_or_closed_page(monkeypatch, tmp_path):
+    frame = _FilesFrame()
+    callbacks = []
+    queued = threading.Event()
+    monkeypatch.setattr(app, "agent_files", lambda _cwd: [])
+
+    def enqueue(callback, *args):
+        callbacks.append((callback, args))
+        queued.set()
+
+    monkeypatch.setattr(app, "_call_after_alive", enqueue)
+    monkeypatch.setattr(frame, "_show_agent_files", lambda *args: frame.shown.append(args))
+    cwd = str(tmp_path)
+
+    frame._load_agent_files(cwd, frame.page, 0)
+    assert queued.wait(5)
+    callback, args = callbacks.pop(0)
+    frame.page = object()
+    callback(*args)
+    assert frame.shown == []
+    assert frame._agent_files_cache == {}
+
+    frame._agent_files_serial += 1
+    callback(*args)
+    assert frame.shown == []
+
+    frame.page = args[2]
+    frame._agent_files_serial = args[0]
+    frame.alive = False
+    callback(*args)
+    assert frame.shown == []
+
+
+@pytest.mark.parametrize("failure", [OSError, RuntimeError])
+def test_agent_discovery_error_is_spoken_without_caching(monkeypatch, tmp_path, failure):
+    frame = _FilesFrame()
+    callbacks = []
+    queued = threading.Event()
+
+    def fail(_cwd):
+        raise failure("unreadable folder")
+
+    def enqueue(callback, *args):
+        callbacks.append((callback, args))
+        queued.set()
+
+    monkeypatch.setattr(app, "agent_files", fail)
+    monkeypatch.setattr(app, "_call_after_alive", enqueue)
+    frame._load_agent_files(str(tmp_path), frame.page, 0)
+    assert queued.wait(5)
+    callback, args = callbacks.pop(0)
+    callback(*args)
+
+    assert frame._agent_files_cache == {}
+    assert frame.messages[-1] == "Error: could not list what agents know: unreadable folder"
+
+
+def test_agent_list_refresh_forgets_only_its_folder_and_keeps_selection(monkeypatch, tmp_path):
+    frame = _FilesFrame()
+    cwd = str(tmp_path / "one")
+    other = str(tmp_path / "two")
+    key = app.os.path.normcase(app.os.path.abspath(cwd))
+    other_key = app.os.path.normcase(app.os.path.abspath(other))
+    groups = [
+        app.AgentFiles("Claude Code", "Memories", []),
+        app.AgentFiles("Codex", "Agents", []),
+    ]
+    frame._agent_files_cache = {key: groups, other_key: groups}
+    refreshed = []
+    monkeypatch.setattr(frame, "_load_agent_files", lambda *args: refreshed.append(args))
+
+    class Choice:
+        def __init__(self, _parent, _message, _title, labels):
+            assert labels[-1] == "Refresh the list"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def SetSelection(self, selected):
+            assert selected == 1
+
+        def ShowModal(self):
+            return app.wx.ID_OK
+
+        def GetSelection(self):
+            return len(groups)
+
+    monkeypatch.setattr(app.wx, "SingleChoiceDialog", Choice)
+
+    frame._show_agent_files(cwd, frame.page, 1, groups, 1)
+
+    assert key not in frame._agent_files_cache
+    assert frame._agent_files_cache[other_key] is groups
+    assert refreshed == [(cwd, frame.page, 1)]
+
+
+def test_agent_list_reuses_folder_cache_without_discovery(monkeypatch, tmp_path, wx_app):
+    frame = _FilesFrame()
+    cwd = str(tmp_path)
+
+    class Page:
+        def __init__(self, folder):
+            self.cwd = folder
+
+    frame.page = Page(cwd)
+    groups = [app.AgentFiles("Claude Code", "Memories", [])]
+    frame._agent_files_cache[app.os.path.normcase(app.os.path.abspath(cwd))] = groups
+    shown = []
+    monkeypatch.setattr(app, "SessionPanel", Page)
+    monkeypatch.setattr(frame, "_show_agent_files", lambda *args: shown.append(args))
+    monkeypatch.setattr(frame, "_load_agent_files", lambda *_args: pytest.fail("cache missed"))
+
+    frame._claude_files_active()
+
+    assert shown[0][0:2] == (cwd, frame.page)
+    assert shown[0][3] is groups
 
 
 def test_files_are_found_by_kind_and_labelled_from_their_front_matter(tmp_path, monkeypatch):
