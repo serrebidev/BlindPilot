@@ -374,6 +374,58 @@ CHAT_MODEL_ORDERS = (
 # the responses control only once for each batch.
 _WORKER_EVENT_BATCH_SIZE = 16
 _WORKER_EVENT_BUDGET_SECONDS = 0.02
+
+# ----- GUI-thread budget -----
+#
+# Nothing may block the GUI thread. That rule has been in this project's
+# reviews for a while and nothing enforced it, so a handler that reads a
+# provider CLI or waits on a process still runs to completion before the
+# window repaints, and the keystrokes behind it are lost.
+#
+# A shortcut handler is expected to return inside this budget. Work that can
+# exceed it belongs on a worker, with the handler returning at once and the
+# answer filled in when it arrives. `_gui_work` measures what each handler
+# actually spends and records anything over the line, so the offending handler
+# is named rather than guessed at.
+GUI_BUDGET_MS = 50.0
+
+# Newest last, and bounded: a stalled window produces one entry per keystroke,
+# and the record must not grow without limit on a machine that is having a bad
+# day. Read by the tests that guard a handler, written only by `_gui_work`.
+_over_budget_work: deque[tuple[str, float]] = deque(maxlen=200)
+
+
+def over_budget_work() -> list[tuple[str, float]]:
+    """(name, milliseconds) for every GUI-thread callback that ran long.
+
+    Newest last, and a copy, so nothing a caller does can disturb what the
+    window recorded.
+    """
+    return list(_over_budget_work)
+
+
+def _gui_work(name: str, action: Callable[[], None]) -> Callable[[], None]:
+    """Wrap a GUI-thread callback so what it spends is measured and recorded.
+
+    The returned callable takes no arguments, which is what a menu binding
+    hands its handler. Over-budget work is logged at DEBUG -- the harness, on
+    with BLINDPILOT_LOG_LEVEL=DEBUG -- and filed in `over_budget_work`.
+    """
+    logger = logging.getLogger("blindpilot.timing")
+
+    def run() -> None:
+        started = time.monotonic()
+        try:
+            action()
+        finally:
+            spent = (time.monotonic() - started) * 1000.0
+            if spent > GUI_BUDGET_MS:
+                _over_budget_work.append((name, spent))
+                logger.debug("%s spent %.0f ms on the GUI thread", name, spent)
+
+    return run
+
+
 ORIGINAL_APP_CREDIT = (
     "Based on the original Claude Code Reader application by doubletaponair.\n"
     "https://github.com/doubletaponair/claude-code-reader"
@@ -15473,14 +15525,23 @@ class MainFrame(wx.Frame):
         id_jump_response = wx.NewIdRef()
         id_next_pane = wx.NewIdRef()
         id_prev_pane = wx.NewIdRef()
-        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_pane(+1), id=id_next_pane)
-        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_pane(-1), id=id_prev_pane)
-        self.Bind(wx.EVT_MENU, lambda _e: self._focus_active("prompt"), id=id_focus_prompt)
-        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(+1), id=id_next_tab)
-        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_tab(-1), id=id_prev_tab)
-        self.Bind(wx.EVT_MENU, lambda _e: self._cycle_mode_active(), id=id_cycle_mode)
-        self.Bind(wx.EVT_MENU, lambda _e: self._attach_active(), id=id_attach)
-        self.Bind(wx.EVT_MENU, lambda _e: self._jump_to_latest_response(), id=id_jump_response)
+
+        self._bind_shortcut(id_next_pane, "F6, next pane", lambda: self._cycle_pane(+1))
+        self._bind_shortcut(id_prev_pane, "Shift+F6, previous pane", lambda: self._cycle_pane(-1))
+        self._bind_shortcut(
+            id_focus_prompt, "Ctrl+L, focus the prompt", lambda: self._focus_active("prompt")
+        )
+        self._bind_shortcut(id_next_tab, "Ctrl+Tab, next tab", lambda: self._cycle_tab(+1))
+        self._bind_shortcut(
+            id_prev_tab, "Ctrl+Shift+Tab, previous tab", lambda: self._cycle_tab(-1)
+        )
+        self._bind_shortcut(
+            id_cycle_mode, "Ctrl+Shift+M, cycle mode", lambda: self._cycle_mode_active()
+        )
+        self._bind_shortcut(id_attach, "Ctrl+Shift+A, attach files", lambda: self._attach_active())
+        self._bind_shortcut(
+            id_jump_response, "Ctrl+R, latest response", lambda: self._jump_to_latest_response()
+        )
 
         accel_entries = [
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("L"), id_focus_prompt),
@@ -15498,11 +15559,9 @@ class MainFrame(wx.Frame):
         for n in range(1, 10):
             tid = wx.NewIdRef()
             self._tab_jump_ids.append(tid)
-
-            def jump_to_tab(_event: wx.CommandEvent, idx: int = n - 1) -> None:
-                self._jump_to_tab(idx)
-
-            self.Bind(wx.EVT_MENU, jump_to_tab, id=tid)
+            self._bind_shortcut(
+                tid, f"Ctrl+{n}, jump to tab {n}", lambda n=n: self._jump_to_tab(n - 1)
+            )
             accel_entries.append(wx.AcceleratorEntry(wx.ACCEL_CMD, ord(str(n)), tid))
 
         self.SetAcceleratorTable(wx.AcceleratorTable(accel_entries))
@@ -16218,9 +16277,16 @@ class MainFrame(wx.Frame):
 
     # ----- Options menu -----
     def _menu_item(self, menu, label, help_text, action, item_id=wx.ID_ANY):
-        """Append one item and bind it, so neither can be added without the other."""
+        """Append one item and bind it, so neither can be added without the other.
+
+        Bound through `_gui_work`, so every menu item's chord is measured
+        against the GUI-thread budget. The label names the item in the record
+        and in the log, which is the whole point of measuring here rather than
+        one handler at a time.
+        """
         item = menu.Append(item_id, label, help_text)
-        self.Bind(wx.EVT_MENU, lambda _event: action(), item)
+        handler = _gui_work(label.replace("&", ""), action)
+        self.Bind(wx.EVT_MENU, lambda _event: handler(), item)
         return item
 
     def _agent_item(self, menu, label, help_text, action, item_id=wx.ID_ANY):
@@ -16228,6 +16294,17 @@ class MainFrame(wx.Frame):
         item = self._menu_item(menu, label, help_text, action, item_id)
         self._agent_menu_items.append(item)
         return item
+
+    def _bind_shortcut(self, bind_id, name: str, action) -> None:
+        """Bind an accelerator, measured against the GUI-thread budget.
+
+        Every chord in the table goes through here, not only the ones that are
+        slow today, so a handler that grows expensive is named in the record
+        rather than felt as a stall. A method rather than a nested function
+        because the guard has to be able to reach it.
+        """
+        handler = _gui_work(name, action)
+        self.Bind(wx.EVT_MENU, lambda _event: handler(), id=bind_id)
 
     def _build_model_menu(self) -> wx.Menu:
         """What answers you, and what it may do.
