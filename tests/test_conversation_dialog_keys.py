@@ -58,8 +58,8 @@ def _hermes_stub(monkeypatch):
     stub.dialog = app.HermesSessionsDialog
     stub.said: list[str] = []
     monkeypatch.setattr(app, "announce", lambda text, urgent=False: stub.said.append(text))
-    stub.reload_result = True
-    stub._reload = lambda: stub.reload_result
+    stub.reloads: list[dict] = []
+    stub._reload = lambda **kwargs: stub.reloads.append(kwargs)
     return stub
 
 
@@ -114,16 +114,11 @@ def test_escape_still_cancels_from_anywhere(dialog):
     assert dialog.ended == [app.wx.ID_CANCEL]
 
 
-def test_f5_says_refreshed_only_when_the_reload_worked(hermes):
-    """`_reload` speaks the error itself; "Refreshed" on top of it is a lie.
+def test_f5_asks_for_a_refresh_without_waiting_for_the_answer(hermes):
+    """Only the Hermes dialog reloads; the answer arrives on a worker.
 
-    Only the Hermes dialog reloads: the past-conversations list is read from
-    disk when it opens and has nothing to go back to.
+    The dialog must not speak "Refreshed" before it knows the reload worked.
     """
     _press(hermes, app.wx.WXK_F5)
-    assert hermes.said == ["Refreshed"]
 
-    hermes.said.clear()
-    hermes.reload_result = False
-    _press(hermes, app.wx.WXK_F5)
-    assert hermes.said == []
+    assert hermes.reloads == [{"refreshing": True}]
