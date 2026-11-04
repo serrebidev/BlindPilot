@@ -129,6 +129,7 @@ def panel_stub(base=None, **overrides):
     panel._session_backend = app.BACKEND_CLAUDE
     panel._session_title = ""
     panel._claude_generation = 0
+    panel._museai_main_serial = 0
     panel._held_hermes = None
 
     # ----- what it would show and say -----

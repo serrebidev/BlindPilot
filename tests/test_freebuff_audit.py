@@ -514,10 +514,10 @@ def test_ending_the_launcher_also_ends_its_background_children(monkeypatch):
     terminal = ab._ConPtyTerminal(["test.exe"], ".", {}, 60, 180)
     monkeypatch.setattr(terminal, "isalive", lambda: True)
     called = []
-    monkeypatch.setattr(ab, "_end_windows_tree", lambda pid: called.append(("tree", pid)))
+    terminal._job = SimpleNamespace(close=lambda: called.append(("job", 123)))
     kernel.TerminateProcess = _Api(lambda *_: called.append(("process", 123)))
     terminal.terminate()
-    assert called == [("tree", 123), ("process", 123)]
+    assert called == [("job", 123), ("process", 123)]
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="ConPTY is Windows-only")
