@@ -81,7 +81,7 @@ unverified.
 
 **Work:** Avoid synchronous Muse.ai CLI work during window construction/backend selection and fill the result asynchronously.
 
-**Status:** Implemented in `09289ee`; main-chat discovery and history loading now
+**Status:** Implemented in `a3ca5db`; main-chat discovery and history loading now
 run on a worker when Muse.ai is selected, with spoken loading/error states,
 pending-send preservation, and stale-result guards. Deferred sends also check
 panel lifetime, generation, and backend before running. Focused Muse.ai
