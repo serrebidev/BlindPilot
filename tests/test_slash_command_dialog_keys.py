@@ -136,6 +136,27 @@ def test_get_selection_reports_the_lists_selection(dialog):
     assert dialog.GetSelection() == 2
 
 
+def test_set_labels_keeps_the_selected_command_when_results_arrive(dialog):
+    dialog.list_box.SetSelection(1)
+    selected = dialog.list_box.GetRows()[1].label
+
+    dialog.SetLabels([*LABELS, "/extra. Extra", "Refresh the list"])
+
+    rows = dialog.list_box.GetRows()
+    assert rows[dialog.list_box.GetSelection()].label == selected
+    assert "/extra. Extra" in [row.label for row in rows]
+
+
+def test_set_labels_keeps_refresh_selected_when_results_arrive(dialog):
+    dialog.SetLabels([*LABELS, "Refresh the list"])
+    dialog.list_box.SetSelection(len(LABELS))
+
+    dialog.SetLabels([*LABELS, "/extra. Extra", "Refresh the list"])
+
+    rows = dialog.list_box.GetRows()
+    assert rows[dialog.list_box.GetSelection()].label == "Refresh the list"
+
+
 def test_double_click_on_the_list_ends_the_modal_with_ok(dialog):
     # A dialog built without ShowModal cannot EndModal; the repo's other
     # dialog tests capture the call the same way.

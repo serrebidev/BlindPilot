@@ -2691,7 +2691,8 @@ _HERMES_SLASH_COMMANDS: list[tuple[str, str]] = [
 ]
 
 
-def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list[tuple[str, str]]:
+def _static_slash_commands_for_backend(backend: str) -> list[tuple[str, str]]:
+    """The commands that need no backend probe, and so can be shown at once."""
     commands = list(_BLINDPILOT_SLASH_COMMANDS)
     backend = normalize_backend(backend)
     if backend == BACKEND_CLAUDE:
@@ -2702,6 +2703,16 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
         commands.extend(_HERMES_SLASH_COMMANDS)
     elif backend == BACKEND_OPENCODE:
         commands.extend(_OPENCODE_SLASH_COMMANDS)
+    elif backend == BACKEND_COMMANDCODE:
+        commands.extend(_COMMANDCODE_SLASH_COMMANDS)
+    return commands
+
+
+def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list[tuple[str, str]]:
+    """The commands this backend offers, including the ones it is asked for."""
+    commands = _static_slash_commands_for_backend(backend)
+    backend = normalize_backend(backend)
+    if backend == BACKEND_OPENCODE:
         # Whatever this directory's opencode actually offers, which is its two
         # built-in commands plus any the project defines for itself.
         commands.extend(
@@ -2709,7 +2720,6 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
             for name, description in opencode_commands(cwd)
         )
     elif backend == BACKEND_COMMANDCODE:
-        commands.extend(_COMMANDCODE_SLASH_COMMANDS)
         # Then whatever Command Code itself offers: its agent's commands
         # (skills, mods, /loop), sent as typed, and its console's built-ins,
         # run in its console off screen. Cached; the first look in a folder
@@ -2735,6 +2745,37 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
             for name, description in muse_skills(cwd)
         )
     return commands
+
+
+_SLASH_COMMANDS_REFRESH = "Refresh the command list (checks the backend)"
+_slash_commands_cache: dict[tuple[str, str], list[tuple[str, str]]] = {}
+
+
+def _slash_commands_cache_key(backend: str, cwd: Optional[str]) -> tuple[str, str]:
+    """The same backend and folder spelled differently still share their warm list."""
+    folder = os.path.normcase(os.path.abspath(cwd)) if cwd else ""
+    return normalize_backend(backend), folder
+
+
+def cached_slash_commands(backend: str, cwd: Optional[str]) -> Optional[list[tuple[str, str]]]:
+    """The warm command list for this backend and folder, or None."""
+    return _slash_commands_cache.get(_slash_commands_cache_key(backend, cwd))
+
+
+def remember_slash_commands(
+    backend: str, cwd: Optional[str], commands: list[tuple[str, str]]
+) -> None:
+    """Keep a completed probe warm, so the next open does not ask again."""
+    _slash_commands_cache[_slash_commands_cache_key(backend, cwd)] = list(commands)
+
+
+def forget_slash_commands(backend: str, cwd: Optional[str]) -> None:
+    """Drop a warm list, so Refresh asks the backend again."""
+    _slash_commands_cache.pop(_slash_commands_cache_key(backend, cwd), None)
+
+
+def _slash_command_labels(commands: list[tuple[str, str]]) -> list[str]:
+    return [f"{cmd}. {desc}" for cmd, desc in commands] + [_SLASH_COMMANDS_REFRESH]
 
 
 # BlindPilot runs its backends hands-off: a run that stops to ask a question
@@ -8836,6 +8877,22 @@ class SlashCommandDialog(wx.Dialog):
     def GetSelection(self) -> int:
         return self.list_box.GetSelection()
 
+    def SetLabels(self, labels: List[str]) -> None:
+        """Replace the list while it is open, keeping the same row selected."""
+        rows = self.list_box.GetRows()
+        index = self.list_box.GetSelection()
+        selected = rows[index].label if 0 <= index < len(rows) else ""
+        self.list_box.Set(labels)
+        rows = self.list_box.GetRows()
+        if not rows:
+            return
+        current = [row.label for row in rows]
+        if selected in current:
+            index = current.index(selected)
+        else:
+            index = self.list_box.GetSelection()
+        self.list_box.SetSelection(min(max(index, 0), len(rows) - 1))
+
     def _accept(self) -> None:
         self.EndModal(wx.ID_OK)
 
@@ -9182,6 +9239,9 @@ class SessionPanel(wx.Panel):
         # Which changed-file discovery is current for this tab, so a worker
         # that finishes after a refresh cannot fill the list it replaced.
         self._changed_files_serial = 0
+        # The same for slash-command probes, and the dialog they fill.
+        self._slash_commands_serial = 0
+        self._slash_dialog: Optional[SlashCommandDialog] = None
         self._attachments: List[str] = []
 
         self.backend_status = wx.StaticText(
@@ -10416,24 +10476,56 @@ class SessionPanel(wx.Panel):
                 return
             self._add_attachments(dlg.GetPaths())
 
-    def _pick_slash_command(self) -> None:
-        """Slash-command picker: choose a command to insert into the prompt."""
-        commands = _slash_commands_for_backend(self.selected_backend(), self.cwd)
-        labels = [f"{cmd}. {desc}" for cmd, desc in commands]
+    def _pick_slash_command(self, refresh: bool = False) -> None:
+        """Slash-command picker: choose a command to insert into the prompt.
+
+        The built-in list opens at once. Anything the backend has to be asked
+        for is probed on a worker and filled into the open picker; a backend
+        and folder's last answer is reused until Refresh asks again.
+        """
+        backend = self.selected_backend()
+        cwd = self.cwd
+        if refresh:
+            forget_slash_commands(backend, cwd)
+        cached = None if refresh else cached_slash_commands(backend, cwd)
+        if cached is not None:
+            self._show_slash_commands(backend, cwd, list(cached), probe=False)
+            return
+        self._announce("Looking for this backend's slash commands…")
+        commands = _static_slash_commands_for_backend(backend)
+        self._show_slash_commands(backend, cwd, commands, probe=True)
+
+    def _show_slash_commands(
+        self,
+        backend: str,
+        cwd: Optional[str],
+        commands: list[tuple[str, str]],
+        probe: bool,
+    ) -> None:
+        """Open the picker, and let a worker fill it while it is open."""
+        serial = self._slash_commands_serial + 1
+        self._slash_commands_serial = serial
+        shown = list(commands)
         dlg = SlashCommandDialog(
             self,
             "Choose a slash command. It will be placed in the prompt ready to send.",
-            labels,
+            _slash_command_labels(shown),
         )
+        self._slash_dialog = dlg
         try:
-            if dlg.ShowModal() != wx.ID_OK:
-                return
-            idx = dlg.GetSelection()
+            if probe:
+                self._load_slash_commands(serial, backend, cwd, dlg, shown)
+            chosen = dlg.GetSelection() if dlg.ShowModal() == wx.ID_OK else -1
         finally:
+            self._slash_dialog = None
             dlg.Destroy()
-        if not (0 <= idx < len(commands)):
+        if not (0 <= chosen < len(shown)):
+            if chosen == len(shown):
+                self._pick_slash_command(refresh=True)
+            else:
+                self.prompt.SetFocus()
             return
-        cmd_text = commands[idx][0]
+        cmd_text = shown[chosen][0]
         # Strip the placeholder hint (e.g. "[message]", "[model-id]") so the
         # inserted text is the raw command; user can append arguments if needed.
         cmd_text = cmd_text.split(" [")[0]
@@ -10443,6 +10535,69 @@ class SessionPanel(wx.Panel):
         self.prompt.SetInsertionPointEnd()
         self.prompt.SetFocus()
         self._announce(f"Slash command: {cmd_text}. Edit if needed, then press Enter to send.")
+
+    def _load_slash_commands(
+        self,
+        serial: int,
+        backend: str,
+        cwd: Optional[str],
+        dlg: SlashCommandDialog,
+        shown: list[tuple[str, str]],
+    ) -> None:
+        """Ask this backend for its own commands on a worker."""
+
+        def work() -> None:
+            found: list[tuple[str, str]] = []
+            error = ""
+            try:
+                if normalize_backend(backend) == BACKEND_COMMANDCODE:
+                    # The agent's list is fetched on its own worker; wait for it
+                    # here so this probe returns the complete answer to cache.
+                    from commandcode_backend import commandcode_agent_commands
+
+                    commandcode_agent_commands(cwd, wait=True)
+                found = _slash_commands_for_backend(backend, cwd)
+            except (OSError, subprocess.SubprocessError) as exc:
+                error = str(exc)
+            _call_after_alive(
+                self._slash_commands_loaded,
+                serial,
+                backend,
+                cwd,
+                dlg,
+                shown,
+                found,
+                error,
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _slash_commands_loaded(
+        self,
+        serial: int,
+        backend: str,
+        cwd: Optional[str],
+        dlg: SlashCommandDialog,
+        shown: list[tuple[str, str]],
+        found: list[tuple[str, str]],
+        error: str,
+    ) -> None:
+        """Fill a completed probe, unless its tab or request is no longer current."""
+        if (
+            not self
+            or serial != self._slash_commands_serial
+            or normalize_backend(backend) != self.selected_backend()
+            or cwd != self.cwd
+        ):
+            return
+        if error:
+            self._announce(f"Error: could not read slash commands: {error}")
+            return
+        remember_slash_commands(backend, cwd, found)
+        if dlg is not getattr(self, "_slash_dialog", None):
+            return
+        shown[:] = found
+        dlg.SetLabels(_slash_command_labels(shown))
 
     def _pick_saved_prompt(self) -> None:
         """Saved Prompts: put one in the prompt at the caret, over any selection."""
