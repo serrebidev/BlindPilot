@@ -45,6 +45,10 @@ unverified.
 
 **Work:** Run Git discovery on a worker, announce and fill results, warm per-folder results, and support explicit refresh.
 
+**Status:** Implemented in `a15c072`; focused suite passed (`74 passed`), Ruff
+checks and `git diff --check` passed. Discovery and selected-file reads run off
+the GUI thread. Real screen-reader/device behavior remains unverified.
+
 ## 06. Move Ctrl+/ slash-command probes off-thread
 
 **Ticket:** [#11](https://github.com/thebetterfarhan/BlindPilot/issues/11)
