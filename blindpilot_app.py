@@ -15811,6 +15811,8 @@ class MainFrame(wx.Frame):
         # upstream drops out of the picker on a window left open. Watched only
         # once the window is shown, like the links timer above.
         self._model_timer: Optional[wx.Timer] = None
+        self._desktop_shortcut_serial = 0
+        self._desktop_shortcut_running = False
         menubar = wx.MenuBar()
         menubar.Append(self._build_file_menu(), "&File")
         menubar.Append(self._build_conversation_menu(), "&Conversation")
@@ -18851,12 +18853,31 @@ class MainFrame(wx.Frame):
             page.export_conversation()
 
     def _create_desktop_shortcut(self) -> None:
-        try:
-            link = create_desktop_shortcut()
-        except (OSError, subprocess.SubprocessError) as exc:
-            self._announce_setting(f"The desktop shortcut could not be created: {exc}")
+        if self._desktop_shortcut_running:
             return
-        self._announce_setting(f"Desktop shortcut created at {link}")
+        self._desktop_shortcut_running = True
+        self._desktop_shortcut_serial += 1
+        serial = self._desktop_shortcut_serial
+        self._announce_setting("Creating desktop shortcut…")
+
+        def work() -> None:
+            try:
+                link = create_desktop_shortcut()
+            except (OSError, subprocess.SubprocessError) as exc:
+                _call_after_alive(self._desktop_shortcut_finished, serial, None, str(exc))
+                return
+            _call_after_alive(self._desktop_shortcut_finished, serial, link, "")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _desktop_shortcut_finished(self, serial: int, link: Optional[str], error: str) -> None:
+        if not self or serial != self._desktop_shortcut_serial:
+            return
+        self._desktop_shortcut_running = False
+        if error:
+            self._announce_setting(f"The desktop shortcut could not be created: {error}")
+        elif link is not None:
+            self._announce_setting(f"Desktop shortcut created at {link}")
 
     def _stop_active(self) -> None:
         if self._app_mode == APP_MODE_CHAT and self.chat_panel is not None:
@@ -18995,6 +19016,7 @@ class MainFrame(wx.Frame):
 
     def _on_close(self, event: wx.CloseEvent) -> None:
         self._agent_files_serial = getattr(self, "_agent_files_serial", 0) + 1
+        self._desktop_shortcut_serial = getattr(self, "_desktop_shortcut_serial", 0) + 1
         timer = getattr(self, "_links_timer", None)
         if timer is not None:
             timer.Stop()

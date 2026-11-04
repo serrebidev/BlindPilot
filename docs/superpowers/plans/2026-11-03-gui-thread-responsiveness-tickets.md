@@ -97,6 +97,12 @@ Real screen-reader/device behavior remains unverified.
 
 **Work:** Return from the shortcut handler promptly and report PowerShell result or error accessibly.
 
+**Status:** Implemented on `agent/ticket-19`; shortcut creation runs on a worker,
+reports progress and completion/errors through spoken status, prevents duplicate
+requests, and invalidates callbacks on close. Full gate passed (`2743 passed,
+17 skipped`); focused tests, Ruff, formatting, compileall, and `git diff --check`
+passed. Real screen-reader/device behavior remains unverified.
+
 ## 15. Move setup wizard CLI checks off-thread
 
 **Ticket:** [#20](https://github.com/thebetterfarhan/BlindPilot/issues/20)
