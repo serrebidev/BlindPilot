@@ -1,3 +1,7 @@
+# BlindPilot 0.55.3
+
+- Fixed: the window could freeze - keyboard focus and screen-reader speech stalling - while BlindPilot did slow work such as cloning a repository, checking a setup tool, resuming history, creating a desktop shortcut, or quitting with backends still running. Those actions now run in the background under the 50 ms GUI responsiveness budget (spec #125), and quitting ends the backend processes BlindPilot started instead of leaving them behind. From Farhan Khan's PRs #128 and #129, landed as #130.
+
 # BlindPilot 0.55.2
 
 - Fixed: connecting to Hermes failed with a raw "[gateway-exit] refused: ... is owned by a running gateway" error whenever a Hermes gateway was already running for the profile (started by the CLI, a login item, or another client). Blind Pilot now attaches to the running gateway instead of trying to start a second one, using Hermes' own discovery and session ticket. If attaching is not possible, the message says what happened and what to do, in plain words. Reported by Devin Prater, issue #127.

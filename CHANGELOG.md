@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.3 - 2026-11-04
+
+- The 50 ms GUI budget from spec #125 is now enforced across the app: a blocking contract names the operations that may never run on the GUI thread (process starts, network reads, file scans, synchronous speech calls) and a guard test fails if a GUI callback reaches one. The remaining slow actions run on workers instead: GitHub clone, desktop-shortcut creation, setup CLI checks, history resume, changed-file and Claude file views, Hermes session actions, Muse.ai actions, and quitting, which now ends owned backend process trees off-thread; backend processes are pooled so starting one is not paid on the GUI thread either. Farhan Khan's PRs #128 and #129 landed as replacement #130, which also restores the `search_all_conversations` helper shipped in v0.55.1 (#126) that the branch had inlined away, and makes the branch's Windows-only test seams pass cross-platform. Landing note: the branch predated v0.55.1/v0.55.2 and carried APP_VERSION 0.55.0; the version regression was caught at release time and this release sets 0.55.3 directly - the Hermes running-gateway attach from v0.55.2 is present and unchanged.
+
 ## v0.55.2 - 2026-11-04
 
 - Connecting to a local Hermes no longer spawns a second gateway when one is already running for the profile's home. `running_gateway_target` runs Hermes' own client bootstrap (`ui-tui/scripts/gateway_bootstrap.py`) under Hermes' interpreter to discover the running gateway and mint its session ticket, and `local_transport` attaches to it over its WebSocket with the ticket as a subprotocol; the session catalog, the model picker and the worker all take that path. When nothing is running -- or the installed Hermes predates the bootstrap -- a private gateway is spawned exactly as before. If a spawn still loses the race, the raw `[gateway-exit]` refusal is translated into an actionable message. The WSL path keeps spawning (its interpreter is not visible from Windows) and gets the translated message. Issue #127, reported by Devin Prater.
