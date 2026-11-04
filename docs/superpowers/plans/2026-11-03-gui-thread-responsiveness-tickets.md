@@ -65,6 +65,8 @@ unverified.
 
 **Work:** Keep Hermes session reload from blocking its dialog; announce and fill results when ready.
 
+**Status:** Implemented in `0d44645`; focused UI and callback-guard suite passed (49 passed), Ruff and `git diff --check` passed. Real screen-reader/device behavior remains unverified.
+
 ## 08. Move Muse.ai dialog actions off-thread
 
 **Ticket:** [#13](https://github.com/thebetterfarhan/BlindPilot/issues/13)
