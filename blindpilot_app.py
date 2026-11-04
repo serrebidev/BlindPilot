@@ -15151,6 +15151,9 @@ class MainFrame(wx.Frame):
         self._agent_menu_items: list[wx.MenuItem] = []
         # The two sessions in an agent conversation, while one runs.
         self._relay: Optional[dict] = None
+        self._find_all_serial = 0
+        self._find_all_progress: Optional[wx.ProgressDialog] = None
+        self._find_all_cancel: Optional[threading.Event] = None
         # Session links handed over by a second copy; watched only once the
         # window is shown (`watch_for_links`), never in a window built and torn
         # down by a check, where a timer firing mid-teardown crashed macOS.
@@ -17418,6 +17421,9 @@ class MainFrame(wx.Frame):
         """Search every past conversation's messages (Ctrl+Shift+S).
 
         Enter on a result reopens that conversation on the matching response.
+        Scanning up to 1,000 transcripts is far past the GUI-thread budget, so
+        the work runs on a worker and only progress and the finished list come
+        back through the event loop.
         """
         with wx.TextEntryDialog(
             self, "Find in all conversations:", "Find in All Conversations",
@@ -17427,24 +17433,101 @@ class MainFrame(wx.Frame):
                 return
             term = ask.GetValue().strip()
         self._find_all_term = term
-        entries = list_history(None, None, limit=1000)
-        results: list[tuple[ConversationItem, HistoryEntry, int]] = []
+        old_cancel = getattr(self, "_find_all_cancel", None)
+        if old_cancel is not None:
+            old_cancel.set()
+        old_progress = getattr(self, "_find_all_progress", None)
+        if old_progress is not None:
+            old_progress.Destroy()
+        serial = getattr(self, "_find_all_serial", 0) + 1
+        cancel = threading.Event()
+        self._find_all_serial = serial
+        self._find_all_cancel = cancel
         progress = wx.ProgressDialog(
-            "Find in All Conversations", f"Searching for {term}", maximum=max(1, len(entries)),
+            "Find in All Conversations", f"Searching for {term}", maximum=1000,
             parent=self, style=wx.PD_APP_MODAL | wx.PD_CAN_ABORT | wx.PD_AUTO_HIDE,
         )  # fmt: skip
-        try:
-            for done, entry in enumerate(entries):
-                if not progress.Update(done, f"Searching {entry.title}")[0]:
-                    break
-                for index, snippet, whole in search_turns(load_turns(entry), term):
-                    label = (
-                        f"{entry.title}, {backend_label(entry.backend)}, "
-                        f"{describe_age(entry.modified)}: {snippet}"
+        self._find_all_progress = progress
+
+        def work() -> None:
+            results: list[tuple[ConversationItem, HistoryEntry, int]] = []
+            error = ""
+            try:
+                entries = list_history(None, None, limit=1000)
+                _call_after_alive(self._find_all_range, serial, progress, max(1, len(entries)))
+                for done, entry in enumerate(entries):
+                    if cancel.is_set():
+                        break
+                    _call_after_alive(
+                        self._find_all_progress_update,
+                        serial,
+                        progress,
+                        cancel,
+                        done,
+                        entry.title,
                     )
-                    results.append((ConversationItem(label, whole), entry, index))
-        finally:
-            progress.Destroy()
+                    turns = load_turns(entry)
+                    if cancel.is_set():
+                        break
+                    for index, snippet, whole in search_turns(turns, term):
+                        label = (
+                            f"{entry.title}, {backend_label(entry.backend)}, "
+                            f"{describe_age(entry.modified)}: {snippet}"
+                        )
+                        results.append((ConversationItem(label, whole), entry, index))
+            except Exception as exc:
+                error = f"Could not search conversations: {exc}"
+            _call_after_alive(self._find_all_loaded, serial, progress, cancel, term, results, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _find_all_range(self, serial: int, progress: wx.ProgressDialog, total: int) -> None:
+        """Give the progress bar the real transcript count once it is known."""
+        if not self or serial != getattr(self, "_find_all_serial", None):
+            return
+        if progress is getattr(self, "_find_all_progress", None):
+            progress.SetRange(total)
+
+    def _find_all_progress_update(
+        self,
+        serial: int,
+        progress: wx.ProgressDialog,
+        cancel: threading.Event,
+        done: int,
+        title: str,
+    ) -> None:
+        """Show one transcript's progress, and notice the user cancelling."""
+        if not self or serial != getattr(self, "_find_all_serial", None):
+            cancel.set()
+            return
+        if progress is not getattr(self, "_find_all_progress", None):
+            cancel.set()
+            return
+        if not progress.Update(done, f"Searching {title}")[0]:
+            cancel.set()
+
+    def _find_all_loaded(
+        self,
+        serial: int,
+        progress: wx.ProgressDialog,
+        cancel: threading.Event,
+        term: str,
+        results: list[tuple[ConversationItem, HistoryEntry, int]],
+        error: str,
+    ) -> None:
+        """Fill the result list, unless this search is no longer the current one."""
+        if not self or serial != getattr(self, "_find_all_serial", None):
+            return
+        self._find_all_progress = None
+        self._find_all_cancel = None
+        cancelled = cancel.is_set() or progress.WasCancelled()
+        progress.Destroy()
+        if error:
+            announce(f"Error: {error}")
+            return
+        if cancelled:
+            announce("Search cancelled")
+            return
         if not results:
             announce(f"No conversation mentions {term}")
             return
