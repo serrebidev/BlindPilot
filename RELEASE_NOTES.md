@@ -1,3 +1,7 @@
+# BlindPilot 0.55.1
+
+- Fixed: Find in All Conversations (Ctrl+Shift+S) read every saved conversation on the GUI thread, so a large history froze keyboard focus and screen-reader speech until the search finished. The search now runs on a worker thread: progress is announced as it goes, the progress dialog can cancel it, and a new search replaces a stale one instead of its results landing on top. First slice of the 50 ms GUI budget spec (#125), from Farhan Khan's issue #126.
+
 # BlindPilot 0.55.0
 
 - Fixed: the Codex model picker offered the catalog bundled inside the installed CLI, so a model the service retired stayed on offer — and a new one stayed hidden — until the CLI itself was updated. The list is now read from the service's refreshed catalog; models Codex marks hidden (including its internal codex-auto-review) are no longer offered, and if the service cannot be reached the bundled copy is used with a spoken note that it may be out of date.

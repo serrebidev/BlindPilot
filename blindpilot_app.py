@@ -357,7 +357,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.55.0"
+APP_VERSION = "0.55.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2877,6 +2877,36 @@ def search_turns(turns: Sequence[HistoryTurn], term: str) -> list[tuple[int, str
             snippet = ("…" if start else "") + snippet + ("…" if end < len(text) else "")
             found.append((index, f"{who}: {snippet}", f"{who}: {text}"))
     return found
+
+
+def search_all_conversations(
+    entries: Sequence[HistoryEntry],
+    term: str,
+    on_progress: Optional[Callable[[int, str], None]] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    load: Optional[Callable[[HistoryEntry], List[HistoryTurn]]] = None,
+) -> list[tuple[str, HistoryEntry, int, str]]:
+    """Search every past conversation for `term`: (row label, entry, turn, whole).
+
+    Pure disk and database work, so the caller runs this on a worker thread
+    and brings the rows back to the GUI thread. `on_progress(done, title)`
+    fires before each entry is read; when `is_cancelled()` turns true the
+    search stops early and the caller discards the partial rows.
+    """
+    loader = load if load is not None else load_turns
+    rows: list[tuple[str, HistoryEntry, int, str]] = []
+    for done, entry in enumerate(entries):
+        if is_cancelled is not None and is_cancelled():
+            break
+        if on_progress is not None:
+            on_progress(done, entry.title)
+        for index, snippet, whole in search_turns(loader(entry), term):
+            label = (
+                f"{entry.title}, {backend_label(entry.backend)}, "
+                f"{describe_age(entry.modified)}: {snippet}"
+            )
+            rows.append((label, entry, index, whole))
+    return rows
 
 
 def relay_message(speaker: str, text: str) -> str:
@@ -17350,24 +17380,60 @@ class MainFrame(wx.Frame):
                 return
             term = ask.GetValue().strip()
         self._find_all_term = term
-        entries = list_history(None, None, limit=1000)
-        results: list[tuple[ConversationItem, HistoryEntry, int]] = []
+        # The search reads every transcript off disk, far over the GUI
+        # budget, so it runs on a worker; results come back through
+        # _show_find_all_results. A new search supersedes one still running:
+        # its generation no longer matches and its rows are dropped.
+        generation = getattr(self, "_find_all_generation", 0) + 1
+        self._find_all_generation = generation
+        cancelled = threading.Event()
         progress = wx.ProgressDialog(
-            "Find in All Conversations", f"Searching for {term}", maximum=max(1, len(entries)),
+            "Find in All Conversations", f"Searching for {term}", maximum=100,
             parent=self, style=wx.PD_APP_MODAL | wx.PD_CAN_ABORT | wx.PD_AUTO_HIDE,
         )  # fmt: skip
-        try:
-            for done, entry in enumerate(entries):
-                if not progress.Update(done, f"Searching {entry.title}")[0]:
-                    break
-                for index, snippet, whole in search_turns(load_turns(entry), term):
-                    label = (
-                        f"{entry.title}, {backend_label(entry.backend)}, "
-                        f"{describe_age(entry.modified)}: {snippet}"
-                    )
-                    results.append((ConversationItem(label, whole), entry, index))
-        finally:
-            progress.Destroy()
+        announce(f"Searching conversations for {term}")
+
+        def show_progress(done: int, title: str) -> None:
+            if generation != self._find_all_generation:
+                cancelled.set()
+                return
+            if not progress.Pulse(f"Searching {title}")[0]:
+                cancelled.set()
+
+        def work() -> None:
+            entries = list_history(None, None, limit=1000)
+            rows = search_all_conversations(
+                entries,
+                term,
+                on_progress=lambda done, title: _call_after_alive(show_progress, done, title),
+                is_cancelled=cancelled.is_set,
+            )
+            _call_after_alive(
+                self._show_find_all_results, generation, term, rows, cancelled.is_set(), progress
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_find_all_results(
+        self,
+        generation: int,
+        term: str,
+        rows: list[tuple[str, HistoryEntry, int, str]],
+        was_cancelled: bool,
+        progress: wx.ProgressDialog,
+    ) -> None:
+        """Bring a finished history search's rows onto the GUI thread."""
+        if not self:  # the window closed while the search was running
+            return
+        progress.Destroy()
+        if generation != self._find_all_generation:
+            return  # a newer search owns the screen now
+        if was_cancelled:
+            announce("Search cancelled")
+            return
+        results: list[tuple[ConversationItem, HistoryEntry, int]] = [
+            (ConversationItem(label, whole), entry, index) for label, entry, index, whole in rows
+        ]
         if not results:
             announce(f"No conversation mentions {term}")
             return

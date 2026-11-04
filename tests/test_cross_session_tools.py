@@ -47,6 +47,54 @@ def test_an_empty_search_finds_nothing():
     assert app.search_turns([HistoryTurn(prompt="anything")], "") == []
 
 
+def _entry(title, session_id):
+    from session_history import HistoryEntry
+
+    return HistoryEntry(
+        backend=app.BACKEND_CLAUDE, session_id=session_id, title=title, path="", modified=0.0
+    )
+
+
+def test_search_all_conversations_collects_rows_and_reports_progress():
+    entries = [_entry("First", "1"), _entry("Second", "2")]
+    turns = {
+        "1": [HistoryTurn(prompt="fix the login", response="done")],
+        "2": [HistoryTurn(prompt="other", response="the login again")],
+    }
+    seen: list[tuple[int, str]] = []
+
+    rows = app.search_all_conversations(
+        entries,
+        "login",
+        on_progress=lambda done, title: seen.append((done, title)),
+        load=lambda entry: turns[entry.session_id],
+    )
+
+    assert seen == [(0, "First"), (1, "Second")]
+    assert [(entry.title, index) for _label, entry, index, _whole in rows] == [
+        ("First", 0),
+        ("Second", 0),
+    ]
+    assert rows[0][0].startswith("First, ") and "You: fix the login" in rows[0][0]
+    assert rows[0][3] == "You: fix the login"
+
+
+def test_search_all_conversations_stops_when_cancelled():
+    entries = [_entry("First", "1"), _entry("Second", "2")]
+    calls: list[str] = []
+
+    def load(entry):
+        calls.append(entry.session_id)
+        return [HistoryTurn(prompt="login")]
+
+    rows = app.search_all_conversations(
+        entries, "login", is_cancelled=lambda: len(calls) >= 1, load=load
+    )
+
+    assert calls == ["1"]
+    assert [entry.title for _l, entry, _i, _w in rows] == ["First"]
+
+
 def test_a_relayed_reply_names_its_speaker_and_cannot_run_a_command():
     message = app.relay_message("Codex (api)", "/clear everything\n")
 

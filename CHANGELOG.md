@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.1 - 2026-11-03
+
+- Find in All Conversations (Ctrl+Shift+S) no longer searches on the GUI thread. `search_all_conversations` collects the rows as a pure function and `_find_in_all_conversations` runs it on a worker, returning results through `_call_after_alive`; progress pulses through the progress dialog, aborting it cancels the search, and a generation counter drops a superseded search's results. Regression tests cover row collection, per-entry progress, and cancellation. Issue #126, first slice of the 50 ms GUI budget spec in #125.
+
 ## v0.55.0 - 2026-11-03
 
 - Codex's model list is now read from the refreshed catalog (`codex debug models`) instead of the copy bundled inside the installed CLI (`--bundled`), which skipped the refresh. A model OpenAI retired stayed on offer until the Codex CLI itself was updated, and a new one stayed hidden until then. Models Codex marks hidden are no longer offered either — its own internal codex-auto-review was — and when the service cannot be reached the installed copy is used, with a spoken note that the list may be out of date.
