@@ -887,7 +887,10 @@ def test_a_worker_that_fails_to_launch_codex_reports_why(monkeypatch):
     worker._do_run()
 
     assert failures and failures[0].startswith("Failed to launch Codex")
-    assert captured.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW | 4
+    # CREATE_SUSPENDED (4) joins CREATE_NO_WINDOW only on Windows; POSIX
+    # Popen rejects creationflags outright.
+    suspended = 4 if platform.system() == "Windows" else 0
+    assert captured.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW | suspended
 
 
 def test_freebuff_keeps_its_choice_when_freebuff_resets_its_own_setting(

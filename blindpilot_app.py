@@ -3046,6 +3046,36 @@ def search_turns(turns: Sequence[HistoryTurn], term: str) -> list[tuple[int, str
     return found
 
 
+def search_all_conversations(
+    entries: Sequence[HistoryEntry],
+    term: str,
+    on_progress: Optional[Callable[[int, str], None]] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    load: Optional[Callable[[HistoryEntry], List[HistoryTurn]]] = None,
+) -> list[tuple[str, HistoryEntry, int, str]]:
+    """Search every past conversation for `term`: (row label, entry, turn, whole).
+
+    Pure disk and database work, so the caller runs this on a worker thread
+    and brings the rows back to the GUI thread. `on_progress(done, title)`
+    fires before each entry is read; when `is_cancelled()` turns true the
+    search stops early and the caller discards the partial rows.
+    """
+    loader = load if load is not None else load_turns
+    rows: list[tuple[str, HistoryEntry, int, str]] = []
+    for done, entry in enumerate(entries):
+        if is_cancelled is not None and is_cancelled():
+            break
+        if on_progress is not None:
+            on_progress(done, entry.title)
+        for index, snippet, whole in search_turns(loader(entry), term):
+            label = (
+                f"{entry.title}, {backend_label(entry.backend)}, "
+                f"{describe_age(entry.modified)}: {snippet}"
+            )
+            rows.append((label, entry, index, whole))
+    return rows
+
+
 def relay_message(speaker: str, text: str) -> str:
     """What one agent's reply says when it is handed to another tab.
 
@@ -18599,26 +18629,23 @@ class MainFrame(wx.Frame):
             try:
                 entries = list_history(None, None, limit=1000)
                 _call_after_alive(self._find_all_range, serial, progress, max(1, len(entries)))
-                for done, entry in enumerate(entries):
-                    if cancel.is_set():
-                        break
-                    _call_after_alive(
+                rows = search_all_conversations(
+                    entries,
+                    term,
+                    on_progress=lambda done, title: _call_after_alive(
                         self._find_all_progress_update,
                         serial,
                         progress,
                         cancel,
                         done,
-                        entry.title,
-                    )
-                    turns = load_turns(entry)
-                    if cancel.is_set():
-                        break
-                    for index, snippet, whole in search_turns(turns, term):
-                        label = (
-                            f"{entry.title}, {backend_label(entry.backend)}, "
-                            f"{describe_age(entry.modified)}: {snippet}"
-                        )
-                        results.append((ConversationItem(label, whole), entry, index))
+                        title,
+                    ),
+                    is_cancelled=cancel.is_set,
+                )
+                results = [
+                    (ConversationItem(label, whole), entry, index)
+                    for label, entry, index, whole in rows
+                ]
             except Exception as exc:
                 error = f"Could not search conversations: {exc}"
             _call_after_alive(self._find_all_loaded, serial, progress, cancel, term, results, error)

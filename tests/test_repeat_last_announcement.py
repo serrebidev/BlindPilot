@@ -31,6 +31,7 @@ def speaker(monkeypatch):
 
 
 def test_the_last_line_is_said_again(speaker, monkeypatch):
+    monkeypatch.setattr(app.platform, "system", lambda: "Windows")
     monkeypatch.setattr(app, "_enqueue_windows_announcement", app._speak_windows_announcement)
     app.announce("Receiving response")
     app.announce("Turn finished")
@@ -41,6 +42,7 @@ def test_the_last_line_is_said_again(speaker, monkeypatch):
 
 
 def test_with_nothing_said_yet_it_says_so(speaker, monkeypatch):
+    monkeypatch.setattr(app.platform, "system", lambda: "Windows")
     monkeypatch.setattr(app, "_enqueue_windows_announcement", app._speak_windows_announcement)
     app.repeat_last_announcement()
 
