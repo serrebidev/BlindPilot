@@ -109,6 +109,20 @@ passed. Real screen-reader/device behavior remains unverified.
 
 **Work:** Keep setup responsive while backend CLI checks run and fill their outcomes asynchronously.
 
+**Status:** Implemented on `agent/ticket-20`; CLI discovery, installer
+availability, and persistent-PATH checks run in a worker. Spoken progress and
+error/retry states are shown, and stale results are discarded after navigation
+or close. Full gate passed (`2747 passed, 17 skipped`); focused tests, Ruff,
+formatting, compileall, and `git diff --check` passed. Real screen-reader/device
+behavior remains unverified.
+
+**Status:** Implemented on `agent/ticket-20`; CLI discovery, installer
+availability, and persistent-PATH checks run in a worker. Spoken progress and
+error/retry states are shown, and stale results are discarded after navigation
+or close. Full gate passed (`2747 passed, 17 skipped`); focused tests, Ruff,
+formatting, compileall, and `git diff --check` passed. Real screen-reader/device
+behavior remains unverified.
+
 ## 16. Move cross-process `announce` work off-thread
 
 **Ticket:** [#21](https://github.com/thebetterfarhan/BlindPilot/issues/21)
