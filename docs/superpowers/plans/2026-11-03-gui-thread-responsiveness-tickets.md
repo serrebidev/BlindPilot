@@ -129,6 +129,12 @@ behavior remains unverified.
 
 **Work:** Ensure synchronous cross-process status delivery cannot block a GUI callback while preserving status order and screen-reader feedback.
 
+**Status:** Implemented on `agent/ticket-21`; Windows speaker initialization
+and speech delivery run on a single FIFO worker, leaving GUI callers to enqueue
+announcements. Focused speech tests passed (13 passed); full gate passed (`2750 passed, 17 skipped`),
+Ruff, formatting, compileall, and `git diff --check` passed. Independent review
+found no blocking issue. Real screen-reader/device behavior remains unverified.
+
 ## 17. Record the GUI-thread rule and quit decision
 
 **Ticket:** [#22](https://github.com/thebetterfarhan/BlindPilot/issues/22)

@@ -232,7 +232,17 @@ def _make_speaker():
         return None
 
 
-_SPEAKER = _make_speaker()
+# Build accessible_output2 lazily on its worker thread; its Windows backends
+# can initialize thread-affine COM connections and scan other processes.
+_SPEAKER = None
+_SPEAKER_INITIALIZED = False
+
+# accessible_output2 crosses into another process (NVDA, JAWS, or SAPI) and a
+# disconnected or busy reader can make that call take seconds. Serialize those
+# calls on one daemon worker so GUI callbacks only enqueue narration.
+_ANNOUNCEMENT_QUEUE: queue.Queue[str] = queue.Queue()
+_ANNOUNCEMENT_LOCK = threading.RLock()
+_ANNOUNCEMENT_WORKER: Optional[threading.Thread] = None
 
 # What `announce` said last, for Repeat Last Announcement. A line spoken while
 # the reader was busy, or cut off by a keystroke, is otherwise gone for good.
@@ -251,7 +261,72 @@ def _linux_announce(text: str) -> bool:
 
 def repeat_last_announcement() -> None:
     """Say the last announcement again (Conversation menu, Ctrl+Shift+R)."""
-    announce(_last_announcement or "Nothing has been announced yet")
+    with _ANNOUNCEMENT_LOCK:
+        text = _last_announcement or "Nothing has been announced yet"
+    announce(text)
+
+
+def _speak_windows_announcement(text: str) -> None:
+    """Deliver one Windows announcement and recover a dropped reader link."""
+    global _SPEAKER, _SPEAKER_INITIALIZED, _speaker_retry_after
+    if _SPEAKER is None:
+        # No reader when BlindPilot started, or the last rebuild failed too.
+        # Looked for again occasionally, so a reader started afterwards is
+        # picked up instead of leaving the session silent for good.
+        now = time.monotonic()
+        if now >= _speaker_retry_after:
+            _speaker_retry_after = now + _SPEAKER_RETRY_SECONDS
+            _SPEAKER = _make_speaker()
+            if not _SPEAKER_INITIALIZED and _SPEAKER is None:
+                logging.getLogger("blindpilot").warning(
+                    "no screen reader output is available: accessible-output2 could not "
+                    "connect, so nothing will be spoken on Windows"
+                )
+            _SPEAKER_INITIALIZED = True
+    if _SPEAKER is None:
+        return
+    try:
+        # interrupt=False queues behind other reader speech instead of chopping
+        # it off; the single worker preserves BlindPilot's own message order.
+        _SPEAKER.speak(text, interrupt=False)
+    except Exception:
+        # Rebuild a connection that went stale and retry this line once.
+        now = time.monotonic()
+        if now < _speaker_retry_after:
+            return
+        _speaker_retry_after = now + _SPEAKER_RETRY_SECONDS
+        _SPEAKER = _make_speaker()
+        if _SPEAKER is not None:
+            try:
+                _SPEAKER.speak(text, interrupt=False)
+            except Exception:
+                _SPEAKER = None
+
+
+def _announcement_worker(messages: queue.Queue[str]) -> None:
+    while True:
+        text = messages.get()
+        try:
+            _speak_windows_announcement(text)
+        except Exception:
+            # A reader failure must never kill the queue and silence later lines.
+            logging.exception("Could not deliver screen-reader announcement")
+        finally:
+            messages.task_done()
+
+
+def _enqueue_windows_announcement(text: str) -> None:
+    global _ANNOUNCEMENT_WORKER
+    _ANNOUNCEMENT_QUEUE.put(text)
+    if _ANNOUNCEMENT_WORKER is None or not _ANNOUNCEMENT_WORKER.is_alive():
+        worker = threading.Thread(
+            target=_announcement_worker,
+            args=(_ANNOUNCEMENT_QUEUE,),
+            name="screen-reader-announcements",
+            daemon=True,
+        )
+        _ANNOUNCEMENT_WORKER = worker
+        worker.start()
 
 
 def announce(text: str, urgent: bool = False) -> None:
@@ -262,37 +337,13 @@ def announce(text: str, urgent: bool = False) -> None:
     also mirror the message to the status bar so there is a fallback the review
     cursor can reach.
     """
-    global _SPEAKER, _speaker_retry_after, _last_announcement
-    _last_announcement = text
-    if _SPEAKER is None and platform.system() == "Windows":
-        # No reader when BlindPilot started, or the last rebuild failed too.
-        # Looked for again occasionally, so a reader started afterwards is
-        # picked up instead of leaving the session silent for good.
-        now = time.monotonic()
-        if now >= _speaker_retry_after:
-            _speaker_retry_after = now + _SPEAKER_RETRY_SECONDS
-            _SPEAKER = _make_speaker()
-    if _SPEAKER is not None:
-        try:
-            # interrupt=False so a long narration is queued behind whatever the
-            # reader is already saying instead of chopping it off.
-            _SPEAKER.speak(text, interrupt=False)
-        except Exception:
-            # The connection drops when NVDA restarts or a JAWS COM object
-            # disconnects, and the object never recovers. Rebuild it and say
-            # this line again, but not more than once per retry window: a
-            # fan-out narrates far faster than a reader restarts.
-            now = time.monotonic()
-            if now < _speaker_retry_after:
-                return
-            _speaker_retry_after = now + _SPEAKER_RETRY_SECONDS
-            _SPEAKER = _make_speaker()
-            if _SPEAKER is not None:
-                try:
-                    _SPEAKER.speak(text, interrupt=False)
-                except Exception:
-                    _SPEAKER = None
+    global _last_announcement
+    if platform.system() == "Windows":
+        with _ANNOUNCEMENT_LOCK:
+            _last_announcement = text
+            _enqueue_windows_announcement(text)
         return
+    _last_announcement = text
     if platform.system() == "Linux" and _linux_announce(text):
         return
     if not _MAC_ANNOUNCE:
@@ -5920,7 +5971,9 @@ def _speech_route() -> str:
         return "VoiceOver announcements" if _MAC_ANNOUNCE else "none (AppKit missing)"
     if platform.system() == "Linux":
         return "ATK announcements to Orca"
-    return "accessible_output2" if _SPEAKER is not None else "none found"
+    if _SPEAKER is not None:
+        return "accessible_output2"
+    return "accessible_output2 (pending)" if not _SPEAKER_INITIALIZED else "none found"
 
 
 def bug_report_facts(backend: str, app_mode: str) -> str:
@@ -19388,16 +19441,6 @@ def main() -> int:
     # First, so that anything below which goes wrong leaves a trace behind.
     # The packaged build is windowed and has no stderr to fall back on.
     diagnostics.start_logging()
-    if _SPEAKER is None and platform.system() == "Windows":
-        # Worth saying plainly: with no output, every announcement on Windows
-        # goes nowhere and the application runs in total silence while its
-        # menus still say narration is on. accessible-output2 is in
-        # requirements.txt, so this means an incomplete install. Said after
-        # logging starts, so there is somewhere for it to be said.
-        logging.getLogger("blindpilot").warning(
-            "no screen reader output is available: accessible-output2 is not "
-            "installed, so nothing will be spoken on Windows"
-        )
     # Before anything is started: nothing BlindPilot launches may inherit a
     # PATH that points back into its own install folder, or the files there
     # stay open long after BlindPilot has closed and cannot be updated.
