@@ -56,7 +56,7 @@ def test_a_working_speaker_is_not_rebuilt(monkeypatch):
     monkeypatch.setattr(app, "_SPEAKER", speaker)
     monkeypatch.setattr(app, "_make_speaker", lambda: builds.append(1) or _Speaker())
 
-    app.announce("a line of narration")
+    app._speak_windows_announcement("a line of narration")
 
     assert speaker.said == ["a line of narration"]
     assert builds == []
@@ -69,7 +69,7 @@ def test_a_dropped_connection_is_rebuilt_and_the_line_still_spoken(monkeypatch):
     monkeypatch.setattr(app, "_SPEAKER", dead)
     monkeypatch.setattr(app, "_make_speaker", lambda: fresh)
 
-    app.announce("Error: the turn stopped")
+    app._speak_windows_announcement("Error: the turn stopped")
 
     assert fresh.said == ["Error: the turn stopped"]
     assert app._SPEAKER is fresh
@@ -82,9 +82,9 @@ def test_later_lines_go_to_the_rebuilt_speaker(monkeypatch):
     monkeypatch.setattr(app, "_SPEAKER", dead)
     monkeypatch.setattr(app, "_make_speaker", lambda: fresh)
 
-    app.announce("first")
-    app.announce("second")
-    app.announce("third")
+    app._speak_windows_announcement("first")
+    app._speak_windows_announcement("second")
+    app._speak_windows_announcement("third")
 
     assert fresh.said == ["first", "second", "third"]
 
@@ -94,7 +94,7 @@ def test_a_rebuild_that_also_fails_is_not_an_error(monkeypatch):
     monkeypatch.setattr(app, "_SPEAKER", _Speaker(alive=False))
     monkeypatch.setattr(app, "_make_speaker", lambda: None)
 
-    app.announce("nobody is listening")  # must not raise
+    app._speak_windows_announcement("nobody is listening")  # must not raise
 
     assert app._SPEAKER is None
 
@@ -107,7 +107,7 @@ def test_a_reader_that_starts_late_is_picked_up(monkeypatch):
     monkeypatch.setattr(app, "_speaker_retry_after", 0.0)
     monkeypatch.setattr(app, "_make_speaker", lambda: fresh)
 
-    app.announce("the reader arrived")
+    app._speak_windows_announcement("the reader arrived")
 
     assert fresh.said == ["the reader arrived"]
 
@@ -122,7 +122,7 @@ def test_a_missing_reader_is_not_retried_on_every_single_line(monkeypatch):
     monkeypatch.setattr(app, "_make_speaker", lambda: builds.append(1) or None)
 
     for _ in range(20):
-        app.announce("still nobody")
+        app._speak_windows_announcement("still nobody")
 
     assert len(builds) == 1, f"rebuilt {len(builds)} times for 20 lines"
 
@@ -157,7 +157,7 @@ def test_a_reader_that_never_speaks_again_is_not_rebuilt_on_every_line(monkeypat
     monkeypatch.setattr(app, "_make_speaker", lambda: builds.append(1) or _Speaker(alive=False))
 
     for _ in range(20):
-        app.announce("a line nobody will hear")
+        app._speak_windows_announcement("a line nobody will hear")
 
     assert len(builds) == 1, f"rebuilt {len(builds)} times for 20 lines"
 
@@ -169,6 +169,6 @@ def test_a_connection_that_cannot_speak_is_let_go_of(monkeypatch):
     monkeypatch.setattr(app, "_speaker_retry_after", 0.0)
     monkeypatch.setattr(app, "_make_speaker", lambda: _Speaker(alive=False))
 
-    app.announce("into the void")
+    app._speak_windows_announcement("into the void")
 
     assert app._SPEAKER is None
