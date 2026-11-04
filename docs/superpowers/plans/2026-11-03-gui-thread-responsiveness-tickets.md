@@ -12,7 +12,8 @@ This restores the decisions in grilling transcript `059b518a-286e-4c8a-80ff-d144
 
 **Ticket:** [#7](https://github.com/thebetterfarhan/BlindPilot/issues/7)
 
-**Status:** Implemented in the working tree; focused checks passed, full suite did not complete.
+**Status:** Implemented in `dd1e4cc`; focused check passed (`53 passed`). The
+full repository gate and real screen-reader checks remain outstanding.
 
 **Work:** Forget a dropped held process immediately, stop it on a worker, and ensure the next turn starts fresh.
 
