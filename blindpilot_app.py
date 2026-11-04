@@ -3186,6 +3186,40 @@ def changed_files(cwd: str) -> Optional[tuple[str, list[tuple[str, str, bool]]]]
     return root, described
 
 
+_changed_files_cache: dict[str, tuple[str, list[tuple[str, str, bool]]]] = {}
+
+
+def _changed_files_cache_key(cwd: str) -> str:
+    """The same folder spelled differently still shares its warm listing."""
+    return os.path.normcase(os.path.abspath(cwd))
+
+
+def cached_changed_files(cwd: str) -> Optional[tuple[str, list[tuple[str, str, bool]]]]:
+    """A folder's warm changed-file listing, or None when nothing is warm.
+
+    Only a listing with entries is kept: an empty answer and "not a repository"
+    both have to be asked again, so a folder that has just gained its first
+    change is never hidden behind a remembered empty list.
+    """
+    return _changed_files_cache.get(_changed_files_cache_key(cwd))
+
+
+def remember_changed_files(
+    cwd: str, found: Optional[tuple[str, list[tuple[str, str, bool]]]]
+) -> None:
+    """Keep a folder's listing warm, and forget an answer with nothing to list."""
+    key = _changed_files_cache_key(cwd)
+    if found is not None and found[1]:
+        _changed_files_cache[key] = found
+    else:
+        _changed_files_cache.pop(key, None)
+
+
+def forget_changed_files(cwd: str) -> None:
+    """Drop a folder's warm listing, so the next open asks Git again."""
+    _changed_files_cache.pop(_changed_files_cache_key(cwd), None)
+
+
 # Lines of a unified diff that describe the files rather than change them.
 _DIFF_HEADERS = (
     "diff --git",
@@ -9175,6 +9209,9 @@ class SessionPanel(wx.Panel):
         # which is not a change worth announcing.
         self._known_models: Optional[List[str]] = None
         self._model_refresh_running = False
+        # Which changed-file discovery is current for this tab, so a worker
+        # that finishes after a refresh cannot fill the list it replaced.
+        self._changed_files_serial = 0
         self._attachments: List[str] = []
 
         self.backend_status = wx.StaticText(
@@ -10186,12 +10223,64 @@ class SessionPanel(wx.Panel):
         """What differs from the last commit here (Model menu, Ctrl+Shift+D).
 
         Enter on a file reads its changes a line at a time; closing that comes
-        back to the list on the same file.
+        back to the list on the same file. Git discovery runs on a worker so
+        the shortcut returns at once, and a folder's last listing is reused
+        until Refresh asks Git again.
         """
-        try:
-            found = changed_files(self.cwd) if self.cwd else None
-        except (OSError, subprocess.SubprocessError) as exc:
-            self._announce(f"Error: git could not be run: {exc}")
+        cwd = self.cwd
+        if not cwd:
+            self._announce("Open a session tab first, so changes have a folder to look in.")
+            return
+        cached = cached_changed_files(cwd)
+        if cached is not None:
+            serial = self._changed_files_serial + 1
+            self._changed_files_serial = serial
+            self._show_changed_files(serial, cwd, cached)
+            return
+        self._load_changed_files(cwd)
+
+    def _load_changed_files(self, cwd: str) -> None:
+        """Ask Git for this folder's changes on a worker."""
+        serial = self._changed_files_serial + 1
+        self._changed_files_serial = serial
+        self._announce("Looking for changed files since the last commit…")
+
+        def work() -> None:
+            found = None
+            error = ""
+            try:
+                found = changed_files(cwd)
+            except (OSError, subprocess.SubprocessError) as exc:
+                error = str(exc)
+            _call_after_alive(self._changed_files_loaded, serial, cwd, found, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _changed_files_loaded(
+        self,
+        serial: int,
+        cwd: str,
+        found: Optional[tuple[str, list[tuple[str, str, bool]]]],
+        error: str,
+    ) -> None:
+        """Fill the list from a worker, unless its tab or request is no longer current."""
+        if not self or serial != self._changed_files_serial or cwd != self.cwd:
+            return
+        if error:
+            self._announce(f"Error: git could not be run: {error}")
+            return
+        remember_changed_files(cwd, found)
+        self._show_changed_files(serial, cwd, found)
+
+    def _show_changed_files(
+        self,
+        serial: int,
+        cwd: str,
+        found: Optional[tuple[str, list[tuple[str, str, bool]]]],
+        chosen: int = 0,
+    ) -> None:
+        """Offer a folder's listing, with an explicit Refresh in place."""
+        if not self or serial != self._changed_files_serial:
             return
         if found is None:
             self._announce("This folder is not in a git repository, so changes cannot be listed")
@@ -10201,34 +10290,81 @@ class SessionPanel(wx.Panel):
             self._announce("No changed files since the last commit")
             return
         n = len(files)
-        chosen = 0
+        refresh = "Refresh the list (asks Git)"
         while True:
             with wx.SingleChoiceDialog(
                 self,
                 f"{n} changed {'file' if n == 1 else 'files'} since the last commit. "
-                "Enter reads a file's changes.",
+                "Enter reads a file's changes; Refresh re-checks Git.",
                 "Changed Files",
-                [label for _path, label, _new in files],
+                [label for _path, label, _new in files] + [refresh],
             ) as dlg:
                 dlg.SetSelection(chosen)
                 if dlg.ShowModal() != wx.ID_OK:
                     break
                 chosen = dlg.GetSelection()
+            if chosen == n:
+                forget_changed_files(cwd)
+                self._load_changed_files(cwd)
+                return
             path, _label, new = files[chosen]
-            if new:
-                try:
+            self._load_changed_file(serial, cwd, root, path, new, files, chosen)
+            return
+        self.prompt.SetFocus()
+
+    def _load_changed_file(
+        self,
+        serial: int,
+        cwd: str,
+        root: str,
+        path: str,
+        new: bool,
+        files: list[tuple[str, str, bool]],
+        chosen: int,
+    ) -> None:
+        """Read a selected file or its Git diff without blocking the event loop."""
+
+        def work() -> None:
+            try:
+                if new:
                     with open(os.path.join(root, path), encoding="utf-8", errors="replace") as fh:
                         text = "New file:\n" + fh.read()
-                except OSError as exc:
-                    text = f"Could not read the file: {exc}"
-            else:
-                text = readable_diff(_git(root, "diff", "HEAD", "--", path).stdout)
-            view = ReadView(self, text or "No changes to show", path, monospace=True)
-            try:
-                view.ShowModal()
-            finally:
-                view.Destroy()
-        self.prompt.SetFocus()
+                else:
+                    text = readable_diff(_git(root, "diff", "HEAD", "--", path).stdout)
+            except (OSError, subprocess.SubprocessError) as exc:
+                text = f"Could not read the file: {exc}"
+            _call_after_alive(
+                self._changed_file_loaded,
+                serial,
+                cwd,
+                root,
+                path,
+                files,
+                chosen,
+                text,
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _changed_file_loaded(
+        self,
+        serial: int,
+        cwd: str,
+        root: str,
+        path: str,
+        files: list[tuple[str, str, bool]],
+        chosen: int,
+        text: str,
+    ) -> None:
+        """Show a completed read only if its tab and request are still current."""
+        if not self or serial != self._changed_files_serial or cwd != self.cwd:
+            return
+        view = ReadView(self, text or "No changes to show", path, monospace=True)
+        try:
+            view.ShowModal()
+        finally:
+            view.Destroy()
+        self._show_changed_files(serial, cwd, (root, files), chosen)
 
     def _show_status(self, backend: str, report: str) -> None:
         """Put the finished report on screen, once the probe has answered."""
