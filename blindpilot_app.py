@@ -15652,6 +15652,9 @@ class MainFrame(wx.Frame):
         self._find_all_serial = 0
         self._find_all_progress: Optional[wx.ProgressDialog] = None
         self._find_all_cancel: Optional[threading.Event] = None
+        self._history_open_serial = 0
+        self._history_open_cancel: Optional[threading.Event] = None
+        self._history_open_progress: Optional[wx.Dialog] = None
         # Session links handed over by a second copy; watched only once the
         # window is shown (`watch_for_links`), never in a window built and torn
         # down by a check, where a timer firing mid-teardown crashed macOS.
@@ -17895,13 +17898,100 @@ class MainFrame(wx.Frame):
         else:
             wx.CallAfter(announce, f"Reopening {title or session_id}")
 
-    def _resume_history(self, entry: HistoryEntry) -> Optional["SessionPanel"]:
-        """Open one past conversation in its own tab, ready to be continued."""
-        with wx.BusyCursor():
-            turns = load_turns(entry)
+    def _resume_history(self, entry: HistoryEntry, on_open=None) -> None:
+        """Load one past conversation without holding the GUI callback."""
+        old_cancel = getattr(self, "_history_open_cancel", None)
+        if old_cancel is not None:
+            old_cancel.set()
+        old_progress = getattr(self, "_history_open_progress", None)
+        if old_progress is not None:
+            old_progress.Destroy()
+            self._history_open_progress = None
+        serial = getattr(self, "_history_open_serial", 0) + 1
+        self._history_open_serial = serial
+        cancel = threading.Event()
+        self._history_open_cancel = cancel
+        announce(f"Loading conversation {entry.title}")
+        wx.CallAfter(self._show_history_open_progress, serial, entry.title)
+
+        def work() -> None:
+            try:
+                turns = load_turns(entry)
+                error = ""
+            except Exception as exc:
+                turns, error = [], str(exc)
+            _call_after_alive(
+                self._history_open_loaded, serial, cancel, entry, turns, error, on_open
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_history_open_progress(self, serial: int, title: str) -> None:
+        if not self or serial != self._history_open_serial or self._history_open_cancel is None:
+            return
+        progress = wx.Dialog(self, title="Open Conversation")
+        progress.message = wx.StaticText(progress, label=f"Loading {title}")
+        progress.message.SetName("Loading conversation")
+        progress.cancel_button = wx.Button(progress, label="Cancel opening")
+        progress.cancel_button.Bind(wx.EVT_BUTTON, lambda _event: self._cancel_history_open(serial))
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(progress.message, 0, wx.ALL, progress.FromDIP(PAD_DIALOG))
+        sizer.Add(
+            progress.cancel_button,
+            0,
+            wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM,
+            progress.FromDIP(PAD_DIALOG),
+        )
+        progress.SetSizerAndFit(sizer)
+        progress.Bind(
+            wx.EVT_CHAR_HOOK,
+            lambda event: (
+                self._cancel_history_open(serial)
+                if event.GetKeyCode() == wx.WXK_ESCAPE
+                else event.Skip()
+            ),
+        )
+
+        def close(event) -> None:
+            self._cancel_history_open(serial)
+            if self._history_open_progress is progress:
+                self._history_open_progress = None
+            event.Skip()
+
+        progress.Bind(wx.EVT_CLOSE, close)
+        self._history_open_progress = progress
+        progress.CentreOnParent()
+        progress.Show()
+
+    def _cancel_history_open(self, serial: int) -> None:
+        if not self or serial != self._history_open_serial:
+            return
+        cancel = self._history_open_cancel
+        progress = self._history_open_progress
+        if cancel is not None:
+            cancel.set()
+        if progress is not None:
+            progress.message.SetLabel("Cancelling; the loaded conversation will be discarded")
+            progress.cancel_button.Disable()
+
+    def _history_open_loaded(self, serial, cancel, entry, turns, error, on_open) -> None:
+        if not self or serial != self._history_open_serial:
+            return
+        self._history_open_cancel = None
+        progress = self._history_open_progress
+        self._history_open_progress = None
+        cancelled = cancel.is_set()
+        if progress is not None:
+            progress.Destroy()
+        if cancelled:
+            announce("Opening conversation cancelled")
+            return
+        if error:
+            announce(f"Error: Could not read {entry.title}: {error}")
+            return
         if not turns:
             announce(f"Error: {entry.title} could not be read back")
-            return None
+            return
         if not entry.resumable:
             text = "\n\n".join(
                 f"{label}: {value}"
@@ -17914,7 +18004,7 @@ class MainFrame(wx.Frame):
                 dialog.ShowModal()
             finally:
                 dialog.Destroy()
-            return None
+            return
         cwd = self._history_cwd()
         if entry.cwd:
             candidate = entry.cwd
@@ -17936,7 +18026,8 @@ class MainFrame(wx.Frame):
         self._follow_tab_backend()
         responses = "1 response" if len(turns) == 1 else f"{len(turns)} responses"
         wx.CallAfter(announce, f"Resumed {entry.title}, {responses}")
-        return panel
+        if on_open:
+            on_open(panel)
 
     def _find_in_all_conversations(self) -> None:
         """Search every past conversation's messages (Ctrl+Shift+S).
@@ -18076,13 +18167,14 @@ class MainFrame(wx.Frame):
         if not chosen:
             return
         entry, index = chosen[0]
-        panel = self._resume_history(entry)
-        if panel is None:
-            return
-        for position, row in enumerate(panel._displayed):
-            if row.kind == "header" and row.response_number == index + 1:
-                wx.CallAfter(panel._focus_row, position)
-                break
+
+        def focus_result(panel) -> None:
+            for position, row in enumerate(panel._displayed):
+                if row.kind == "header" and row.response_number == index + 1:
+                    wx.CallAfter(panel._focus_row, position)
+                    break
+
+        self._resume_history(entry, on_open=focus_result)
 
     def _send_to_tab_active(self) -> None:
         """Hand this tab's response to another tab (Ctrl+Shift+O)."""
@@ -18566,17 +18658,22 @@ class MainFrame(wx.Frame):
                 announce(f"{_tab_label(panel.tab_title, panel.cwd)} is already open")
                 return
 
+        serial = getattr(self, "_linked_lookup_serial", 0) + 1
+        self._linked_lookup_serial = serial
+
         def work() -> None:
             try:
                 entries = list_history(backend, None, limit=1000)
             except Exception:
                 entries = []
             entry = next((e for e in entries if e.session_id == session_id), None)
-            _call_after_alive(self._open_linked, entry)
+            _call_after_alive(self._open_linked, serial, entry)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _open_linked(self, entry: Optional[HistoryEntry]) -> None:
+    def _open_linked(self, serial: int, entry: Optional[HistoryEntry]) -> None:
+        if not self or serial != getattr(self, "_linked_lookup_serial", 0):
+            return
         if entry is None:
             announce("The conversation that link names was not found on this computer.")
             return
