@@ -284,6 +284,33 @@ def test_a_prewarm_remembers_the_log_offset_before_it_started(monkeypatch, tmp_p
         ab.discard_freebuff_prewarm()
 
 
+def test_freebuff_prewarm_defers_cli_discovery_and_discards_stale_result(monkeypatch):
+    discovery_started = threading.Event()
+    finish_discovery = threading.Event()
+    spawned = []
+
+    def discover(_):
+        discovery_started.set()
+        assert finish_discovery.wait(3)
+        return "freebuff"
+
+    monkeypatch.setattr(ab, "find_backend_cli", discover)
+    monkeypatch.setattr(ab, "_spawn_freebuff_pty", lambda *_: spawned.append(True))
+    ab.discard_freebuff_prewarm()
+    try:
+        started = time.monotonic()
+        ab.prewarm_freebuff(".", None, "model")
+        assert time.monotonic() - started < 0.2
+        assert discovery_started.wait(3)
+        ab.discard_freebuff_prewarm()
+        finish_discovery.set()
+        time.sleep(0.05)
+        assert spawned == []
+    finally:
+        finish_discovery.set()
+        ab.discard_freebuff_prewarm()
+
+
 def test_desktop_history_opens_for_reading_without_a_cli_session(monkeypatch, wx_app):
     import blindpilot_app as app
 
