@@ -73,6 +73,8 @@ unverified.
 
 **Work:** Keep Muse.ai remote and CLI actions from blocking their dialogs; announce and fill results when ready.
 
+**Status:** Implemented in `9e6e368`; Muse.ai dialog tests passed (43 passed), Ruff and `git diff --check` passed. The combined GUI timing check had its known load-sensitive failure, which passed alone on rerun. Real screen-reader/device behavior remains unverified.
+
 ## 09. Move Muse.ai backend selection off the startup path
 
 **Ticket:** [#14](https://github.com/thebetterfarhan/BlindPilot/issues/14)
