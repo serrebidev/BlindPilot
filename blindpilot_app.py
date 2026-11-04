@@ -8710,6 +8710,10 @@ class HermesSessionsDialog(wx.Dialog):
         self._live: set[str] = set()
         self.entry: Optional[dict] = None
         self.attaching = False
+        self._load_serial = 0
+        self._loading = False
+        self._load_error = ""
+        self._announce_refresh = False
 
         filter_label = wx.StaticText(self, label="&Filter:")
         self.filter_box = wx.TextCtrl(self)
@@ -8758,34 +8762,77 @@ class HermesSessionsDialog(wx.Dialog):
         self.CentreOnParent()
 
     # ----- Loading and filtering -----
-    def _reload(self) -> bool:
-        """Ask Hermes for its conversations. Blocking, so it says it is working.
+    def _reload(self, refreshing: bool = False) -> None:
+        """Ask Hermes for its conversations on a worker.
 
-        False when Hermes could not be asked; the reason has been spoken.
+        The dialog opens and stays usable while Hermes is asked. The answer is
+        filled in when it arrives, unless a newer request or a closed dialog
+        has made it stale.
         """
-        self.summary.SetLabel("Asking Hermes for its conversations…")
-        with wx.BusyCursor():
-            remote_url = REMOTE_HERMES.url()
-            entries, live, error = hermes_session_catalog(
-                self._cwd,
-                remote_url=remote_url,
-                remote_token=REMOTE_HERMES.key if remote_url else "",
-                remote_credential=REMOTE_HERMES.credential if remote_url else "token",
-                remote_username=REMOTE_HERMES.username if remote_url else "",
-            )
-        self._entries = entries
-        self._live = live
+        self._load_serial += 1
+        serial = self._load_serial
+        self._loading = True
+        self._load_error = ""
+        self._announce_refresh = refreshing
+        self._entries = []
+        self._shown = []
+        self.list_box.Set([])
+        self._set_open_enabled(False)
+        asking = "Asking Hermes for its conversations…"
+        self.summary.SetLabel(asking)
+        announce(asking)
+
+        # Read the remote settings here, on the GUI thread, so the worker only
+        # does the talking to Hermes.
+        remote_url = REMOTE_HERMES.url()
+        remote_token = REMOTE_HERMES.key if remote_url else ""
+        remote_credential = REMOTE_HERMES.credential if remote_url else "token"
+        remote_username = REMOTE_HERMES.username if remote_url else ""
+        cwd = self._cwd
+
+        def work() -> None:
+            try:
+                entries, live, error = hermes_session_catalog(
+                    cwd,
+                    remote_url=remote_url,
+                    remote_token=remote_token,
+                    remote_credential=remote_credential,
+                    remote_username=remote_username,
+                )
+            except Exception as exc:
+                entries, live, error = [], set(), str(exc)
+            _call_after_alive(self._sessions_loaded, serial, entries, live, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sessions_loaded(
+        self, serial: int, entries: list[dict], live: set[str], error: str
+    ) -> None:
+        """Fill the list from a worker, unless this dialog or request is stale."""
+        if not self or serial != self._load_serial:
+            return
+        self._loading = False
+        self._load_error = error
+        refreshing = self._announce_refresh
+        self._announce_refresh = False
         if error:
             # The reason is spoken, not logged: a blind user cannot glance at a
             # console to find out why the list is empty.
-            self.summary.SetLabel(error)
-            announce(f"Error: {error}")
-            self.list_box.Set([])
-            self._shown = []
+            self._entries = []
+            self._live = set()
+            self._refresh()
             self._set_open_enabled(False)
-            return False
+            announce(f"Error: {error}")
+            return
+        self._entries = entries
+        self._live = live
         self._refresh()
-        return True
+        announce("Refreshed" if refreshing else self.summary.GetLabel())
+
+    def Destroy(self) -> bool:  # type: ignore[override]
+        # Cocoa may defer native destruction past an already queued callback.
+        self._load_serial += 1
+        return super().Destroy()
 
     def _is_live(self, entry: dict) -> bool:
         return str(entry.get("id") or "") in self._live
@@ -8810,7 +8857,11 @@ class HermesSessionsDialog(wx.Dialog):
             self.list_box.SetSelection(0)
         count = len(self._shown)
         running = sum(1 for entry in self._shown if self._is_live(entry))
-        if not self._entries:
+        if self._loading:
+            message = "Asking Hermes for its conversations…"
+        elif self._load_error:
+            message = self._load_error
+        elif not self._entries:
             message = "Hermes reported no conversations"
         else:
             message = "1 conversation" if count == 1 else f"{count} conversations"
@@ -8820,7 +8871,7 @@ class HermesSessionsDialog(wx.Dialog):
         self._set_open_enabled(bool(self._shown))
 
     def _set_open_enabled(self, enabled: bool) -> None:
-        button = self.FindWindowById(wx.ID_OK)
+        button = wx.FindWindowById(wx.ID_OK, self)
         if button is not None:
             button.Enable(enabled)
 
@@ -8861,8 +8912,7 @@ class HermesSessionsDialog(wx.Dialog):
             self._accept()
             return
         if key == wx.WXK_F5:
-            if self._reload():
-                announce("Refreshed")
+            self._reload(refreshing=True)
             return
         if key == wx.WXK_DOWN and self.filter_box.HasFocus() and self._shown:
             self.list_box.SetFocus()
