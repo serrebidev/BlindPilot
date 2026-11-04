@@ -140,10 +140,10 @@ and Linux.
 
 - The GUI budget and timing harness landed in commit `a49dbf5` on
   `fix/gui-thread-stalls`.
-- The async per-panel drop change is present in the working tree in
-  `backend_pool.py`, `blindpilot_app.py`, and focused tests; it has not yet been
-  committed. The parser changes in `agent_backends.py` and
-  `tests/test_trailing_question.py` are separate and must be preserved.
+- The async per-panel drop change was committed as `dd1e4cc` on
+  `fix/gui-thread-stalls`; focused tests passed (53 passed). The parser changes
+  in `agent_backends.py` and `tests/test_trailing_question.py` are separate and
+  must be preserved.
 - The prior full-suite run timed out in an updater subprocess test after an
   early failure; record that failure before changing its code and rerun the
   relevant gate after the final edit.
