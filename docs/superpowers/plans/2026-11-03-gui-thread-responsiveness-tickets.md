@@ -55,6 +55,10 @@ the GUI thread. Real screen-reader/device behavior remains unverified.
 
 **Work:** Open picker promptly, probe on a worker, fill results, warm per-process results, and support explicit refresh.
 
+**Status:** Implemented in `d7c6745`; focused suite passed (`126 passed`), Ruff
+checks and `git diff --check` passed. Real screen-reader/device behavior remains
+unverified.
+
 ## 07. Move Hermes session reload off-thread
 
 **Ticket:** [#12](https://github.com/thebetterfarhan/BlindPilot/issues/12)
