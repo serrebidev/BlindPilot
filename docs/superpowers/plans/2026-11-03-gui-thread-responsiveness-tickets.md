@@ -174,6 +174,12 @@ found no blocking issue. Real screen-reader/device behavior remains unverified.
 
 **Work:** Add the no-blocking rule and 50 ms budget to project guidance and document the implemented exit strategy in an ADR.
 
+**Status:** Contributor guidance now sets the 50 ms GUI-callback budget and
+routes shutdown and process ownership to ADR 0001. The ADR records the existing
+nonblocking close path, shared three-second cleanup deadline, Windows Job Object
+ownership, and verified POSIX process-group behavior. Documentation checks
+passed; platform process integration remains unverified.
+
 ## 18. Cover every handler and run the final gate
 
 **Ticket:** [#23](https://github.com/thebetterfarhan/BlindPilot/issues/23)
