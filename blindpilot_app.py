@@ -14253,6 +14253,7 @@ class SetupWizard(wx.Dialog):
         self._cli_check_btn = wx.Button(p, label="Check Again")
         self._cli_check_btn.Bind(wx.EVT_BUTTON, lambda _e: self._check_cli(force_update_check=True))
         self._cli_check_btn.Hide()
+        self._cli_check_pending = False
 
         # Read-only multiline field rather than a label: NVDA can review the
         # installer's output line by line, and it stays reachable by Tab.
@@ -14452,9 +14453,13 @@ class SetupWizard(wx.Dialog):
         self.Layout()
 
     def _find_selected_cli(self) -> Optional[str]:
-        if self.backend == BACKEND_CLAUDE:
+        return SetupWizard._find_selected_cli_for_backend(self.backend)
+
+    @staticmethod
+    def _find_selected_cli_for_backend(backend: str) -> Optional[str]:
+        if backend == BACKEND_CLAUDE:
             return _find_claude()
-        if self.backend == BACKEND_MUSE:
+        if backend == BACKEND_MUSE:
             # The launcher lives inside WSL on Windows, where a Windows
             # process cannot run it; asking the ordinary search would find
             # nothing and the wizard would offer an install that already
@@ -14462,16 +14467,20 @@ class SetupWizard(wx.Dialog):
             from muse_backend import muse_cli_path
 
             return muse_cli_path()
-        return find_backend_cli(self.backend)
+        return find_backend_cli(backend)
 
     def _selected_install_argv(self) -> Optional[List[str]]:
-        if self.backend == BACKEND_CLAUDE:
+        return SetupWizard._selected_install_argv_for_backend(self.backend)
+
+    @staticmethod
+    def _selected_install_argv_for_backend(backend: str) -> Optional[List[str]]:
+        if backend == BACKEND_CLAUDE:
             return _install_argv()
-        if self.backend == BACKEND_HERMES:
+        if backend == BACKEND_HERMES:
             return _hermes_install_argv()
-        if self.backend == BACKEND_MUSE:
+        if backend == BACKEND_MUSE:
             return _muse_install_argv()
-        argv = _npm_install_argv(self.backend)
+        argv = _npm_install_argv(backend)
         if argv is not None:
             return argv
         # The actual Node.js command is discovered at install time. A sentinel
@@ -14481,6 +14490,9 @@ class SetupWizard(wx.Dialog):
     # ---- navigation ----
 
     def _show_step(self, step: int) -> None:
+        if step != self._step:
+            self._update_check_generation += 1
+            self._cli_check_pending = False
         self._step = step
         self._book.SetSelection(step)
         n = len(self._STEPS)
@@ -14517,6 +14529,7 @@ class SetupWizard(wx.Dialog):
         event.Skip()
 
     def _on_wizard_close(self, event: wx.CloseEvent) -> None:
+        self._update_check_generation = getattr(self, "_update_check_generation", 0) + 1
         self._stop_login()
         event.Skip()
 
@@ -14576,16 +14589,75 @@ class SetupWizard(wx.Dialog):
 
     # ---- CLI step ----
 
-    def _check_cli(self, force_update_check: bool = False) -> None:
+    def _check_cli(
+        self,
+        force_update_check: bool = False,
+        _facts: Optional[tuple[Optional[str], bool, bool, bool]] = None,
+        _generation: Optional[int] = None,
+        _backend: Optional[str] = None,
+    ) -> None:
         if not self:
             # `_show_step` queues these, so one can land an event-loop
             # iteration after the wizard was closed.
             return
-        self._update_check_generation += 1
-        if self.backend != BACKEND_CLAUDE:
-            self._check_npm_backend_cli(force_update_check)
+        if _facts is None:
+            if self._cli_check_pending:
+                return
+            self._update_check_generation += 1
+            generation = self._update_check_generation
+            backend = self.backend
+            self._cli_check_pending = True
+            self._cli_status.SetLabel(f"Checking for {backend_label(backend)} CLI…")
+            self._cli_detail.SetLabel("This may take several seconds.")
+            self._next_btn.Enable(False)
+            self._pages[1].Layout()
+            self.Layout()
+            announce(self._cli_status.GetLabel())
+
+            def work() -> None:
+                try:
+                    path = SetupWizard._find_selected_cli_for_backend(backend)
+                    on_path = _is_on_persistent_path(Path(path).parent) if path else False
+                    install_available = (
+                        SetupWizard._selected_install_argv_for_backend(backend) is not None
+                    )
+                    npm_available = _find_npm() is not None
+                    facts = path, on_path, install_available, npm_available
+                    error = ""
+                except Exception as exc:  # noqa: BLE001 - report check failures accessibly
+                    facts = None
+                    error = str(exc) or type(exc).__name__
+                _call_after_alive(
+                    self._on_cli_check_finished,
+                    generation,
+                    backend,
+                    force_update_check,
+                    facts,
+                    error,
+                )
+
+            threading.Thread(target=work, daemon=True).start()
             return
-        self._backend_path = self._find_selected_cli()
+
+        if (
+            _generation != self._update_check_generation
+            or _backend != self.backend
+            or self._step != 1
+        ):
+            return
+        self._cli_check_pending = False
+        self._backend_path, on_path, install_available, npm_available = _facts
+        self._cli_check_btn.Enable(True)
+        if self.backend != BACKEND_CLAUDE:
+            self._check_npm_backend_cli(
+                force_update_check,
+                on_path=on_path,
+                install_available=install_available,
+                npm_available=npm_available,
+                backend_path=self._backend_path,
+                prepared=True,
+            )
+            return
         windows = platform.system() == "Windows"
         # Spoken after the status line. The labels are long, and what the user
         # needs to hear is which button to Tab to.
@@ -14593,7 +14665,6 @@ class SetupWizard(wx.Dialog):
 
         if self._backend_path:
             folder = Path(self._backend_path).parent
-            on_path = _is_on_persistent_path(folder)
             self._cli_status.SetLabel("Claude Code found:")
             if on_path:
                 self._cli_detail.SetLabel(self._backend_path)
@@ -14617,7 +14688,7 @@ class SetupWizard(wx.Dialog):
             self._cli_check_btn.Hide()
             self._next_btn.Enable(True)
             self._check_backend_updates(self._backend_path, force_update_check)
-        elif _install_argv() is not None:
+        elif install_available:
             flavour = "native Windows version" if windows else "native version"
             self._cli_status.SetLabel("Claude Code is not installed on this computer.")
             self._cli_detail.SetLabel(
@@ -14656,14 +14727,55 @@ class SetupWizard(wx.Dialog):
         self.Layout()
         announce(" ".join(filter(None, (self._cli_status.GetLabel(), hint))))
 
-    def _check_npm_backend_cli(self, force_update_check: bool = False) -> None:
+    def _on_cli_check_finished(
+        self,
+        generation: int,
+        backend: str,
+        force_update_check: bool,
+        facts: Optional[tuple[Optional[str], bool, bool, bool]],
+        error: str,
+    ) -> None:
+        if (
+            not self
+            or self._step != 1
+            or generation != self._update_check_generation
+            or backend != self.backend
+        ):
+            return
+        self._cli_check_pending = False
+        if error or facts is None:
+            label = backend_label(backend)
+            self._cli_status.SetLabel(f"Could not check for {label} CLI.")
+            self._cli_detail.SetLabel(
+                f"{error or 'Try Check Again.'}\n\nChoose Check Again to retry."
+            )
+            self._cli_check_btn.Show()
+            self._cli_check_btn.Enable(True)
+            self._next_btn.Enable(False)
+            self._pages[1].Layout()
+            self.Layout()
+            announce(self._cli_status.GetLabel() + " " + self._cli_detail.GetLabel())
+            return
+        self._check_cli(force_update_check, facts, generation, backend)
+
+    def _check_npm_backend_cli(
+        self,
+        force_update_check: bool = False,
+        *,
+        on_path: Optional[bool] = None,
+        install_available: Optional[bool] = None,
+        npm_available: Optional[bool] = None,
+        backend_path: Optional[str] = None,
+        prepared: bool = False,
+    ) -> None:
         """Check a non-Claude backend without showing Claude-specific guidance."""
         info = BACKENDS[self.backend]
-        self._backend_path = self._find_selected_cli()
+        self._backend_path = backend_path if prepared else self._find_selected_cli()
         hint = ""
         if self._backend_path:
             folder = Path(self._backend_path).parent
-            on_path = _is_on_persistent_path(folder)
+            if on_path is None:
+                on_path = _is_on_persistent_path(folder)
             self._cli_status.SetLabel(f"{info.label} found:")
             self._cli_detail.SetLabel(self._backend_path)
             self._cli_install_btn.Hide()
@@ -14686,8 +14798,12 @@ class SetupWizard(wx.Dialog):
             # own. Offer it when the prerequisites are here, and name what is
             # missing when they are not. npm is never named, since saying it
             # would send the user after the wrong thing.
-            argv = self._selected_install_argv()
-            if argv is not None:
+            has_installer = (
+                install_available
+                if install_available is not None
+                else self._selected_install_argv() is not None
+            )
+            if has_installer:
                 self._cli_status.SetLabel(f"{info.label} is not installed.")
                 self._cli_detail.SetLabel(
                     f"Choose Install {info.label} to run its official installer. No "
@@ -14715,9 +14831,14 @@ class SetupWizard(wx.Dialog):
                 self._cli_check_btn.Show()
                 self._next_btn.Enable(False)
                 hint = "Tab to Check Again once it is installed."
-        elif self._selected_install_argv() is not None:
+        elif (
+            install_available
+            if install_available is not None
+            else self._selected_install_argv() is not None
+        ):
             self._cli_status.SetLabel(f"{info.label} is not installed.")
-            if _find_npm() is None:
+            has_npm = npm_available if npm_available is not None else _find_npm() is not None
+            if not has_npm:
                 self._cli_detail.SetLabel(
                     f"Choose Install {info.label}. BlindPilot will first install the "
                     "latest Node.js LTS and npm for your user account, without administrator "
