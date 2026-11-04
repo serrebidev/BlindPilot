@@ -39,6 +39,7 @@ import os
 import platform
 import queue
 import re
+import signal
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -7947,6 +7948,9 @@ class NewSessionDialog(wx.Dialog):
         self.title_text = ""
         self.worktree_box: Optional[wx.CheckBox] = None
         self.branch_box: Optional[wx.TextCtrl] = None
+        self._github_serial = 0
+        self._github_cancel = threading.Event()
+        self._github_cancel.set()
 
         rows = wx.BoxSizer(wx.VERTICAL)
 
@@ -8008,7 +8012,13 @@ class NewSessionDialog(wx.Dialog):
             folder_row.Add(browse_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, self.FromDIP(PAD))
             github_btn = wx.Button(self, label="From Git&Hub…")
             github_btn.Bind(wx.EVT_BUTTON, lambda _e: self._from_github())
+            self.github_btn = github_btn
             folder_row.Add(github_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+            self.github_status = wx.StaticText(self, label="")
+            self.github_status.Hide()
+            self.github_cancel = wx.Button(self, label="&Cancel GitHub operation")
+            self.github_cancel.Bind(wx.EVT_BUTTON, lambda _e: self._cancel_github())
+            self.github_cancel.Hide()
             worktree_box = wx.CheckBox(self, label="Work in a new git &worktree")
             branch_label = wx.StaticText(self, label="B&ranch for the worktree:")
             branch_box = wx.TextCtrl(self, value="")
@@ -8029,6 +8039,8 @@ class NewSessionDialog(wx.Dialog):
         else:
             rows.Add(folder_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(folder_row, 0, wx.EXPAND | wx.ALL, pad)
+            rows.Add(self.github_status, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+            rows.Add(self.github_cancel, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
             rows.Add(worktree_box, 0, wx.LEFT | wx.RIGHT, pad)
             rows.Add(branch_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
             rows.Add(branch_box, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, pad)
@@ -8044,7 +8056,9 @@ class NewSessionDialog(wx.Dialog):
         # Validate before the dialog closes, so a bad path can be corrected
         # in place instead of failing after the session is created.
         self.Bind(wx.EVT_BUTTON, self._on_ok, id=wx.ID_OK)
+        self.Bind(wx.EVT_BUTTON, self._on_cancel_dialog, id=wx.ID_CANCEL)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_key)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
         self.initial_focus().SetFocus()
         self.CentreOnParent()
 
@@ -8077,23 +8091,127 @@ class NewSessionDialog(wx.Dialog):
         announce(f"Folder set to {path}")
 
     def _from_github(self) -> None:
-        """Pick one of your GitHub repositories, cloning it into the projects folder."""
-        typed_choice = "Type a repository name (owner/name)…"
-        try:
-            listed = subprocess.run(
+        """List repositories without holding up the New Session dialog."""
+        serial, cancelled = self._start_github("Loading GitHub repositories...")
+
+        def work() -> None:
+            listed, error = self._run_github(
                 ["gh", "repo", "list", "--limit", "300", "--json", "nameWithOwner",
-                 "--jq", ".[].nameWithOwner"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace",
-                timeout=60, **no_window_kwargs(),
+                 "--jq", ".[].nameWithOwner"], 60, cancelled,
             )  # fmt: skip
+            _call_after_alive(self._github_listed, serial, listed, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _run_github(
+        self, command: list[str], timeout: int, cancelled: threading.Event
+    ) -> tuple[Optional[subprocess.CompletedProcess[str]], str]:
+        if cancelled.is_set():
+            return None, ""
+        try:
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+                start_new_session=os.name != "nt", **no_window_kwargs(),
+            )  # fmt: skip
+            deadline = time.monotonic() + timeout
+            while True:
+                if cancelled.is_set():
+                    self._terminate_github_process(process)
+                    return None, ""
+                try:
+                    remaining = max(0.01, deadline - time.monotonic())
+                    stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                    return subprocess.CompletedProcess(
+                        command, process.returncode, stdout, stderr
+                    ), ""
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() >= deadline:
+                        self._terminate_github_process(process)
+                        return None, f"GitHub CLI timed out after {timeout} seconds."
+        except FileNotFoundError:
+            return None, "The GitHub CLI (gh) is not installed. Install it and sign in first."
+        except (OSError, subprocess.SubprocessError) as exc:
+            return None, str(exc)
+
+    @staticmethod
+    def _terminate_github_process(process: subprocess.Popen[str]) -> None:
+        # gh starts git as a child; stopping only gh can leave a clone running.
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=10, **no_window_kwargs(),
+                )  # fmt: skip
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
         except (OSError, subprocess.SubprocessError):
-            self._reject("The GitHub CLI (gh) is not installed. Install it and sign in first.")
+            pass
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+            process.wait(timeout=5)
+
+    def _start_github(self, message: str) -> tuple[int, threading.Event]:
+        self._github_serial += 1
+        self._github_cancel = threading.Event()
+        self.github_btn.Disable()
+        self.github_status.SetLabel(message)
+        self.github_status.Show()
+        self.github_cancel.Show()
+        self.Layout()
+        self.Fit()
+        self.github_cancel.SetFocus()
+        announce(message)
+        return self._github_serial, self._github_cancel
+
+    def _finish_github(self) -> None:
+        self.github_status.Hide()
+        self.github_cancel.Hide()
+        self.github_btn.Enable()
+        self.Layout()
+
+    def _stop_github(self) -> bool:
+        if self._github_cancel.is_set():
+            return False
+        self._github_serial += 1
+        self._github_cancel.set()
+        return True
+
+    def _cancel_github(self) -> None:
+        if self._stop_github():
+            self._finish_github()
+            self.github_btn.SetFocus()
+            announce("GitHub operation cancelled")
+
+    def _github_listed(
+        self, serial: int, listed: Optional[subprocess.CompletedProcess[str]], error: str
+    ) -> None:
+        if not self or serial != self._github_serial:
+            return
+        self._finish_github()
+        if error:
+            if error.startswith("The GitHub CLI (gh) is not installed"):
+                self._reject(error)
+            else:
+                self._reject(f"The GitHub CLI could not list your repositories:\n{error}")
+            return
+        if listed is None:
             return
         if listed.returncode:
             detail = (listed.stderr or "").strip() or "gh repo list failed."
             self._reject(f"The GitHub CLI could not list your repositories:\n{detail}")
             return
         repos = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+        typed_choice = "Type a repository name (owner/name)\u2026"
+        self.github_btn.SetFocus()
         with wx.SingleChoiceDialog(
             self, "Repository:", "From GitHub", [typed_choice, *repos]
         ) as pick:
@@ -8109,24 +8227,50 @@ class NewSessionDialog(wx.Dialog):
             self._reject(f"Not a repository name: {repo}")
             return
         target = os.path.join(os.path.expanduser(self._default_dir), repo.split("/")[1])
-        if not os.path.isdir(target):
-            announce(f"Cloning {repo}")
-            try:
-                with wx.BusyInfo(f"Cloning {repo}…", self):
-                    cloned = subprocess.run(
-                        ["gh", "repo", "clone", repo, target],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace",
-                        timeout=900, **no_window_kwargs(),
-                    )  # fmt: skip
-            except (OSError, subprocess.SubprocessError) as exc:
-                self._reject(f"Cloning {repo} failed: {exc}")
-                return
-            if cloned.returncode:
-                self._reject(f"Cloning {repo} failed:\n{(cloned.stderr or '').strip()}")
-                return
+        if os.path.isdir(target):
+            self._github_cloned(serial, repo, target, None, "")
+            return
+        serial, cancelled = self._start_github(f"Cloning {repo}...")
+
+        def work() -> None:
+            cloned, error = self._run_github(["gh", "repo", "clone", repo, target], 900, cancelled)
+            _call_after_alive(self._github_cloned, serial, repo, target, cloned, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _github_cloned(
+        self,
+        serial: int,
+        repo: str,
+        target: str,
+        cloned: Optional[subprocess.CompletedProcess[str]],
+        error: str,
+    ) -> None:
+        if not self or serial != self._github_serial:
+            return
+        if cloned is not None or error:
+            self._finish_github()
+        if error:
+            self._reject(f"Cloning {repo} failed: {error}")
+            return
+        if cloned is not None and cloned.returncode:
+            self._reject(f"Cloning {repo} failed:\n{(cloned.stderr or '').strip()}")
+            return
         self.folder_box.SetValue(target)
         self.folder_box.SetFocus()
         announce(f"Folder set to {target}")
+
+    def _on_cancel_dialog(self, event: wx.CommandEvent) -> None:
+        self._stop_github()
+        event.Skip()
+
+    def _on_close(self, event: wx.CloseEvent) -> None:
+        self._stop_github()
+        event.Skip()
+
+    def Destroy(self) -> bool:  # type: ignore[override]
+        self._stop_github()
+        return super().Destroy()
 
     def _on_ok(self, event: wx.CommandEvent) -> None:
         self.title_text = self.name_box.GetValue().strip()
@@ -8161,6 +8305,7 @@ class NewSessionDialog(wx.Dialog):
                 self._reject(why)
                 return
         self.path = path
+        self._stop_github()
         event.Skip()
 
     def _reject(self, message: str) -> None:
@@ -8173,6 +8318,7 @@ class NewSessionDialog(wx.Dialog):
 
     def _on_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_ESCAPE:
+            self._stop_github()
             self.EndModal(wx.ID_CANCEL)
             return
         event.Skip()

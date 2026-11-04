@@ -85,6 +85,12 @@ full repository gate and real screen-reader checks remain outstanding.
 
 **Work:** Keep Ctrl+T responsive while repository listing or cloning runs, with accessible progress and completion.
 
+**Status:** Implemented on `agent/ticket-18`; repository listing and cloning
+run on workers with cancellable progress, process-tree cleanup, stale-result
+guards, and accessible status/error reporting. Full gate passed (`2739 passed,
+17 skipped`); Ruff check, formatting, compileall, and `git diff --check` passed.
+Real screen-reader/device behavior remains unverified.
+
 ## 14. Move desktop-shortcut PowerShell off-thread
 
 **Ticket:** [#19](https://github.com/thebetterfarhan/BlindPilot/issues/19)
