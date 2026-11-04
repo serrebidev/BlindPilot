@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Optional, cast
 
 import backend_pool
+from owned_process import owned_popen
 from agent_backends import (
     BACKEND_CLAUDE,
     ask_through_the_tool,
@@ -33,7 +34,7 @@ from agent_backends import (
 _log = logging.getLogger("blindpilot.claude")
 
 # Swapped by tests for a fake process.
-_popen = subprocess.Popen
+_popen = owned_popen
 
 # How long Stop waits for the CLI to confirm an interrupt before the process
 # is stopped instead. The same budget Codex gives its interrupt.

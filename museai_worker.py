@@ -37,6 +37,7 @@ import threading
 import time
 from typing import Optional
 
+from owned_process import owned_popen
 from agent_backends import (
     BACKEND_MUSEAI,
     _TurnWorker,
@@ -262,7 +263,7 @@ class MuseAiWorker(_TurnWorker):
         env["PYTHONIOENCODING"] = "utf-8"
         env["BLINDPILOT_MUSEAI_WATCH"] = session
         try:
-            proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            proc = owned_popen(  # noqa: S603 - fixed argv, no shell
                 [binary, "watch"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -436,7 +437,7 @@ class MuseAiWorker(_TurnWorker):
         env = subprocess_env(binary)
         env["PYTHONIOENCODING"] = "utf-8"
         try:
-            proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            proc = owned_popen(  # noqa: S603 - fixed argv, no shell
                 [binary, *args],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

@@ -189,6 +189,8 @@ class BackendPool:
         self._per_panel: "weakref.WeakKeyDictionary[object, dict[str, HeldProcess]]" = (
             weakref.WeakKeyDictionary()
         )
+        self._stopping: set[threading.Thread] = set()
+        self._closing = False
         # Told the backend name of each process let go, and why, so the
         # window can say what the next prompt in that tab is waiting for. Set
         # by the window; the pool itself must not import wx or speak.
@@ -269,9 +271,38 @@ class BackendPool:
         if held is not None:
             held.stop()
 
+    def drop_async(self, key: tuple) -> None:
+        """Forget this key now and stop off-thread unless shutting down."""
+        with self._lock:
+            slot, name = self._slot(key)
+            held = slot.pop(name, None) if slot is not None else None
+            if held is None:
+                return
+            synchronous = self._closing
+            if not synchronous:
+
+                def stop() -> None:
+                    try:
+                        held.stop()
+                    finally:
+                        with self._lock:
+                            self._stopping.discard(threading.current_thread())
+
+                worker = threading.Thread(target=stop, name="backend-pool-stop", daemon=True)
+                self._stopping.add(worker)
+                try:
+                    worker.start()
+                except Exception:
+                    self._stopping.remove(worker)
+                    synchronous = True
+        if synchronous:
+            # A failed spawn or a drop after shutdown must still stop the process.
+            held.stop()
+
     def drop_all(self) -> None:
         """Stop everything, at quit. An update drops only the key it replaces."""
         with self._lock:
+            self._closing = True
             everything = list(self._shared.values())
             self._shared.clear()
             for slot in list(self._per_panel.values()):
@@ -281,6 +312,13 @@ class BackendPool:
             # One backend that throws on the way down must not strand the
             # rest; HeldProcess.stop already swallows, this is belt and braces.
             held.stop()
+        while True:
+            with self._lock:
+                stopping = tuple(self._stopping)
+            if not stopping:
+                break
+            for worker in stopping:
+                worker.join()
 
     def held_count(self) -> int:
         with self._lock:

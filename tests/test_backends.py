@@ -887,7 +887,10 @@ def test_a_worker_that_fails_to_launch_codex_reports_why(monkeypatch):
     worker._do_run()
 
     assert failures and failures[0].startswith("Failed to launch Codex")
-    assert captured.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW
+    # CREATE_SUSPENDED (4) joins CREATE_NO_WINDOW only on Windows; POSIX
+    # Popen rejects creationflags outright.
+    suspended = 4 if platform.system() == "Windows" else 0
+    assert captured.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW | suspended
 
 
 def test_freebuff_keeps_its_choice_when_freebuff_resets_its_own_setting(
@@ -2541,34 +2544,28 @@ class _Child:
 
 
 def test_on_windows_a_child_is_stopped_with_its_whole_tree(monkeypatch):
-    # TerminateProcess ends one process. Codex's app-server has a dozen or
-    # more MCP children, and stopping only the parent left every one of them
-    # running in Task Manager with nobody to stop them.
+    # The Job handle identifies owned descendants even after the root exits.
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
-    monkeypatch.setenv("SystemRoot", r"C:\Win")
-    ran: list[tuple[list, dict]] = []
-
-    def fake_run(argv, **kwargs):
-        ran.append((argv, kwargs))
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(agent_backends.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        agent_backends.subprocess,
+        "run",
+        lambda *_a, **_k: pytest.fail("PID-based taskkill is unsafe"),
+    )
     child = _Child()
+    closed = []
+    child._blindpilot_job = SimpleNamespace(close=lambda: closed.append(True))
 
     agent_backends.end_process_group(child)
 
-    ((argv, kwargs),) = ran
-    # The full path: a `taskkill` planted on PATH must not be what runs.
-    assert argv == [r"C:\Win\System32\taskkill.exe", "/T", "/F", "/PID", "99"]
-    assert kwargs.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW
-    assert child.killed, "the parent is still killed directly, in case taskkill missed it"
+    assert closed
+    assert child.killed, "the exact root still needs to be stopped"
 
 
-def test_on_windows_a_tree_kill_that_fails_still_kills_the_child(monkeypatch):
+def test_on_windows_an_unowned_process_only_kills_the_exact_root(monkeypatch):
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
 
     def broken_run(_argv, **_kwargs):
-        raise OSError("taskkill is missing")
+        pytest.fail("an unowned PID must never be used for a tree sweep")
 
     monkeypatch.setattr(agent_backends.subprocess, "run", broken_run)
     child = _Child()
@@ -2576,6 +2573,19 @@ def test_on_windows_a_tree_kill_that_fails_still_kills_the_child(monkeypatch):
     agent_backends.end_process_group(child)
 
     assert child.killed
+
+
+def test_on_windows_an_exited_root_still_closes_its_owned_job(monkeypatch):
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    child = _Child()
+    child.poll = lambda: 0
+    closed = []
+    child._blindpilot_job = SimpleNamespace(close=lambda: closed.append(True))
+
+    agent_backends.end_process_group(child)
+
+    assert closed
+    assert not child.killed
 
 
 def test_off_windows_no_tree_kill_is_attempted(monkeypatch):
@@ -2597,12 +2607,7 @@ def test_opencode_is_stopped_with_its_tree_on_windows(monkeypatch):
     # POSIX. On Windows terminate() is TerminateProcess, which asks nothing
     # and leaves the children, so the tree is ended in one go instead.
     monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
-    ran: list[list] = []
-    monkeypatch.setattr(
-        agent_backends.subprocess,
-        "run",
-        lambda argv, **_k: ran.append(argv) or SimpleNamespace(returncode=0),
-    )
+    closed = []
 
     class _Proc(_Child):
         def terminate(self):
@@ -2610,9 +2615,10 @@ def test_opencode_is_stopped_with_its_tree_on_windows(monkeypatch):
 
     server = agent_backends.OpencodeServer.__new__(agent_backends.OpencodeServer)
     server._proc = _Proc()
+    server._proc._blindpilot_job = SimpleNamespace(close=lambda: closed.append(True))
     server.stop()
 
-    assert ran and ran[0][-1] == "99"
+    assert closed
 
 
 def test_stopping_an_already_exited_server_still_closes_its_pipes():

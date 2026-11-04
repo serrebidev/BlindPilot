@@ -2,12 +2,25 @@
 """Muse.ai account views read the gateway, and decisions grant only one action."""
 
 import json
+import time
 
 import pytest
 
 import agent_backends
 import museai_backend as backend
 import blindpilot_app as app
+
+
+def _wait(predicate):
+    deadline = time.monotonic() + 3
+    while not predicate() and time.monotonic() < deadline:
+        app.wx.GetApp().Yield()
+        time.sleep(0.01)
+    assert predicate()
+
+
+def _loaded(dialog):
+    _wait(lambda: not dialog._busy)
 
 
 @pytest.fixture
@@ -176,6 +189,7 @@ def test_native_views_read_full_details_and_recent_approvals_cannot_be_decided(
         ],
     }
     dialog = app.MuseAiDialog(frame, "approvals")
+    _loaded(dialog)
     try:
         assert dialog.list.GetCount() == 1
         assert not dialog.decide.IsEnabled()
@@ -192,6 +206,7 @@ def test_view_read_errors_are_spoken_and_actions_disabled(frame, monkeypatch):
         backend, "museai_items", lambda _view: (_ for _ in ()).throw(ValueError("Signed out"))
     )
     dialog = app.MuseAiDialog(frame, "approvals")
+    _loaded(dialog)
     try:
         assert dialog.list.GetCount() == 0
         assert not dialog.read.IsEnabled() and not dialog.decide.IsEnabled()
@@ -223,6 +238,7 @@ def test_unreadable_approval_decision_is_spoken_without_sending(frame, gateway, 
     spoken = []
     monkeypatch.setattr(app, "announce", spoken.append)
     dialog = app.MuseAiDialog(frame, "approvals")
+    _loaded(dialog)
     try:
         dialog._decide()
         assert "approval" in spoken[-1]

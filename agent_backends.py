@@ -29,7 +29,6 @@ import datetime
 import difflib
 import json
 import logging
-import ntpath
 import os
 import platform
 import queue
@@ -47,6 +46,7 @@ from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import backend_pool
 import diagnostics
+from owned_process import _WindowsJob, owned_popen
 
 from markdown_rows import SentenceStreamer
 from markdown_rows import complete_sentences as _complete_sentences
@@ -87,24 +87,25 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
     POSIX and an unreleased handle on Windows, which is why the default path
     gained the short bounded wait.
 
-    The group is only signalled when the child is demonstrably the leader of
-    one, which is exactly what ``start_new_session`` made it. Anything else, a
+    The group is only signalled while the root is live and demonstrably the
+    leader, which is exactly what ``start_new_session`` made it. Anything else, a
     child started without its own group or a stand-in in a test, is stopped on
     its own. That check is not a formality: a process still sitting in
     BlindPilot's group would otherwise have BlindPilot signal itself, and take
     every other backend down with it.
 
-    Windows has no process groups to signal, so the tree is ended by pid with
-    ``taskkill /T``. TerminateProcess alone ends the parent and nothing else,
-    and Codex's app-server has a dozen or more MCP children to leave behind.
+    On Windows, only a Job Object attached at creation can end descendants.
+    On POSIX, an exited root cannot prove a group still belongs to us, so
+    children left behind by that root are not signalled by a reused group ID.
     """
+    job = getattr(proc, "_blindpilot_job", None)
+    if job is not None:
+        job.close()
     poll = getattr(proc, "poll", None)
     if poll is None or poll() is None:
         pid = getattr(proc, "pid", None)
         if isinstance(pid, int) and pid > 0:
-            if platform.system() == "Windows":
-                _end_windows_tree(pid)
-            else:
+            if platform.system() != "Windows":
                 try:
                     # POSIX only, and the platform test above is a runtime
                     # condition the checker cannot read, so against a Windows
@@ -113,8 +114,7 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
                         os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
                 except OSError:
                     pass
-        # Still done after the tree kill, so a taskkill that failed or was not
-        # there still costs the parent its life.
+        # Also stop the exact root if group or Job cleanup did not reach it.
         kill = getattr(proc, "kill", None)
         if kill is not None:
             try:
@@ -150,32 +150,6 @@ def _close_process_pipes(proc: object) -> None:
             close()
         except (OSError, ValueError, AttributeError):
             pass
-
-
-def _end_windows_tree(pid: int) -> None:
-    """Kill a Windows process and every descendant, by the full path to taskkill.
-
-    The full path because the child's own directory may be a cloned repository,
-    and a ``taskkill.exe`` committed to it is not what should run with force.
-    Best effort: the caller kills the parent directly afterwards either way.
-    """
-    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
-    # os.path.join uses this process's separators; under POSIX that turns the
-    # path into "C:\Win/System32/taskkill.exe", which Windows then splits at
-    # every forward slash and refuses to run. Windows accepts either
-    # separator, so forward slashes are built unconditionally instead.
-    taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
-    try:
-        subprocess.run(
-            [taskkill, "/T", "/F", "/PID", str(pid)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-            **no_window_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        pass
 
 
 _CONSOLE_WINDOW_CLASSES = ("ConsoleWindowClass", "PseudoConsoleWindow")
@@ -3845,7 +3819,7 @@ def _start_codex_server(binary: str = "") -> CodexServer:
     if not binary:
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
-    proc = subprocess.Popen(
+    proc = owned_popen(
         [server_binary, *codex_question_args(), "app-server", "--stdio"],
         cwd=str(Path.home()),
         stdin=subprocess.PIPE,
@@ -6109,6 +6083,7 @@ class _ConPtyTerminal:
         self._output_read = output_read
         self._pseudo = handle()
         self._process = None
+        self._job: Optional[_WindowsJob] = None
         try:
             pseudo = handle()
             result = kernel32.CreatePseudoConsole(
@@ -6221,14 +6196,15 @@ class _ConPtyTerminal:
                 "\0".join(f"{key}={value}" for key, value in env.items()) + "\0"
             )
             info = _ProcessInformation()
-            # EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+            # EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT |
+            # CREATE_SUSPENDED: no child can run before Job assignment.
             if not kernel32.CreateProcessW(
                 None,
                 command_line,
                 None,
                 None,
                 False,
-                0x00080000 | 0x00000400,
+                0x00080000 | 0x00000400 | 0x00000004,
                 env_block,
                 cwd,
                 ctypes.byref(startup),
@@ -6237,7 +6213,20 @@ class _ConPtyTerminal:
                 raise ctypes.WinError(kernel32.GetLastError())
         finally:
             kernel32.DeleteProcThreadAttributeList(startup.lpAttributeList)
-        kernel32.CloseHandle(info.hThread)
+        try:
+            job = _WindowsJob()
+            job.assign_handle(info.hProcess)
+            if kernel32.ResumeThread(info.hThread) == 0xFFFFFFFF:
+                raise OSError("ResumeThread failed for the FreeBuff backend")
+            self._job = job
+        except BaseException:
+            kernel32.TerminateProcess(info.hProcess, 1)
+            kernel32.CloseHandle(info.hProcess)
+            if "job" in locals():
+                job.close()
+            raise
+        finally:
+            kernel32.CloseHandle(info.hThread)
         return info.hProcess, int(info.dwProcessId)
 
     def read_chunk(self) -> Optional[str]:
@@ -6321,10 +6310,9 @@ class _ConPtyTerminal:
 
     def terminate(self, force: bool = False) -> None:
         kernel32 = self._ctypes.windll.kernel32
+        if self._job is not None:
+            self._job.close()
         if self.isalive():
-            # MCP servers can be detached from the pseudoconsole; closing it
-            # alone leaves those children running and holding the workspace.
-            _end_windows_tree(self.pid)
             kernel32.TerminateProcess(self._process, 1)
 
     def close(self, force: bool = False) -> None:
@@ -6340,8 +6328,10 @@ class _ConPtyTerminal:
                 kernel32.CloseHandle(handle)
             except Exception:
                 pass
-        # Close output first: a stopped pump cannot drain the shutdown frame,
-        # and ClosePseudoConsole waits forever for it on older Windows.
+        # End owned descendants before closing the pseudoconsole, which can
+        # otherwise wait forever for a child still writing to it.
+        if self._job is not None:
+            self._job.close()
         if self._pseudo:
             kernel32.ClosePseudoConsole(self._pseudo)
         if self._process is None:
@@ -6597,9 +6587,6 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
     or one started for a different conversation, simply starts its own.
     """
     global _freebuff_prewarm_generation
-    binary = find_backend_cli(BACKEND_FREEBUFF)
-    if not binary:
-        return
     # Resolved the same way the turn resolves it, or a fresh install with no
     # recorded choice prewarms under "" and the turn, looking for the
     # preferred model, kills the waiting terminal every time.
@@ -6621,6 +6608,9 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
     def work() -> None:
         if delay:
             time.sleep(delay)
+        binary = find_backend_cli(BACKEND_FREEBUFF)
+        if not binary:
+            return
         # Claiming a terminal must wait for an in-progress spawn to publish
         # it. Otherwise Send launches a second CLI and chat discovery can
         # follow the idle background chat forever. Delayed starts must also
@@ -6628,9 +6618,9 @@ def prewarm_freebuff(cwd: str, session_id: Optional[str], model: str, delay: flo
         with _FREEBUFF_PREWARM_LOCK:
             if generation != _freebuff_prewarm_generation:
                 return
-            launch()
+            launch(binary)
 
-    def launch() -> None:
+    def launch(binary: str) -> None:
         chat = _freebuff_resume_chat_path(cwd, session_id) if session_id else None
         if session_id and chat is None:
             return
@@ -7797,7 +7787,7 @@ class OpencodeServer:
             # Started from the home directory rather than any one project: one
             # server serves them all, and the ``directory`` query parameter on each
             # request is what says which project a call is about.
-            self._proc = subprocess.Popen(
+            self._proc = owned_popen(
                 [binary, "serve", "--port", str(_free_port()), "--hostname", "127.0.0.1"],
                 cwd=str(Path.home()),
                 stdin=subprocess.DEVNULL,

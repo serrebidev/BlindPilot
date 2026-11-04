@@ -5,6 +5,7 @@ import json
 import platform
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -283,6 +284,33 @@ def test_a_prewarm_remembers_the_log_offset_before_it_started(monkeypatch, tmp_p
         ab.discard_freebuff_prewarm()
 
 
+def test_freebuff_prewarm_defers_cli_discovery_and_discards_stale_result(monkeypatch):
+    discovery_started = threading.Event()
+    finish_discovery = threading.Event()
+    spawned = []
+
+    def discover(_):
+        discovery_started.set()
+        assert finish_discovery.wait(3)
+        return "freebuff"
+
+    monkeypatch.setattr(ab, "find_backend_cli", discover)
+    monkeypatch.setattr(ab, "_spawn_freebuff_pty", lambda *_: spawned.append(True))
+    ab.discard_freebuff_prewarm()
+    try:
+        started = time.monotonic()
+        ab.prewarm_freebuff(".", None, "model")
+        assert time.monotonic() - started < 0.2
+        assert discovery_started.wait(3)
+        ab.discard_freebuff_prewarm()
+        finish_discovery.set()
+        time.sleep(0.05)
+        assert spawned == []
+    finally:
+        finish_discovery.set()
+        ab.discard_freebuff_prewarm()
+
+
 def test_desktop_history_opens_for_reading_without_a_cli_session(monkeypatch, wx_app):
     import blindpilot_app as app
 
@@ -300,7 +328,14 @@ def test_desktop_history_opens_for_reading_without_a_cli_session(monkeypatch, wx
         _history_cwd=lambda: ".",
         _add_session=lambda *_a, **_k: pytest.fail("desktop ID was passed to the CLI"),
     )
+    frame._history_open_loaded = lambda *args: app.MainFrame._history_open_loaded(frame, *args)
+    frame._show_history_open_progress = lambda *_args: None
+    frame._history_open_progress = None
     app.MainFrame._resume_history(frame, entry)
+    deadline = time.monotonic() + 3
+    while not viewed and time.monotonic() < deadline:
+        wx_app.Yield()
+        time.sleep(0.01)
     assert viewed and "read only" in viewed[0][1]
     assert "Question" in viewed[0][0] and "Answer" in viewed[0][0]
 
@@ -479,10 +514,10 @@ def test_ending_the_launcher_also_ends_its_background_children(monkeypatch):
     terminal = ab._ConPtyTerminal(["test.exe"], ".", {}, 60, 180)
     monkeypatch.setattr(terminal, "isalive", lambda: True)
     called = []
-    monkeypatch.setattr(ab, "_end_windows_tree", lambda pid: called.append(("tree", pid)))
+    terminal._job = SimpleNamespace(close=lambda: called.append(("job", 123)))
     kernel.TerminateProcess = _Api(lambda *_: called.append(("process", 123)))
     terminal.terminate()
-    assert called == [("tree", 123), ("process", 123)]
+    assert called == [("job", 123), ("process", 123)]
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="ConPTY is Windows-only")

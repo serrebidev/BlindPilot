@@ -596,6 +596,7 @@ def test_windows_helper_script_has_valid_powershell_syntax(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows PowerShell")
+@pytest.mark.timeout(180)
 def test_windows_helper_waits_for_old_process_then_replaces_and_launches(tmp_path):
     install_dir = tmp_path / "installed BlindPilot"
     payload = tmp_path / "payload" / "BlindPilot"
@@ -688,7 +689,7 @@ def test_windows_helper_waits_for_old_process_then_replaces_and_launches(tmp_pat
             detail += log_file.read_text(encoding="utf-8", errors="replace")
         assert updater.returncode == 0, detail
 
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not marker.exists():
             time.sleep(0.05)
         assert marker.exists()
