@@ -195,3 +195,12 @@ passed; platform process integration remains unverified.
 **Blocked by:** #7–#22.
 
 **Work:** Enumerate every menu, accelerator, timer, and `CallAfter` callback; exercise the blocking guard with no allowlist; run the full gate and record unavailable platform and assistive-technology checks.
+
+**Status:** Callback measurement now covers menu, accelerator, timer,
+`CallAfter`, and `CallLater` handlers; the blocking guard is tested without
+handler exceptions. Focused callback tests passed (20 passed), as did Ruff,
+formatting, compileall, and `git diff --check`. The full gate is blocked by a
+pre-existing Windows updater test failure: `test_windows_helper_waits_for_old_process_then_replaces_and_launches`
+also fails on the unchanged coordinator because the expected launch marker is
+absent. Independent review found no blocking issue. Other platform and real
+screen-reader/device behavior remain unverified.
