@@ -83,9 +83,11 @@ unverified.
 
 **Status:** Implemented in `09289ee`; main-chat discovery and history loading now
 run on a worker when Muse.ai is selected, with spoken loading/error states,
-pending-send preservation, and stale-result guards. Focused Muse.ai main-chat
-tests passed (10 passed); Ruff, formatting, and `git diff --check` passed.
-Real screen-reader/device behavior remains unverified.
+pending-send preservation, and stale-result guards. Deferred sends also check
+panel lifetime, generation, and backend before running. Focused Muse.ai
+main-chat tests passed (11 passed); Ruff, formatting, and `git diff --check`
+passed. Independent review found no remaining issue. Real screen-reader/device
+behavior remains unverified.
 
 ## 10. Move history Open, links, and `/resume` loading off-thread
 
