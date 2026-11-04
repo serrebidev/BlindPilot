@@ -135,6 +135,32 @@ def test_quitting_takes_the_stray_window_and_ends_the_loop(monkeypatch):
     assert ended.is_set(), "quitting never asked the event loop to end"
 
 
+def test_quit_closes_while_backend_cleanup_is_still_running(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def slow_cleanup():
+        entered.set()
+        release.wait(5)
+        finished.set()
+
+    monkeypatch.setattr(app.backend_pool, "stop_all_held_processes", slow_cleanup)
+    monkeypatch.setattr(app, "SessionPanel", _Page)
+    frame = _frame_with([])
+    monkeypatch.setattr(app.wx, "GetTopLevelWindows", lambda: [frame])
+    monkeypatch.setattr(app.wx, "GetApp", lambda: None)
+    event = _CloseEvent()
+    try:
+        app.MainFrame._on_close(frame, event)
+        assert event.skipped
+        assert entered.wait(2), "backend cleanup never started"
+        assert not finished.is_set(), "quit waited for backend cleanup"
+    finally:
+        release.set()
+        assert finished.wait(2)
+
+
 # ----- the watchdog -----
 
 

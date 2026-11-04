@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Optional
 
 import agent_backends
+from owned_process import owned_popen
 from agent_backends import (
     BACKEND_COPILOT,
     SUBAGENT_COMPLETED,
@@ -309,7 +310,7 @@ class CopilotWorker(_TurnWorker):
             self._fail("GitHub Copilot CLI is not installed. Run: npm install -g @github/copilot")
             return
         try:
-            proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            proc = owned_popen(  # noqa: S603 - fixed argv, no shell
                 self._command(binary),
                 cwd=self._cwd or None,
                 stdin=subprocess.PIPE,

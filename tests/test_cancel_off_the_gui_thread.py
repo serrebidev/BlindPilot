@@ -128,7 +128,7 @@ def test_quitting_cancels_every_tab(monkeypatch):
     app.MainFrame._on_close(frame, _CloseEvent())
 
     for worker in workers:
-        assert worker.cancelled.is_set(), "a CLI was left running after quitting"
+        assert worker.cancelled.wait(2), "a CLI was left running after quitting"
 
 
 def test_quitting_does_not_take_three_seconds_per_tab(monkeypatch):

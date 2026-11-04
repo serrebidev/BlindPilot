@@ -51,6 +51,7 @@ import subprocess
 import threading
 from typing import Optional
 
+from owned_process import owned_popen
 from agent_backends import (
     BACKEND_ANTIGRAVITY,
     BACKEND_GEMINI,
@@ -257,7 +258,7 @@ class _GoogleTurnWorker(_TurnWorker):
             self._fail(self._install_hint)
             return
         try:
-            proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            proc = owned_popen(  # noqa: S603 - fixed argv, no shell
                 self._command(binary),
                 cwd=self._cwd or None,
                 stdin=subprocess.PIPE,
