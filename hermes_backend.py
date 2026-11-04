@@ -1081,7 +1081,7 @@ def running_gateway_target() -> Optional[tuple[str, list[str]]]:
     return None
 
 
-def local_transport(cwd: str) -> "Transport":
+def local_transport(cwd: str) -> "StdioTransport | WebSocketTransport":
     """The transport for a Hermes on this machine.
 
     A gateway already running for the configured home owns that home's
