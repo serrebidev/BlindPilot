@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional, Protocol, Sequence
 
 from certificates import certificate_context
+from owned_process import owned_popen
 
 # Hermes' launcher is a plain executable on PATH, but the gateway itself is a
 # Python module inside Hermes' own virtual environment. A GUI cannot rely on
@@ -1022,7 +1023,7 @@ class StdioTransport:
     def start(self) -> None:
         """Launch the child. Raises ``OSError`` if it cannot be started."""
         command, cwd, env = self._launch_arguments()
-        self._proc = subprocess.Popen(
+        self._proc = owned_popen(
             command,
             cwd=cwd,
             stdin=subprocess.PIPE,
@@ -1163,6 +1164,9 @@ class StdioTransport:
                     proc.kill()
                 except OSError:
                     pass
+        job = getattr(proc, "_blindpilot_job", None)
+        if job is not None:
+            job.close()
         # Close the read pipes too, and only after the child is gone so the
         # reader threads are not left reading a closed handle. Leaving them to
         # the garbage collector raises ResourceWarning: unclosed file, which

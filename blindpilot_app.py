@@ -18030,22 +18030,23 @@ class MainFrame(wx.Frame):
             self._model_timer = None
         if self.chat_panel is not None:
             self.chat_panel.shutdown()
-        # Started together, then waited on together. One after another meant
-        # up to three seconds per tab - longer for opencode - of a window that
-        # has stopped responding and cannot say why.
+        # Forget each tab's held process before the window closes. The waits
+        # belong to the shutdown thread, after the UI has returned to wx.
         cancelling = []
         for page in self._session_panels():
             thread = page.cancel_worker(wait=False)
             if thread is not None:
                 cancelling.append(thread)
-        # Quitting does wait, unlike closing a tab: a CLI that is not killed
-        # here outlives the application that started it.
-        deadline = time.monotonic() + _CANCEL_JOIN_SECONDS
-        for thread in cancelling:
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        # Belt and braces over the per-tab teardown above: a shared app-server
-        # belongs to no single tab, so nothing above this stops it.
-        backend_pool.stop_all_held_processes()
+
+        def finish_shutdown() -> None:
+            deadline = time.monotonic() + _CANCEL_JOIN_SECONDS
+            for thread in cancelling:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            # A shared app-server belongs to no single tab. This also waits
+            # for pending per-tab drops without blocking the close callback.
+            backend_pool.stop_all_held_processes()
+
+        threading.Thread(target=finish_shutdown, name="backend-shutdown").start()
         # Closing this window is meant to end the process, and wx ends the
         # event loop only when the last top-level window is destroyed. Any
         # other one left standing — a dialog parented to nothing, a window a

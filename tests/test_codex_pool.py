@@ -405,7 +405,8 @@ def test_the_shared_server_is_launched_without_a_console_window(monkeypatch):
     with pytest.raises(OSError):
         agent_backends._start_codex_server()
     for key, value in agent_backends.no_window_kwargs().items():
-        assert seen.get(key) == value
+        assert seen.get(key, 0) & value == value
+    assert seen.get("creationflags", 0) & 4  # CREATE_SUSPENDED before Job assignment
 
 
 class _ScriptedProc(_FakeProc):
