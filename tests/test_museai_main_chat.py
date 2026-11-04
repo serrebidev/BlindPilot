@@ -172,6 +172,7 @@ def test_reopening_a_side_chat_does_not_load_main_first(monkeypatch, tmp_path):
             calls.clear()
             entry = session_history.HistoryEntry("museai", "side", "Side chat", "", 0)
             frame._resume_history(entry)
+            _wait(lambda: frame.notebook.GetCurrentPage()._session_id == "side")
             assert frame.notebook.GetCurrentPage()._session_id == "side"
             assert calls == [["history", "--thread", "side", "--limit", "300"]]
         finally:

@@ -5,6 +5,7 @@ import json
 import platform
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -300,7 +301,14 @@ def test_desktop_history_opens_for_reading_without_a_cli_session(monkeypatch, wx
         _history_cwd=lambda: ".",
         _add_session=lambda *_a, **_k: pytest.fail("desktop ID was passed to the CLI"),
     )
+    frame._history_open_loaded = lambda *args: app.MainFrame._history_open_loaded(frame, *args)
+    frame._show_history_open_progress = lambda *_args: None
+    frame._history_open_progress = None
     app.MainFrame._resume_history(frame, entry)
+    deadline = time.monotonic() + 3
+    while not viewed and time.monotonic() < deadline:
+        wx_app.Yield()
+        time.sleep(0.01)
     assert viewed and "read only" in viewed[0][1]
     assert "Question" in viewed[0][0] and "Answer" in viewed[0][0]
 

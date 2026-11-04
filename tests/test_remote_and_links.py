@@ -172,8 +172,9 @@ def test_a_link_only_ever_reopens_a_conversation(monkeypatch):
     assert spoken == ["That link isn't one BlindPilot knows."] * 2
 
     opened: list = []
+    stub._linked_lookup_serial = 1
     stub._resume_history = opened.append
-    app.MainFrame._open_linked(stub, None)
+    app.MainFrame._open_linked(stub, 1, None)
     assert spoken[-1].startswith("The conversation that link names was not found")
     assert opened == []
 
