@@ -46,6 +46,15 @@ def test_work_over_budget_is_recorded_and_named():
     assert recorded[0][1] >= app.GUI_BUDGET_MS
 
 
+def test_work_timing_is_independent_of_monotonic_clock_patches(monkeypatch):
+    monkeypatch.setattr(app.time, "monotonic", lambda: 0.0)
+
+    app._gui_work("Slow item", lambda: time.sleep(0.06))()
+
+    recorded = app.over_budget_work()
+    assert [name for name, _spent in recorded] == ["Slow item"]
+
+
 def test_work_inside_the_budget_is_not_recorded():
     app._gui_work("Quick item", lambda: None)()
 
