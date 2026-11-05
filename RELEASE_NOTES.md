@@ -1,3 +1,12 @@
+# BlindPilot 0.55.5
+
+- Fixed: a structured question block a turn wrote into its answer could be lost when the turn went on to write about the block itself, because only the last block was read and the later samples are not the JSON they claim to be. The last usable block now wins. Blocks fenced with ~~~ are read as well as ones fenced with backticks, and a single question written as one object is taken. From Farhan Khan, PR #133.
+- Docs: the README now says which backends support permission modes (FreeBuff has none, and muse.ai manages its own approvals) and that running from source uses Python 3.12, the version CI and releases use.
+
+# BlindPilot 0.55.4
+
+- Changed: dialogs now share one background-task lifecycle, so the slow work they start is tracked and shut down the same way instead of each dialog managing its own. From Farhan Khan, PR #131.
+
 # BlindPilot 0.55.3
 
 - Fixed: the window could freeze - keyboard focus and screen-reader speech stalling - while BlindPilot did slow work such as cloning a repository, checking a setup tool, resuming history, creating a desktop shortcut, or quitting with backends still running. Those actions now run in the background under the 50 ms GUI responsiveness budget (spec #125), and quitting ends the backend processes BlindPilot started instead of leaving them behind. From Farhan Khan's PRs #128 and #129, landed as #130.
