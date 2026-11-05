@@ -22,6 +22,7 @@ import threading
 import time
 
 import agent_backends
+import process_utils
 from agent_backends import CodexWorker
 
 PANIC = "thread 'main' panicked at src/auth.rs:91: unauthorized"
@@ -83,7 +84,7 @@ class _DeadProc:
 def _run(monkeypatch, stderr):
     failures: list[str] = []
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "codex")
-    monkeypatch.setattr(agent_backends, "end_process_group", lambda *a, **k: None)
+    monkeypatch.setattr(process_utils, "end_process_group", lambda *a, **k: None)
     monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *a, **k: _DeadProc(stderr))
     worker = CodexWorker(
         "test",

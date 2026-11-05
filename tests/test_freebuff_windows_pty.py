@@ -9,6 +9,7 @@ import ctypes
 import pytest
 
 import agent_backends as ab
+import process_utils
 
 pytestmark = pytest.mark.skipif(platform.system() != "Windows", reason="ConPTY is Windows-only")
 
@@ -16,7 +17,7 @@ pytestmark = pytest.mark.skipif(platform.system() != "Windows", reason="ConPTY i
 @pytest.fixture
 def quiet_console(monkeypatch):
     """Keep the test process's own console out of it."""
-    monkeypatch.setattr(ab, "hide_console_windows", lambda roots=None: 0)
+    monkeypatch.setattr(process_utils, "hide_console_windows", lambda roots=None: 0)
 
 
 class _Pty:

@@ -16,6 +16,7 @@ import time
 import pytest
 
 import agent_backends as ab
+import process_utils
 import blindpilot_app as app
 
 
@@ -89,7 +90,7 @@ def test_the_sign_in_console_is_created_hidden_rather_than_hidden_after(monkeypa
         return proc
 
     monkeypatch.setattr(ab.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(ab, "hide_console_windows", lambda roots=None: 0)
+    monkeypatch.setattr(process_utils, "hide_console_windows", lambda roots=None: 0)
 
     terminal = ab._spawn_hidden_console(["command-code", "login"], "C:/tmp")
 
@@ -125,7 +126,7 @@ def test_stopping_a_hidden_console_ends_the_process_tree(monkeypatch):
     """The launcher is a batch file with a Node child: killing only the
     launcher would leave the sign-in running with nothing attached to it."""
     ended: list = []
-    monkeypatch.setattr(ab, "end_process_group", ended.append)
+    monkeypatch.setattr(process_utils, "end_process_group", ended.append)
     proc = _Proc()
 
     ab._HiddenConsoleProcess(proc).terminate(True)

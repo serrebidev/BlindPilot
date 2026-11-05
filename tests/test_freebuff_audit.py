@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import agent_backends as ab
+import process_utils
 import session_history as history
 from accessible_ai.storage.credentials import CredentialStore
 
@@ -347,7 +348,7 @@ def test_chat_discovery_uses_the_terminal_process(monkeypatch, tmp_path):
         (chat / "log.jsonl").write_text(json.dumps({"pid": pid, "msg": "boot"}) + "\n")
     monkeypatch.setattr(ab, "_freebuff_chat_dirs", lambda _: {"ours": 1, "theirs": 2})
     monkeypatch.setattr(ab, "_freebuff_chat_path", lambda _, sid: tmp_path / sid)
-    monkeypatch.setattr(ab, "_descendant_pids", lambda roots: roots | {123})
+    monkeypatch.setattr(process_utils, "_descendant_pids", lambda roots: roots | {123})
     worker = _worker()
     worker._pty = SimpleNamespace(pid=122)
     assert worker._adopt_new_chat({}) == "ours"
@@ -527,7 +528,7 @@ def test_batch_launcher_in_a_spaced_directory(monkeypatch, tmp_path, name):
     folder.mkdir()
     script = folder / "probe.cmd"
     script.write_text('@echo spaced-launcher-works\r\n@echo "%~2"\r\n', encoding="utf-8")
-    monkeypatch.setattr(ab, "hide_console_windows", lambda *_: 0)
+    monkeypatch.setattr(process_utils, "hide_console_windows", lambda *_: 0)
     ended = threading.Event()
     terminal, read = ab._spawn_freebuff_pty([str(script), "--cwd", str(folder)], str(folder), ended)
     output = ""
