@@ -199,8 +199,6 @@ passed; platform process integration remains unverified.
 **Status:** Callback measurement covers menu, accelerator, timer, `CallAfter`,
 and `CallLater` handlers; the blocking guard is tested without handler
 exceptions. Focused callback tests passed (20 passed). The full suite passed
-(`6723 passed, 17 skipped`); Ruff check, compileall, and `git diff --check`
-passed. Ruff formatting passed on the clean committed worktree (258 files); the
-working checkout has a separate uncommitted line-ending change in
-`agent_backends.py`. Independent review found no blocking issue. Other platform
-and real screen-reader/device behavior remain unverified.
+(`2790 passed, 17 skipped`); Ruff check and formatting, mypy, compileall, and
+`git diff --check` passed. Independent review found no blocking issue. Other
+platform and real screen-reader/device behavior remain unverified.
