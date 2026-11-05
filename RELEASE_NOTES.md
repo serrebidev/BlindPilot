@@ -1,3 +1,8 @@
+# BlindPilot 0.55.8
+
+- Fixed: a Muse.ai follow test left its working cue running after the test ended, and the leaked cue thread kept spawning a player that a later test counted as its own launch — the macOS-only failure on PRs #139 and #140. The test now stops the cue in teardown, the same way closing a tab does. From Farhan Khan, PR #141.
+- Docs: the responsiveness ticket plan's final gate count is corrected. From Farhan Khan, PR #140.
+
 # BlindPilot 0.55.7
 
 - Fixed: a resumed Muse.ai tab queued its pending send with nothing re-checked when the send actually fired, so it could land after the tab's backend had changed. The deferred send now carries a serial and re-checks it plus both backend fields before sending. From Farhan Khan, PR #139.
