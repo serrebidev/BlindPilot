@@ -71,6 +71,7 @@ import backend_pool
 from backend_updates import BackendUpdateResult, BackendUpdateService, BackendUpdateState
 import claude_session
 import diagnostics
+from dialog_tasks import TaskSlot
 from certificates import open_url
 from conversation_list import make_conversation_list
 from conversation_items import ConversationItem, ConversationItemsDialog, collect_items
@@ -398,7 +399,11 @@ def _call_after_alive(callback: Callable[..., object], *args: object) -> None:
     """
     if wx.GetApp() is None:
         return
-    wx.CallAfter(callback, *args)
+    try:
+        wx.CallAfter(callback, *args)
+    except Exception:
+        if wx.GetApp() is not None:
+            raise
 
 
 APP_NAME = "BlindPilot"
@@ -465,11 +470,11 @@ def _gui_work(name: str, action: Callable[..., object]) -> Callable[..., None]:
     logger = logging.getLogger("blindpilot.timing")
 
     def run(*args: object, **kwargs: object) -> None:
-        started = time.monotonic()
+        started = time.perf_counter()
         try:
             action(*args, **kwargs)
         finally:
-            spent = (time.monotonic() - started) * 1000.0
+            spent = (time.perf_counter() - started) * 1000.0
             if spent > GUI_BUDGET_MS:
                 _over_budget_work.append((name, spent))
                 logger.debug("%s spent %.0f ms on the GUI thread", name, spent)
@@ -6297,7 +6302,7 @@ class MuseAiDialog(wx.Dialog):
         self.goal = goal
         self.chat_request: Optional[tuple[str, str, str]] = None
         self.items: list[dict] = []
-        self._action_serial = 0
+        self._action_task = TaskSlot(_call_after_alive)
         self._busy = False
         pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -6364,32 +6369,25 @@ class MuseAiDialog(wx.Dialog):
     def _start_action(
         self, label: str, work: Callable[[], object], done: Callable[[object], None]
     ) -> None:
-        self._action_serial += 1
-        serial = self._action_serial
         self._busy = True
         self.status.SetLabel(label)
         announce(label)
         self.list.Enable(False)
         self._selection_changed()
 
-        def run() -> None:
-            try:
-                result, error = work(), ""
-            except Exception as exc:
-                result, error = None, str(exc)
-            _call_after_alive(self._action_finished, serial, label, result, error, done)
-
-        threading.Thread(target=run, daemon=True).start()
+        self._action_task.start(
+            work,
+            lambda result, error: self._action_finished(label, result, error, done),
+        )
 
     def _action_finished(
         self,
-        serial: int,
         label: str,
         result: object,
         error: str,
         done: Callable[[object], None],
     ) -> None:
-        if not self or serial != self._action_serial:
+        if not self:
             return
         self._busy = False
         self.list.Enable(True)
@@ -6402,7 +6400,7 @@ class MuseAiDialog(wx.Dialog):
         done(result)
 
     def Destroy(self) -> bool:  # type: ignore[override]
-        self._action_serial += 1
+        self._action_task.close()
         return super().Destroy()
 
     def _refresh(self) -> None:
@@ -7642,7 +7640,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             providers, connected, error = opencode_providers()
-            wx.CallAfter(self._show, providers, connected, error)
+            _call_after_alive(self._show, providers, connected, error)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7775,7 +7773,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             methods = opencode_auth_methods(provider_id)
-            wx.CallAfter(self._choose_method, provider_id, name, methods)
+            _call_after_alive(self._choose_method, provider_id, name, methods)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7814,7 +7812,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             error = opencode_connect_api_key(provider_id, key, answers)
-            wx.CallAfter(self._finished, name, error, "connected")
+            _call_after_alive(self._finished, name, error, "connected")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7827,7 +7825,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             authorization, error = opencode_oauth_start(provider_id, index, answers)
-            wx.CallAfter(self._opened, provider_id, name, index, authorization, error)
+            _call_after_alive(self._opened, provider_id, name, index, authorization, error)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7875,7 +7873,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             failure = opencode_oauth_finish(provider_id, index, code)
-            wx.CallAfter(self._finished, name, failure, "connected")
+            _call_after_alive(self._finished, name, failure, "connected")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7904,7 +7902,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             error = opencode_disconnect(provider_id)
-            wx.CallAfter(self._finished, name, error, "disconnected")
+            _call_after_alive(self._finished, name, error, "disconnected")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -9043,7 +9041,7 @@ class HermesSessionsDialog(wx.Dialog):
         self._live: set[str] = set()
         self.entry: Optional[dict] = None
         self.attaching = False
-        self._load_serial = 0
+        self._load_task = TaskSlot(_call_after_alive)
         self._loading = False
         self._load_error = ""
         self._announce_refresh = False
@@ -9102,8 +9100,6 @@ class HermesSessionsDialog(wx.Dialog):
         filled in when it arrives, unless a newer request or a closed dialog
         has made it stale.
         """
-        self._load_serial += 1
-        serial = self._load_serial
         self._loading = True
         self._load_error = ""
         self._announce_refresh = refreshing
@@ -9123,26 +9119,27 @@ class HermesSessionsDialog(wx.Dialog):
         remote_username = REMOTE_HERMES.username if remote_url else ""
         cwd = self._cwd
 
-        def work() -> None:
-            try:
-                entries, live, error = hermes_session_catalog(
-                    cwd,
-                    remote_url=remote_url,
-                    remote_token=remote_token,
-                    remote_credential=remote_credential,
-                    remote_username=remote_username,
-                )
-            except Exception as exc:
-                entries, live, error = [], set(), str(exc)
-            _call_after_alive(self._sessions_loaded, serial, entries, live, error)
+        def work() -> object:
+            return hermes_session_catalog(
+                cwd,
+                remote_url=remote_url,
+                remote_token=remote_token,
+                remote_credential=remote_credential,
+                remote_username=remote_username,
+            )
 
-        threading.Thread(target=work, daemon=True).start()
+        def loaded(result: object, error: str) -> None:
+            if error:
+                self._sessions_loaded([], set(), error)
+                return
+            entries, live, catalog_error = cast(tuple[list[dict], set[str], str], result)
+            self._sessions_loaded(entries, live, catalog_error)
 
-    def _sessions_loaded(
-        self, serial: int, entries: list[dict], live: set[str], error: str
-    ) -> None:
-        """Fill the list from a worker, unless this dialog or request is stale."""
-        if not self or serial != self._load_serial:
+        self._load_task.start(work, loaded)
+
+    def _sessions_loaded(self, entries: list[dict], live: set[str], error: str) -> None:
+        """Fill the list with the current worker result."""
+        if not self:
             return
         self._loading = False
         self._load_error = error
@@ -9163,8 +9160,7 @@ class HermesSessionsDialog(wx.Dialog):
         announce("Refreshed" if refreshing else self.summary.GetLabel())
 
     def Destroy(self) -> bool:  # type: ignore[override]
-        # Cocoa may defer native destruction past an already queued callback.
-        self._load_serial += 1
+        self._load_task.close()
         return super().Destroy()
 
     def _is_live(self, entry: dict) -> bool:

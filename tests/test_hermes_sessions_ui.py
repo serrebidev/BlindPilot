@@ -330,27 +330,19 @@ def test_a_catalog_exception_is_spoken_as_an_error(monkeypatch, frame):
         dialog.Destroy()
 
 
-def test_a_stale_result_does_not_fill_the_current_list(monkeypatch, frame):
-    _install_catalog(monkeypatch)
-    dialog = HermesSessionsDialog(frame, cwd=".")
-    _loaded(dialog)
-    before = [row.label for row in dialog.list_box.GetRows()]
-    spoken: list[str] = []
-    monkeypatch.setattr(blindpilot_app, "announce", lambda text, **_k: spoken.append(text))
-    try:
-        dialog._sessions_loaded(0, [{"id": "stale", "title": "Stale"}], set(), "")
-
-        assert [row.label for row in dialog.list_box.GetRows()] == before
-        assert spoken == []
-    finally:
-        dialog.Destroy()
-
-
 def test_closing_during_loading_discards_the_result(monkeypatch, frame):
     started = threading.Event()
     release = threading.Event()
+    dispatched = threading.Event()
     spoken: list[str] = []
     monkeypatch.setattr(blindpilot_app, "announce", lambda text, **_k: spoken.append(text))
+    wx_call_after = blindpilot_app._call_after_alive
+
+    def dispatch(callback, *args):
+        wx_call_after(callback, *args)
+        dispatched.set()
+
+    monkeypatch.setattr(blindpilot_app, "_call_after_alive", dispatch)
 
     def catalog(*_a, **_k):
         started.set()
@@ -372,8 +364,10 @@ def test_closing_during_loading_discards_the_result(monkeypatch, frame):
     _wait(lambda: not dialog)
     spoken.clear()
     release.set()
-    _wait(delivered.is_set)
+    _wait(dispatched.is_set)
+    wx.GetApp().Yield()
 
+    assert not delivered.is_set(), "a callback reached a destroyed dialog"
     assert spoken == [], "a callback on a destroyed dialog updated or spoke"
 
 

@@ -441,6 +441,21 @@ class ProtocolMixin(BaseProvider):
                             if isinstance(delta, str) and delta:
                                 received_text = True
                                 yield StreamEvent("text", text=delta)
+                        elif event_type == "response.failed":
+                            response_data = data.get("response")
+                            error = (
+                                response_data.get("error")
+                                if isinstance(response_data, dict)
+                                else None
+                            )
+                            detail = (
+                                error.get("message")
+                                if isinstance(error, dict)
+                                else str(error or "")
+                            )
+                            raise ProviderError(
+                                detail or "The provider failed to complete the response."
+                            )
             else:
                 response = client.post(url, headers=headers, json=body)
                 self.raise_for_status(response)
