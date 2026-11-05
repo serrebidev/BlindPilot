@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_backends import (
+from questions import (
     is_an_offer_to_carry_on,
     questions_written_in_the_answer,
     trailing_question,

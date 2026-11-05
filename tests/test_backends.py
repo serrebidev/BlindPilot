@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 import agent_backends
+import process_utils
+import questions
 from agent_backends import (
     BACKEND_CLAUDE,
     BACKEND_CODEX,
@@ -859,11 +861,11 @@ def test_backend_processes_are_launched_without_a_console_window():
     the keyword has to be absent, not zero, or ``subprocess`` rejects it.
     """
     if platform.system() == "Windows":
-        assert agent_backends.CREATE_NO_WINDOW == 0x08000000
-        assert agent_backends.no_window_kwargs() == {"creationflags": 0x08000000}
+        assert process_utils.CREATE_NO_WINDOW == 0x08000000
+        assert process_utils.no_window_kwargs() == {"creationflags": 0x08000000}
     else:
-        assert agent_backends.CREATE_NO_WINDOW == 0
-        assert agent_backends.no_window_kwargs() == {}
+        assert process_utils.CREATE_NO_WINDOW == 0
+        assert process_utils.no_window_kwargs() == {}
 
 
 def test_a_worker_that_fails_to_launch_codex_reports_why(monkeypatch):
@@ -890,7 +892,7 @@ def test_a_worker_that_fails_to_launch_codex_reports_why(monkeypatch):
     # CREATE_SUSPENDED (4) joins CREATE_NO_WINDOW only on Windows; POSIX
     # Popen rejects creationflags outright.
     suspended = 4 if platform.system() == "Windows" else 0
-    assert captured.get("creationflags", 0) == agent_backends.CREATE_NO_WINDOW | suspended
+    assert captured.get("creationflags", 0) == process_utils.CREATE_NO_WINDOW | suspended
 
 
 def test_freebuff_keeps_its_choice_when_freebuff_resets_its_own_setting(
@@ -2404,7 +2406,7 @@ def test_a_catalog_that_could_not_be_read_still_offers_the_remembered_model(
 def test_a_backend_is_started_in_a_group_of_its_own():
     # npm's `codex` and `freebuff` are Node launchers that run the real agent
     # as a child. Stopping only the launcher leaves that child running.
-    kwargs = agent_backends.own_group_kwargs()
+    kwargs = process_utils.own_group_kwargs()
     if platform.system() == "Windows":
         assert kwargs == {}
     else:
@@ -2440,7 +2442,7 @@ def test_stopping_a_child_never_signals_blindpilots_own_group(monkeypatch):
             return 0
 
     child = Child()
-    agent_backends.end_process_group(child)
+    process_utils.end_process_group(child)
 
     assert signalled == []
     assert child.killed
@@ -2467,7 +2469,7 @@ def test_a_child_that_leads_its_own_group_is_stopped_as_a_group(monkeypatch):
         def wait(self, timeout=None):
             return 0
 
-    agent_backends.end_process_group(Child())
+    process_utils.end_process_group(Child())
 
     assert signalled == [99]
 
@@ -2489,7 +2491,7 @@ def test_stopping_a_child_that_already_exited_does_nothing(monkeypatch):
         def kill(self):
             pytest.fail("a finished process must not be killed")
 
-    agent_backends.end_process_group(Gone())
+    process_utils.end_process_group(Gone())
 
 
 def test_a_killed_child_is_always_reaped_within_a_bound(monkeypatch):
@@ -2518,10 +2520,10 @@ def test_a_killed_child_is_always_reaped_within_a_bound(monkeypatch):
             waited.append(timeout)
             return 0
 
-    agent_backends.end_process_group(Child())
+    process_utils.end_process_group(Child())
     assert waited == [5]
 
-    agent_backends.end_process_group(Child(), timeout=2)
+    process_utils.end_process_group(Child(), timeout=2)
     assert waited == [5, 2]
 
 
@@ -2555,51 +2557,51 @@ def test_on_windows_a_child_is_stopped_with_its_whole_tree(monkeypatch):
     closed = []
     child._blindpilot_job = SimpleNamespace(close=lambda: closed.append(True))
 
-    agent_backends.end_process_group(child)
+    process_utils.end_process_group(child)
 
     assert closed
     assert child.killed, "the exact root still needs to be stopped"
 
 
 def test_on_windows_an_unowned_process_only_kills_the_exact_root(monkeypatch):
-    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(process_utils.platform, "system", lambda: "Windows")
 
     def broken_run(_argv, **_kwargs):
         pytest.fail("an unowned PID must never be used for a tree sweep")
 
-    monkeypatch.setattr(agent_backends.subprocess, "run", broken_run)
+    monkeypatch.setattr(process_utils.subprocess, "run", broken_run)
     child = _Child()
 
-    agent_backends.end_process_group(child)
+    process_utils.end_process_group(child)
 
     assert child.killed
 
 
 def test_on_windows_an_exited_root_still_closes_its_owned_job(monkeypatch):
-    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(process_utils.platform, "system", lambda: "Windows")
     child = _Child()
     child.poll = lambda: 0
     closed = []
     child._blindpilot_job = SimpleNamespace(close=lambda: closed.append(True))
 
-    agent_backends.end_process_group(child)
+    process_utils.end_process_group(child)
 
     assert closed
     assert not child.killed
 
 
 def test_off_windows_no_tree_kill_is_attempted(monkeypatch):
-    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(agent_backends.os, "killpg", lambda *_a: None, raising=False)
-    monkeypatch.setattr(agent_backends.os, "getpgid", lambda pid: pid, raising=False)
-    monkeypatch.setattr(agent_backends.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(process_utils.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(process_utils.os, "killpg", lambda *_a: None, raising=False)
+    monkeypatch.setattr(process_utils.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(process_utils.signal, "SIGKILL", 9, raising=False)
     monkeypatch.setattr(
-        agent_backends.subprocess,
+        process_utils.subprocess,
         "run",
         lambda *_a, **_k: pytest.fail("taskkill is a Windows tool"),
     )
 
-    agent_backends.end_process_group(_Child())
+    process_utils.end_process_group(_Child())
 
 
 def test_opencode_is_stopped_with_its_tree_on_windows(monkeypatch):
@@ -3252,6 +3254,6 @@ def test_question_options_keep_their_previews():
             ],
         }
     ]
-    questions = agent_backends._questions(raw, multi_key="multiSelect")
-    assert questions[0].options[0].preview == "plan: edit one file"
-    assert questions[0].options[1].preview == ""
+    parsed = questions._questions(raw, multi_key="multiSelect")
+    assert parsed[0].options[0].preview == "plan: edit one file"
+    assert parsed[0].options[1].preview == ""

@@ -23,13 +23,15 @@ from typing import Callable, Optional, Sequence
 from agent_backends import (
     SUBAGENT_COMPLETED,
     SUBAGENT_RUNNING,
+    SubagentReport,
+    subagent_line,
+    subagent_status,
+)
+from questions import (
     AskQuestions,
     Question,
     QuestionOption,
-    SubagentReport,
     question_summary,
-    subagent_line,
-    subagent_status,
 )
 from hermes_backend import (
     JsonRpcCalls,

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 import agent_backends
+import process_utils
 
 
 class BackendUpdateState(str, Enum):
@@ -91,7 +92,7 @@ def _run_version_probe(binary: str) -> str:
             timeout=30,
             stdin=subprocess.DEVNULL,
             env=agent_backends.subprocess_env(binary),
-            **agent_backends.no_window_kwargs(),
+            **process_utils.no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -111,7 +112,7 @@ def _run_npm_metadata(npm: str, package: str) -> Optional[str]:
             timeout=30,
             stdin=subprocess.DEVNULL,
             env=agent_backends.subprocess_env(npm),
-            **agent_backends.no_window_kwargs(),
+            **process_utils.no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

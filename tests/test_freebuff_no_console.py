@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 import agent_backends as ab
+import process_utils
 
 
 def test_spawning_freebuff_allocates_no_console():
@@ -51,7 +52,7 @@ def test_the_windows_terminal_is_a_pseudoconsole_only(monkeypatch):
     monkeypatch.setattr(ab, "_ConPtyTerminal", spawn)
     monkeypatch.setattr(platform, "system", lambda: "Windows")
     monkeypatch.setattr(ab, "subprocess_env", lambda _binary: {})
-    monkeypatch.setattr(ab, "hide_console_windows", lambda roots=None: 0)
+    monkeypatch.setattr(process_utils, "hide_console_windows", lambda roots=None: 0)
 
     ended = threading.Event()
     _pty, read = ab._spawn_freebuff_pty(["freebuff", "--cwd", "."], ".", ended)

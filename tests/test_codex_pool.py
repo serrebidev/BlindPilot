@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import agent_backends
+import process_utils
 import backend_pool
 from pool_contract import check_pool_contract
 
@@ -64,12 +65,12 @@ def test_stopping_the_server_ends_its_process_group():
     stopped: list[object] = []
     proc = _FakeProc()
     server = agent_backends.CodexServer(proc)
-    original = agent_backends.end_process_group
-    agent_backends.end_process_group = lambda p, timeout=0.0: stopped.append(p)
+    original = process_utils.end_process_group
+    process_utils.end_process_group = lambda p, timeout=0.0: stopped.append(p)
     try:
         agent_backends.codex_adapter().stop(server)
     finally:
-        agent_backends.end_process_group = original
+        process_utils.end_process_group = original
     assert stopped == [proc]
 
 
@@ -404,9 +405,9 @@ def test_the_shared_server_is_launched_without_a_console_window(monkeypatch):
     monkeypatch.setattr(agent_backends.subprocess, "Popen", fake_popen)
     with pytest.raises(OSError):
         agent_backends._start_codex_server()
-    for key, value in agent_backends.no_window_kwargs().items():
+    for key, value in process_utils.no_window_kwargs().items():
         assert seen.get(key, 0) & value == value
-    if agent_backends.CREATE_NO_WINDOW:
+    if process_utils.CREATE_NO_WINDOW:
         # CREATE_SUSPENDED before Job assignment is a Windows-only flag;
         # POSIX Popen rejects creationflags outright.
         assert seen.get("creationflags", 0) & 4
@@ -1236,12 +1237,12 @@ def test_cancelling_never_kills_the_server_the_other_tabs_are_using():
     backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
     _confirming(server, False)
     worker = _stoppable(server)
-    original = agent_backends.end_process_group
-    agent_backends.end_process_group = lambda p, timeout=0.0: killed.append(p)
+    original = process_utils.end_process_group
+    process_utils.end_process_group = lambda p, timeout=0.0: killed.append(p)
     try:
         worker.cancel()
     finally:
-        agent_backends.end_process_group = original
+        process_utils.end_process_group = original
 
     assert killed == [], "cancelling one tab stopped the server every tab shares"
     assert server.proc.killed is False

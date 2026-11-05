@@ -15,6 +15,7 @@ prose counts as a question is tests/test_trailing_question.py.
 from __future__ import annotations
 
 import blindpilot_app as app
+from questions import Question, QuestionOption
 from doubles import Prompt
 
 
@@ -258,11 +259,11 @@ def test_a_block_is_answered_in_order_and_every_answer_is_sent():
     # provider that takes a list of answers here already uses.
     panel = _Answering([["Tabs"], ["/tmp", "/var"]])
     block = (
-        app.Question(question="Which indent?", options=(app.QuestionOption("Tabs"),)),
-        app.Question(
+        Question(question="Which indent?", options=(QuestionOption("Tabs"),)),
+        Question(
             question="Which paths?",
             multi_select=True,
-            options=(app.QuestionOption("/tmp"), app.QuestionOption("/var")),
+            options=(QuestionOption("/tmp"), QuestionOption("/var")),
         ),
     )
 
@@ -276,7 +277,7 @@ def test_a_block_reaches_the_dialog_with_its_options():
     # The options are the whole reason the block exists: without them the
     # dialog can only offer a text field.
     panel = _Answering([["Tabs"]])
-    block = (app.Question(question="Which indent?", options=(app.QuestionOption("Tabs"),)),)
+    block = (Question(question="Which indent?", options=(QuestionOption("Tabs"),)),)
 
     app.SessionPanel._ask_question_left_in_the_answer(panel, block)
 

@@ -21,7 +21,13 @@ import base64
 
 import pytest
 
-from agent_backends import BACKEND_CLAUDE, BACKEND_CODEX, BACKEND_FREEBUFF, BACKEND_HERMES, BACKENDS
+from agent_backends import (
+    BACKEND_CLAUDE,
+    BACKEND_CODEX,
+    BACKEND_FREEBUFF,
+    BACKEND_HERMES,
+    BACKENDS,
+)
 from hermes_worker import (
     ATTACHMENT_MAX_BYTES,
     AttachmentError,
