@@ -521,3 +521,94 @@ def test_narration_that_throws_does_not_fail_the_turn_that_found_it_dead():
     pool.keep(key, backend_pool.HeldProcess(handle, _adapter()))
     handle.running = False
     assert pool.take(key) is None
+
+
+# ----- One held process per Account -----
+#
+# Codex runs either on its own login -- one process for every tab, as it always
+# has -- or on a chosen ChatGPT-plan Account, where one Account is shared and
+# two Accounts are never. The key is the whole of that rule, so the key, and
+# what the registry does with it, is what these assert.
+
+
+def _account(account_id: int) -> tuple:
+    return backend_pool.pool_key("codex", account=account_id)
+
+
+def test_two_accounts_take_different_keys_and_one_account_shares_its_key():
+    assert _account(7) != _account(9), "two Accounts would have shared one process"
+    assert _account(7) == _account(7), "one Account would have been given two"
+
+
+def test_the_codex_login_choice_keeps_the_key_it_has_always_had():
+    """No Account chosen is not an Account: the key stays the two-part one, so
+    every existing install keeps exactly the one process it has today."""
+    assert backend_pool.pool_key("codex") == ("codex", None)
+    assert backend_pool.pool_key("codex", account=None) == backend_pool.pool_key("codex")
+
+
+def test_two_accounts_hold_two_processes_and_one_account_shares_one():
+    pool = backend_pool.BackendPool()
+    work, personal = _FakeHandle(), _FakeHandle()
+    pool.keep(_account(7), backend_pool.HeldProcess(work, _adapter()))
+    pool.keep(_account(9), backend_pool.HeldProcess(personal, _adapter()))
+    assert pool.take(_account(7)).handle is work  # type: ignore[union-attr]
+    assert pool.take(_account(9)).handle is personal  # type: ignore[union-attr]
+    assert pool.take(backend_pool.pool_key("codex")) is None, (
+        "an Account's process answered for Codex's own login too"
+    )
+    pool.drop_all()
+
+
+def test_dropping_one_accounts_process_leaves_anothers_running():
+    pool = backend_pool.BackendPool()
+    work, personal = _FakeHandle(), _FakeHandle()
+    pool.keep(_account(7), backend_pool.HeldProcess(work, _adapter()))
+    pool.keep(_account(9), backend_pool.HeldProcess(personal, _adapter()))
+    pool.drop(_account(7))
+    assert work.stops == 1
+    assert personal.stops == 0, "dropping one Account's process stopped another Account's"
+    assert pool.take(_account(9)) is not None
+    pool.drop_all()
+
+
+def test_the_reaper_finds_a_process_held_for_an_account():
+    """The sweep rebuilt each key from the registry's own name, and a key with
+    an Account in it must not become one it cannot find: a process nothing can
+    reap is a process that outlives the laptop being left open overnight."""
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    pool.keep(_account(7), backend_pool.HeldProcess(handle, _adapter(), now=lambda: 0.0))
+    assert pool.reap(now=901.0, idle_limit=900.0) == [_account(7)]
+    assert handle.stops == 1
+
+
+def test_reaping_one_accounts_process_leaves_anothers_running():
+    pool = backend_pool.BackendPool()
+    idle, in_use = _FakeHandle(), _FakeHandle()
+    pool.keep(_account(7), backend_pool.HeldProcess(idle, _adapter(), now=lambda: 0.0))
+    pool.keep(_account(9), backend_pool.HeldProcess(in_use, _adapter(), now=lambda: 900.0))
+    assert pool.reap(now=901.0, idle_limit=900.0) == [_account(7)]
+    assert idle.stops == 1
+    assert in_use.stops == 0, "a sweep for one Account's process took another Account's"
+    pool.drop_all()
+
+
+def test_replacing_the_executable_lets_go_of_every_account():
+    """npm cannot overwrite an executable that is running, and which Account
+    started it does not change that."""
+    pool = backend_pool.BackendPool()
+    login, work, personal, claude = _FakeHandle(), _FakeHandle(), _FakeHandle(), _FakeHandle()
+    a_tab = _Panel()
+    pool.keep(backend_pool.pool_key("codex"), backend_pool.HeldProcess(login, _adapter()))
+    pool.keep(_account(7), backend_pool.HeldProcess(work, _adapter()))
+    pool.keep(_account(9), backend_pool.HeldProcess(personal, _adapter()))
+    pool.keep(
+        backend_pool.pool_key("claude", a_tab),
+        backend_pool.HeldProcess(claude, _adapter()),
+    )
+    pool.drop_backend("codex")
+    assert (login.stops, work.stops, personal.stops) == (1, 1, 1)
+    assert claude.stops == 0, "replacing Codex's executable stopped another backend's process"
+    assert pool.held_count() == 1
+    pool.drop_all()

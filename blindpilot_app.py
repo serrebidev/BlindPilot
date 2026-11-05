@@ -65,6 +65,7 @@ from linux_accessibility import announce as _linux_native_announce
 
 import wx
 import wx.adv
+from accessible_ai.storage import preferences
 from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
@@ -2009,12 +2010,14 @@ def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> boo
 
 
 def _drop_codex_server(log: Callable[[str], None]) -> None:
-    """Let go of the held Codex app-server before npm replaces its executable.
+    """Let go of every held Codex app-server before npm replaces its executable.
 
-    Windows will not overwrite an executable that is running.
+    Windows will not overwrite an executable that is running. Codex may be held
+    per ChatGPT-plan Account, so this reaches every Account's process: leaving
+    one behind fails the update exactly as one left behind used to.
     """
     log("Stopping Codex's app-server so its executable can be replaced...")
-    backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
+    backend_pool.pool().drop_backend(BACKEND_CODEX)
 
 
 def update_backend(backend: str, log: Callable[[str], None]) -> bool:
@@ -4178,39 +4181,17 @@ def _record_setup_complete(cfg: dict) -> bool:
 
 
 def _load_config() -> dict:
-    for path in (_config_path(), _legacy_config_path()):
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-                return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            continue
-    return {}
+    return preferences.load_config((_config_path(), _legacy_config_path()))
 
 
 def _save_config(cfg: dict) -> bool:
     """Write the settings. False if they did not get written.
 
-    Callers announce what they saved, so they need to know. Written to one
-    side and moved into place, so an interruption partway through cannot
-    leave a half-written file: `_load_config` cannot parse one of those and
-    falls back to the legacy claude-reader file, or to empty.
+    Callers announce what they saved, so they need to know. The write itself is
+    `accessible_ai.storage.preferences`, shared with the Codex backend's Account
+    choice, which lives in this same file.
     """
-    path = _config_path()
-    temporary = path.with_name(path.name + ".new")
-    try:
-        _config_dir().mkdir(parents=True, exist_ok=True)
-        with open(temporary, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, indent=2)
-        os.replace(temporary, path)
-        return True
-    except (OSError, ValueError, TypeError):
-        logging.getLogger("blindpilot").warning("could not write the settings to %s", path)
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        return False
+    return preferences.save_config(_config_path(), cfg)
 
 
 def _save_or_announce(cfg: dict) -> bool:

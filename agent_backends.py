@@ -46,6 +46,7 @@ from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 import backend_pool
 import diagnostics
 from accessible_ai import plan_token
+from accessible_ai.storage import preferences
 from owned_process import _WindowsJob, owned_popen
 import questions
 import process_utils
@@ -1399,8 +1400,13 @@ def _codex_usage_result(binary: str, timeout: int) -> object:
     for the length of the question so the reaper cannot stop it underneath.
     Where no process is held, one is started for the question and stopped
     again, the way every other part of this report is asked.
+
+    Asked of the Account the backend is set to use, because that is whose
+    windows the report is about: a plan's remaining usage is not the same
+    question as the one Codex's own login answers.
     """
-    key = backend_pool.pool_key(BACKEND_CODEX)
+    account = codex_plan_account()
+    key = codex_pool_key(account)
     shared = backend_pool.pool()
     server: Optional[CodexServer] = None
     with _CODEX_START_LOCK:
@@ -1415,7 +1421,7 @@ def _codex_usage_result(binary: str, timeout: int) -> object:
         finally:
             server.give_back()
     try:
-        started = _start_codex_server(binary)
+        started = _start_codex_server(binary, plan_account=account)
     except OSError:
         return None
     try:
@@ -2724,6 +2730,73 @@ class PlanAccount:
         return self.name or f"account {self.account_id}"
 
 
+# ----- Which Account the Codex backend uses -----
+#
+# Chosen once for the backend, saved beside the window's own preferences, and
+# inherited by every tab: nothing here is per conversation. The value is either
+# a specific ChatGPT-plan Account or nothing at all, and nothing at all means
+# Codex's own login -- the behaviour every existing setup has, so an install
+# that has chosen nothing runs exactly as it did.
+#
+# Read on the thread about to launch a process, never on the window's: it is a
+# small file, but it is a file. Kept in this module rather than with the other
+# preferences because the Codex launch is what needs it, and the window already
+# imports this module rather than the other way round.
+
+# The key the choice is stored under in the settings file. Named for the
+# backend, because it is that backend's choice and not a global one.
+CODEX_PLAN_ACCOUNT = "codex_plan_account"
+
+
+def _settings_file() -> Path:
+    """The settings file the window keeps its preferences in."""
+    return blindpilot_config_dir() / "config.json"
+
+
+def codex_plan_account() -> Optional[PlanAccount]:
+    """The Account the Codex backend is set to use, or None for its own login."""
+    saved = preferences.load_config((_settings_file(),)).get(CODEX_PLAN_ACCOUNT)
+    if not isinstance(saved, dict):
+        return None
+    try:
+        account_id = int(saved.get("account_id", 0))
+    except (TypeError, ValueError):
+        # Written by hand, or by a release that meant something else by it.
+        # Codex's own login is the answer that always works.
+        return None
+    if account_id <= 0:
+        return None
+    return PlanAccount(account_id=account_id, name=str(saved.get("name") or ""))
+
+
+def save_codex_plan_account(account: Optional[PlanAccount]) -> bool:
+    """Remember which Account the Codex backend uses. False if it was not saved.
+
+    The rest of the settings are read back and written with it, because one
+    file holds both and saving a choice must not cost somebody their
+    preferences. Off the window's thread when it is called from there.
+    """
+    path = _settings_file()
+    cfg = preferences.load_config((path,))
+    if account is None:
+        cfg.pop(CODEX_PLAN_ACCOUNT, None)
+    else:
+        cfg[CODEX_PLAN_ACCOUNT] = {"account_id": int(account.account_id), "name": account.name}
+    return preferences.save_config(path, cfg)
+
+
+def codex_pool_key(account: Optional[PlanAccount] = None) -> tuple:
+    """The pool key for the Codex backend, on this Account if one is chosen.
+
+    One place decides what an Account means to the pool, so the turn that takes
+    a process, the drop that gives it up and the usage report that reads it can
+    never disagree about which Account's process they are talking about.
+    """
+    return backend_pool.pool_key(
+        BACKEND_CODEX, account=None if account is None else account.account_id
+    )
+
+
 def plan_token_command(account_id: int) -> tuple[str, ...]:
     """The command that prints one access token for an account and exits.
 
@@ -3625,6 +3698,11 @@ class CodexWorker(_TurnWorker):
         # Borrowed from the pool, which starts and stops it; other tabs read it too.
         self._server: Optional[CodexServer] = None
         self._held: Optional[backend_pool.HeldProcess] = None
+        # The pool key this turn borrowed its process under, which carries the
+        # Account it runs on. Remembered rather than recomputed, so a choice
+        # changed while the turn is running cannot make the turn give up
+        # somebody else's process.
+        self._pool_key: Optional[tuple] = None
         # Where this turn's stderr begins in a process older than the turn.
         self._stderr_mark = 0
         # This turn's queue, read by it alone. Unbounded, because a turn's own
@@ -3875,8 +3953,15 @@ class CodexWorker(_TurnWorker):
         Taking and handing back happen under one lock so that two tabs sending
         their first Codex message together cannot each launch a server, with
         the second one kept displacing and stopping the first mid-turn.
+
+        Which process this is depends on the Account the backend is set to use:
+        the tabs on one Account share its process, and a tab on another Account
+        is given -- or starts -- that Account's own. A conversation resumed from
+        history comes through here too, so it lands on the Account its
+        conversation was held under rather than on whichever tab resumed it.
         """
-        key = backend_pool.pool_key(BACKEND_CODEX)
+        account = codex_plan_account()
+        key = codex_pool_key(account)
         shared = backend_pool.pool()
         with _CODEX_START_LOCK:
             held = shared.take(key)
@@ -3885,7 +3970,7 @@ class CodexWorker(_TurnWorker):
             reused = held is not None
             if held is None:
                 try:
-                    started = _start_codex_server()
+                    started = _start_codex_server(plan_account=account)
                 except OSError as exc:
                     self._fail(f"Failed to launch Codex: {exc}")
                     return None
@@ -3900,6 +3985,7 @@ class CodexWorker(_TurnWorker):
                     self._fail(detail)
                     return None
             shared.keep(key, held)
+            self._pool_key = key
             # Registered under the same lock the drop takes, so a turn that
             # has been handed this server is never counted as absent by a turn
             # deciding whether anyone still wants it.
@@ -3928,14 +4014,19 @@ class CodexWorker(_TurnWorker):
         exactly the turn that must not have its process stopped underneath it.
         This must never be the way one conversation's bad session id ends
         another's live turn.
+
+        Dropped under the key this turn borrowed, which remembers the Account
+        the process was started on: a choice changed mid-turn must not take a
+        different Account's process down with it.
         """
         server = self._server
         if server is None:
             return
+        key = self._pool_key or codex_pool_key()
         with _CODEX_START_LOCK:
             if server.borrower_count() > 1:
                 return
-            backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
+            backend_pool.pool().drop(key)
 
     @staticmethod
     def _policy(mode: str) -> tuple[str, dict]:

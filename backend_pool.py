@@ -24,6 +24,12 @@ the backends whose protocol wants that. The panel object is the key because
 `cwd` is not unique (`/btw` opens a second tab in the same folder) and the
 session id does not exist until the first turn has started.
 
+A process-wide backend may also run on one **Account** rather than on the
+login it holds itself, which adds that Account's identity to the key: Codex on
+a ChatGPT-plan Account is `(backend, None, account)`, so two Accounts mean two
+processes and the tabs on one Account share one. Codex on its own login takes
+no third part at all and keeps the key it has always had.
+
 Idle processes are reaped after `_HELD_IDLE_SECONDS` with no turn, and the
 reap is announced so a slow next prompt is never unexplained. The limit is a
 constant, not a preference. A process-wide process is only dropped when it is
@@ -162,7 +168,7 @@ class HeldProcess:
 _SHARED = None
 
 
-def pool_key(backend: str, panel: object = None) -> tuple:
+def pool_key(backend: str, panel: object = None, account: object = None) -> tuple:
     """The registry key for this backend, in the shape its protocol wants.
 
     No panel means one process for every tab, which is how Codex is held. A
@@ -171,8 +177,34 @@ def pool_key(backend: str, panel: object = None) -> tuple:
     the pool. The panel is the only stable per-conversation identity: `cwd` is
     not unique, because `/btw` opens a second tab in the same directory, and
     `session_id` does not exist yet when the first turn starts.
+
+    ``account`` is the identity of the Account a process-wide backend runs on,
+    and joins the key only when one is chosen. Two Accounts therefore never
+    share a process, while a backend on its own login keeps exactly the two-part
+    key it has today -- no third part to tell apart, because there is nothing
+    to tell apart.
     """
-    return (backend, panel)
+    if account is None:
+        return (backend, panel)
+    return (backend, panel, account)
+
+
+def _filed_as(key: tuple) -> tuple:
+    """The name a pool key is filed under inside its slot, without its panel.
+
+    The panel is left out because the per-conversation registry is a weak table
+    keyed by the panel itself: a name carrying the panel would be a strong
+    reference from that table's value back to its own key, and the tab could
+    then never be collected -- which is the one thing the weak table is there to
+    allow. Everything else in the key is kept, so a backend holding one process
+    per Account is filed once per Account rather than once per backend.
+    """
+    return (key[0], *key[2:])
+
+
+def _key_of(name: tuple, panel: object) -> tuple:
+    """The pool key a filed name stands for, in the slot that panel selects."""
+    return (name[0], panel, *name[1:])
 
 
 class BackendPool:
@@ -180,13 +212,16 @@ class BackendPool:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # Process-wide backends: one entry per backend, for the whole app.
-        self._shared: dict[str, HeldProcess] = {}
+        # Process-wide backends: one entry per filed name, for the whole app.
+        # A filed name carries everything in the key except the panel (see
+        # `_filed_as`), so a backend holding one process per Account is kept
+        # once per Account rather than once per backend.
+        self._shared: dict[tuple, HeldProcess] = {}
         # Per-conversation backends. Weak on the panel so a tab destroyed
         # without a teardown cannot pin its process for the life of the app.
         # This is a backstop, not the mechanism: collection is not prompt, so
         # the enumerated drop sites remain the contract.
-        self._per_panel: "weakref.WeakKeyDictionary[object, dict[str, HeldProcess]]" = (
+        self._per_panel: "weakref.WeakKeyDictionary[object, dict[tuple, HeldProcess]]" = (
             weakref.WeakKeyDictionary()
         )
         self._stopping: set[threading.Thread] = set()
@@ -196,12 +231,12 @@ class BackendPool:
         # by the window; the pool itself must not import wx or speak.
         self.on_reap: Optional[Callable[[str, str], None]] = None
 
-    def _slot(self, key: tuple) -> tuple[Optional[dict], str]:
-        """The dict a key lives in and the name within it, or (None, name)."""
-        backend, panel = key
+    def _slot(self, key: tuple) -> Optional[dict]:
+        """The dict this key lives in, or None if nothing is held for it."""
+        panel = key[1]
         if panel is _SHARED:
-            return self._shared, backend
-        return self._per_panel.get(panel), backend
+            return self._shared
+        return self._per_panel.get(panel)
 
     def take(self, key: tuple) -> Optional[HeldProcess]:
         """The process for this key if it can still serve a turn, else None.
@@ -212,12 +247,15 @@ class BackendPool:
         costs the next prompt a cold start, and silence is how a hang sounds.
         """
         with self._lock:
-            slot, name = self._slot(key)
-            held = slot.get(name) if slot is not None else None
+            slot = self._slot(key)
+            if slot is None:
+                return None
+            name = _filed_as(key)
+            held = slot.get(name)
             if held is None:
                 return None
             if not held.alive():
-                del slot[name]  # type: ignore[index, union-attr]
+                del slot[name]
                 dead = held
             else:
                 held.touch()
@@ -240,24 +278,21 @@ class BackendPool:
 
     def keep(self, key: tuple, held: HeldProcess) -> None:
         """Hand a process back at the end of a turn."""
-        backend, panel = key
+        panel = key[1]
         # Idle is time with no turn, so the clock starts when the turn ENDS.
         # Measured from the start instead, a fourteen-minute turn was reaped
         # sixty seconds after it finished -- while the follow-up prompt was
         # being typed.
         held.touch()
+        name = _filed_as(key)
         stale: Optional[HeldProcess] = None
         with self._lock:
             if panel is _SHARED:
-                stale = self._shared.get(backend)
-                self._shared[backend] = held
+                slot = self._shared
             else:
-                slot = self._per_panel.get(panel)
-                if slot is None:
-                    slot = {}
-                    self._per_panel[panel] = slot
-                stale = slot.get(backend)
-                slot[backend] = held
+                slot = self._per_panel.setdefault(panel, {})
+            stale = slot.get(name)
+            slot[name] = held
             if stale is held:
                 stale = None
         if stale is not None:
@@ -266,16 +301,16 @@ class BackendPool:
     def drop(self, key: tuple) -> None:
         """Stop this key's process and forget it. Safe on a key never held."""
         with self._lock:
-            slot, name = self._slot(key)
-            held = slot.pop(name, None) if slot is not None else None
+            slot = self._slot(key)
+            held = slot.pop(_filed_as(key), None) if slot is not None else None
         if held is not None:
             held.stop()
 
     def drop_async(self, key: tuple) -> None:
         """Forget this key now and stop off-thread unless shutting down."""
         with self._lock:
-            slot, name = self._slot(key)
-            held = slot.pop(name, None) if slot is not None else None
+            slot = self._slot(key)
+            held = slot.pop(_filed_as(key), None) if slot is not None else None
             if held is None:
                 return
             synchronous = self._closing
@@ -297,6 +332,22 @@ class BackendPool:
                     synchronous = True
         if synchronous:
             # A failed spawn or a drop after shutdown must still stop the process.
+            held.stop()
+
+    def drop_backend(self, backend: str) -> None:
+        """Stop every process this backend holds, whichever Account holds it.
+
+        For replacing the executable: Windows will not overwrite a file a
+        process is running from, and which Account started that process does
+        not change it. This is the one drop that reaches across Accounts, and
+        it is for a reason outside every conversation -- a tab letting go of
+        its own conversation must never use it.
+        """
+        with self._lock:
+            gone = [self._shared.pop(name) for name in [n for n in self._shared if n[0] == backend]]
+            for slot in list(self._per_panel.values()):
+                gone.extend(slot.pop(name) for name in [n for n in slot if n[0] == backend])
+        for held in gone:
             held.stop()
 
     def drop_all(self) -> None:
@@ -352,16 +403,21 @@ class BackendPool:
         return [key for key, _held in expired]
 
     def _idle(self, now: float, idle_limit: float) -> list[tuple[tuple, HeldProcess]]:
-        """Everything whose idle clock has run out, without judging it yet."""
+        """Everything whose idle clock has run out, without judging it yet.
+
+        Each entry is reported under the key it was filed by, rebuilt with the
+        panel that names its slot, so an Account in the key comes back whole
+        and the caller drops exactly what it was given.
+        """
         found: list[tuple[tuple, HeldProcess]] = []
         with self._lock:
-            for backend, held in list(self._shared.items()):
+            for name, held in list(self._shared.items()):
                 if held.idle_seconds(now) > idle_limit:
-                    found.append((pool_key(backend), held))
+                    found.append((_key_of(name, _SHARED), held))
             for panel, slot in list(self._per_panel.items()):
-                for backend, held in list(slot.items()):
+                for name, held in list(slot.items()):
                     if held.idle_seconds(now) > idle_limit:
-                        found.append((pool_key(backend, panel), held))
+                        found.append((_key_of(name, panel), held))
         return found
 
     def _forget(
@@ -371,7 +427,8 @@ class BackendPool:
         gone: list[tuple[tuple, HeldProcess]] = []
         with self._lock:
             for key, held in candidates:
-                slot, name = self._slot(key)
+                slot = self._slot(key)
+                name = _filed_as(key)
                 if slot is None or slot.get(name) is not held:
                     # Dropped, or replaced by a newer process, since the sweep
                     # looked. Either way this key is not this object's any more.

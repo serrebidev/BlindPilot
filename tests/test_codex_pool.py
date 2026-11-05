@@ -629,7 +629,7 @@ def test_two_first_turns_at_once_start_one_server_and_neither_is_killed(monkeypa
     started: list[agent_backends.CodexServer] = []
     barrier = threading.Barrier(2)
 
-    def slow_start() -> agent_backends.CodexServer:
+    def slow_start(**_asked) -> agent_backends.CodexServer:
         server = agent_backends.CodexServer(_FakeProc())
         time.sleep(0.05)
         started.append(server)
@@ -703,7 +703,7 @@ def test_a_conversation_being_read_is_never_dropped_by_another_tabs_failure(monk
     server = agent_backends.CodexServer(_FakeProc())
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
-    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: server)
     mid_turn = _bare_worker()
     assert mid_turn._borrow_server() is not None
     server.attach("someone-elses-thread", mid_turn._inbox)
@@ -758,7 +758,7 @@ def test_a_server_a_turn_is_still_waiting_on_is_not_taken_away(monkeypatch):
     server = agent_backends.CodexServer(_FakeProc())
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
-    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: server)
 
     waiting = _bare_worker()
     assert waiting._borrow_server() is not None
@@ -779,7 +779,7 @@ def test_the_last_turn_holding_a_broken_server_is_the_one_that_drops_it(monkeypa
     server = agent_backends.CodexServer(_FakeProc())
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
-    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: server)
 
     worker = _bare_worker(session_id="no-such-thread")
     assert worker._borrow_server() is not None
@@ -1092,7 +1092,7 @@ def test_a_server_is_not_dropped_while_another_tab_is_registering_its_borrow(mon
     server = agent_backends.CodexServer(_FakeProc())
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     backend_pool.pool().keep(key, backend_pool.HeldProcess(server, agent_backends.codex_adapter()))
-    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: server)
 
     holding = _bare_worker()
     assert holding._borrow_server() is not None
@@ -1813,7 +1813,7 @@ def test_a_sweep_never_stops_the_app_server_a_turn_is_speaking_through(monkeypat
     server is shared, so every other tab's turn ended with it, all of its MCP
     children went, and BlindPilot announced the backend had been idle."""
     server = agent_backends.CodexServer(_FakeProc())
-    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: server)
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     worker = _bare_worker()
     assert worker._borrow_server() is not None
@@ -1840,7 +1840,7 @@ def test_the_idle_clock_runs_from_the_end_of_a_codex_turn_not_its_start(monkeypa
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     held = backend_pool.HeldProcess(server, agent_backends.codex_adapter(), now=lambda: clock[0])
     backend_pool.pool().keep(key, held)
-    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: server)
 
     worker = _bare_worker()
     assert worker._borrow_server() is held
@@ -1871,7 +1871,7 @@ def test_a_sweep_between_give_back_and_touch_does_not_reap_a_turn_that_just_ende
     key = backend_pool.pool_key(agent_backends.BACKEND_CODEX)
     held = backend_pool.HeldProcess(server, agent_backends.codex_adapter(), now=lambda: clock[0])
     backend_pool.pool().keep(key, held)
-    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda: server)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: server)
 
     worker = _bare_worker()
     assert worker._borrow_server() is held
@@ -2323,3 +2323,181 @@ def test_a_launch_without_a_plan_leaves_the_users_own_login_alone(monkeypatch):
     assert "-c" not in captured.server["args"], "the user's own config was overridden"
     assert captured.token_runs == [], "a token command was run with no plan account chosen"
     assert captured.server["args"][-2:] == ["app-server", "--stdio"]
+
+
+# ----- Which Account the backend is set to use -----
+#
+# The choice is saved once for the Codex backend and every tab inherits it, so
+# the thing to prove from outside is which held process a tab is handed: one per
+# Account, shared by the tabs on it, and Codex's own login exactly as it was.
+
+
+def _choose(settings: Path, account_id: int | None, name: str = "") -> None:
+    """Save the Account the Codex backend is set to use, as the dialog does."""
+    account = None if account_id is None else agent_backends.PlanAccount(account_id, name)
+    assert agent_backends.save_codex_plan_account(account)
+
+
+def test_the_account_choice_survives_a_restart(
+    the_account_choice_stays_out_of_the_real_settings,
+):
+    """Read fresh each turn, so a restart -- or the next launch of the app --
+    opens on the Account that was chosen rather than back on Codex's login."""
+    settings = the_account_choice_stays_out_of_the_real_settings
+    assert agent_backends.codex_plan_account() is None, (
+        "Codex's own login is what an install that has chosen nothing runs on"
+    )
+
+    _choose(settings, 7, "Work plan")
+
+    chosen = agent_backends.codex_plan_account()
+    assert chosen is not None, "the Account the backend was set to use was forgotten"
+    assert (chosen.account_id, chosen.name) == (7, "Work plan")
+
+
+def test_choosing_codex_s_own_login_again_is_remembered_as_no_account(
+    the_account_choice_stays_out_of_the_real_settings,
+):
+    settings = the_account_choice_stays_out_of_the_real_settings
+    _choose(settings, 7, "Work plan")
+
+    _choose(settings, None)
+
+    assert agent_backends.codex_plan_account() is None, "the Account could not be given up"
+
+
+def test_saving_the_choice_leaves_the_window_s_own_settings_alone(
+    the_account_choice_stays_out_of_the_real_settings,
+):
+    """One file holds both, so saving the choice must not cost the person the
+    preferences beside it."""
+    settings = the_account_choice_stays_out_of_the_real_settings
+    (settings / "config.json").write_text(
+        json.dumps({"backend": "codex", "narration": "keep-up"}), encoding="utf-8"
+    )
+
+    _choose(settings, 7, "Work plan")
+
+    stored = json.loads((settings / "config.json").read_text(encoding="utf-8"))
+    assert stored["backend"] == "codex"
+    assert stored["narration"] == "keep-up"
+
+
+def _launch_on_each_account(monkeypatch, procs: list) -> list:
+    """The real launch path, with one app-server and one token command replaced.
+
+    ``procs`` is handed out one per launch, so a turn that starts a second
+    app-server is visible as one more of them having been taken.
+    """
+    launched: list = []
+
+    def fake_popen(*_args, **_kwargs):
+        launched.append(procs[len(launched)])
+        return launched[-1]
+
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "codex")
+    monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda binary: binary)
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _binary: {})
+    monkeypatch.setattr(agent_backends, "codex_question_args", lambda: ())
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        agent_backends,
+        "_run_token_command",
+        lambda command, **_kwargs: subprocess.CompletedProcess(list(command), 0, "tok\n", ""),
+    )
+    return launched
+
+
+def _held_for(account_id: int | None = None) -> object | None:
+    """The app-server the pool holds for an Account, or for Codex's own login."""
+    held = backend_pool.pool().take(
+        backend_pool.pool_key(agent_backends.BACKEND_CODEX, account=account_id)
+    )
+    return None if held is None else held.handle
+
+
+def test_a_tab_is_launched_on_the_account_the_backend_is_set_to(monkeypatch, tmp_path):
+    """The choice reaches the process: the app-server is the one the token
+    command for that Account launches, and it is held under that Account."""
+    _choose(tmp_path, 7, "Work plan")
+    captured = _capture_launch(monkeypatch)
+
+    assert _bare_worker()._borrow_server() is not None
+
+    assert _auth_command(_overrides(captured.server["args"]))[-2:] == ["--print-plan-token", "7"]
+    assert _held_for(7) is not None, "the turn was not held under the Account it ran on"
+    assert _held_for() is None, "an Account's process answered for Codex's own login too"
+
+
+def test_two_tabs_on_one_account_share_its_process(monkeypatch, tmp_path):
+    _choose(tmp_path, 7, "Work plan")
+    launched = _launch_on_each_account(monkeypatch, [_FakeProc()])
+    first, second = _bare_worker(), _bare_worker()
+
+    assert first._borrow_server() is not None
+    assert second._borrow_server() is not None
+
+    assert len(launched) == 1, "two tabs on one Account started two app-servers"
+    assert first._server is second._server
+    assert _held_for(7) is first._server
+
+
+def test_a_conversation_resumed_from_history_resumes_on_its_account(monkeypatch, tmp_path):
+    """The conversation was held under that Account, so resuming it uses the
+    process that has its thread rather than starting one on Codex's own login."""
+    _choose(tmp_path, 7, "Work plan")
+    work = agent_backends.CodexServer(_FakeProc())
+    backend_pool.pool().keep(
+        backend_pool.pool_key(agent_backends.BACKEND_CODEX, account=7),
+        backend_pool.HeldProcess(work, agent_backends.codex_adapter()),
+    )
+    launched = _launch_on_each_account(monkeypatch, [_FakeProc()])
+
+    resumed = _bare_worker(session_id="saved-thread")
+    assert resumed._borrow_server() is not None
+
+    assert launched == [], "resuming started a process instead of using its Account's"
+    assert resumed._server is work
+
+
+def test_another_account_never_takes_this_accounts_process(monkeypatch, tmp_path):
+    """Switching the choice in one tab cannot move what another Account holds."""
+    _choose(tmp_path, 7, "Work plan")
+    work = agent_backends.CodexServer(_FakeProc())
+    backend_pool.pool().keep(
+        backend_pool.pool_key(agent_backends.BACKEND_CODEX, account=7),
+        backend_pool.HeldProcess(work, agent_backends.codex_adapter()),
+    )
+    launched = _launch_on_each_account(monkeypatch, [_FakeProc()])
+    _choose(tmp_path, 9, "Personal plan")
+
+    assert _bare_worker()._borrow_server() is not None
+
+    assert len(launched) == 1, "the second Account was given the first Account's process"
+    assert not work.proc.killed, "the second Account stopped the first Account's process"
+    assert _held_for(7) is work
+    assert _held_for(9) is not work
+
+
+def test_dropping_one_accounts_process_leaves_the_other_account_running(monkeypatch, tmp_path):
+    """A conversation that cannot start takes down its own Account's process and
+    nothing else: the other Account's tab is sitting on its own."""
+    _choose(tmp_path, 7, "Work plan")
+    launched = _launch_on_each_account(monkeypatch, [_FakeProc(), _FakeProc()])
+    settled = _bare_worker()
+    assert settled._borrow_server() is not None
+    # That tab's turn is over, so it gives its borrow back: what Account 7
+    # holds is a process with nobody speaking through it.
+    settled._release()
+    _choose(tmp_path, 9, "Personal plan")
+    assert _bare_worker()._borrow_server() is not None
+    assert len(launched) == 2
+
+    _choose(tmp_path, 7, "Work plan")
+    giving_up = _bare_worker(session_id="no-such-thread")
+    assert giving_up._borrow_server() is not None
+    giving_up._discard_server()
+
+    assert _held_for(7) is None, "the Account that gave up its conversation kept its process"
+    assert _held_for(9) is not None, "one Account's failure took another Account's process"
+    assert not launched[1].killed

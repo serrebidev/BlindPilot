@@ -113,7 +113,9 @@ def test_the_contract_rejects_a_pool_that_leaves_a_dead_process_registered(monke
 
     class _KeepsTheCorpse(backend_pool.BackendPool):
         def take(self, key: tuple):
-            held = self._shared.get(key[0])
+            # The one entry the contract clause kept, however the registry
+            # files a key: an Account in it is not this stand-in's business.
+            held = next(iter(self._shared.values()), None)
             if held is not None and not held.alive():
                 return None  # discarded from the caller's view, not the registry
             return backend_pool.BackendPool.take(self, key)

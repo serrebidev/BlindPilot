@@ -111,6 +111,30 @@ def chat_data_stays_out_of_the_real_folder(monkeypatch):
         shutil.rmtree(data, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def the_account_choice_stays_out_of_the_real_settings(monkeypatch):
+    """Point the Codex backend's Account choice at a throwaway settings folder.
+
+    Every Codex turn reads which Account the backend is set to use, out of the
+    same config.json the window keeps its own preferences in. Left alone that is
+    the installed application's file: somebody who has chosen a plan Account
+    would find the whole suite's Codex tests running turns on it, and a test
+    that chose one would write over the choice they made. The folder is handed
+    to a test that names this fixture, which is how one chooses an Account.
+    """
+    try:
+        import agent_backends
+    except Exception:
+        yield None
+        return
+    settings = Path(tempfile.mkdtemp(prefix="blindpilot-test-settings-"))
+    monkeypatch.setattr(agent_backends, "blindpilot_config_dir", lambda: settings)
+    try:
+        yield settings
+    finally:
+        shutil.rmtree(settings, ignore_errors=True)
+
+
 def _forget_every_held_process() -> None:
     """Stop everything the pool is holding and start it again from nothing.
 
