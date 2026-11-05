@@ -2755,8 +2755,9 @@ def codex_plan_args(account_id: int) -> tuple[str, ...]:
         (f"{provider}.name", json.dumps("OpenAI")),
         (f"{provider}.base_url", json.dumps(PLAN_BASE_URL)),
         (f"{provider}.wire_api", json.dumps("responses")),
-        (f"{provider}.requires_openai_auth", "false"),
         (f"{provider}.supports_websockets", "false"),
+        # requires_openai_auth is deliberately absent: Codex's reference says
+        # not to combine it with auth, and its default is already false.
         (f"{provider}.auth.command", json.dumps(command[0], ensure_ascii=False)),
         (f"{provider}.auth.args", json.dumps(list(command[1:]), ensure_ascii=False)),
         (f"{provider}.auth.refresh_interval_ms", str(PLAN_TOKEN_REFRESH_MS)),

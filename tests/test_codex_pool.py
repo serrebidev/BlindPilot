@@ -2260,7 +2260,9 @@ def test_a_plan_launch_points_codex_at_openai_and_fetches_its_token_by_command(m
     assert overrides["model_provider"] == "blindpilot-chatgpt"
     assert overrides[f"{provider}.base_url"] == "https://api.openai.com/v1"
     assert overrides[f"{provider}.wire_api"] == "responses"
-    assert overrides[f"{provider}.requires_openai_auth"] is False
+    assert f"{provider}.requires_openai_auth" not in overrides, (
+        "Codex refuses auth combined with requires_openai_auth; its default is false already"
+    )
     assert overrides[f"{provider}.supports_websockets"] is False
 
     # A command Codex runs itself, for this app's token mode and this account.
