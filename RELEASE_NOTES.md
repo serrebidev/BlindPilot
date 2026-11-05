@@ -1,3 +1,8 @@
+# BlindPilot 0.55.6
+
+- Changed: question handling and shared process utilities now live in focused modules of their own — question types and parsing in questions.py, the question dialog in question_dialog.py, and shared process-group, pipe-cleanup and console-window helpers in process_utils.py — so unrelated changes are easier to isolate and review. Windows Job Object ownership stays in owned_process.py under ADR 0001. From Farhan Khan's spec #134, issues #135, #136 and #137, PR #138.
+- Fixed: in the question dialog, selecting "Other" now announces which question's custom-answer field appeared and how to Tab to it, instead of a generic message; multi-select questions now show the previews of all selected options together, each labelled; and long question sets scroll, so every question stays reachable.
+
 # BlindPilot 0.55.5
 
 - Fixed: a structured question block a turn wrote into its answer could be lost when the turn went on to write about the block itself, because only the last block was read and the later samples are not the JSON they claim to be. The last usable block now wins. Blocks fenced with ~~~ are read as well as ones fenced with backticks, and a single question written as one object is taken. From Farhan Khan, PR #133.
