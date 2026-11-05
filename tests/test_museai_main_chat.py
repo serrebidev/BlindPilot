@@ -46,6 +46,13 @@ def test_restored_main_chat_follows_changes_from_its_loaded_sequence(monkeypatch
             panel._museai_checked("main", 11)
             assert launches and panel._museai_follow_after == 10
         finally:
+            # A follow starts the working cue, and the turn it belongs to is
+            # the one stubbed out above, so nothing here ever ends it. Left
+            # running the cue's thread outlives the test and keeps spawning a
+            # player -- `afplay` on macOS -- which the next test that patches
+            # `subprocess` counts as a launch of its own. `cancel_worker` is
+            # what stops the cue when a tab really closes.
+            frame.earcons.stop_progress()
             frame.Destroy()
 
 
