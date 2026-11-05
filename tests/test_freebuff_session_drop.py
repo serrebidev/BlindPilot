@@ -19,7 +19,11 @@ from __future__ import annotations
 import agent_backends
 import json
 import pytest
-from agent_backends import FreebuffWorker, _freebuff_picker_options, _freebuff_run_status
+from agent_backends import (
+    FreebuffWorker,
+    _freebuff_picker_options,
+    _freebuff_run_status,
+)
 
 CATALOG = [
     "z-ai/glm-5.3-flash",

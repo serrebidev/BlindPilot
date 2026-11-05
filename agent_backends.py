@@ -34,7 +34,6 @@ import platform
 import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -47,278 +46,11 @@ from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 import backend_pool
 import diagnostics
 from owned_process import _WindowsJob, owned_popen
+import questions
+import process_utils
 
 from markdown_rows import SentenceStreamer
 from markdown_rows import complete_sentences as _complete_sentences
-
-
-# A windowed app owns no console, so every child process Windows considers a
-# console program is given a brand new one - a terminal that pops up on screen,
-# takes focus away from the screen reader, and in the case of a long-running
-# agent CLI stays there for the whole turn. CREATE_NO_WINDOW suppresses it.
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-
-def no_window_kwargs() -> dict:
-    """``subprocess`` keyword arguments that keep children off the screen."""
-    return {"creationflags": CREATE_NO_WINDOW} if CREATE_NO_WINDOW else {}
-
-
-def own_group_kwargs() -> dict:
-    """``subprocess`` keyword arguments that give a child its own process group.
-
-    Half the provider CLIs are launchers rather than programs: npm's
-    ``@openai/codex`` is a Node script that runs the real Codex as a child of
-    its own, and FreeBuff's is the same shape. Killing the launcher leaves that
-    child running — still holding its lock, still waiting on a sign-in nobody
-    is completing. A child in a group of its own can be stopped as a group,
-    which is the only way to stop what it started too.
-    """
-    return {} if platform.system() == "Windows" else {"start_new_session": True}
-
-
-def end_process_group(proc: object, timeout: float = 0.0) -> None:
-    """Stop a child started with :func:`own_group_kwargs`, and its own children.
-
-    The kill signals go out immediately; the wait for the child to be gone is
-    bounded by *timeout*, or five seconds when it is not given. Stop Task and a
-    closing wizard both call this from the window's own thread, so an unbounded
-    wait there is a frozen application -- but no wait at all leaves a zombie on
-    POSIX and an unreleased handle on Windows, which is why the default path
-    gained the short bounded wait.
-
-    The group is only signalled while the root is live and demonstrably the
-    leader, which is exactly what ``start_new_session`` made it. Anything else, a
-    child started without its own group or a stand-in in a test, is stopped on
-    its own. That check is not a formality: a process still sitting in
-    BlindPilot's group would otherwise have BlindPilot signal itself, and take
-    every other backend down with it.
-
-    On Windows, only a Job Object attached at creation can end descendants.
-    On POSIX, an exited root cannot prove a group still belongs to us, so
-    children left behind by that root are not signalled by a reused group ID.
-    """
-    job = getattr(proc, "_blindpilot_job", None)
-    if job is not None:
-        job.close()
-    poll = getattr(proc, "poll", None)
-    if poll is None or poll() is None:
-        pid = getattr(proc, "pid", None)
-        if isinstance(pid, int) and pid > 0:
-            if platform.system() != "Windows":
-                try:
-                    # POSIX only, and the platform test above is a runtime
-                    # condition the checker cannot read, so against a Windows
-                    # target it reports all three of these as missing.
-                    if os.getpgid(pid) == pid:  # type: ignore[attr-defined]
-                        os.killpg(pid, signal.SIGKILL)  # type: ignore[attr-defined]
-                except OSError:
-                    pass
-        # Also stop the exact root if group or Job cleanup did not reach it.
-        kill = getattr(proc, "kill", None)
-        if kill is not None:
-            try:
-                kill()
-            except OSError:
-                pass
-    # Reaped whether the kill just happened or the child had already exited:
-    # a finished child that is never waited on stays a zombie (POSIX) or keeps
-    # its process handle (Windows). An already-exited child answers at once.
-    wait = getattr(proc, "wait", None)
-    if wait is not None:
-        try:
-            wait(timeout=timeout or 5)
-        except Exception:
-            pass
-
-
-def _close_process_pipes(proc: object) -> None:
-    """Close a child's pipe handles, whatever state the child is in.
-
-    Ending a process does not hand its pipes back: a server stopped after it
-    had already exited still holds one file handle per pipe until something
-    closes them, and an application that stays open all day leaks one server's
-    worth per restart. Best effort, and tolerant of the stand-ins tests use --
-    a pipe without a ``close`` method is left alone rather than raising.
-    """
-    for name in ("stdin", "stdout", "stderr"):
-        pipe = getattr(proc, name, None)
-        close = getattr(pipe, "close", None)
-        if close is None:
-            continue
-        try:
-            close()
-        except (OSError, ValueError, AttributeError):
-            pass
-
-
-_CONSOLE_WINDOW_CLASSES = ("ConsoleWindowClass", "PseudoConsoleWindow")
-
-
-def _banish_window(handle: int) -> None:
-    """Make a console unable to take focus, then hide it off-screen.
-
-    A console created for a pseudo-terminal is owned by BlindPilot, so Windows
-    gives it the executable path for a title and treats it as an ordinary app
-    window. Hiding alone is insufficient: Windows can make it visible again
-    while ConPTY is starting or stopping, at which point it can take focus.
-    Turn it into a disabled, no-activate tool window first, then hide and park
-    it. The watcher reapplies these properties if a child creates another
-    console later.
-    """
-    import ctypes
-
-    user32 = ctypes.windll.user32
-    try:
-        # GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE.
-        # Tool windows do not appear on the taskbar; no-activate prevents an
-        # accidental ShowWindow from moving keyboard or screen-reader focus.
-        ex_style = user32.GetWindowLongW(handle, -20)
-        ex_style = (ex_style | 0x00000080 | 0x08000000) & ~0x00040000
-        user32.SetWindowLongW(handle, -20, ex_style)
-        user32.EnableWindow(handle, False)
-        user32.ShowWindow(handle, 0)  # SW_HIDE
-        # SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_NOZORDER |
-        # SWP_NOOWNERZORDER | SWP_HIDEWINDOW.
-        user32.SetWindowPos(
-            handle,
-            0,
-            -32000,
-            -32000,
-            0,
-            0,
-            0x0400 | 0x0010 | 0x0004 | 0x0200 | 0x0080,
-        )
-    except OSError:
-        pass
-
-
-def _descendant_pids(roots: set[int]) -> set[int]:
-    """Every process descended from ``roots``, so only our own are touched."""
-    if platform.system() != "Windows":
-        try:
-            result = subprocess.run(
-                ["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=5
-            )
-            posix_parents = {
-                int(pid): int(parent)
-                for pid, parent in (line.split() for line in result.stdout.splitlines())
-            }
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            return set(roots)
-        family = set(roots)
-        while (
-            additions := {pid for pid, parent in posix_parents.items() if parent in family} - family
-        ):
-            family.update(additions)
-        return family
-    import ctypes
-    import ctypes.wintypes as wintypes
-
-    class ProcessEntry(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
-            ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", ctypes.c_long),
-            ("dwFlags", wintypes.DWORD),
-            ("szExeFile", ctypes.c_char * 260),
-        ]
-
-    kernel32 = ctypes.windll.kernel32
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-    if snapshot == -1:
-        return set(roots)
-    parents: dict[int, int] = {}
-    try:
-        entry = ProcessEntry()
-        entry.dwSize = ctypes.sizeof(ProcessEntry)
-        ok = kernel32.Process32First(snapshot, ctypes.byref(entry))
-        while ok:
-            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
-            ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
-    finally:
-        kernel32.CloseHandle(snapshot)
-
-    family = set(roots)
-    for pid in parents:
-        seen: set[int] = set()
-        walker = pid
-        while walker and walker not in seen:
-            seen.add(walker)
-            if walker in family:
-                family.update(seen)
-                break
-            walker = parents.get(walker, 0)
-    return family
-
-
-def hide_console_windows(roots: Optional[set[int]] = None) -> int:
-    """Hide the console this process was given, and any its children raise.
-
-    Creating the pseudo-terminal attaches a console to BlindPilot itself, which
-    is why the window belongs to us rather than to the program being run. That
-    one is found directly; the enumeration is the safety net for a child that
-    raises its own, and never touches a console outside this process tree.
-    """
-    if platform.system() != "Windows":
-        return 0
-    import ctypes
-    import ctypes.wintypes as wintypes
-
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    hidden = 0
-    try:
-        own = kernel32.GetConsoleWindow()
-        if own and user32.IsWindowVisible(own):
-            _banish_window(own)
-            hidden += 1
-    except OSError:
-        pass
-
-    candidates: list[tuple[int, int]] = []
-
-    def visit(handle, _param):
-        try:
-            if not user32.IsWindowVisible(handle):
-                return True
-            name = ctypes.create_unicode_buffer(64)
-            user32.GetClassNameW(handle, name, 64)
-            if name.value in _CONSOLE_WINDOW_CLASSES:
-                owner = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
-                candidates.append((handle, int(owner.value)))
-        except Exception:
-            pass
-        return True
-
-    try:
-        callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(visit)
-        user32.EnumWindows(callback, 0)
-    except Exception:
-        return hidden
-    # Walking the process table costs milliseconds, and this runs in a tight
-    # loop to catch the window in the frame it appears. Pay for it only when
-    # there is actually a console window on screen to account for.
-    if not candidates:
-        return hidden
-    try:
-        family = _descendant_pids(set(roots or ()) | {os.getpid()})
-    except Exception:
-        family = set(roots or ()) | {os.getpid()}
-    for handle, owner in candidates:
-        if owner in family:
-            try:
-                _banish_window(handle)
-                hidden += 1
-            except Exception:
-                pass
-    return hidden
 
 
 BACKEND_CLAUDE = "claude"
@@ -441,256 +173,6 @@ def ignore_subagents(_agent_id: str, _name: str, _status: str, _line: str) -> No
 # `ask_user` tool straight onto its terminal. The window should not have to
 # know any of that, so each adapter translates its provider's shape into the
 # two types below, and translates the answers back on the way out.
-
-
-@dataclass(frozen=True)
-class QuestionOption:
-    """One answer a backend offers for a question.
-
-    `preview` is the longer text some providers attach to an option to show
-    what choosing it would mean (Claude Code's AskUserQuestion sends one, a
-    mock-up or a plan sketch); most options from most providers have none.
-    """
-
-    label: str
-    description: str = ""
-    preview: str = ""
-
-
-@dataclass(frozen=True)
-class Question:
-    """One question a backend has paused its turn to ask.
-
-    ``id`` is whatever the backend needs to match the answer back to the
-    question — Codex's question id, or an empty string where the provider keys
-    answers by position or by the question's own text instead.
-    """
-
-    question: str
-    header: str = ""
-    options: tuple[QuestionOption, ...] = ()
-    multi_select: bool = False
-    id: str = ""
-    # Whether the provider accepts an answer that is not one of its options.
-    # Every backend does today, and all four say so in their tool descriptions
-    # ("the client will add a free-form Other option automatically"), so this
-    # is the default rather than the exception.
-    allow_custom: bool = True
-    # Codex alone marks a question whose answer should not be echoed back.
-    secret: bool = False
-
-
-# Given the questions, return one list of chosen answers per question — the
-# option labels the person picked, or the text they typed instead — or None if
-# they closed the dialog without answering. Called on the worker thread, and
-# blocks it: the backend's turn is waiting on this answer.
-AskQuestions = Callable[[Sequence[Question]], Optional[list[list[str]]]]
-
-
-# How much a turn may say after its last question mark before it counts as
-# having moved on. A question the answer then answers itself -- "Is the extra
-# lock worth it? No, because..." -- is not asked of anybody, and opening a
-# dialog on it would interrupt for nothing. A question followed by the
-# recommendation the asker would give is still a question, and that is what
-# fits inside this.
-_QUESTION_TAIL_CHARS = 200
-
-# Markdown that would otherwise be read out as part of the question.
-_QUESTION_TRIM = "*_`~ 	"
-_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
-
-
-def _without_code(text: str) -> str:
-    """The text with fenced code taken out.
-
-    A question mark in a code sample is punctuation, not a question, and a
-    fence is the one place it turns up often enough to matter.
-    """
-    kept: list[str] = []
-    fence = ""
-    for line in text.splitlines():
-        stripped = line.strip()
-        if fence:
-            if stripped.startswith(fence):
-                fence = ""
-            continue
-        if stripped.startswith(("```", "~~~")):
-            fence = stripped[:3]
-            continue
-        kept.append(line)
-    return "\n".join(kept)
-
-
-def trailing_question(text: str) -> str:
-    """The question a turn ended by asking, or "" if it did not end on one.
-
-    Every backend opens the question dialog from a structured event of its own
-    -- AskUserQuestion, request_user_input, clarify, userInput. A model that
-    writes its question into its answer sends none of them, so the turn ends
-    with nothing said and nothing shown, and the person is left waiting on a
-    turn that is itself waiting on them. An interview skill asks that way by
-    design, and Command Code has no question tool in a headless run at all, so
-    on that backend it is the only way a question ever arrives.
-
-    The judgement is deliberately narrow, because a dialog nobody asked for is
-    worse than none: the last question mark has to be near the end, and the
-    question is read no further back than the line it sits on. Both are what
-    keep a turn that asked itself something in passing from being mistaken for
-    one that is waiting.
-    """
-    body = _without_code(text)
-    end = body.rfind("?")
-    if end < 0:
-        return ""
-    if len(body[end + 1 :].strip()) > _QUESTION_TAIL_CHARS:
-        return ""
-    start = body.rfind("\n", 0, end) + 1
-    for mark in ".!?":
-        found = body.rfind(mark, start, end)
-        if found >= 0:
-            start = max(start, found + 1)
-    question = " ".join(body[start : end + 1].split())
-    question = _BULLET.sub("", question.lstrip("#").strip())
-    question = question.strip(_QUESTION_TRIM)
-    if not any(character.isalpha() for character in question):
-        # A stray question mark on its own is not a question worth stopping for.
-        return ""
-    return question if question.endswith("?") else f"{question}?"
-
-
-# The shapes a turn signs off with once its work is already done. "Want me to
-# run the tests as well?", "Should I commit this?", "Anything else?" -- none of
-# them is in the way of anything. The turn ended, the work it asks about is the
-# next thing to ask for, and the reply is the next message whenever it comes,
-# so a modal interrupts the answer being read for a question that was never
-# blocking. What the dialog is for is the other kind: the turn that stopped
-# because only the person can say which name, which of the two, what it should
-# be called. That one still opens it.
-_OFFER_TO_CARRY_ON = re.compile(
-    r"""^(?:(?:and|then|so|also|now|ok|okay|alright),?\s+)*
-    (?:
-        (?:do\s+you\s+want|would\s+you\s+like|want|like)\s+(?:me|us)\s+to\b
-      | (?:should|shall|can|may)\s+(?:i|we)\b
-      | (?:ready|happy|ok(?:ay)?)\s+for\s+(?:me|us)\s+to\b
-      | (?:is\s+)?(?:that|this|it)\s+(?:ok(?:ay)?|good|fine|right|all\s+right)\b
-      | (?:does|do)\s+(?:that|this|they|these)\s+(?:work|help|sound|look|make)\b
-      | (?:sound|sounds|look|looks)\s+(?:good|right|ok(?:ay)?)\b
-      | (?:make|makes)\s+sense\b
-      | any(?:thing)?\s+else\b
-      | any\s+(?:other\s+)?questions?\b
-      | all\s+good\b
-      | good\s+to\s+go\b
-    )""",
-    re.IGNORECASE | re.VERBOSE,
-)
-
-# A fork named inside the offer. "Should I use tabs or spaces?" is an offer by
-# its grammar and a decision by its content, and nobody but the person can
-# settle which way the work goes from there.
-_A_FORK = re.compile(r"\bor\b", re.IGNORECASE)
-
-
-def is_an_offer_to_carry_on(question: str) -> bool:
-    """Whether a question written into an answer signs off rather than waits.
-
-    A turn that delivered its work and closed by offering the next step, or by
-    checking that what it did reads right, is not waiting on anybody: nothing
-    is held open, and the reply is simply the next turn. A turn that stopped
-    short of the work because it needs to be told something is waiting, and
-    that is the one worth a dialog.
-
-    The reading is of the question alone, and deliberately literal: an offer is
-    recognised by the way it is put -- "want me to", "should I", "anything
-    else" -- because the alternative is guessing at intent, and a dialog that
-    opens over a finished turn is exactly the interruption this is meant to
-    spare. A yes-or-no offer to do more is a sign-off; an offer that names a
-    fork is a decision, and stays a question.
-    """
-    text = question.strip().strip(_QUESTION_TRIM)
-    if not _OFFER_TO_CARRY_ON.match(text):
-        return False
-    return not _A_FORK.search(text)
-
-
-# A question block a turn can write into its reply: a fenced code block whose
-# info string is `questions`, carrying the same JSON a backend's question tool
-# sends. Command Code has no way to be asked through a tool at all -- its
-# ask_user_question is withheld from a headless run, because a headless run
-# answers its own prompts by taking the first option, and switching it on would
-# settle the question with nobody hearing it. Everywhere else the tool is what
-# carries the options, so a backend that cannot be asked through one has no way
-# to offer any. A written block does, and it is the same shape all four
-# providers already send, so the dialog reads it with the very code that reads
-# theirs: the same questions, the same options, the same answers back.
-#
-# Either fence character opens one, and the closer has to be the one that
-# opened it. A turn that writes about the block -- quoting one, showing it in a
-# diff -- has to reach for `~~~` to keep the sample it is writing from ending
-# early, so a block fenced that way is read just the same.
-_QUESTION_BLOCK = re.compile(
-    r"(?P<fence>```|~~~)[ \t]*questions[ \t]*\r?\n(?P<body>.*?)(?P=fence)",
-    re.DOTALL | re.IGNORECASE,
-)
-
-
-def questions_written_in_the_answer(text: str) -> tuple[Question, ...]:
-    """The questions a turn wrote into its reply as a structured block.
-
-    Empty when there is no block, when no block is the JSON it claims to be, or
-    when nothing in any of them is a question. In every one of those cases the
-    prose reading is what is left to try, so a malformed block degrades to
-    exactly what the turn would have done without one rather than losing the
-    question it was trying to ask.
-
-    The last usable block wins, not simply the last block. A turn that asked
-    its question and then went on to write about the block itself -- which is
-    what happened the first time this was watched, the question followed by
-    four samples of one shown in a diff -- would otherwise lose the question it
-    had already asked to the prose that came after it, and be dropped back to
-    the prose reading for no reason.
-
-    A single question written as one object rather than a one-item list is
-    taken as well, since that is what one question looks like when it is
-    written out.
-    """
-    for block in reversed(list(_QUESTION_BLOCK.finditer(text))):
-        try:
-            raw = json.loads(block.group("body"))
-        except (ValueError, TypeError):
-            continue
-        if isinstance(raw, dict):
-            raw = [raw]
-        questions = _questions(raw, multi_key="multiSelect", id_key="id")
-        if questions:
-            return questions
-    return ()
-
-
-def question_summary(questions: Sequence[Question], answers: Optional[list[list[str]]]) -> str:
-    """One row for the transcript saying what was asked and what was said.
-
-    Both halves are kept: read back later, a bare "Spaces" says nothing, and
-    the answer is the reason the rest of the turn went the way it did.
-    """
-    if answers is None:
-        asked = " ".join(question.question for question in questions)
-        return f"Question left unanswered: {asked}"
-    parts = []
-    for index, question in enumerate(questions):
-        chosen = answers[index] if index < len(answers) else []
-        if question.secret:
-            # Codex marks a question whose answer is a secret. The transcript
-            # is read back, copied, and saved, so it gets the fact of an answer
-            # and not the answer itself.
-            parts.append(
-                f'You answered "{question.question}".'
-                if chosen
-                else f'You left "{question.question}" unanswered.'
-            )
-            continue
-        said = ", ".join(chosen) if chosen else "nothing"
-        parts.append(f'You answered "{question.question}" with "{said}".')
-    return " ".join(parts)
 
 
 @dataclass(frozen=True)
@@ -1189,7 +671,7 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
                 stderr=subprocess.DEVNULL,
                 timeout=timeout,
                 env=subprocess_env(binary),
-                **no_window_kwargs(),
+                **process_utils.no_window_kwargs(),
             )
             return proc.returncode == 0
         if backend == BACKEND_CODEX:
@@ -1200,7 +682,7 @@ def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
                 stderr=subprocess.DEVNULL,
                 timeout=timeout,
                 env=subprocess_env(binary),
-                **no_window_kwargs(),
+                **process_utils.no_window_kwargs(),
             )
             return proc.returncode == 0
         if backend == BACKEND_FREEBUFF:
@@ -1309,7 +791,7 @@ def _probe_backend(binary: str, args: list[str], timeout: int) -> tuple[Optional
             errors="replace",
             timeout=timeout,
             env={**subprocess_env(binary), "PYTHONIOENCODING": "utf-8"},
-            **no_window_kwargs(),
+            **process_utils.no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None, ""
@@ -1731,22 +1213,24 @@ def _claude_usage_payload(binary: str, timeout: int) -> Optional[dict]:
             encoding="utf-8",
             errors="replace",
             env=subprocess_env(binary),
-            **own_group_kwargs(),
-            **no_window_kwargs(),
+            **process_utils.own_group_kwargs(),
+            **process_utils.no_window_kwargs(),
         )
     except (OSError, ValueError):
         return None
     # Reading a pipe has no deadline of its own, so the deadline is the
     # process: ending it is what turns a silent CLI into an end of stream
     # rather than a status dialog that never opens.
-    watchdog = threading.Timer(max(1.0, float(timeout)), lambda: end_process_group(proc))
+    watchdog = threading.Timer(
+        max(1.0, float(timeout)), lambda: process_utils.end_process_group(proc)
+    )
     watchdog.daemon = True
     watchdog.start()
     try:
         return _claude_usage_exchange(proc)
     finally:
         watchdog.cancel()
-        end_process_group(proc)
+        process_utils.end_process_group(proc)
         # Ending the process does not hand its pipes back. /status can be asked
         # as often as somebody presses it, and two file handles a press is a
         # leak in an application that stays open all day.
@@ -2583,7 +2067,7 @@ def _codex_model_payload(binary: str, cwd: Optional[str], extra: Sequence[str]) 
             errors="replace",
             timeout=30,
             env=subprocess_env(binary),
-            **no_window_kwargs(),
+            **process_utils.no_window_kwargs(),
         )
         return json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
@@ -3196,74 +2680,13 @@ def codex_question_args() -> tuple[str, ...]:
     return (*_CODEX_QUESTION_ARGS, "-c", f"developer_instructions={value}")
 
 
-def _question_options(raw: object) -> tuple[QuestionOption, ...]:
-    """The labelled options of a question, as Codex and opencode both send them."""
-    if not isinstance(raw, list):
-        return ()
-    return tuple(
-        QuestionOption(
-            str(option["label"]),
-            str(option.get("description") or ""),
-            str(option.get("preview") or ""),
-        )
-        for option in raw
-        if isinstance(option, dict) and option.get("label")
-    )
-
-
-def _questions(
-    raw: object,
-    *,
-    multi_key: str = "",
-    custom_key: str = "",
-    secret_key: str = "",
-    id_key: str = "",
-) -> tuple[Question, ...]:
-    """Read a provider's list of question dicts into BlindPilot's own shape.
-
-    All four providers send the same thing — a list of dicts carrying a
-    question, a header and labelled options — and differ only in what they
-    call the flags beside them, and in which of those they send at all. Each
-    key is therefore named by its caller, and a key left empty means the
-    provider has nothing to say on that point and the `Question` default
-    stands: only Codex numbers its questions or marks an answer secret, only
-    opencode and Claude Code ask for more than one answer, and every one of
-    them lets an answer be typed instead of picked.
-    """
-    if not isinstance(raw, list):
-        return ()
-    questions: list[Question] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        text = str(entry.get("question") or "").strip()
-        if not text:
-            continue
-        options = _question_options(entry.get("options"))
-        questions.append(
-            Question(
-                question=text,
-                header=str(entry.get("header") or ""),
-                options=options,
-                multi_select=bool(entry.get(multi_key)) if multi_key else False,
-                # A question with no options is a free-text one whatever the
-                # flag says, so the two together decide whether typing is
-                # offered.
-                allow_custom=(bool(entry.get(custom_key)) or not options) if custom_key else True,
-                secret=bool(entry.get(secret_key)) if secret_key else False,
-                id=str(entry.get(id_key) or "") if id_key else "",
-            )
-        )
-    return tuple(questions)
-
-
-def _codex_questions(raw: object) -> tuple[Question, ...]:
+def _codex_questions(raw: object) -> tuple[questions.Question, ...]:
     """Read request_user_input's params into BlindPilot's own question shape.
 
     `isOther` is Codex asking for the "Other" answer its tool description
     tells the model not to write itself.
     """
-    return _questions(raw, custom_key="isOther", secret_key="isSecret", id_key="id")
+    return questions._questions(raw, custom_key="isOther", secret_key="isSecret", id_key="id")
 
 
 # How long a failing Codex turn waits for the last line of stderr, which is
@@ -3811,13 +3234,13 @@ class CodexServer:
 
     def stop(self) -> None:
         try:
-            end_process_group(self.proc, timeout=2)
+            process_utils.end_process_group(self.proc, timeout=2)
         finally:
             # Both happen even when the process had already exited: waiting
             # turns must still be woken, and the pipe handles must still be
             # released.
             self._close("")
-            _close_process_pipes(self.proc)
+            process_utils._close_process_pipes(self.proc)
 
 
 def _app_version() -> str:
@@ -3850,8 +3273,8 @@ def _start_codex_server(binary: str = "") -> CodexServer:
         # npm's `codex` is a Node launcher that runs the real Codex as a child
         # of its own; stopping only the launcher leaves that child holding the
         # app-server session.
-        **own_group_kwargs(),
-        **no_window_kwargs(),
+        **process_utils.own_group_kwargs(),
+        **process_utils.no_window_kwargs(),
     )
     server = CodexServer(proc)
     server.start_readers()
@@ -3923,7 +3346,7 @@ class _TurnWorker(threading.Thread):
         on_complete: Callable[[str], None],
         on_failed: Callable[[str], None],
         on_done: Callable[[], None],
-        on_question: Optional[AskQuestions] = None,
+        on_question: Optional[questions.AskQuestions] = None,
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         on_subagent: Optional[SubagentReport] = None,
     ) -> None:
@@ -4907,14 +4330,14 @@ class CodexWorker(_TurnWorker):
         "the person had nothing to say to this" — the turn then carries on
         rather than waiting for an answer that is not coming.
         """
-        questions = _codex_questions(params.get("questions"))
-        answers = self._on_question(questions) if (questions and self._on_question) else None
-        self._on_activity("tool", question_summary(questions, answers))
+        asked = _codex_questions(params.get("questions"))
+        answers = self._on_question(asked) if (asked and self._on_question) else None
+        self._on_activity("tool", questions.question_summary(asked, answers))
         payload = {
             question.id or question.question: {
                 "answers": answers[index] if answers is not None and index < len(answers) else []
             }
-            for index, question in enumerate(questions)
+            for index, question in enumerate(asked)
         }
         self._send({"id": request_id, "result": {"answers": payload}})
 
@@ -5338,7 +4761,7 @@ def _freebuff_question_box(visible: str) -> list[str]:
     return body
 
 
-def _freebuff_open_question(visible: str) -> tuple[int, int, Optional[Question]]:
+def _freebuff_open_question(visible: str) -> tuple[int, int, Optional[questions.Question]]:
     """(how many questions there are, which one is open, and that question).
 
     FreeBuff shows one question's answers at a time and keeps the rest folded
@@ -5351,7 +4774,7 @@ def _freebuff_open_question(visible: str) -> tuple[int, int, Optional[Question]]
     total = 0
     open_index = -1
     text = ""
-    options: list[QuestionOption] = []
+    options: list[questions.QuestionOption] = []
     multi = False
     for line in body:
         header = _FREEBUFF_QUESTION_RE.match(line)
@@ -5376,12 +4799,16 @@ def _freebuff_open_question(visible: str) -> tuple[int, int, Optional[Question]]
         if option:
             if option.group(1) in _FREEBUFF_CHECKBOXES:
                 multi = True
-            options.append(QuestionOption(option.group(2)))
+            options.append(questions.QuestionOption(option.group(2)))
     if open_index < 0 or not text:
         return total, -1, None
     if options and options[-1].label == _FREEBUFF_CUSTOM_LABEL:
         options = options[:-1]
-    return total, open_index, Question(question=text, options=tuple(options), multi_select=multi)
+    return (
+        total,
+        open_index,
+        questions.Question(question=text, options=tuple(options), multi_select=multi),
+    )
 
 
 # How long a frame must hold still before it is read out. The terminal repaints
@@ -5824,7 +5251,7 @@ def _freebuff_new_chat_path(before: dict[str, float], cwd: str, pid: int = 0) ->
     new_ids = set(after) - set(before)
     if not new_ids:
         return None
-    family = _descendant_pids({pid}) if pid else set()
+    family = process_utils._descendant_pids({pid}) if pid else set()
     for chat_id in sorted(new_ids, key=lambda chat_id: after[chat_id], reverse=True):
         target = _freebuff_chat_path(cwd, chat_id)
         if target is None:
@@ -6391,7 +5818,7 @@ def _spawn_freebuff_pty(
                     elif now > grace_until:
                         return
                 try:
-                    hide_console_windows(roots)
+                    process_utils.hide_console_windows(roots)
                 except Exception:
                     # Never let this thread die: it is the only thing
                     # keeping the terminal off the screen for the whole run.
@@ -6469,7 +5896,7 @@ class _HiddenConsoleProcess:
         return self._proc.poll() is None
 
     def terminate(self, force: bool = False) -> None:
-        end_process_group(self._proc)
+        process_utils.end_process_group(self._proc)
 
     def close(self, force: bool = False) -> None:
         try:
@@ -6509,7 +5936,7 @@ def _spawn_hidden_console(args: list[str], cwd: str) -> object:
         started = time.monotonic()
         while proc.poll() is None:
             try:
-                hide_console_windows(roots)
+                process_utils.hide_console_windows(roots)
             except Exception:
                 # Never let this thread die: it is the only thing keeping the
                 # console off screen for the whole run.
@@ -7418,18 +6845,18 @@ class FreebuffWorker(_TurnWorker):
         refresh(0.5)
         return True
 
-    def _ask_one(self, question: Question) -> Optional[list[str]]:
+    def _ask_one(self, question: questions.Question) -> Optional[list[str]]:
         """Put one question to the person. None if they closed the dialog."""
         if self._on_question is None:
             return None
         answers = self._on_question([question])
         chosen = answers[0] if answers else None
-        self._on_activity("tool", question_summary([question], answers))
+        self._on_activity("tool", questions.question_summary([question], answers))
         if not chosen:
             return None
         return chosen
 
-    def _choose(self, question: Question, chosen: list[str]) -> None:
+    def _choose(self, question: questions.Question, chosen: list[str]) -> None:
         """Walk the box to the chosen answers and take them."""
         # The focus opens on the first answer, and "Custom" sits one past the
         # last of the model's own, which is where anything typed goes.
@@ -7815,8 +7242,8 @@ class OpencodeServer:
                 encoding="utf-8",
                 errors="replace",
                 env=env,
-                **own_group_kwargs(),
-                **no_window_kwargs(),
+                **process_utils.own_group_kwargs(),
+                **process_utils.no_window_kwargs(),
             )
             threading.Thread(target=self._pump, daemon=True).start()
             self._listening.wait(60)
@@ -7900,12 +7327,12 @@ class OpencodeServer:
                         proc.wait(timeout=5)
                     except (OSError, subprocess.TimeoutExpired):
                         pass
-                end_process_group(proc, timeout=5)
+                process_utils.end_process_group(proc, timeout=5)
         finally:
             # Released whether the process was stopped just now or had already
             # exited on its own: a dead server's stdout pipe is still a handle
             # until something closes it.
-            _close_process_pipes(proc)
+            process_utils._close_process_pipes(proc)
 
 
 def opencode_server() -> OpencodeServer:
@@ -8011,7 +7438,7 @@ def _opencode_models_from_cli() -> list[str]:
             errors="replace",
             timeout=60,
             env=subprocess_env(binary),
-            **no_window_kwargs(),
+            **process_utils.no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -8284,7 +7711,7 @@ def _poison_history_error(text: str) -> bool:
     return bool(_POISON_HISTORY_RE.search(text or ""))
 
 
-def _opencode_questions(raw: object) -> tuple[Question, ...]:
+def _opencode_questions(raw: object) -> tuple[questions.Question, ...]:
     """Read a question.asked event into BlindPilot's own question shape.
 
     opencode's own flags are `multiple` for more than one answer and `custom`
@@ -8292,7 +7719,7 @@ def _opencode_questions(raw: object) -> tuple[Question, ...]:
     model not to offer an "Other" of its own because the client adds one, so a
     typed answer is offered whether or not `custom` was set.
     """
-    return _questions(raw, multi_key="multiple")
+    return questions._questions(raw, multi_key="multiple")
 
 
 # Magic bytes to media types for attached pictures. The server has no upload
@@ -9149,9 +8576,9 @@ class OpencodeWorker(_TurnWorker):
         request_id = str(properties.get("id") or "")
         if not request_id or self._server is None:
             return
-        questions = _opencode_questions(properties.get("questions"))
-        answers = self._on_question(questions) if (questions and self._on_question) else None
-        self._on_activity("tool", question_summary(questions, answers))
+        asked = _opencode_questions(properties.get("questions"))
+        answers = self._on_question(asked) if (asked and self._on_question) else None
+        self._on_activity("tool", questions.question_summary(asked, answers))
         if answers is None:
             self._post(
                 [

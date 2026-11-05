@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_backends import Question, QuestionOption
+from questions import Question, QuestionOption
 
 wx = pytest.importorskip("wx")
 
@@ -37,10 +37,15 @@ QUESTIONS = (
 )
 
 
-def _dialog(frame, questions=QUESTIONS):
-    import blindpilot_app
+def _dialog(frame, questions=QUESTIONS, announce=None):
+    import question_dialog
 
-    return blindpilot_app.QuestionDialog(frame, "claude", questions)
+    return question_dialog.QuestionDialog(
+        frame,
+        "Claude Code",
+        questions,
+        announce=announce if announce is not None else (lambda _text: None),
+    )
 
 
 def test_one_answer_gets_radio_buttons_and_several_gets_a_checked_list(frame):
@@ -234,10 +239,14 @@ def test_a_question_only_written_into_the_answer_says_the_turn_ended(frame):
     event, so there is no call waiting on it. Calling that "paused" would be
     telling somebody their turn is still running when it has finished.
     """
-    import blindpilot_app
+    import question_dialog
 
-    dlg = blindpilot_app.QuestionDialog(
-        frame, "commandcode", (Question(question="Which name do you want?"),), ended_turn=True
+    dlg = question_dialog.QuestionDialog(
+        frame,
+        "Command Code",
+        (Question(question="Which name do you want?"),),
+        announce=lambda _text: None,
+        ended_turn=True,
     )
     try:
         assert _intro(dlg) == "Command Code ended this turn by asking you a question."
@@ -281,5 +290,95 @@ def test_no_preview_box_when_no_option_has_one(frame):
     dlg = _dialog(frame)
     try:
         assert dlg._previews == [None, None]
+    finally:
+        dlg.Destroy()
+
+
+def test_the_dialog_lives_in_its_own_module():
+    import question_dialog
+
+    assert question_dialog.QuestionDialog.__module__ == "question_dialog"
+
+
+def test_choosing_other_announces_the_specific_question_and_how_to_tab_to_its_field(frame):
+    said: list[str] = []
+    dlg = _dialog(frame, announce=said.append)
+    try:
+        single, _several = dlg._pickers
+        single.SetSelection(single.GetCount() - 1)
+        dlg._on_choice(wx.CommandEvent())
+
+        assert said, "choosing Other said nothing"
+        assert "Tabs or spaces?" in said[-1]
+        assert "Tab" in said[-1]
+        # The announcement, not a focus move, tells the person where the
+        # new field is: the text box never grabs focus in _on_choice.
+        assert not dlg._texts[0].HasFocus()
+    finally:
+        dlg.Destroy()
+
+
+def test_multi_select_previews_show_every_selected_option_labelled(frame):
+    questions = (
+        Question(
+            question="Which extras?",
+            multi_select=True,
+            options=(
+                QuestionOption("Tests", "Add tests.", preview="Runs the suite."),
+                QuestionOption("Docs", "Add docs.", preview="Writes the guide."),
+                QuestionOption("Lint", "Add lint."),
+            ),
+        ),
+    )
+    dlg = _dialog(frame, questions)
+    try:
+        picker = dlg._pickers[0]
+        picker.Check(0, True)
+        picker.Check(1, True)
+        dlg._update_previews()
+
+        value = dlg._previews[0].GetValue()
+        assert "Tests: Runs the suite." in value
+        assert "Docs: Writes the guide." in value
+    finally:
+        dlg.Destroy()
+
+
+def test_preview_controls_stay_reachable_in_the_tab_order(frame):
+    questions = (
+        Question(
+            question="Which layout?",
+            options=(QuestionOption("Wide", "Two columns.", preview="Wide preview."),),
+        ),
+    )
+    dlg = _dialog(frame, questions)
+    try:
+        preview = dlg._previews[0]
+        assert preview is not None
+        assert preview.IsShown()
+        # A plain TextCtrl takes part in Tab traversal and accepts focus;
+        # nothing here takes the preview out of the Tab order.
+        assert preview.AcceptsFocus()
+    finally:
+        dlg.Destroy()
+
+
+def test_long_question_sets_live_in_a_scrolling_window(frame):
+    many = tuple(
+        Question(
+            question=f"Question number {index}?",
+            options=(QuestionOption("Yes"), QuestionOption("No")),
+        )
+        for index in range(12)
+    )
+    dlg = _dialog(frame, many)
+    try:
+        scrolled = [child for child in dlg.GetChildren() if isinstance(child, wx.ScrolledWindow)]
+        assert len(scrolled) == 1
+        assert scrolled[0].GetScrollPixelsPerUnit()[1] > 0
+        # Every question's picker is inside the scrolled window, so all of
+        # them stay reachable by scrolling.
+        assert all(picker.GetParent() is scrolled[0] for picker in dlg._pickers)
+        assert len(dlg._pickers) == 12
     finally:
         dlg.Destroy()

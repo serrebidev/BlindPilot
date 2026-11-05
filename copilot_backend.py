@@ -61,11 +61,13 @@ from agent_backends import (
     SUBAGENT_RUNNING,
     _tool_use_label,
     _TurnWorker,
-    end_process_group,
     find_backend_cli,
+    subprocess_env,
+)
+from process_utils import (
+    end_process_group,
     no_window_kwargs,
     own_group_kwargs,
-    subprocess_env,
 )
 from markdown_rows import SentenceStreamer
 

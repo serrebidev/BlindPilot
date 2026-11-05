@@ -3,6 +3,7 @@
 import io
 
 import agent_backends
+import process_utils
 import blindpilot_app as app
 
 
@@ -27,7 +28,7 @@ def test_status_model_and_version_probes_are_hidden_and_disable_updates(monkeypa
     for _argv, kwargs in calls:
         assert kwargs["stdin"] == agent_backends.subprocess.DEVNULL
         assert kwargs["env"]["COMMANDCODE_SKIP_UPDATES"] == "1"
-        for key, value in agent_backends.no_window_kwargs().items():
+        for key, value in process_utils.no_window_kwargs().items():
             assert kwargs[key] == value
 
 

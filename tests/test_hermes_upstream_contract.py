@@ -21,7 +21,12 @@ import inspect
 
 import agent_backends
 import session_history
-from agent_backends import BACKEND_HERMES, BACKEND_IDS, BACKENDS, normalize_backend
+from agent_backends import (
+    BACKEND_HERMES,
+    BACKEND_IDS,
+    BACKENDS,
+    normalize_backend,
+)
 from hermes_worker import HermesWorker
 
 

@@ -19,7 +19,11 @@ import agent_backends
 import commandcode_backend
 import pytest
 import session_history
-from agent_backends import BACKEND_COMMANDCODE, BACKEND_IDS, BACKENDS
+from agent_backends import (
+    BACKEND_COMMANDCODE,
+    BACKEND_IDS,
+    BACKENDS,
+)
 from commandcode_worker import CommandcodeWorker
 
 WHOAMI_SIGNED_IN = (

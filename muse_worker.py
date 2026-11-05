@@ -41,13 +41,15 @@ from agent_backends import (
     SUBAGENT_COMPLETED,
     SUBAGENT_FAILED,
     SUBAGENT_RUNNING,
-    AskQuestions,
-    Question,
-    QuestionOption,
     SubagentReport,
     ignore_subagents,
     subagent_line,
     subagent_status,
+)
+from questions import (
+    AskQuestions,
+    Question,
+    QuestionOption,
 )
 from hermes_backend import JsonRpcCalls, StdioTransport, windows_path_to_wsl
 from markdown_rows import SentenceStreamer

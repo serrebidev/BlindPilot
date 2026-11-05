@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 import agent_backends
+import process_utils
 from agent_backends import BACKEND_COMMANDCODE
 
 # The reasoning levels the picker can offer. At 1.69.0 the CLI had one
@@ -313,8 +314,8 @@ def commandcode_model_options(
                 encoding="utf-8",
                 errors="replace",
                 env={**agent_backends.subprocess_env(binary), "PYTHONIOENCODING": "utf-8"},
-                **agent_backends.no_window_kwargs(),
-                **agent_backends.own_group_kwargs(),
+                **process_utils.no_window_kwargs(),
+                **process_utils.own_group_kwargs(),
             )
         except OSError:
             code, text = None, ""
@@ -340,8 +341,8 @@ def commandcode_model_options(
                     code, text = None, ""
             finally:
                 if proc.poll() is None:
-                    agent_backends.end_process_group(proc, timeout=1)
-                agent_backends._close_process_pipes(proc)
+                    process_utils.end_process_group(proc, timeout=1)
+                process_utils._close_process_pipes(proc)
     models = _models_from_catalog(text) if code == 0 else []
     config = commandcode_config()
     current = str(config.get("model") or "").strip()
@@ -436,7 +437,7 @@ def _fetch_agent_commands(cwd: str) -> list[tuple[str, str]]:
             errors="replace",
             cwd=cwd or None,
             env=agent_backends.subprocess_env(binary),
-            **agent_backends.no_window_kwargs(),
+            **process_utils.no_window_kwargs(),
         )
     except (OSError, ValueError):
         return []
