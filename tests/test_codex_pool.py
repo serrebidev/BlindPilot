@@ -2187,3 +2187,50 @@ def test_a_conversation_codex_cannot_resume_costs_the_tab_its_session_not_the_se
     assert held is not None, "one tab's stale session id took the shared server down"
     assert held.handle.proc is proc
     assert not proc.killed
+
+
+# ----- Launching the server on a ChatGPT plan instead of the user's login -----
+
+
+def _capture_launch(monkeypatch) -> dict:
+    captured: dict = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        captured["env"] = dict(kwargs.get("env") or {})
+        return _FakeProc()
+
+    monkeypatch.setattr(agent_backends, "owned_popen", fake_popen)
+    monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda binary: binary)
+    monkeypatch.setattr(agent_backends, "codex_question_args", lambda: ())
+    return captured
+
+
+def test_a_plan_launch_points_codex_at_openai_and_keeps_the_token_out_of_argv(monkeypatch):
+    monkeypatch.delenv(agent_backends.PLAN_TOKEN_ENV, raising=False)
+    captured = _capture_launch(monkeypatch)
+
+    agent_backends._start_codex_server("codex", access_token="plan-token")
+
+    assert captured["env"][agent_backends.PLAN_TOKEN_ENV] == "plan-token"
+    assert not [arg for arg in captured["args"] if "plan-token" in arg], (
+        "the token reached the command line, where every process can read it"
+    )
+    assert 'model_provider="blindpilot-chatgpt"' in captured["args"]
+    assert (
+        'model_providers.blindpilot-chatgpt.base_url="https://api.openai.com/v1"'
+        in captured["args"]
+    )
+    assert "model_providers.blindpilot-chatgpt.requires_openai_auth=false" in captured["args"]
+    assert captured["args"][-2:] == ["app-server", "--stdio"]
+
+
+def test_a_launch_without_a_plan_leaves_the_users_own_login_alone(monkeypatch):
+    monkeypatch.delenv(agent_backends.PLAN_TOKEN_ENV, raising=False)
+    captured = _capture_launch(monkeypatch)
+
+    agent_backends._start_codex_server("codex")
+
+    assert agent_backends.PLAN_TOKEN_ENV not in captured["env"]
+    assert "-c" not in captured["args"], "the user's own config was overridden"
+    assert captured["args"][-2:] == ["app-server", "--stdio"]

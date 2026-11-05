@@ -2680,6 +2680,37 @@ def codex_question_args() -> tuple[str, ...]:
     return (*_CODEX_QUESTION_ARGS, "-c", f"developer_instructions={value}")
 
 
+# The provider entry a ChatGPT-plan turn is sent through, and the variable its
+# token is read from. The endpoint is the one OpenAI documents for plan usage.
+PLAN_PROVIDER_ID = "blindpilot-chatgpt"
+PLAN_BASE_URL = "https://api.openai.com/v1"
+PLAN_TOKEN_ENV = "OPENAI_API_KEY"
+
+
+def codex_plan_args() -> tuple[str, ...]:
+    """Arguments that point Codex at OpenAI's Responses endpoint for a plan.
+
+    The token is not among them: a command line is readable by every process
+    on the machine, so it travels in the child's environment instead. Passing
+    these overrides leaves the user's own ``config.toml`` alone, which matters
+    because it also holds their MCP servers and preferences.
+    """
+    provider = f"model_providers.{PLAN_PROVIDER_ID}"
+    overrides = (
+        ("model_provider", json.dumps(PLAN_PROVIDER_ID)),
+        (f"{provider}.name", json.dumps("OpenAI")),
+        (f"{provider}.base_url", json.dumps(PLAN_BASE_URL)),
+        (f"{provider}.env_key", json.dumps(PLAN_TOKEN_ENV)),
+        (f"{provider}.wire_api", json.dumps("responses")),
+        (f"{provider}.requires_openai_auth", "false"),
+        (f"{provider}.supports_websockets", "false"),
+    )
+    args: list[str] = []
+    for key, value in overrides:
+        args += ["-c", f"{key}={value}"]
+    return tuple(args)
+
+
 def _codex_questions(raw: object) -> tuple[questions.Question, ...]:
     """Read request_user_input's params into BlindPilot's own question shape.
 
@@ -3253,14 +3284,27 @@ def _app_version() -> str:
     return str(getattr(app, "APP_VERSION", "") or "unknown")
 
 
-def _start_codex_server(binary: str = "") -> CodexServer:
-    """Launch the shared app-server. Raises OSError if it cannot be started."""
+def _start_codex_server(binary: str = "", access_token: str = "") -> CodexServer:
+    """Launch the shared app-server. Raises OSError if it cannot be started.
+
+    Given ``access_token``, the server runs on that ChatGPT plan credential:
+    it is pointed at OpenAI's Responses endpoint and reads the token from its
+    own environment. Without one, Codex uses whatever login the user already
+    has, which is the behaviour every existing setup relies on.
+    """
     binary = binary or find_backend_cli(BACKEND_CODEX) or ""
     if not binary:
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
+    args = [server_binary, *codex_question_args(), "app-server", "--stdio"]
+    env = subprocess_env(server_binary)
+    if access_token:
+        args = [server_binary, *codex_plan_args(), *codex_question_args(), "app-server", "--stdio"]
+        # Only this child sees it. A plan token is good for an hour and this is
+        # the one process that must present it.
+        env[PLAN_TOKEN_ENV] = access_token
     proc = owned_popen(
-        [server_binary, *codex_question_args(), "app-server", "--stdio"],
+        args,
         cwd=str(Path.home()),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -3269,7 +3313,7 @@ def _start_codex_server(binary: str = "") -> CodexServer:
         bufsize=1,
         encoding="utf-8",
         errors="replace",
-        env=subprocess_env(server_binary),
+        env=env,
         # npm's `codex` is a Node launcher that runs the real Codex as a child
         # of its own; stopping only the launcher leaves that child holding the
         # app-server session.
