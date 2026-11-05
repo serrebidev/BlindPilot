@@ -131,6 +131,117 @@ def test_a_tampered_id_token_is_refused(rsa_key):
         )
 
 
+# ----- The signature check, against a signature this code did not produce -----
+
+# RFC 7515 Appendix A.2: the public key, the signing input and the signature
+# for an RSASSA-PKCS1-v1_5 SHA-256 JWS, as published in the RFC.
+RFC_N = (
+    "ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddx"
+    "HmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT-SFd2lZS-pCgNMs"
+    "D1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSH"
+    "SXndS5z5rexMdbBYUsLA9e-KXBdQOS-UTo7WTBEMa2R2CapHg665xsmtdV"
+    "MTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8"
+    "NAco9_h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ"
+)
+RFC_E = "AQAB"
+RFC_SIGNING_INPUT = (
+    "eyJhbGciOiJSUzI1NiJ9."
+    "eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFt"
+    "cGxlLmNvbS9pc19yb290Ijp0cnVlfQ"
+)
+RFC_SIGNATURE = (
+    "cC4hiUPoj9Eetdgtv3hF80EGrhuB__dzERat0XF9g2VtQgr9PJbu3XOiZj5RZmh7"
+    "AAuHIm4Bh-0Qc_lF5YKt_O8W2Fp5jujGbds9uJdbF9CUAr7t1dnZcAcQjbKBYNX4"
+    "BAynRFdiuB--f_nZLgrnbyTyWzO75vRK5h6xBArLIARNPvkSjtQBMHlb1L07Qe7K"
+    "0GarZRmB_eSN9383LcOLn6_dO--xi12jzDwusC-eOkHWEsqtFZESc6BfI7noOPqv"
+    "hJ1phCnvWh6IeYI2w9QOYEUipUTI8np6LbgGY9Fs98rqVt5AXLIhWkWywlVmtVrB"
+    "p0igcN_IoypGlUPQGe77Rw"
+)
+
+
+def _rfc_key() -> tuple[int, int]:
+    return (
+        int.from_bytes(chatgpt._unb64url(RFC_N), "big"),
+        int.from_bytes(chatgpt._unb64url(RFC_E), "big"),
+    )
+
+
+def test_the_rfc_7515_signature_is_accepted():
+    signature = chatgpt._unb64url(RFC_SIGNATURE)
+    assert chatgpt.rs256_valid(RFC_SIGNING_INPUT.encode("ascii"), signature, *_rfc_key())
+
+
+def test_the_rfc_7515_signature_is_refused_once_a_byte_changes():
+    signature = bytearray(chatgpt._unb64url(RFC_SIGNATURE))
+    signature[0] ^= 0x01
+    assert not chatgpt.rs256_valid(RFC_SIGNING_INPUT.encode("ascii"), bytes(signature), *_rfc_key())
+
+
+def test_a_key_smaller_than_2048_bits_is_refused():
+    small = (1 << 1024) - 1
+    assert not chatgpt.rs256_valid(b"anything", b"\x01" * 128, small, 65537)
+
+
+def test_a_signature_not_below_the_modulus_is_refused(rsa_key):
+    n, e, _d = rsa_key
+    size = (n.bit_length() + 7) // 8
+    assert not chatgpt.rs256_valid(b"anything", n.to_bytes(size, "big"), n, e)
+    assert not chatgpt.rs256_valid(b"anything", b"\xff" * size, n, e)
+
+
+def test_a_signature_of_the_wrong_length_is_refused(rsa_key):
+    n, e, _d = rsa_key
+    assert not chatgpt.rs256_valid(b"anything", b"\x01" * 255, n, e)
+
+
+# ----- Whose keys are trusted -----
+
+
+def test_only_openai_addresses_serve_the_signing_keys():
+    assert chatgpt._openai_https("https://auth.openai.com/keys")
+    assert chatgpt._openai_https("https://openai.com/.well-known/jwks.json")
+    assert not chatgpt._openai_https("http://auth.openai.com/keys")
+    assert not chatgpt._openai_https("https://openai.com.evil.example/keys")
+    assert not chatgpt._openai_https("https://evilopenai.com/keys")
+    assert not chatgpt._openai_https("https://auth.openai.com@evil.example/keys")
+    assert not chatgpt._openai_https("")
+
+
+def test_signing_keys_refuses_a_key_address_that_is_not_openai(monkeypatch):
+    def boom(url, **kwargs):
+        raise AssertionError(f"fetched keys from {url}")
+
+    monkeypatch.setattr(chatgpt, "_discovery", lambda: {"jwks_uri": "https://evil.example/keys"})
+    monkeypatch.setattr(chatgpt.httpx, "get", boom)
+    with pytest.raises(chatgpt.ChatGPTError):
+        chatgpt.signing_keys()
+
+
+def test_signing_keys_reads_the_rsa_keys_and_skips_the_rest(monkeypatch, rsa_key):
+    n, e, _d = rsa_key
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "keys": [
+                    {
+                        "kty": "RSA",
+                        "kid": "k1",
+                        "n": _b64(n.to_bytes((n.bit_length() + 7) // 8, "big")),
+                        "e": _b64(e.to_bytes(3, "big")),
+                    },
+                    {"kty": "EC", "kid": "another-algorithm"},
+                ]
+            }
+
+    monkeypatch.setattr(chatgpt, "_discovery", lambda: {"jwks_uri": "https://auth.openai.com/jwks"})
+    monkeypatch.setattr(chatgpt.httpx, "get", lambda url, **kwargs: Response())
+    assert chatgpt.signing_keys() == {"k1": (n, e)}
+
+
 # ----- The browser sign-in, with the browser played by a test -----
 
 
