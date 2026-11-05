@@ -760,7 +760,17 @@ class ChatPanel(wx.Panel):
         event.Skip()
 
     def on_accounts(self, event: wx.CommandEvent) -> None:
-        dialog = AccountsDialog(self, self.db, self.credentials, self.model_service)
+        # The dialog announces its own changes -- which Account Codex runs on,
+        # for one -- so it is handed the same two paths Chat mode uses: the
+        # status bar behind it, and the screen reader.
+        dialog = AccountsDialog(
+            self,
+            self.db,
+            self.credentials,
+            self.model_service,
+            self.SetStatusText,
+            self._speak,
+        )
         try:
             dialog.ShowModal()
         finally:

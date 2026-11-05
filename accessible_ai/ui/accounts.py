@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 import threading
+from typing import Callable
 
 import wx
 
@@ -45,6 +46,15 @@ JSON_FIELD_HEIGHT = 70
 NOTE_WRAP = 640
 COMPAT_NOTE_WRAP = 620
 LIST_DIALOG_SIZE = wx.Size(650, 480)
+
+# Which Account the Codex backend runs on is a choice about the backend, like
+# the default Account is about Chat mode: not a setting belonging to any one
+# Account. So it is offered under the list, and the words it is said in live
+# here rather than being spelled out again at each site.
+CODEX_LOGIN_LABEL = "Codex's own login"
+# The window's own words for the same failure, so the status bar behind this
+# dialog and the screen reader say one thing when the file refuses a write.
+CODEX_SAVE_FAILED = "Error: could not save settings"
 
 
 PROVIDER_ORDER = [
@@ -660,6 +670,8 @@ class AccountsDialog(wx.Dialog):
         db: Database,
         credentials: CredentialStore,
         model_service: ModelService,
+        set_status: Callable[[str], None] | None = None,
+        speak: Callable[[str], None] | None = None,
     ):
         super().__init__(
             parent,
@@ -670,6 +682,12 @@ class AccountsDialog(wx.Dialog):
         self.db = db
         self.credentials = credentials
         self.model_service = model_service
+        # Announcement, the same way Chat mode does it: one sentence, spoken by
+        # `speak` and mirrored by `set_status`, so the status bar behind this
+        # dialog says what was heard. Absent when the dialog is built without
+        # them, and then nothing is announced rather than half of it.
+        self._set_status = set_status
+        self._speak = speak
         self.accounts: list[Account] = []
         self.model_action_running = False
 
@@ -692,6 +710,20 @@ class AccountsDialog(wx.Dialog):
         self.default_check.SetName("Use as default account")
         self.default_check.SetToolTip("Chat mode starts on this account")
         outer.Add(self.default_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
+
+        # Which Account the Codex backend runs on, under the list for the same
+        # reason the checkbox is: it is a choice about the backend rather than
+        # a setting belonging to whichever account the cursor happens to be on.
+        # Built here, between the checkbox and the buttons, so it takes its
+        # place in the dialog's own Tab order rather than one of its own.
+        codex_row = wx.BoxSizer(wx.HORIZONTAL)
+        codex_label = wx.StaticText(panel, label="Codex &backend account:")
+        self.codex_account = wx.Choice(panel)
+        self.codex_account.SetName("Codex backend account")
+        self.codex_account.SetToolTip("The Account the Codex backend runs on")
+        codex_row.Add(codex_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        codex_row.Add(self.codex_account, 1, wx.EXPAND)
+        outer.Add(codex_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         # One row. The actions sit on the left; Close goes through the
         # standard button sizer so it lands where the platform puts it.
@@ -729,6 +761,7 @@ class AccountsDialog(wx.Dialog):
         self.listbox.Bind(wx.EVT_LISTBOX_DCLICK, self.on_edit)
         self.listbox.Bind(wx.EVT_LISTBOX, self.on_selection_changed)
         self.default_check.Bind(wx.EVT_CHECKBOX, self.on_default_changed)
+        self.codex_account.Bind(wx.EVT_CHOICE, self.on_codex_account_changed)
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.reload()
         self.CentreOnParent()
@@ -736,6 +769,9 @@ class AccountsDialog(wx.Dialog):
     def reload(self, select_account_id: int | None = None) -> None:
         self.accounts = self.db.list_accounts()
         self.listbox.Set([self._row_label(account) for account in self.accounts])
+        # Rebuilt with the list, so an Account added, renamed or deleted above
+        # leaves the choice telling the truth about what Codex will use.
+        self._sync_codex_account()
         if not self.accounts:
             self._sync_default_check()
             return
@@ -787,6 +823,83 @@ class AccountsDialog(wx.Dialog):
         if index == wx.NOT_FOUND or index >= len(self.accounts):
             return None
         return self.accounts[index]
+
+    def _codex_choices(self) -> list[tuple[str, Account | None]]:
+        """Codex's own login, then every ChatGPT-plan Account by name.
+
+        An Account of any other provider cannot pay for a Codex turn on a plan,
+        so it is not offered. The list is the one the listbox already holds,
+        read once for both rather than a second time for this.
+        """
+        choices: list[tuple[str, Account | None]] = [(CODEX_LOGIN_LABEL, None)]
+        choices.extend(
+            (account.name, account)
+            for account in self.accounts
+            if account.provider == PROVIDER_CHATGPT
+        )
+        return choices
+
+    def _sync_codex_account(self) -> None:
+        """Point the choice at the Account the Codex backend is saved on.
+
+        The saved value is one small settings file, read here whole, the way
+        this dialog reads the rest of what it shows -- and the same file the
+        window writes from its own menu handlers -- which ADR 0001 allows a GUI
+        callback to do, so there is nothing to wait for. Read again rather than
+        remembered, because an Account may just have been added, renamed or
+        deleted in this dialog.
+        """
+        # Imported here rather than at the top: the setting belongs to the
+        # application, and these dialogs are also built without it.
+        import agent_backends
+
+        choices = self._codex_choices()
+        self.codex_account.Set([label for label, _account in choices])
+        chosen = agent_backends.codex_plan_account()
+        selection = 0
+        if chosen is not None:
+            for index, (_label, account) in enumerate(choices):
+                if account is not None and account.id == chosen.account_id:
+                    selection = index
+                    break
+        self.codex_account.SetSelection(selection)
+
+    def _say(self, text: str) -> None:
+        """Announce `text`, and mirror the same words to the status bar."""
+        if self._speak is not None:
+            self._speak(text)
+        if self._set_status is not None:
+            self._set_status(text)
+
+    def on_codex_account_changed(self, event: wx.CommandEvent) -> None:
+        """Save which Account Codex runs on, and say which one that now is."""
+        import agent_backends
+
+        choices = self._codex_choices()
+        selection = self.codex_account.GetSelection()
+        label, account = choices[selection] if 0 <= selection < len(choices) else ("", None)
+        plan = None
+        if account is not None and account.id is not None:
+            plan = agent_backends.PlanAccount(account_id=int(account.id), name=account.name)
+        # One small settings file, read and written whole and moved into place,
+        # on this thread: ADR 0001 allows a small bounded filesystem operation
+        # in a GUI callback, and the window's own menu handlers write this same
+        # file the same way. Nothing here waits on anything off this machine.
+        if agent_backends.save_codex_plan_account(plan):
+            said = (
+                f"Codex will use the ChatGPT plan Account {label}."
+                if plan is not None
+                else "Codex will use its own login."
+            )
+            logger.info(
+                "Codex backend Account is now name=%s", plan.name if plan else CODEX_LOGIN_LABEL
+            )
+        else:
+            # What the choice shows goes back to what is actually saved.
+            self._sync_codex_account()
+            said = CODEX_SAVE_FAILED
+        self._say(said)
+        event.Skip()
 
     def on_add(self, event: wx.CommandEvent) -> None:
         dialog = AccountEditorDialog(self, self.db, self.credentials)

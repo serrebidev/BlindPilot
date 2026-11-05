@@ -25,6 +25,7 @@ from accessible_ai.models import (
     MessageAttachment,
     PROVIDER_CHATGPT,
     PROVIDER_LABELS,
+    PROVIDER_OPENROUTER,
 )
 from accessible_ai.providers import chatgpt
 from accessible_ai.providers.base import ProviderError
@@ -636,6 +637,103 @@ def test_the_account_dialog_signs_in_instead_of_asking_for_a_key(frame, tmp_path
         except wx.wxAssertionError:
             pass  # EndModal on a dialog never shown modally; the save came first.
         assert json.loads(credentials.values[account_id])["refresh_token"] == "refresh-1"
+    finally:
+        dialog.Destroy()
+
+
+# ----- The Account the Codex backend uses, chosen in the account dialog -----
+
+
+def _codex_account_dialog(frame, db, spoken: list[str], mirrored: list[str]):
+    """The account dialog as Chat mode opens it: one sentence, spoken and shown."""
+    from accessible_ai.services.model_service import ModelService
+    from accessible_ai.storage.credentials import CredentialStore
+    from accessible_ai.ui.accounts import AccountsDialog
+
+    credentials = CredentialStore()
+    return AccountsDialog(
+        frame,
+        db,
+        credentials,
+        ModelService(db, credentials),
+        mirrored.append,
+        spoken.append,
+    )
+
+
+def _codex_items(dialog) -> list[str]:
+    return [dialog.codex_account.GetString(i) for i in range(dialog.codex_account.GetCount())]
+
+
+def test_the_account_dialog_offers_a_labelled_choice_of_the_codex_account(frame, tmp_path):
+    """One choice, said in words, that a screen reader can read and Tab can reach."""
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Personal", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Keyed", provider=PROVIDER_OPENROUTER))
+    dialog = _codex_account_dialog(frame, db, [], [])
+    try:
+        # The name is what the screen reader reads out on the control itself.
+        assert dialog.codex_account.GetName() == "Codex backend account"
+        # A choice takes focus, so Tab reaches it and the arrow keys change it.
+        assert dialog.codex_account.IsEnabled() and dialog.codex_account.AcceptsFocus()
+        # Codex's own login is still offered, still selectable, and is what an
+        # install that has chosen nothing runs on.
+        assert dialog.codex_account.GetString(0) == "Codex's own login"
+        assert dialog.codex_account.GetSelection() == 0
+        # Only a ChatGPT-plan Account can pay for a Codex turn on a plan.
+        assert _codex_items(dialog) == ["Codex's own login", "Personal", "Work"]
+        # It keeps the dialog's own Tab order: after the checkbox, before the buttons.
+        siblings = dialog.codex_account.GetParent().GetChildren()
+        assert siblings.index(dialog.default_check) < siblings.index(dialog.codex_account)
+        assert siblings.index(dialog.codex_account) < siblings.index(dialog.add_button)
+    finally:
+        dialog.Destroy()
+
+
+def test_the_account_dialog_opens_on_the_account_codex_will_use(frame, tmp_path):
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(account_id, "Work"))
+
+    spoken: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, [])
+    try:
+        assert dialog.codex_account.GetStringSelection() == "Work"
+        assert spoken == [], "opening the dialog is not a change to announce"
+    finally:
+        dialog.Destroy()
+
+
+def test_choosing_an_account_saves_it_and_says_which_one_codex_will_use(frame, tmp_path):
+    import wx
+
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    spoken: list[str] = []
+    mirrored: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, mirrored)
+    try:
+        dialog.codex_account.SetSelection(_codex_items(dialog).index("Work"))
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        assert agent_backends.codex_plan_account() == agent_backends.PlanAccount(account_id, "Work")
+        # Announced at once, in the words the status bar mirror carries.
+        assert spoken == mirrored == ["Codex will use the ChatGPT plan Account Work."]
+
+        dialog.codex_account.SetSelection(0)
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        assert agent_backends.codex_plan_account() is None
+        assert spoken[-1] == mirrored[-1] == "Codex will use its own login."
     finally:
         dialog.Destroy()
 
