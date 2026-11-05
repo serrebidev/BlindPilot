@@ -244,3 +244,35 @@ def test_a_block_is_not_read_as_prose_as_well():
     # The prose reading takes fenced code out, so a turn that asked with a
     # block is not asked a second time over the question mark inside it.
     assert trailing_question(_BLOCK) == ""
+
+
+def test_a_later_block_that_is_not_the_json_does_not_hide_the_question():
+    # The shape watched in the wild: the question first, then the turn going on
+    # to write about the block -- a sample of one, shown in a diff, where the
+    # diff's own + on every line is what makes it not JSON. Reading only the
+    # last block would find the sample and drop back to the prose reading with
+    # the question sitting right there above it.
+    sample = '```questions\n+[{"question": "...", "options": [{"label": "..."}]}]\n+```\n'
+
+    questions = questions_written_in_the_answer(_BLOCK + "\n" + sample)
+
+    assert [question.question for question in questions] == ["Tabs or spaces?"]
+
+
+def test_a_question_block_may_be_fenced_with_tildes():
+    # A block written inside another fenced sample has to use ~~~ to keep the
+    # sample from ending early, so a block fenced that way is read too.
+    text = '~~~questions\n[{"question": "Tabs or spaces?"}]\n~~~\n'
+
+    questions = questions_written_in_the_answer(text)
+
+    assert [question.question for question in questions] == ["Tabs or spaces?"]
+
+
+def test_a_single_question_may_be_written_as_one_object():
+    # One question written out on its own is an object, not a one-item list.
+    text = '```questions\n{"question": "What should it be called?"}\n```\n'
+
+    questions = questions_written_in_the_answer(text)
+
+    assert [question.question for question in questions] == ["What should it be called?"]
