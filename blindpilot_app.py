@@ -7636,7 +7636,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             providers, connected, error = opencode_providers()
-            wx.CallAfter(self._show, providers, connected, error)
+            _call_after_alive(self._show, providers, connected, error)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7769,7 +7769,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             methods = opencode_auth_methods(provider_id)
-            wx.CallAfter(self._choose_method, provider_id, name, methods)
+            _call_after_alive(self._choose_method, provider_id, name, methods)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7808,7 +7808,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             error = opencode_connect_api_key(provider_id, key, answers)
-            wx.CallAfter(self._finished, name, error, "connected")
+            _call_after_alive(self._finished, name, error, "connected")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7821,7 +7821,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             authorization, error = opencode_oauth_start(provider_id, index, answers)
-            wx.CallAfter(self._opened, provider_id, name, index, authorization, error)
+            _call_after_alive(self._opened, provider_id, name, index, authorization, error)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7869,7 +7869,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             failure = opencode_oauth_finish(provider_id, index, code)
-            wx.CallAfter(self._finished, name, failure, "connected")
+            _call_after_alive(self._finished, name, failure, "connected")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7898,7 +7898,7 @@ class ConnectDialog(wx.Dialog):
 
         def work() -> None:
             error = opencode_disconnect(provider_id)
-            wx.CallAfter(self._finished, name, error, "disconnected")
+            _call_after_alive(self._finished, name, error, "disconnected")
 
         threading.Thread(target=work, daemon=True).start()
 
