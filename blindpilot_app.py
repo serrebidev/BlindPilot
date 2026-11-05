@@ -9756,7 +9756,17 @@ class SessionPanel(wx.Panel):
         self.model = self.effort = self._cli_model = self._cli_effort = ""
         self.restore_history(entry, turns)
         if resume_pending:
-            wx.CallAfter(self.send_now)
+            _call_after_alive(self._send_museai_pending, self._museai_main_serial)
+
+    def _send_museai_pending(self, serial: int) -> None:
+        if (
+            not self
+            or serial != self._museai_main_serial
+            or self._backend != BACKEND_MUSEAI
+            or self._session_backend != BACKEND_MUSEAI
+        ):
+            return
+        self.send_now()
 
     def show_backend_in_prompt(self, shown: bool) -> None:
         """Name the prompt after the backend it sends to, while tabs are mixed.

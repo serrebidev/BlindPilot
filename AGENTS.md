@@ -19,6 +19,14 @@ python -m pytest -q -W error
 Before a commit or PR, every command above must exit 0. `-W error` is
 intentional: warnings are failures.
 
+## GUI callbacks
+
+Keep GUI callbacks within the 50 ms budget. Callbacks must not wait or join,
+start processes, or perform network or other potentially slow work. Move such
+work to a worker and deliver results through the GUI event path only while the
+owning UI is live. See [ADR 0001](docs/adr/0001-gui-thread-and-shutdown.md) for
+the shutdown and process-ownership decision.
+
 ## Notes
 
 - Do not edit without an explicit ask: `BlindPilot.spec` (release workflow
@@ -29,16 +37,4 @@ intentional: warnings are failures.
 - An accessibility change is not complete until it is verified with a real
   screen reader, not only a successful build or a UI-tree dump.
 
-## Agent skills
-
-### Issue tracker
-
-Issues are tracked in this repo's GitHub Issues, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Issue and domain conventions: `docs/agents/issue-tracker.md`, `docs/agents/triage-labels.md`, and `docs/agents/domain.md`.

@@ -13,11 +13,13 @@ import os
 import shutil
 import stat
 import subprocess
+import threading
+import time
 
 import pytest
 
 import blindpilot_app as app
-from session_history import HistoryTurn
+from session_history import HistoryEntry, HistoryTurn
 
 
 def test_search_finds_matches_in_prompts_and_answers_without_case():
@@ -93,6 +95,188 @@ def test_search_all_conversations_stops_when_cancelled():
 
     assert calls == ["1"]
     assert [entry.title for _l, entry, _i, _w in rows] == ["First"]
+
+
+def _wait(predicate):
+    deadline = time.monotonic() + 3
+    while not predicate() and time.monotonic() < deadline:
+        app.wx.GetApp().Yield()
+        time.sleep(0.01)
+    assert predicate()
+
+
+class _Ask:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def ShowModal(self):
+        return app.wx.ID_OK
+
+    def GetValue(self):
+        return "needle"
+
+
+class _Progress:
+    made = []
+
+    def __init__(self, _title, _message, maximum=100, parent=None, style=0):
+        self.maximum = maximum
+        self.style = style
+        self.updates = []
+        self.ranges = []
+        self.cancelled = False
+        self.cancel_after = None
+        self.on_update = None
+        self.destroyed = False
+        type(self).made.append(self)
+
+    def SetRange(self, total):
+        self.ranges.append(total)
+
+    def Update(self, done, message):
+        self.updates.append((done, message))
+        if self.on_update is not None:
+            self.on_update()
+        if self.cancel_after is not None and done >= self.cancel_after:
+            self.cancelled = True
+        return (not self.cancelled, False)
+
+    def WasCancelled(self):
+        return self.cancelled
+
+    def Destroy(self):
+        self.destroyed = True
+
+
+class _ItemsDialog:
+    made = []
+
+    def __init__(self, _parent, items, title, **_kwargs):
+        self.items = list(items)
+        self.title = title
+        type(self).made.append(self)
+
+    def ShowModal(self):
+        return app.wx.ID_CANCEL
+
+    def Destroy(self):
+        pass
+
+
+@pytest.fixture
+def search_ui(monkeypatch, wx_app):
+    _Progress.made.clear()
+    _ItemsDialog.made.clear()
+    monkeypatch.setattr(app.wx, "TextEntryDialog", _Ask)
+    monkeypatch.setattr(app.wx, "ProgressDialog", _Progress)
+    monkeypatch.setattr(app, "ConversationItemsDialog", _ItemsDialog)
+    spoken: list[str] = []
+    monkeypatch.setattr(app, "announce", lambda text, *_a, **_k: spoken.append(text))
+    frame = type("FrameStub", (), {})()
+    frame.spoken = spoken
+    frame._find_all_range = lambda *args: app.MainFrame._find_all_range(frame, *args)
+    frame._find_all_progress_update = lambda *args: app.MainFrame._find_all_progress_update(
+        frame, *args
+    )
+    frame._find_all_loaded = lambda *args: app.MainFrame._find_all_loaded(frame, *args)
+    return frame
+
+
+def _entries(count):
+    return [
+        HistoryEntry("claude", f"session-{index}", f"Title {index}", "", 10.0 - index)
+        for index in range(count)
+    ]
+
+
+def test_all_conversation_search_returns_before_the_scan_finishes(search_ui, monkeypatch):
+    entries = _entries(3)
+    release = threading.Event()
+    started = threading.Event()
+
+    def list_history(*_args, **_kwargs):
+        started.set()
+        release.wait(5)
+        return entries
+
+    monkeypatch.setattr(app, "list_history", list_history)
+    monkeypatch.setattr(
+        app, "load_turns", lambda entry: [HistoryTurn(prompt=f"{entry.title} needle")]
+    )
+
+    began = time.monotonic()
+    app.MainFrame._find_in_all_conversations(search_ui)
+    assert time.monotonic() - began < 1
+    assert started.wait(1), "the scan never started"
+    progress = _Progress.made[-1]
+    assert progress.style & app.wx.PD_CAN_ABORT
+    assert not progress.destroyed
+    assert _ItemsDialog.made == []
+
+    release.set()
+    _wait(lambda: bool(_ItemsDialog.made))
+    assert progress.destroyed
+    assert progress.ranges == [3]
+    assert [done for done, _message in progress.updates] == [0, 1, 2]
+    assert _ItemsDialog.made[0].title == "3 matches for needle"
+    assert search_ui.spoken == []
+
+
+def test_cancelling_the_search_stops_the_scan_and_says_so(search_ui, monkeypatch):
+    entries = _entries(5)
+    release = threading.Event()
+    acknowledged = threading.Event()
+    scanned: list[str] = []
+
+    def list_history(*_args, **_kwargs):
+        release.wait(5)
+        return entries
+
+    def load_turns(entry):
+        scanned.append(entry.session_id)
+        assert acknowledged.wait(3), "the progress update was never shown"
+        acknowledged.clear()
+        return [HistoryTurn(prompt="needle")]
+
+    monkeypatch.setattr(app, "list_history", list_history)
+    monkeypatch.setattr(app, "load_turns", load_turns)
+
+    app.MainFrame._find_in_all_conversations(search_ui)
+    progress = _Progress.made[-1]
+    progress.on_update = acknowledged.set
+    progress.cancel_after = 1
+    release.set()
+
+    _wait(lambda: progress.destroyed)
+    assert progress.cancelled
+    assert search_ui.spoken == ["Search cancelled"]
+    assert _ItemsDialog.made == []
+    assert scanned == ["session-0", "session-1"]
+
+
+def test_a_stale_search_result_cannot_fill_the_current_list(search_ui):
+    current_progress = _Progress("Find", "Searching", style=app.wx.PD_CAN_ABORT)
+    old_progress = _Progress("Find", "Searching", style=app.wx.PD_CAN_ABORT)
+    search_ui._find_all_serial = 2
+    search_ui._find_all_progress = current_progress
+    search_ui._find_all_cancel = threading.Event()
+    entry = _entries(1)[0]
+    results = [(app.ConversationItem("Old match", "Old match"), entry, 0)]
+
+    app.MainFrame._find_all_loaded(
+        search_ui, 1, old_progress, threading.Event(), "needle", results, ""
+    )
+
+    assert search_ui.spoken == []
+    assert _ItemsDialog.made == []
+    assert not old_progress.destroyed
+    assert search_ui._find_all_progress is current_progress
 
 
 def test_a_relayed_reply_names_its_speaker_and_cannot_run_a_command():
