@@ -25,7 +25,15 @@ def bundle_dir() -> Path | None:
 
 
 def system_config_dir() -> Path:
-    """The platform's usual per-user settings folder for this application."""
+    """The platform's usual per-user settings folder for this application.
+
+    ``BLINDPILOT_CONFIG_DIR`` overrides the location. The plan-token command
+    and its subprocess tests use it to point the whole process at a temporary
+    data folder; nothing else should set it in normal use.
+    """
+    override = os.environ.get("BLINDPILOT_CONFIG_DIR")
+    if override:
+        return Path(override)
     if sys.platform == "win32":
         base = os.environ.get("APPDATA")
         # APPDATA is always set in a normal session; the home folder is only a
