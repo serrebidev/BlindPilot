@@ -64,7 +64,7 @@ def test_a_freebuff_console_cannot_be_activated_or_shown(monkeypatch):
 
     monkeypatch.setattr(ctypes, "windll", Windll())
 
-    ab._banish_window(42)
+    process_utils._banish_window(42)
 
     assert ("set_style", 42, -20, 0x08000080) in calls
     assert ("enable", 42, False) in calls
