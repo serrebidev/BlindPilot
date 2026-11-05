@@ -45,6 +45,7 @@ from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import backend_pool
 import diagnostics
+from accessible_ai import plan_token
 from owned_process import _WindowsJob, owned_popen
 import questions
 import process_utils
@@ -2680,30 +2681,86 @@ def codex_question_args() -> tuple[str, ...]:
     return (*_CODEX_QUESTION_ARGS, "-c", f"developer_instructions={value}")
 
 
-# The provider entry a ChatGPT-plan turn is sent through, and the variable its
-# token is read from. The endpoint is the one OpenAI documents for plan usage.
+# ----- Codex on a ChatGPT-plan account -----
+#
+# Codex is pointed at OpenAI's Responses endpoint for plan usage through
+# configuration overrides on its own command line, and fetches its own bearer
+# token by running this app's token-printing mode on an interval. The token is
+# therefore in neither the child's command line nor its environment. Rejected:
+# the token as an environment key, with the process restarted hourly -- that
+# exposes it to every child Codex starts, and restarting means resuming threads
+# on a clock. Overrides rather than a written configuration file, because the
+# user's own config.toml also holds their MCP servers and preferences.
+
 PLAN_PROVIDER_ID = "blindpilot-chatgpt"
 PLAN_BASE_URL = "https://api.openai.com/v1"
-PLAN_TOKEN_ENV = "OPENAI_API_KEY"
+
+# How often Codex runs the token command again. An access token lives an hour and
+# the command refreshes it only when it is within two minutes of expiry, so ten
+# minutes leaves six intervals of life: a run that fails -- another process
+# holding the store, a machine that was asleep -- is retried long before the
+# token under it expires. After the first run each one is answered from the
+# shared token cache, so it costs a process start and no exchange.
+PLAN_TOKEN_REFRESH_MS = 600_000
+# Longer than the command's own bounded wait for another process's refresh (two
+# 30-second exchanges plus 30), so a shared refresh is not reported as a failing
+# token command.
+PLAN_TOKEN_TIMEOUT_MS = 120_000
 
 
-def codex_plan_args() -> tuple[str, ...]:
-    """Arguments that point Codex at OpenAI's Responses endpoint for a plan.
+@dataclass(frozen=True)
+class PlanAccount:
+    """The ChatGPT-plan account a Codex turn runs on.
 
-    The token is not among them: a command line is readable by every process
-    on the machine, so it travels in the child's environment instead. Passing
-    these overrides leaves the user's own ``config.toml`` alone, which matters
-    because it also holds their MCP servers and preferences.
+    The id is what the token command takes; the name is how a failure is
+    reported, because an id on its own does not say which account it was.
+    """
+
+    account_id: int
+    name: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.name or f"account {self.account_id}"
+
+
+def plan_token_command(account_id: int) -> tuple[str, ...]:
+    """The command that prints one access token for an account and exits.
+
+    Codex runs it itself, from whatever folder it was started in. A frozen
+    build's ``sys.executable`` is BlindPilot, whose entry point answers the flag
+    before importing the window; from source it is a Python, so it is given the
+    entry point by absolute path rather than relying on a working directory.
+    """
+    tail = (plan_token.FLAG, str(int(account_id)))
+    if getattr(sys, "frozen", False):
+        return (sys.executable, *tail)
+    entry = Path(__file__).resolve().with_name("blind_pilot.py")
+    return (sys.executable, str(entry), *tail)
+
+
+def codex_plan_args(account_id: int) -> tuple[str, ...]:
+    """Arguments that put Codex on OpenAI's Responses endpoint for a plan.
+
+    The token is not among them: Codex runs the token command beside them to
+    obtain its own bearer token, and runs it again on an interval. Quoted as
+    TOML strings because ``-c`` parses its value as TOML; ``ensure_ascii`` is
+    off for the paths, since JSON would write a character outside the BMP as an
+    escaped surrogate pair, which TOML refuses.
     """
     provider = f"model_providers.{PLAN_PROVIDER_ID}"
+    command = plan_token_command(account_id)
     overrides = (
         ("model_provider", json.dumps(PLAN_PROVIDER_ID)),
         (f"{provider}.name", json.dumps("OpenAI")),
         (f"{provider}.base_url", json.dumps(PLAN_BASE_URL)),
-        (f"{provider}.env_key", json.dumps(PLAN_TOKEN_ENV)),
         (f"{provider}.wire_api", json.dumps("responses")),
         (f"{provider}.requires_openai_auth", "false"),
         (f"{provider}.supports_websockets", "false"),
+        (f"{provider}.auth.command", json.dumps(command[0], ensure_ascii=False)),
+        (f"{provider}.auth.args", json.dumps(list(command[1:]), ensure_ascii=False)),
+        (f"{provider}.auth.refresh_interval_ms", str(PLAN_TOKEN_REFRESH_MS)),
+        (f"{provider}.auth.timeout_ms", str(PLAN_TOKEN_TIMEOUT_MS)),
     )
     args: list[str] = []
     for key, value in overrides:
@@ -3284,27 +3341,72 @@ def _app_version() -> str:
     return str(getattr(app, "APP_VERSION", "") or "unknown")
 
 
-def _start_codex_server(binary: str = "", access_token: str = "") -> CodexServer:
+def _run_token_command(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run the plan-token command once and hand back what it printed and said."""
+    return subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=PLAN_TOKEN_TIMEOUT_MS / 1000.0,
+        **process_utils.no_window_kwargs(),
+    )
+
+
+def _plan_token_failure(account: PlanAccount, reason: str) -> str:
+    return (
+        f"The ChatGPT-plan account {account.label} could not be used for Codex: "
+        f"its token command failed. {reason}"
+    )
+
+
+def _plan_token_or_report(account: PlanAccount) -> None:
+    """Fetch a token now, so a broken credential is reported instead of a turn.
+
+    Codex runs this same command itself before each request, and a failure there
+    reaches the person as a turn that came back with nothing said. Running it
+    here makes the failure an error naming the account, before any process is
+    started. It costs one process and no exchange: the command hands the freshly
+    issued token to the chat path through the in-memory token cache.
+    """
+    command = plan_token_command(account.account_id)
+    try:
+        done = _run_token_command(command)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(_plan_token_failure(account, str(exc).strip())) from exc
+    printed = (done.stdout or "").strip()
+    if done.returncode == 0 and printed:
+        return
+    said = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
+    reason = said[-1].removeprefix("error:").strip() if said else ""
+    raise OSError(
+        _plan_token_failure(
+            account, reason or f"it exited with {done.returncode} and printed no token"
+        )
+    )
+
+
+def _start_codex_server(
+    binary: str = "", plan_account: Optional[PlanAccount] = None
+) -> CodexServer:
     """Launch the shared app-server. Raises OSError if it cannot be started.
 
-    Given ``access_token``, the server runs on that ChatGPT plan credential:
-    it is pointed at OpenAI's Responses endpoint and reads the token from its
-    own environment. Without one, Codex uses whatever login the user already
-    has, which is the behaviour every existing setup relies on.
+    Given a ``plan_account``, the server runs on that ChatGPT-plan account: it is
+    pointed at OpenAI's Responses endpoint and runs ``plan_token_command`` to
+    obtain its own bearer token. Without one, Codex uses whatever login the user
+    already has, which is the behaviour every existing setup relies on.
     """
     binary = binary or find_backend_cli(BACKEND_CODEX) or ""
     if not binary:
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
-    args = [server_binary, *codex_question_args(), "app-server", "--stdio"]
-    env = subprocess_env(server_binary)
-    if access_token:
-        args = [server_binary, *codex_plan_args(), *codex_question_args(), "app-server", "--stdio"]
-        # Only this child sees it. A plan token is good for an hour and this is
-        # the one process that must present it.
-        env[PLAN_TOKEN_ENV] = access_token
+    plan: tuple[str, ...] = ()
+    if plan_account is not None:
+        _plan_token_or_report(plan_account)
+        plan = codex_plan_args(plan_account.account_id)
     proc = owned_popen(
-        args,
+        [server_binary, *plan, *codex_question_args(), "app-server", "--stdio"],
         cwd=str(Path.home()),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -3313,7 +3415,7 @@ def _start_codex_server(binary: str = "", access_token: str = "") -> CodexServer
         bufsize=1,
         encoding="utf-8",
         errors="replace",
-        env=env,
+        env=subprocess_env(server_binary),
         # npm's `codex` is a Node launcher that runs the real Codex as a child
         # of its own; stopping only the launcher leaves that child holding the
         # app-server session.

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import queue
+import subprocess
+import sys
 import threading
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -2192,45 +2195,129 @@ def test_a_conversation_codex_cannot_resume_costs_the_tab_its_session_not_the_se
 # ----- Launching the server on a ChatGPT plan instead of the user's login -----
 
 
-def _capture_launch(monkeypatch) -> dict:
-    captured: dict = {}
+class _Launch:
+    """The two processes a plan launch creates, as their creator was asked to.
+
+    The token command and the app-server are both process creation, so both are
+    replaced here and the launch is judged only by what it asked for.
+    """
+
+    def __init__(self, token: str, failure: str) -> None:
+        self.token = token
+        self.failure = failure
+        self.server: dict = {}
+        self.token_runs: list[list[str]] = []
+
+
+def _capture_launch(monkeypatch, token: str = "tok-secret-value", failure: str = "") -> _Launch:
+    captured = _Launch(token, failure)
 
     def fake_popen(args, **kwargs):
-        captured["args"] = list(args)
-        captured["env"] = dict(kwargs.get("env") or {})
+        captured.server["args"] = list(args)
+        captured.server["env"] = dict(kwargs.get("env") or {})
         return _FakeProc()
 
+    def fake_token_command(command, **_kwargs):
+        captured.token_runs.append(list(command))
+        if captured.failure:
+            return subprocess.CompletedProcess(list(command), 1, "", f"error: {captured.failure}")
+        return subprocess.CompletedProcess(list(command), 0, f"{captured.token}\n", "")
+
     monkeypatch.setattr(agent_backends, "owned_popen", fake_popen)
+    monkeypatch.setattr(agent_backends, "_run_token_command", fake_token_command)
     monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda binary: binary)
     monkeypatch.setattr(agent_backends, "codex_question_args", lambda: ())
     return captured
 
 
-def test_a_plan_launch_points_codex_at_openai_and_keeps_the_token_out_of_argv(monkeypatch):
-    monkeypatch.delenv(agent_backends.PLAN_TOKEN_ENV, raising=False)
+def _plan_account() -> agent_backends.PlanAccount:
+    return agent_backends.PlanAccount(account_id=7, name="Work plan")
+
+
+def _overrides(args: list[str]) -> dict:
+    """The `-c key=value` overrides in an argv, read back as TOML like Codex's."""
+    read: dict = {}
+    for index, arg in enumerate(args):
+        if arg != "-c" or index + 1 >= len(args):
+            continue
+        key, _, raw = args[index + 1].partition("=")
+        read[key] = tomllib.loads(f"value = {raw}")["value"]
+    return read
+
+
+def _auth_command(overrides: dict) -> list[str]:
+    provider = "model_providers.blindpilot-chatgpt"
+    return [overrides[f"{provider}.auth.command"], *overrides[f"{provider}.auth.args"]]
+
+
+def test_a_plan_launch_points_codex_at_openai_and_fetches_its_token_by_command(monkeypatch):
     captured = _capture_launch(monkeypatch)
 
-    agent_backends._start_codex_server("codex", access_token="plan-token")
+    agent_backends._start_codex_server("codex", plan_account=_plan_account())
 
-    assert captured["env"][agent_backends.PLAN_TOKEN_ENV] == "plan-token"
-    assert not [arg for arg in captured["args"] if "plan-token" in arg], (
+    provider = "model_providers.blindpilot-chatgpt"
+    overrides = _overrides(captured.server["args"])
+    assert overrides["model_provider"] == "blindpilot-chatgpt"
+    assert overrides[f"{provider}.base_url"] == "https://api.openai.com/v1"
+    assert overrides[f"{provider}.wire_api"] == "responses"
+    assert overrides[f"{provider}.requires_openai_auth"] is False
+    assert overrides[f"{provider}.supports_websockets"] is False
+
+    # A command Codex runs itself, for this app's token mode and this account.
+    command = _auth_command(overrides)
+    assert "blindpilot" in " ".join(command).replace("_", "").lower(), command
+    assert command[-2:] == ["--print-plan-token", "7"], command
+    assert "env_key" not in " ".join(overrides), "the token was to travel in the environment"
+
+    # An access token lives an hour, so the refresh has to land inside that.
+    assert 0 < overrides[f"{provider}.auth.refresh_interval_ms"] < 3_600_000
+    assert overrides[f"{provider}.auth.timeout_ms"] > 0
+
+    # The launch proves the command works first, and the token it printed is in
+    # neither the command line nor the child's environment.
+    assert captured.token_runs == [command]
+    assert not [arg for arg in captured.server["args"] if "tok-secret-value" in arg], (
         "the token reached the command line, where every process can read it"
     )
-    assert 'model_provider="blindpilot-chatgpt"' in captured["args"]
-    assert (
-        'model_providers.blindpilot-chatgpt.base_url="https://api.openai.com/v1"'
-        in captured["args"]
+    assert "tok-secret-value" not in captured.server["env"].values(), (
+        "the token reached the child's environment, where every process Codex starts sees it"
     )
-    assert "model_providers.blindpilot-chatgpt.requires_openai_auth=false" in captured["args"]
-    assert captured["args"][-2:] == ["app-server", "--stdio"]
+    assert not [arg for arg in captured.server["args"] if "config.toml" in arg]
+    assert captured.server["args"][-2:] == ["app-server", "--stdio"]
+
+
+def test_a_packaged_build_runs_itself_for_the_token(monkeypatch):
+    """Frozen, sys.executable is BlindPilot, whose entry point answers the flag."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    captured = _capture_launch(monkeypatch)
+
+    agent_backends._start_codex_server("codex", plan_account=_plan_account())
+
+    assert _auth_command(_overrides(captured.server["args"])) == [
+        sys.executable,
+        "--print-plan-token",
+        "7",
+    ]
+
+
+def test_a_token_command_that_fails_reports_it_naming_the_account(monkeypatch):
+    captured = _capture_launch(monkeypatch, failure="This account is not signed in to ChatGPT.")
+
+    with pytest.raises(OSError) as caught:
+        agent_backends._start_codex_server("codex", plan_account=_plan_account())
+
+    reported = str(caught.value)
+    assert "Work plan" in reported, "the failure did not say which account it was about"
+    assert "not signed in" in reported, reported
+    assert captured.server == {}, "a server was started for an account with no token"
 
 
 def test_a_launch_without_a_plan_leaves_the_users_own_login_alone(monkeypatch):
-    monkeypatch.delenv(agent_backends.PLAN_TOKEN_ENV, raising=False)
     captured = _capture_launch(monkeypatch)
 
     agent_backends._start_codex_server("codex")
 
-    assert agent_backends.PLAN_TOKEN_ENV not in captured["env"]
-    assert "-c" not in captured["args"], "the user's own config was overridden"
-    assert captured["args"][-2:] == ["app-server", "--stdio"]
+    assert captured.server["args"][0] == "codex"
+    assert "-c" not in captured.server["args"], "the user's own config was overridden"
+    assert captured.token_runs == [], "a token command was run with no plan account chosen"
+    assert captured.server["args"][-2:] == ["app-server", "--stdio"]
