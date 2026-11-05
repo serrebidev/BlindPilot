@@ -399,7 +399,11 @@ def _call_after_alive(callback: Callable[..., object], *args: object) -> None:
     """
     if wx.GetApp() is None:
         return
-    wx.CallAfter(callback, *args)
+    try:
+        wx.CallAfter(callback, *args)
+    except Exception:
+        if wx.GetApp() is not None:
+            raise
 
 
 APP_NAME = "BlindPilot"

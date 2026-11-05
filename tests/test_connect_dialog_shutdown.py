@@ -43,3 +43,15 @@ def test_provider_list_worker_drops_result_after_app_shutdown(frame, monkeypatch
         workers.pop()()
     finally:
         dialog.Destroy()
+
+
+def test_dispatch_race_with_app_shutdown_drops_the_callback(monkeypatch):
+    app_states = iter((object(), None))
+    monkeypatch.setattr(app.wx, "GetApp", lambda: next(app_states))
+
+    def destroyed_app(*_args, **_kwargs):
+        raise AssertionError("wx.CallAfter raced with app shutdown")
+
+    monkeypatch.setattr(app.wx, "CallAfter", destroyed_app)
+
+    app._call_after_alive(lambda: None)
