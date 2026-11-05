@@ -16,7 +16,7 @@ BlindPilot is vibe-coded. I use it every day. It started as a fork of [Claude Co
 ## What it does
 
 - Runs eleven coding agents. Pick one per tab under Model, Backend. New tabs start on whatever agent the tab you're in uses. If your tabs use different agents, each tab's name, its prompt, and its send sound tell you which one you're talking to.
-- Doesn't stop to ask permission for every little thing. Every agent runs in Bypass permissions mode out of the box. If you want to approve things yourself, change it under Model, Permission Mode.
+- Doesn't stop to ask permission for every little thing. Backends with permission modes start in Bypass permissions mode. FreeBuff has no permission mode, and muse.ai manages its own approvals. For supported backends, choose another mode under Model, Permission Mode if you want to approve actions yourself.
 - Splits every answer into rows: one per heading, paragraph, list item, quote, code block, thought, and tool step. Arrow through them like any list.
 - Reads answers out as they arrive, or stays quiet until the whole answer is in. Your choice.
 - Reads your message back when you send it ("Sent: fix the build"), so you know what dictation or a paste actually sent. Turn it off in Preferences.
@@ -307,7 +307,7 @@ Everything below is technical.
 
 ### Run from source
 
-1. Install Python 3.10 or newer. Releases are built with 3.12.
+1. Install Python 3.12. It is the version used by CI and releases; the Linux wxPython wheel is built for CPython 3.12.
 2. `pip install -r requirements.txt`
 3. `python blind_pilot.py`
 
