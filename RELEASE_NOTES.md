@@ -1,3 +1,8 @@
+# BlindPilot 0.55.7
+
+- Fixed: a resumed Muse.ai tab queued its pending send with nothing re-checked when the send actually fired, so it could land after the tab's backend had changed. The deferred send now carries a serial and re-checks it plus both backend fields before sending. From Farhan Khan, PR #139.
+- Docs: ADR 0001 records the GUI-thread budget (callbacks stay within 50 ms, no waiting, process starts, or network work on the GUI thread) and the shutdown and process-ownership decision; AGENTS.md links it from a new GUI callbacks section, and the responsiveness ticket records are updated.
+
 # BlindPilot 0.55.6
 
 - Changed: question handling and shared process utilities now live in focused modules of their own — question types and parsing in questions.py, the question dialog in question_dialog.py, and shared process-group, pipe-cleanup and console-window helpers in process_utils.py — so unrelated changes are easier to isolate and review. Windows Job Object ownership stays in owned_process.py under ADR 0001. From Farhan Khan's spec #134, issues #135, #136 and #137, PR #138.
