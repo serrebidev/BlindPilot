@@ -69,10 +69,11 @@ jobs:
         if: matrix.kind == 'windows'
         shell: pwsh
         run: |
-          # What gets collected (winpty's OpenConsole.exe, websocket's runtime
-          # submodules, accessible_output2's output drivers) and the icon live
-          # in BlindPilot.spec, alongside the version and bundle metadata the
-          # macOS build uses. One spec, both platforms.
+          # What gets collected (websocket's runtime submodules,
+          # accessible_output2's output drivers) and the data files (the window
+          # icon and the EarCons sounds) live in BlindPilot.spec, alongside the
+          # version and bundle metadata the macOS build uses. One spec, both
+          # platforms.
           python -m PyInstaller --noconfirm --clean BlindPilot.spec
           $startupSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-smoke" -PassThru -Wait
           if ($startupSmoke.ExitCode -ne 0) { throw "Packaged startup smoke test failed: $($startupSmoke.ExitCode)" }
