@@ -1,3 +1,7 @@
+# BlindPilot 0.55.10
+
+- Fixed: a Codex conversation bound to a ChatGPT-plan Account that was deleted or signed out no longer retries that dead Account on every turn. The failed turn still reports the failure, but the conversation now lets go of the binding when nothing has started on that Account, so the next turn takes the saved choice again — already back on Codex's own login after the deletion. A conversation that already has a thread keeps its Account, since a thread cannot move to another login. From Farhan Khan, PR #146, fixing #145.
+
 # BlindPilot 0.55.9
 
 - New: one Continue with ChatGPT sign-in now serves both Chat and the Codex coding backend, so nobody logs in twice for one plan. Codex runs on the plan through its own command-line configuration, fetching its token from the app's --print-plan-token mode — the token reaches neither the app-server's command line nor its environment, and the user's own Codex configuration is never written. Refresh is serialized across processes with the stored record replaced atomically; the process pool is keyed by Account, so two Accounts hold two processes and a conversation keeps the Account it began on; the account dialog's Codex choice is a labelled, keyboard-operable control that announces its value; sign-out and switching drop only that Account's process, and never while a turn is live. Codex's own login remains available and unchanged. From Farhan Khan, PR #143, landed via replacement PR #144. Design record: ADR 0003 and docs/chatgpt-sign-in-design.md.
