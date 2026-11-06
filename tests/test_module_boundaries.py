@@ -1,9 +1,10 @@
 """The focused modules own their symbols.
 
 Question types and parsing live in ``questions``, the question dialog in
-``question_dialog``, shared process helpers in ``process_utils``, and the Claude
-turn worker in ``claude_worker``. The old modules import what they still use
-from there; they do not keep compatibility re-exports of the moved symbols.
+``question_dialog``, shared process helpers in ``process_utils``, the Claude
+turn worker in ``claude_worker``, and the sound cues in ``earcons``. The old
+modules import what they still use from there; they do not keep compatibility
+re-exports of the moved symbols.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import agent_backends
 import blindpilot_app
 import claude_session
 import claude_worker
+import earcons
 import process_utils
 import question_dialog
 import questions
@@ -88,3 +90,19 @@ def test_the_claude_cli_search_lives_in_claude_session():
     assert claude_session._find_claude.__module__ == "claude_session"
     assert claude_session._fallback_claude_paths.__module__ == "claude_session"
     assert claude_worker._find_claude is claude_session._find_claude
+
+
+def test_the_sound_cues_live_in_earcons():
+    """The window constructs the cues; it does not define them.
+
+    ``Earcons`` is reached as ``earcons.Earcons``, so the name is not an
+    attribute of the window module and nothing can keep reaching it there by
+    accident. The progress mode comes from the settings object the frame hands
+    over, so the cue module needs nothing else from the window.
+    """
+    assert earcons.Earcons.__module__ == "earcons"
+    assert not hasattr(blindpilot_app, "Earcons")
+    # Only the cues the window still uses came back with the import.
+    assert not hasattr(blindpilot_app, "_faster_wav")
+    assert blindpilot_app.CUE_PERIODIC is earcons.CUE_PERIODIC
+    assert blindpilot_app._valid_progress_cue is earcons._valid_progress_cue

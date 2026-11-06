@@ -16,6 +16,7 @@ import wave
 import wx
 
 import blindpilot_app
+from earcons import Earcons, _faster_wav
 from test_tab_strip_focus import _frame, _running_app
 
 
@@ -69,14 +70,14 @@ def test_send_cue_is_pitched_per_backend(tmp_path):
         out.setsampwidth(2)
         out.setframerate(44100)
         out.writeframes(b"\0\0" * 22050)
-    blindpilot_app._faster_wav(str(other / "send.wav"), 2 ** (2 / 12))
+    _faster_wav(str(other / "send.wav"), 2 ** (2 / 12))
     source = tmp_path / "send.wav"
     with wave.open(str(source), "wb") as out:
         out.setnchannels(1)
         out.setsampwidth(2)
         out.setframerate(44100)
         out.writeframes(b"\0\0" * 100)
-    cues = blindpilot_app.Earcons(str(tmp_path))
+    cues = Earcons(str(tmp_path))
     assert cues._send_for(blindpilot_app.BACKEND_CLAUDE) == str(source)
     codex = cues._send_for(blindpilot_app.BACKEND_CODEX)
     with wave.open(codex, "rb") as pitched:

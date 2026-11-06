@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import blindpilot_app as app
+from earcons import Earcons
 
 
 def test_sound_cues_are_enabled_for_a_fresh_configuration(monkeypatch):
@@ -27,7 +28,7 @@ def test_sound_preference_is_saved_with_the_other_settings(monkeypatch):
 
 
 def test_muted_earcons_do_not_play(monkeypatch, tmp_path):
-    earcons = app.Earcons(str(tmp_path), enabled=False)
+    earcons = Earcons(str(tmp_path), enabled=False)
     earcons.send = "send.wav"
     played = []
     monkeypatch.setattr(earcons, "_play_once", lambda path: played.append(path))
@@ -38,7 +39,7 @@ def test_muted_earcons_do_not_play(monkeypatch, tmp_path):
 
 
 def test_disabling_earcons_stops_a_sound_already_in_progress(monkeypatch, tmp_path):
-    earcons = app.Earcons(str(tmp_path))
+    earcons = Earcons(str(tmp_path))
     stopped = []
     monkeypatch.setattr(earcons, "stop_progress", lambda: stopped.append(True))
 
