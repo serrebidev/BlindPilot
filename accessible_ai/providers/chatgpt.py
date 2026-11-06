@@ -223,7 +223,7 @@ def _cross_process_refresh_lock(account_id: int) -> Generator[None, None, None]:
     """Hold the cross-process refresh lock for one account.
 
     The wait is bounded: a holder that never releases fails the refresh rather
-    than hanging the token command or a chat turn forever.
+    than blocking the token command or a chat turn forever.
     """
     path = _refresh_lock_path(account_id)
     path.parent.mkdir(parents=True, exist_ok=True)

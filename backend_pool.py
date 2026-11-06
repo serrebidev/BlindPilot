@@ -435,7 +435,7 @@ class BackendPool:
             self.drop_async(key)
 
     def drop_backend(self, backend: str) -> None:
-        """Stop every process this backend holds, whichever Account holds it.
+        """Drop every process this backend holds, whichever Account holds it.
 
         For replacing the executable: Windows will not overwrite a file a
         process is running from, and which Account started that process does

@@ -46,4 +46,18 @@ leak by someone who finds the flag.
 
 Refresh became a problem across processes, not just across threads, which the
 chat half alone never had. A refresh now waits, boundedly, for another process to
-finish: past that bound it fails rather than hanging the command or a turn.
+finish: past that bound it fails rather than blocking the command or a turn.
+
+Three things are written down here because they are otherwise invisible in the
+code. The provider entry deliberately omits `requires_openai_auth`: Codex's
+reference says not to combine it with `auth`, and its default is already false.
+The in-memory cache that carries an issued access token between processes is a
+named segment any process running as this user can read — the same trust boundary
+as the credential store, stated so it is not mistaken for a secret channel. And
+one test seam sits in production code: `BLINDPILOT_CHATGPT_TOKEN_URL` redirects
+the token exchange so subprocess tests can point at a local server; because it
+carries the refresh token when set, it is named here rather than left to be found.
+
+No glossary term was added. "Token command" describes an implementation, not the
+project's language, and the Accounts vocabulary already covers what a reader
+needs: Account, ChatGPT plan, Registration, Codex login.

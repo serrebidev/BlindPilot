@@ -54,6 +54,10 @@ _Avoid_: ChatGPT account, subscription account, OAuth account
 The client id ChatGPT issued for this installation, kept across sign-outs so the next sign-in reuses it instead of registering again.
 _Avoid_: Client, app registration, connection
 
+**Codex login**:
+The Codex backend authenticating through Codex itself, instead of through a **ChatGPT-plan Account**.
+_Avoid_: Codex account, Codex sign-in, Codex auth
+
 ## Conversations
 
 **Session**:
