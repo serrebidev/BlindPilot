@@ -738,6 +738,218 @@ def test_choosing_an_account_saves_it_and_says_which_one_codex_will_use(frame, t
         dialog.Destroy()
 
 
+# ----- Signing out, deleting, and switching: the choice and the process -----
+#
+# A person who signs out of an Account, deletes it, or chooses another one is
+# promised two things: no later Codex turn is sent on the one being left, and a
+# turn already running is told to finish rather than being cut off. The second
+# is said out loud, because a drop that waits silently is one nobody knows to
+# wait for.
+
+
+class _HeldCodex:
+    """A held Codex process as the pool sees one: alive, borrowed, closable."""
+
+    def __init__(self, borrowers: int = 0) -> None:
+        self.borrowers = borrowers
+        self.closed = False
+
+    def alive(self) -> bool:
+        return not self.closed
+
+    def borrower_count(self) -> int:
+        return self.borrowers
+
+    def stop(self) -> None:
+        self.closed = True
+
+
+def _held_on(account_id: int, borrowers: int = 0) -> _HeldCodex:
+    """Put a held process for this Account in the pool, as a turn leaves one."""
+    import backend_pool
+
+    import agent_backends
+
+    process = _HeldCodex(borrowers)
+    backend_pool.pool().keep(
+        backend_pool.pool_key(agent_backends.BACKEND_CODEX, account=account_id),
+        backend_pool.HeldProcess(process, agent_backends.codex_adapter()),
+    )
+    return process
+
+
+def _soon(ready, what: str, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ready():
+            return
+        time.sleep(0.005)
+    raise AssertionError(what)
+
+
+def test_switching_accounts_while_idle_drops_the_previous_accounts_process(frame, tmp_path):
+    import wx
+
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    work_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Personal", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(work_id, "Work"))
+    work = _held_on(work_id)
+    spoken: list[str] = []
+    mirrored: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, mirrored)
+    try:
+        dialog.codex_account.SetSelection(_codex_items(dialog).index("Personal"))
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        # Nothing was running, so there is no wait to announce -- and the old
+        # Account's process goes before the next turn can be sent on it.
+        assert spoken == mirrored == ["Codex will use the ChatGPT plan Account Personal."]
+        _soon(lambda: work.closed, "the previous Account's Held process was never dropped")
+    finally:
+        dialog.Destroy()
+
+
+def test_switching_accounts_mid_turn_says_the_running_turn_must_finish(frame, tmp_path):
+    import wx
+
+    import agent_backends
+    import backend_pool
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    work_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Personal", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(work_id, "Work"))
+    work = _held_on(work_id, borrowers=1)
+    spoken: list[str] = []
+    mirrored: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, mirrored)
+    try:
+        dialog.codex_account.SetSelection(_codex_items(dialog).index("Personal"))
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        # The choice is saved at once, and said with the wait it comes with.
+        assert agent_backends.codex_plan_account().name == "Personal"
+        assert len(spoken) == 1 and spoken == mirrored
+        assert "Personal" in spoken[0] and "has to finish" in spoken[0], spoken
+        assert not work.closed, "the process was closed underneath a running turn"
+
+        # And the drop happens once that turn is over, and not before. The turn
+        # hands its process back the way a finished one does.
+        work.borrowers = 0
+        backend_pool.pool().drop_pending()
+        _soon(lambda: work.closed, "the drop never landed after the turn had finished")
+    finally:
+        dialog.Destroy()
+
+
+def test_deleting_the_chosen_account_leaves_the_saved_value_and_control_agreeing(
+    frame, tmp_path, monkeypatch
+):
+    """What is saved and what the control shows must be one answer."""
+    import wx
+
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(account_id, "Work"))
+    work = _held_on(account_id)
+    monkeypatch.setattr(wx, "MessageBox", lambda *_args, **_kwargs: wx.YES)
+    dialog = _codex_account_dialog(frame, db, [], [])
+    try:
+        assert dialog.codex_account.GetStringSelection() == "Work"
+        dialog.on_delete(wx.CommandEvent())
+
+        assert agent_backends.codex_plan_account() is None, (
+            "the deleted Account stayed stored as the Codex backend's Account"
+        )
+        assert dialog.codex_account.GetStringSelection() == "Codex's own login", (
+            "the saved value and the control disagree about which Account Codex uses"
+        )
+        _soon(lambda: work.closed, "the deleted Account's Held process was never dropped")
+    finally:
+        dialog.Destroy()
+
+
+def test_signing_out_of_the_chosen_account_leaves_the_saved_value_and_control_agreeing(
+    frame, tmp_path, monkeypatch
+):
+    import wx
+
+    import agent_backends
+    import backend_pool
+    from accessible_ai.storage.database import Database
+    from accessible_ai.ui.accounts import AccountEditorDialog
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(account_id, "Work"))
+    credentials = FakeCredentials()
+    chatgpt.save_session(
+        credentials,
+        account_id,
+        {"client_id": "oaiapp_issued", "email": "w@example.com", "refresh_token": "refresh-1"},
+    )  # type: ignore[arg-type]
+    work = _held_on(account_id, borrowers=1)
+    boxes: list[str] = []
+    monkeypatch.setattr(wx, "MessageBox", lambda message, *_a, **_k: boxes.append(message))
+
+    listing = _codex_account_dialog(frame, db, [], [])
+    editor = AccountEditorDialog(frame, db, credentials, db.get_account(account_id))  # type: ignore[arg-type]
+    try:
+        assert listing.codex_account.GetStringSelection() == "Work"
+        editor._chatgpt_signed_out(True)  # what on_chatgpt_sign_out reports
+
+        assert agent_backends.codex_plan_account() is None, (
+            "the signed-out Account stayed stored as the Codex backend's Account"
+        )
+        assert boxes and "Codex will use its own login" in boxes[0], boxes
+        assert "has to finish" in boxes[0], boxes
+        assert not work.closed, "the process was closed underneath a running turn"
+
+        # The dialog that offers the choice says the same thing as the file.
+        listing.reload()
+        assert listing.codex_account.GetStringSelection() == "Codex's own login"
+
+        work.borrowers = 0
+        backend_pool.pool().drop_pending()
+        _soon(lambda: work.closed, "the drop never landed after the turn had finished")
+    finally:
+        editor.Destroy()
+        listing.Destroy()
+
+
+# ----- A failed plan turn is said once, and kept where it can be read -----
+
+
+def test_a_failed_plan_turn_is_announced_once_and_kept_visible():
+    """One error, spoken once and mirrored once, and still in the list after.
+
+    The usage-limit sentence is the chat half's own, so what a listener hears
+    here is what they would have heard from a chat, the page to review usage on
+    included.
+    """
+    import blindpilot_app as app
+    from doubles import panel_stub
+
+    panel = panel_stub()
+    sentence = chatgpt.PLAN_ERRORS["subscription_sharing_usage_limit_exceeded"]
+
+    app.SessionPanel._on_failed(panel, sentence)
+
+    assert panel.announced == [f"Error: {sentence}"], "the failure was said twice or not at all"
+    assert panel.status == [f"Error: {sentence}"], "the status bar did not mirror it exactly once"
+    errors = [row for row in panel._rows if row.kind == "error"]
+    assert len(errors) == 1, "the failure was not kept as one row of its own"
+    assert chatgpt.USAGE_URL in errors[0].payload
+
+
 # ----- Thinking, web search and answer length on the plan -----
 #
 # Measured live on 2026-10-14: plan models list their own thinking levels

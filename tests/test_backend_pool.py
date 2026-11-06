@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import threading
+import time
 
 import backend_pool
 
@@ -612,3 +613,73 @@ def test_replacing_the_executable_lets_go_of_every_account():
     assert claude.stops == 0, "replacing Codex's executable stopped another backend's process"
     assert pool.held_count() == 1
     pool.drop_all()
+
+
+# ----- Letting go of a process while a turn is still running -----
+#
+# Signing out of an Account, deleting it, or choosing another one takes that
+# Account's held process away. A turn already speaking through it is never
+# interrupted -- it finishes on the credential it started with -- so the drop
+# waits for that turn, and the caller is told it is waiting.
+
+
+def _soon(ready, what: str, timeout: float = 10.0) -> None:
+    """Wait for something a drop does on a thread of its own."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ready():
+            return
+        time.sleep(0.005)
+    raise AssertionError(what)
+
+
+def test_letting_go_of_a_process_nothing_is_running_through_drops_it_at_once():
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, backend_pool.HeldProcess(handle, _adapter()))
+
+    assert pool.drop_when_idle(key) is False, "an idle process was reported as waiting"
+    assert pool.take(key) is None, "the process let go of was still handed out"
+    _soon(lambda: handle.stops == 1, "the process was never stopped")
+
+
+def test_a_process_a_turn_is_running_through_is_not_dropped_and_the_wait_is_reported():
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, backend_pool.HeldProcess(handle, _adapter()))
+    handle.borrowers = 1
+
+    assert pool.drop_when_idle(key) is True, "the wait for the running turn was not reported"
+    pool.drop_pending()
+    assert handle.stops == 0, "the process was dropped underneath a live turn"
+
+    handle.borrowers = 0
+    pool.drop_pending()
+    _soon(lambda: handle.stops == 1, "the drop never landed once the turn had finished")
+    assert pool.take(key) is None, "the dropped process was left for the next turn"
+    pool.drop_all()
+
+
+def test_a_drop_that_waited_happens_once():
+    """Two turns finishing after it is one drop, not one per turn."""
+    pool = backend_pool.BackendPool()
+    handle = _FakeHandle()
+    key = backend_pool.pool_key("codex")
+    pool.keep(key, backend_pool.HeldProcess(handle, _adapter()))
+    handle.borrowers = 1
+    pool.drop_when_idle(key)
+
+    handle.borrowers = 0
+    pool.drop_pending()
+    pool.drop_pending()
+
+    _soon(lambda: handle.stops == 1, "the process was never stopped")
+    assert handle.stops == 1, "the same process was dropped twice"
+    pool.drop_all()
+
+
+def test_letting_go_of_a_key_nobody_held_reports_no_wait():
+    pool = backend_pool.BackendPool()
+    assert pool.drop_when_idle(backend_pool.pool_key("codex")) is False

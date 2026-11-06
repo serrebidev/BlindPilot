@@ -52,6 +52,14 @@ LIST_DIALOG_SIZE = wx.Size(650, 480)
 # Account. So it is offered under the list, and the words it is said in live
 # here rather than being spelled out again at each site.
 CODEX_LOGIN_LABEL = "Codex's own login"
+# Said when the Account being left still has a Codex turn running on it. The
+# Held process is never closed underneath a live turn -- that turn finishes on
+# the sign-in it started with, which is what switching promises -- so the wait
+# is said rather than left to be inferred from a process that is still there.
+CODEX_TURN_WAIT = "The Codex turn running on {label} has to finish before its process is closed."
+# What the choice says when it has gone back to Codex's own login because the
+# Account it named can no longer pay for a turn.
+CODEX_OWN_LOGIN_AGAIN = "Codex will use its own login."
 # The window's own words for the same failure, so the status bar behind this
 # dialog and the screen reader say one thing when the file refuses a write.
 CODEX_SAVE_FAILED = "Error: could not save settings"
@@ -514,6 +522,10 @@ class AccountEditorDialog(wx.Dialog):
     def _chatgpt_signed_out(self, confirmed: bool) -> None:
         if not self:
             return
+        # Read before the stored session is cleared, because this is what says
+        # the credential really ended and a Held process is running on it.
+        had_stored = chatgpt.is_signed_in(self.chatgpt_session)
+        account_id = self.account.id
         self.chatgpt_session.pop("refresh_token", None)
         self._update_chatgpt_status()
         self.chatgpt_button.SetFocus()
@@ -523,6 +535,18 @@ class AccountEditorDialog(wx.Dialog):
                 " OpenAI did not confirm the sign-out. To be sure, disconnect BlindPilot in "
                 "ChatGPT's settings."
             )
+        if had_stored and account_id is not None:
+            # Nothing may be sent on a sign-in that has just ended, and if this
+            # is the Account Codex was set to use, the choice cannot stay on it.
+            # A turn already running finishes on the token it started with, and
+            # that wait is said rather than left to be guessed at.
+            import agent_backends
+
+            drop = agent_backends.forget_codex_plan_account(int(account_id))
+            if drop.choice_cleared:
+                text += " " + CODEX_OWN_LOGIN_AGAIN
+            if drop.waited:
+                text += " " + CODEX_TURN_WAIT.format(label=self.account.name)
         wx.MessageBox(text, "ChatGPT", wx.OK | wx.ICON_INFORMATION, self)
 
     def on_cancel(self, event: wx.CommandEvent) -> None:
@@ -875,6 +899,10 @@ class AccountsDialog(wx.Dialog):
         """Save which Account Codex runs on, and say which one that now is."""
         import agent_backends
 
+        # Which Account it was before the save, so the Held process it was
+        # running on can be let go of. Read first, because the save below is
+        # what changes the answer.
+        previous = agent_backends.codex_plan_account()
         choices = self._codex_choices()
         selection = self.codex_account.GetSelection()
         label, account = choices[selection] if 0 <= selection < len(choices) else ("", None)
@@ -889,11 +917,18 @@ class AccountsDialog(wx.Dialog):
             said = (
                 f"Codex will use the ChatGPT plan Account {label}."
                 if plan is not None
-                else "Codex will use its own login."
+                else CODEX_OWN_LOGIN_AGAIN
             )
             logger.info(
                 "Codex backend Account is now name=%s", plan.name if plan else CODEX_LOGIN_LABEL
             )
+            if previous is not None and (plan is None or plan.account_id != previous.account_id):
+                # The process the old Account was running on goes: nothing may
+                # be sent on an Account that is no longer chosen. A turn already
+                # running through it finishes first, and that is said.
+                drop = agent_backends.forget_codex_plan_account(previous.account_id)
+                if drop.waited:
+                    said += " " + CODEX_TURN_WAIT.format(label=previous.label)
         else:
             # What the choice shows goes back to what is actually saved.
             self._sync_codex_account()
@@ -917,10 +952,18 @@ class AccountsDialog(wx.Dialog):
         try:
             if dialog.ShowModal() == wx.ID_OK:
                 self.reload(dialog.account.id)
+            else:
+                # A sign-out inside the editor happens whether or not the
+                # Account is kept, and it can take the Account Codex was set to
+                # use with it. The choice has to say what is actually saved
+                # either way rather than only when the editor was saved.
+                self._sync_codex_account()
         finally:
             dialog.Destroy()
 
     def on_delete(self, event: wx.CommandEvent) -> None:
+        import agent_backends
+
         account = self.selected()
         if not account or account.id is None:
             return
@@ -932,12 +975,17 @@ class AccountsDialog(wx.Dialog):
         )
         if answer != wx.YES:
             return
+        waited = False
         if account.provider == PROVIDER_CHATGPT:
             try:
                 session = chatgpt.load_session(self.credentials, int(account.id))
             except CredentialStoreError:
                 session = {}
             threading.Thread(target=chatgpt.revoke, args=(session,), daemon=True).start()
+            # The Account is gone, so Codex cannot run on it whatever was
+            # saved: letting it go also puts the choice back on Codex's own
+            # login, which is what the control below will then show.
+            waited = agent_backends.forget_codex_plan_account(int(account.id)).waited
         try:
             self.credentials.delete_api_key(int(account.id))
         except CredentialStoreError:
@@ -947,6 +995,8 @@ class AccountsDialog(wx.Dialog):
         self.db.delete_account(int(account.id))
         logger.info("Deleted account name=%s provider=%s", account.name, account.provider)
         self.reload()
+        if waited:
+            self._say(CODEX_TURN_WAIT.format(label=account.name))
 
     def _run_model_action(self, success_prefix: str) -> None:
         if self.model_action_running:

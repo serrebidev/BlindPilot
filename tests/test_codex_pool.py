@@ -16,6 +16,7 @@ import pytest
 import agent_backends
 import process_utils
 import backend_pool
+from accessible_ai.providers import chatgpt
 from pool_contract import check_pool_contract
 
 
@@ -2501,3 +2502,176 @@ def test_dropping_one_accounts_process_leaves_the_other_account_running(monkeypa
     assert _held_for(7) is None, "the Account that gave up its conversation kept its process"
     assert _held_for(9) is not None, "one Account's failure took another Account's process"
     assert not launched[1].killed
+
+
+# ----- Signing out of an Account, or switching away from it -----
+#
+# An Account that has been signed out, deleted or switched away from must not be
+# used again: no later turn may be sent on its Held process, and the process
+# itself goes. A turn already running through it is never interrupted -- it
+# finishes on the token it started with -- so the drop waits for that turn and
+# says so.
+
+
+def _key_of(account_id: int) -> tuple:
+    return backend_pool.pool_key(agent_backends.BACKEND_CODEX, account=account_id)
+
+
+def _held_on(account_id: int, started: list | None = None) -> agent_backends.CodexServer:
+    """A process the pool holds for this Account, as a running turn left it."""
+    server = agent_backends.CodexServer(_FakeProc())
+    if started is not None:
+        started.append(server)
+    backend_pool.pool().keep(
+        _key_of(account_id), backend_pool.HeldProcess(server, agent_backends.codex_adapter())
+    )
+    return server
+
+
+def test_forgetting_an_account_drops_only_that_accounts_process(tmp_path):
+    _choose(tmp_path, 7, "Work plan")
+    work = _held_on(7)
+    personal = _held_on(9)
+
+    drop = agent_backends.forget_codex_plan_account(7)
+
+    assert drop.waited is False, "a process nobody was speaking through was reported as waiting"
+    _until(lambda: work.proc.killed, "the Account's Held process was never dropped")
+    assert not personal.proc.killed, "forgetting one Account dropped another Account's process"
+    assert _held_for(9) is not None
+    assert drop.choice_cleared is True, "the saved choice still names the Account let go of"
+    assert agent_backends.codex_plan_account() is None, (
+        "a signed-out Account stayed chosen for the Codex backend"
+    )
+
+
+def test_no_later_turn_is_sent_on_an_account_that_was_let_go_of(monkeypatch, tmp_path):
+    """Signing out has to stop the usage, not merely hide it."""
+    _choose(tmp_path, 7, "Work plan")
+    old = _held_on(7)
+    agent_backends.forget_codex_plan_account(7)
+    _until(lambda: old.proc.killed, "the Account's Held process was never dropped")
+    launched = _launch_on_each_account(monkeypatch, [_FakeProc()])
+
+    assert _bare_worker()._borrow_server() is not None
+
+    assert _held_for(7) is None, "a later turn was given the signed-out Account's process"
+    assert _held_for() is not None, "the next turn did not start on Codex's own login"
+    assert len(launched) == 1
+
+
+def test_the_account_that_was_not_chosen_keeps_its_choice(tmp_path):
+    """Only the Account being let go of is forgotten, whatever else is saved."""
+    _choose(tmp_path, 9, "Personal plan")
+    _held_on(7)
+
+    drop = agent_backends.forget_codex_plan_account(7)
+
+    assert drop.choice_cleared is False, "letting go of another Account cleared the choice"
+    assert agent_backends.codex_plan_account() == agent_backends.PlanAccount(9, "Personal plan")
+
+
+def test_a_turn_running_on_the_account_is_never_dropped_under_it(monkeypatch, tmp_path):
+    _choose(tmp_path, 7, "Work plan")
+    started: list = []
+    held = _held_on(7, started)
+    monkeypatch.setattr(agent_backends, "_start_codex_server", lambda **_asked: held)
+    turn = _bare_worker()
+    assert turn._borrow_server() is not None
+
+    drop = agent_backends.forget_codex_plan_account(7)
+
+    assert drop.waited is True, "the wait for the running turn was not reported"
+    assert not held.proc.killed, "the process was dropped underneath a live turn"
+    # And the drop happens once that turn is over, and not before.
+    turn._release()
+    _until(lambda: held.proc.killed, "the drop never landed after the turn had finished")
+
+
+# ----- What Codex says when the plan refuses a turn -----
+#
+# The plan request is Codex's own, so a refusal reaches this half as Codex's
+# words: the OpenAI error body, its code included, or the transport's line for a
+# refused status. The chat half already has a sentence for each of those, and
+# somebody with both halves open must not be told the same failure two ways.
+
+
+class _RefusesOnPlan(_FakeProc):
+    """An app server whose turn ends in the refusal it was given."""
+
+    def __init__(self, said: str) -> None:
+        super().__init__()
+        self._said = said
+        self.stdout = self._script()
+
+    def _asked(self, method: str, timeout: float = 10.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            for line in list(self.stdin.written):
+                message = json.loads(line)
+                if message.get("method") == method:
+                    return message
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"the worker never sent {method}")
+            time.sleep(0.005)
+
+    def _script(self):
+        start = self._asked("thread/start")
+        yield json.dumps({"id": start["id"], "result": {"thread": {"id": "thread-1"}}})
+        turn = self._asked("turn/start")
+        yield json.dumps({"id": turn["id"], "result": {"turn": {"id": "turn-1"}}})
+        yield json.dumps(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "failed", "error": {"message": self._said}},
+                },
+            }
+        )
+
+
+def _plan_turn(proc, monkeypatch, session_id=None) -> tuple:
+    """`_turn`, on a machine whose plan-token command answers as it would."""
+    monkeypatch.setattr(
+        agent_backends,
+        "_run_token_command",
+        lambda command, **_kwargs: subprocess.CompletedProcess(list(command), 0, "tok\n", ""),
+    )
+    return _turn(proc, monkeypatch, session_id=session_id)
+
+
+USAGE_LIMIT_SAID = (
+    'unexpected status 429 Too Many Requests: {"error":{"code":'
+    '"subscription_sharing_usage_limit_exceeded","message":"usage limit"}}'
+)
+
+
+def test_a_usage_limit_on_the_plan_is_said_in_the_chat_halves_words(monkeypatch, tmp_path):
+    _choose(tmp_path, 7, "Work plan")
+    proc = _RefusesOnPlan(USAGE_LIMIT_SAID)
+
+    _worker, _completed, failures, _activity = _plan_turn(proc, monkeypatch)
+
+    assert failures == [chatgpt.PLAN_ERRORS["subscription_sharing_usage_limit_exceeded"]], failures
+    assert chatgpt.USAGE_URL in failures[0], "the way to review usage was not given"
+
+
+def test_a_plan_sign_in_that_has_ended_asks_for_a_new_one(monkeypatch, tmp_path):
+    """A dead credential must not read as a generic failure with no way out."""
+    _choose(tmp_path, 7, "Work plan")
+    proc = _RefusesOnPlan("unexpected status 401 Unauthorized: no token")
+
+    _worker, _completed, failures, _activity = _plan_turn(proc, monkeypatch)
+
+    assert failures == [str(chatgpt.plan_error({}, 401))], failures
+    assert chatgpt.SIGN_IN_AGAIN in failures[0], failures
+
+
+def test_codex_on_its_own_login_keeps_codex_s_own_words(monkeypatch):
+    """That sign-in is Codex's, and `codex login` is what fixes it."""
+    proc = _RefusesOnPlan(USAGE_LIMIT_SAID)
+
+    _worker, _completed, failures, _activity = _turn(proc, monkeypatch)
+
+    assert failures == [USAGE_LIMIT_SAID], failures
