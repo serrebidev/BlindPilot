@@ -3231,6 +3231,14 @@ def _forget_remote(session_id: str) -> None:
         _save_config(cfg)
 
 
+# How many conversations keep a record of what they were allowed for their
+# session. The record is only ever read back to list it in Chat Permissions, so
+# a conversation older than every one opened since has nothing left to say -
+# while the file is read whole at startup, and would otherwise grow with every
+# conversation ever opened.
+_SESSION_RULES_KEPT = 50
+
+
 def _saved_session_rules() -> dict:
     """Rules each conversation has been allowed for its session, by id."""
     saved = _load_config().get("session_permissions")
@@ -3243,6 +3251,11 @@ def _remember_session_rules(session_id: str, new_lines: list[str]) -> None:
     The grants themselves live in the backend's own session and are never
     written to a settings file; this record is only so Chat Permissions can
     say what was allowed, including after the conversation is reopened.
+
+    The newest `_SESSION_RULES_KEPT` conversations are the ones kept. The saved
+    keys are in the order they were written, so this conversation is taken out
+    and put back at the end - written again, it counts as the newest - and the
+    front, the oldest, is what falls off.
     """
     if not session_id or not new_lines:
         return
@@ -3251,8 +3264,10 @@ def _remember_session_rules(session_id: str, new_lines: list[str]) -> None:
     for line in new_lines:
         if line not in lines:
             lines.append(line)
+    ordered = [(sid, rows) for sid, rows in saved.items() if sid != session_id]
+    ordered.append((session_id, lines[-200:]))
     cfg = _load_config()
-    cfg["session_permissions"] = {**saved, session_id: lines[-200:]}
+    cfg["session_permissions"] = dict(ordered[-_SESSION_RULES_KEPT:])
     _save_config(cfg)
 
 
