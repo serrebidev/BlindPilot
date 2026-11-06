@@ -2703,6 +2703,59 @@ def test_a_plan_sign_in_that_has_ended_asks_for_a_new_one(monkeypatch, tmp_path)
     assert chatgpt.SIGN_IN_AGAIN in failures[0], failures
 
 
+def test_a_plan_account_with_no_token_is_let_go_of_for_the_next_conversation(monkeypatch, tmp_path):
+    """Deleting or signing out of the bound Account used to fail every turn.
+
+    The Account is bound to the conversation for as long as it is open, so a
+    deleted Account's id stayed behind and every later message asked the token
+    command for something that no longer exists. Deleting or signing out
+    already put the saved choice back on Codex's own login; with nothing
+    started on that Account, the next turn must be allowed to take it.
+    """
+    import blindpilot_app as app
+    from doubles import panel_stub
+
+    _choose(tmp_path, 7, "Work plan")
+    _capture_launch(monkeypatch, failure="This account is not signed in to ChatGPT.")
+    began_on = agent_backends.PlanAccount(7, "Work plan")
+    worker = _bare_worker(plan_account=began_on)
+    panel = panel_stub(_worker=worker, _session_id=None)
+    panel._codex_plan_account = began_on
+    # The Account goes while the conversation is open: the saved choice has
+    # already fallen back to Codex's own login, but the tab still holds this.
+    _choose(tmp_path, None)
+
+    worker.run()
+
+    assert worker.plan_token_failed, "the failed token command was not remembered"
+    app.SessionPanel._on_failed(panel, "Failed to launch Codex: no token")
+
+    assert panel._codex_plan_account is agent_backends.UNBOUND, (
+        "the next turn would retry the Account that cannot produce a token"
+    )
+    assert app.SessionPanel._codex_conversation_account(panel) is None, (
+        "the next conversation did not fall back to Codex's own login"
+    )
+
+
+def test_a_started_conversation_is_not_moved_off_its_account(tmp_path):
+    """A thread belongs to the Account it was held under, so it stays there."""
+    from types import SimpleNamespace
+
+    import blindpilot_app as app
+    from doubles import panel_stub
+
+    began_on = agent_backends.PlanAccount(7, "Work plan")
+    panel = panel_stub(_worker=SimpleNamespace(plan_token_failed=True), _session_id="saved-thread")
+    panel._codex_plan_account = began_on
+
+    app.SessionPanel._on_failed(panel, "Failed to launch Codex: no token")
+
+    assert panel._codex_plan_account == began_on, (
+        "a conversation that had already started was moved to another login"
+    )
+
+
 def test_codex_on_its_own_login_keeps_codex_s_own_words(monkeypatch):
     """That sign-in is Codex's, and `codex login` is what fixes it."""
     proc = _RefusesOnPlan(USAGE_LIMIT_SAID)

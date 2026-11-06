@@ -2731,6 +2731,16 @@ class PlanAccount:
         return self.name or f"account {self.account_id}"
 
 
+class PlanTokenError(OSError):
+    """The bound Account's token command failed, so no turn can run on it.
+
+    An OSError like every other reason a launch does not happen, so a caller
+    that only knows "Codex could not start" still catches it. The distinct type
+    is what says the failure names the Account rather than the CLI, which is
+    what lets the window stop retrying an Account that has gone.
+    """
+
+
 class _Unbound:
     """No Account taken for this conversation yet: read the saved choice.
 
@@ -3700,13 +3710,13 @@ def _plan_token_or_report(account: PlanAccount) -> None:
     try:
         done = _run_token_command(command)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise OSError(_plan_token_failure(account, str(exc).strip())) from exc
+        raise PlanTokenError(_plan_token_failure(account, str(exc).strip())) from exc
     printed = (done.stdout or "").strip()
     if done.returncode == 0 and printed:
         return
     said = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
     reason = said[-1].removeprefix("error:").strip() if said else ""
-    raise OSError(
+    raise PlanTokenError(
         _plan_token_failure(
             account, reason or f"it exited with {done.returncode} and printed no token"
         )
@@ -3989,6 +3999,11 @@ class CodexWorker(_TurnWorker):
         # session id names a conversation that no longer exists, and the
         # window clears it so the next message starts a new one.
         self.lost_session = False
+        # Set when the Account this conversation runs on could not produce a
+        # token, so nothing was started on it. The window lets go of that
+        # Account while no conversation has begun, where retrying its dead id
+        # would fail every turn.
+        self.plan_token_failed = False
         # True from the moment `turn/start` goes out, before any id names it.
         self._turn_requested = False
         # Decides whether the turn was asked for or the cancel landed first.
@@ -4248,6 +4263,7 @@ class CodexWorker(_TurnWorker):
                 try:
                     started = _start_codex_server(plan_account=account)
                 except OSError as exc:
+                    self.plan_token_failed = isinstance(exc, PlanTokenError)
                     self._fail(f"Failed to launch Codex: {exc}")
                     return None
                 held = backend_pool.HeldProcess(started, codex_adapter())

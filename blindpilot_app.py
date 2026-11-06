@@ -12993,6 +12993,13 @@ class SessionPanel(wx.Panel):
             # And a fresh one is a new conversation: it takes the Account Codex
             # uses when it starts, not the one the lost thread was held under.
             self._forget_codex_conversation_account()
+        if getattr(self._worker, "plan_token_failed", False) and self._session_id is None:
+            # The Account this conversation was bound to could not produce a
+            # token, and nothing has begun on it. Let the next turn take the
+            # saved choice again: deleting or signing out of that Account
+            # already put the choice back on Codex's own login, where retrying
+            # its dead id would fail the same way every time.
+            self._forget_codex_conversation_account()
         # The failure stays in the list as a row of its own. The status bar
         # line is overwritten by the next event, and a list that looks the
         # same after a failed turn as after a finished one tells a reader
