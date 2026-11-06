@@ -2206,7 +2206,10 @@ class _Launch:
     """The two processes a plan launch creates, as their creator was asked to.
 
     The token command and the app-server are both process creation, so both are
-    replaced here and the launch is judged only by what it asked for.
+    replaced here and the launch is judged only by what it asked for. The
+    app-server's binary is answered rather than searched for, and its
+    environment built rather than collected from a login shell: a launch a test
+    drives must not depend on what is installed on the machine running it.
     """
 
     def __init__(self, token: str, failure: str) -> None:
@@ -2232,6 +2235,8 @@ def _capture_launch(monkeypatch, token: str = "tok-secret-value", failure: str =
 
     monkeypatch.setattr(agent_backends, "owned_popen", fake_popen)
     monkeypatch.setattr(agent_backends, "_run_token_command", fake_token_command)
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "codex")
+    monkeypatch.setattr(agent_backends, "subprocess_env", lambda _binary: {})
     monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda binary: binary)
     monkeypatch.setattr(agent_backends, "codex_question_args", lambda: ())
     return captured

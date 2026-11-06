@@ -17,6 +17,10 @@ import pytest
 
 import agent_backends
 
+# Where settings really resolve to is the thing under test, so the suite-wide
+# redirect of that folder has to stay out of this file: see `conftest.py`.
+pytestmark = pytest.mark.real_settings_folder
+
 
 @pytest.fixture
 def darwin_home(monkeypatch, tmp_path):

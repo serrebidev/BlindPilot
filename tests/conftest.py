@@ -112,7 +112,7 @@ def chat_data_stays_out_of_the_real_folder(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def the_account_choice_stays_out_of_the_real_settings(monkeypatch):
+def the_account_choice_stays_out_of_the_real_settings(request, monkeypatch):
     """Point the Codex backend's Account choice at a throwaway settings folder.
 
     Every Codex turn reads which Account the backend is set to use, out of the
@@ -121,7 +121,16 @@ def the_account_choice_stays_out_of_the_real_settings(monkeypatch):
     would find the whole suite's Codex tests running turns on it, and a test
     that chose one would write over the choice they made. The folder is handed
     to a test that names this fixture, which is how one chooses an Account.
+
+    A file marked `real_settings_folder` is left alone, because that is what it
+    tests. A redirect here answers for `blindpilot_config_dir` itself, so a test
+    of where settings really live would be checking this fixture's folder
+    instead of the resolution -- and the migration would be carried out into a
+    throwaway directory that is then deleted.
     """
+    if request.node.get_closest_marker("real_settings_folder"):
+        yield None
+        return
     try:
         import agent_backends
     except Exception:
