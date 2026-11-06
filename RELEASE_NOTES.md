@@ -1,3 +1,7 @@
+# BlindPilot 0.55.11
+
+- Fixed: Codex turns funded by a ChatGPT-plan Account no longer fail before the model is asked with `subscription_sharing_unsupported_capability`. Plan turns now go through a loopback relay inside the app that drops the conversation items the plan endpoint refuses (configuration updates, compaction triggers, shell and other unsupported call/output items) and forwards everything else unchanged, streaming the reply back; Codex's own login never goes through the relay. The same change removes the shared plan-token cache (a process that waited for a token rotation now re-reads the record and does its own exchange) and stops translating Codex's own refusal text. From Farhan Khan, PR #148, fixing #147.
+
 # BlindPilot 0.55.10
 
 - Fixed: a Codex conversation bound to a ChatGPT-plan Account that was deleted or signed out no longer retries that dead Account on every turn. The failed turn still reports the failure, but the conversation now lets go of the binding when nothing has started on that Account, so the next turn takes the saved choice again — already back on Codex's own login after the deletion. A conversation that already has a thread keeps its Account, since a thread cannot move to another login. From Farhan Khan, PR #146, fixing #145.
