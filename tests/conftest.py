@@ -112,7 +112,7 @@ def chat_data_stays_out_of_the_real_folder(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def the_account_choice_stays_out_of_the_real_settings(monkeypatch):
+def the_account_choice_stays_out_of_the_real_settings(request, monkeypatch):
     """Point the Codex backend's Account choice at a throwaway settings folder.
 
     Every Codex turn reads which Account the backend is set to use, out of the
@@ -122,6 +122,11 @@ def the_account_choice_stays_out_of_the_real_settings(monkeypatch):
     that chose one would write over the choice they made. The folder is handed
     to a test that names this fixture, which is how one chooses an Account.
     """
+    # The directory-migration tests exercise blindpilot_config_dir itself:
+    # replacing it would leave them testing this lambda instead of the app.
+    if request.module.__name__ == "test_macos_directory_migration":
+        yield None
+        return
     try:
         import agent_backends
     except Exception:
