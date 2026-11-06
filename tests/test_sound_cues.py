@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
+from earcons import Earcons
 
 # "error" joined these when failure got a cue of its own; it is the one
 # without a shipped audio file, using the platform's own error sound.
@@ -28,7 +29,7 @@ def earcons(monkeypatch, tmp_path):
     # with the working cue switched off used to fail the loop-starts test
     # and pass the loop-stays-off test for the wrong reason.
     monkeypatch.setattr(app.SETTINGS, "progress_cue", app.CUE_LOOP)
-    box = app.Earcons(str(tmp_path))
+    box = Earcons(str(tmp_path), settings=app.SETTINGS)
     box.enabled = True
     box.cues = dict.fromkeys(CUES, True)
     played: list[str] = []

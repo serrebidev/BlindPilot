@@ -25,6 +25,7 @@ import pytest
 
 import blindpilot_app as app
 from doubles import panel_stub
+from earcons import Earcons
 
 
 def _panel(monkeypatch):
@@ -87,7 +88,7 @@ def test_the_error_cue_uses_the_platform_sound_rather_than_a_file(tmp_path):
     """`EarCons/` ships three files. Authoring a fourth is not something to
     fake, and the system error sound is the one already associated with
     failure on whichever platform this is."""
-    box = app.Earcons(str(tmp_path))
+    box = Earcons(str(tmp_path))
 
     assert box._resolve("error") is None, "no error file is shipped, by design"
     box.play_error()  # must not raise on any platform
@@ -108,7 +109,7 @@ def test_every_spawned_player_is_waited_on_not_left_to_the_gc(tmp_path, monkeypa
             waited.append(True)
 
     monkeypatch.setattr(app.subprocess, "Popen", FakeProc)
-    box = app.Earcons(str(tmp_path))
+    box = Earcons(str(tmp_path))
     box._system = "Darwin"  # exercise the afplay path wherever the test runs
 
     box._play_system_error()
@@ -121,7 +122,7 @@ def test_every_spawned_player_is_waited_on_not_left_to_the_gc(tmp_path, monkeypa
 
 def test_a_muted_application_plays_no_error_cue(tmp_path, monkeypatch):
     played: list[str] = []
-    box = app.Earcons(str(tmp_path), enabled=False)
+    box = Earcons(str(tmp_path), enabled=False)
     monkeypatch.setattr(box, "_play_system_error", lambda: played.append("system"))
 
     box.play_error()
@@ -131,7 +132,7 @@ def test_a_muted_application_plays_no_error_cue(tmp_path, monkeypatch):
 
 def test_the_error_cue_obeys_its_own_switch(tmp_path, monkeypatch):
     played: list[str] = []
-    box = app.Earcons(str(tmp_path), cues={"error": False})
+    box = Earcons(str(tmp_path), cues={"error": False})
     monkeypatch.setattr(box, "_play_system_error", lambda: played.append("system"))
 
     box.play_error()

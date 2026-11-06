@@ -152,9 +152,10 @@ BUILTIN_PROVIDER_NOTES = {
 }
 
 # Where CredentialStore keeps the key on this platform, for the two places the
-# dialog names it. Off Windows the store is whatever keyring backend the desktop
-# provides: the macOS Keychain, or the Secret Service on Linux.
-CREDENTIAL_STORE_NAME = "Windows Credential Manager" if os.name == "nt" else "the system keychain"
+# dialog names it. Off Windows the store is whatever backend `keyring` finds --
+# the macOS Keychain, the Secret Service on Linux -- so it is named by the
+# library rather than by one platform's word for it.
+CREDENTIAL_STORE_NAME = "Windows Credential Manager" if os.name == "nt" else "the system keyring"
 
 CUSTOM_PROVIDER_NOTE = (
     "This account type is only for a server that implements an OpenAI-compatible API and is not one "
