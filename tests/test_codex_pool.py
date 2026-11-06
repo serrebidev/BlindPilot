@@ -2231,6 +2231,7 @@ def _capture_launch(monkeypatch, token: str = "tok-secret-value", failure: str =
         return subprocess.CompletedProcess(list(command), 0, f"{captured.token}\n", "")
 
     monkeypatch.setattr(agent_backends, "owned_popen", fake_popen)
+    monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "codex")
     monkeypatch.setattr(agent_backends, "_run_token_command", fake_token_command)
     monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda binary: binary)
     monkeypatch.setattr(agent_backends, "codex_question_args", lambda: ())
