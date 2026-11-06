@@ -1,3 +1,8 @@
+# BlindPilot 0.55.9
+
+- New: one Continue with ChatGPT sign-in now serves both Chat and the Codex coding backend, so nobody logs in twice for one plan. Codex runs on the plan through its own command-line configuration, fetching its token from the app's --print-plan-token mode — the token reaches neither the app-server's command line nor its environment, and the user's own Codex configuration is never written. Refresh is serialized across processes with the stored record replaced atomically; the process pool is keyed by Account, so two Accounts hold two processes and a conversation keeps the Account it began on; the account dialog's Codex choice is a labelled, keyboard-operable control that announces its value; sign-out and switching drop only that Account's process, and never while a turn is live. Codex's own login remains available and unchanged. From Farhan Khan, PR #143, landed via replacement PR #144. Design record: ADR 0003 and docs/chatgpt-sign-in-design.md.
+- Fixed (test suite): the account-choice fixture no longer overrides the directory-migration tests, the Codex launch capture stubs the CLI lookup so the account test no longer needs a real codex binary installed, and tests/doubles.py is formatted for the current ruff — the three clean-runner CI failures #143 arrived with.
+
 # BlindPilot 0.55.8
 
 - Fixed: a Muse.ai follow test left its working cue running after the test ended, and the leaked cue thread kept spawning a player that a later test counted as its own launch — the macOS-only failure on PRs #139 and #140. The test now stops the cue in teardown, the same way closing a tab does. From Farhan Khan, PR #141.
