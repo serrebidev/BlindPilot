@@ -2257,7 +2257,7 @@ def _auth_command(overrides: dict) -> list[str]:
     return [overrides[f"{provider}.auth.command"], *overrides[f"{provider}.auth.args"]]
 
 
-def test_a_plan_launch_points_codex_at_openai_and_fetches_its_token_by_command(monkeypatch):
+def test_a_plan_launch_points_codex_at_the_relay_and_fetches_its_token_by_command(monkeypatch):
     captured = _capture_launch(monkeypatch)
 
     agent_backends._start_codex_server("codex", plan_account=_plan_account())
@@ -2265,7 +2265,9 @@ def test_a_plan_launch_points_codex_at_openai_and_fetches_its_token_by_command(m
     provider = "model_providers.blindpilot-chatgpt"
     overrides = _overrides(captured.server["args"])
     assert overrides["model_provider"] == "blindpilot-chatgpt"
-    assert overrides[f"{provider}.base_url"] == "https://api.openai.com/v1"
+    base_url = overrides[f"{provider}.base_url"]
+    assert base_url.startswith("http://127.0.0.1:"), base_url
+    assert base_url.endswith("/v1"), base_url
     assert overrides[f"{provider}.wire_api"] == "responses"
     assert f"{provider}.requires_openai_auth" not in overrides, (
         "Codex refuses auth combined with requires_openai_auth; its default is false already"

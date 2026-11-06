@@ -44,8 +44,10 @@ from pathlib import Path
 from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import backend_pool
+import certificates
 import diagnostics
 from accessible_ai import plan_token
+from accessible_ai.providers import plan_relay
 from accessible_ai.storage import preferences
 from owned_process import _WindowsJob, owned_popen
 import questions
@@ -2689,17 +2691,15 @@ def codex_question_args() -> tuple[str, ...]:
 
 # ----- Codex on a ChatGPT-plan account -----
 #
-# Codex is pointed at OpenAI's Responses endpoint for plan usage through
-# configuration overrides on its own command line, and fetches its own bearer
-# token by running this app's token-printing mode on an interval. The token is
-# therefore in neither the child's command line nor its environment. Rejected:
-# the token as an environment key, with the process restarted hourly -- that
-# exposes it to every child Codex starts, and restarting means resuming threads
-# on a clock. Overrides rather than a written configuration file, because the
-# user's own config.toml also holds their MCP servers and preferences.
+# Codex is pointed at the plan's Responses endpoint through configuration
+# overrides on its own command line, and fetches its own bearer token by
+# running this app's token-printing mode on an interval. The token is
+# therefore in neither the child's command line nor its environment. The
+# endpoint itself is reached through a loopback relay (accessible_ai.providers.
+# plan_relay) because the plan token is a subscription-sharing token, and that
+# endpoint refuses several item types Codex emits; the relay drops them.
 
 PLAN_PROVIDER_ID = "blindpilot-chatgpt"
-PLAN_BASE_URL = "https://api.openai.com/v1"
 
 # How often Codex runs the token command again. Each run is its own process with
 # no token in memory, so each one performs an exchange and rotates the refresh
@@ -3025,7 +3025,7 @@ def plan_token_command(account_id: int) -> tuple[str, ...]:
 
 
 def codex_plan_args(account_id: int) -> tuple[str, ...]:
-    """Arguments that put Codex on OpenAI's Responses endpoint for a plan.
+    """Arguments that put Codex on the plan's Responses endpoint through the relay.
 
     The token is not among them: Codex runs the token command beside them to
     obtain its own bearer token, and runs it again on an interval. Quoted as
@@ -3038,7 +3038,10 @@ def codex_plan_args(account_id: int) -> tuple[str, ...]:
     overrides = (
         ("model_provider", json.dumps(PLAN_PROVIDER_ID)),
         (f"{provider}.name", json.dumps("OpenAI")),
-        (f"{provider}.base_url", json.dumps(PLAN_BASE_URL)),
+        (
+            f"{provider}.base_url",
+            json.dumps(plan_relay.plan_base_url(ssl_context=certificates.certificate_context())),
+        ),
         (f"{provider}.wire_api", json.dumps("responses")),
         (f"{provider}.supports_websockets", "false"),
         # requires_openai_auth is deliberately absent: Codex's reference says

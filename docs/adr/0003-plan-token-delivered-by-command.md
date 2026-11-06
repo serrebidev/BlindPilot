@@ -29,6 +29,15 @@ process that waited on the lock re-reads it, finds the refresh token the holder
 rotated, and performs its own exchange with it, so two askers perform two
 exchanges. The stored record is replaced atomically.
 
+The base URL in that provider entry is not OpenAI's endpoint but a loopback
+relay run by this app (`accessible_ai.providers.plan_relay`). A plan token is a
+subscription-sharing token, and the endpoint refuses several item types Codex
+emits -- `configuration_update`, `compaction_trigger`, `shell_call` -- with
+`subscription_sharing_unsupported_capability`, so every turn carrying one failed
+before the model was asked anything. The relay drops those items from a
+Responses request, forwards everything else unchanged, and streams the reply
+back; only the plan provider is pointed at it, never Codex's own login.
+
 ## Considered Options
 
 - **The token as an environment key, with the app-server restarted when it
