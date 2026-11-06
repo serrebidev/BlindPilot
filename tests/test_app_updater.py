@@ -787,6 +787,7 @@ def test_the_installer_is_never_left_to_abort_over_a_file_in_use():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows PowerShell")
+@pytest.mark.timeout(180)  # a real DLL load, then PowerShell module enumeration
 def test_a_program_holding_one_of_our_libraries_counts_as_a_blocker(tmp_path):
     """The blocker that broke updates ran from somewhere else entirely.
 
