@@ -22,11 +22,11 @@ from __future__ import annotations
 
 import pytest
 
-import blindpilot_app as app
+from agent_backends import _tool_use_label
 
 
 def _edit(old: str, new: str, path="app/server.py"):
-    return app._tool_use_label("Edit", {"file_path": path, "old_string": old, "new_string": new})
+    return _tool_use_label("Edit", {"file_path": path, "old_string": old, "new_string": new})
 
 
 # ----- the counts -----
@@ -65,19 +65,17 @@ def test_an_edit_that_changes_nothing_says_nothing_extra():
 
 # ----- the other ways a file gets written -----
 def test_writing_a_file_says_how_much_was_written():
-    label = app._tool_use_label(
-        "Write", {"file_path": "notes/plan.md", "content": "one\ntwo\nthree\n"}
-    )
+    label = _tool_use_label("Write", {"file_path": "notes/plan.md", "content": "one\ntwo\nthree\n"})
 
     assert label == "Writing plan.md, 3 lines"
 
 
 def test_writing_an_empty_file_does_not_claim_a_line():
-    assert app._tool_use_label("Write", {"file_path": "a.txt", "content": ""}) == "Writing a.txt"
+    assert _tool_use_label("Write", {"file_path": "a.txt", "content": ""}) == "Writing a.txt"
 
 
 def test_several_edits_at_once_are_added_up():
-    label = app._tool_use_label(
+    label = _tool_use_label(
         "MultiEdit",
         {
             "file_path": "app/server.py",
@@ -94,11 +92,11 @@ def test_several_edits_at_once_are_added_up():
 # ----- nothing else changes -----
 def test_an_edit_without_the_strings_reads_as_it_always_did():
     """Older CLIs, and NotebookEdit, do not always carry both."""
-    assert app._tool_use_label("Edit", {"file_path": "app/server.py"}) == "Editing server.py"
+    assert _tool_use_label("Edit", {"file_path": "app/server.py"}) == "Editing server.py"
 
 
 def test_an_edit_with_no_path_still_works():
-    assert app._tool_use_label("Edit", {"old_string": "a\n", "new_string": "b\n"}).startswith(
+    assert _tool_use_label("Edit", {"old_string": "a\n", "new_string": "b\n"}).startswith(
         "Editing a file"
     )
 
@@ -113,7 +111,7 @@ def test_an_edit_with_no_path_still_works():
     ],
 )
 def test_every_other_tool_is_narrated_exactly_as_before(name, params, expected):
-    assert app._tool_use_label(name, params) == expected
+    assert _tool_use_label(name, params) == expected
 
 
 def test_it_is_still_one_line():

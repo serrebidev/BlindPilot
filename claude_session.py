@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import platform
 import queue
+import shutil
 import subprocess
 import threading
 import uuid
 import weakref
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Callable, Optional, cast
 
 import backend_pool
@@ -77,6 +81,110 @@ ASK_THROUGH_THE_TOOL = ask_through_the_tool("AskUserQuestion")
 # old to know `--include-partial-messages`, the same way the permission
 # prompt tool is dropped. Read by `build_command` on the next start.
 include_partial_messages = True
+
+
+# ---------------------------------------------------------------------------
+# Finding the CLI.
+#
+# It lives here because both the window (its installer, its updater and its
+# model probe) and the turn worker need it, and neither may import the other:
+# this module is the one they already share.
+# ---------------------------------------------------------------------------
+
+CLAUDE_BIN = "claude"
+
+
+# Common install locations to check when `claude` isn't on PATH.
+# macOS GUI apps launched from Finder/Dock inherit a minimal PATH
+# (/usr/bin:/bin:/usr/sbin:/sbin) and miss Homebrew, nvm, the official
+# ~/.claude/local installer, etc. Windows GUI apps usually inherit the
+# user PATH, but installs to non-default npm prefixes can still miss it.
+def _native_bin_dir() -> Path:
+    """Where the official native installer puts the launcher, every platform."""
+    return Path.home() / ".local" / "bin"
+
+
+def _fallback_claude_paths() -> tuple[Path, ...]:
+    home = Path.home()
+    if platform.system() == "Windows":
+        appdata = os.environ.get("APPDATA", str(home / "AppData" / "Roaming"))
+        local_appdata = os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local"))
+        candidates: list[Path] = []
+        for name in ("claude.exe", "claude.cmd", "claude.ps1"):
+            candidates.extend(
+                [
+                    # Native installer (install.ps1 / install.cmd) — the default.
+                    _native_bin_dir() / name,
+                    # WinGet's shim directory.
+                    Path(local_appdata) / "Microsoft" / "WinGet" / "Links" / name,
+                    Path(appdata) / "npm" / name,
+                    home / ".claude" / "local" / name,
+                    home / ".volta" / "bin" / name,
+                    Path(local_appdata) / "Programs" / "claude" / name,
+                ]
+            )
+        return tuple(candidates)
+    return (
+        _native_bin_dir() / "claude",
+        home / ".claude" / "local" / "claude",
+        Path("/opt/homebrew/bin/claude"),
+        Path("/usr/local/bin/claude"),
+        home / ".npm-global" / "bin" / "claude",
+        home / ".volta" / "bin" / "claude",
+    )
+
+
+def _login_shell() -> Optional[str]:
+    """The user's real login shell, if there is one (POSIX only)."""
+    if platform.system() == "Windows":
+        return None
+    shell = os.environ.get("SHELL")
+    return shell if shell and os.path.isfile(shell) else None
+
+
+def _login_shell_which(name: str) -> Optional[str]:
+    """Resolve *name* the way a login shell would.
+
+    A GUI app launched from Finder or the Dock inherits a minimal PATH, so this
+    is how a CLI the user can run is found. It runs `$SHELL -l -c`, a login
+    shell that is not interactive, so for zsh it reads .zprofile and not
+    .zshrc. `command -v` is POSIX and also works in fish.
+    """
+    shell = _login_shell()
+    if shell is None:
+        return None
+    try:
+        result = subprocess.run(
+            [shell, "-l", "-c", f"command -v {name}"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    path = result.stdout.strip().splitlines()[-1].strip()
+    if path and os.path.isfile(path) and os.access(path, os.X_OK):
+        return path
+    return None
+
+
+def _find_claude() -> Optional[str]:
+    """Locate the `claude` binary even when launched from a GUI app.
+
+    Order: PATH, well-known install locations, then (POSIX only) the user's
+    login shell so any custom PATH from .zprofile / .bash_profile is honored.
+    """
+    binary = shutil.which(CLAUDE_BIN)
+    if binary:
+        return binary
+
+    for candidate in _fallback_claude_paths():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    return _login_shell_which(CLAUDE_BIN)
 
 
 def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:

@@ -124,7 +124,7 @@ def _drive(proc, on_activity=None, timeout=10.0, on_worker=None, prompt="hi"):
 
     Returns (activity, completed, failures, raised, finished).
     """
-    import blindpilot_app
+    import claude_worker
 
     activity: list[tuple[str, str]] = []
     completed: list[str] = []
@@ -138,12 +138,12 @@ def _drive(proc, on_activity=None, timeout=10.0, on_worker=None, prompt="hi"):
 
     import claude_session
 
-    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    real_popen, real_find = claude_session._popen, claude_worker._find_claude
     claude_session._popen = lambda *_a, **_k: proc  # type: ignore[assignment]
-    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
+    claude_worker._find_claude = lambda: "claude"  # type: ignore[assignment]
 
     try:
-        worker = blindpilot_app.ClaudeWorker(
+        worker = claude_worker.ClaudeWorker(
             prompt,
             None,
             os.getcwd(),
@@ -172,7 +172,7 @@ def _drive(proc, on_activity=None, timeout=10.0, on_worker=None, prompt="hi"):
         # A test that fails part way through must not leave the real Popen
         # swapped out, or every test after it launches the fake.
         claude_session._popen = real_popen  # type: ignore[assignment]
-        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        claude_worker._find_claude = real_find  # type: ignore[assignment]
         # Not this function's job to drop the held process: a test that
         # asserts on `proc` after this call needs it exactly as the worker
         # left it. `no_backend_process_outlives_its_test` in conftest.py
@@ -471,9 +471,9 @@ def test_a_stopped_turn_ends_at_the_drain_when_no_result_follows(monkeypatch):
     interrupt whose result never arrived held the turn, and the tab's
     process with it, for good.
     """
-    import blindpilot_app
+    import claude_worker
 
-    monkeypatch.setattr(blindpilot_app, "_CANCEL_DRAIN_SECONDS", 0.3)
+    monkeypatch.setattr(claude_worker, "_CANCEL_DRAIN_SECONDS", 0.3)
     workers: list = []
     first_row = threading.Event()
 
@@ -568,9 +568,10 @@ def test_the_panel_join_budget_outlasts_an_interrupt_and_its_drain():
     """
     import blindpilot_app
     import claude_session
+    import claude_worker
 
-    assert blindpilot_app.ClaudeWorker.stop_seconds > (
-        claude_session._INTERRUPT_SECONDS + blindpilot_app._CANCEL_DRAIN_SECONDS
+    assert claude_worker.ClaudeWorker.stop_seconds > (
+        claude_session._INTERRUPT_SECONDS + claude_worker._CANCEL_DRAIN_SECONDS
     )
     # Codex derives its verify budget from _CANCEL_JOIN_SECONDS, which stays
     # the plain teardown budget rather than the worker's own stop_seconds.
@@ -601,9 +602,9 @@ def test_a_stopped_turn_ends_at_its_deadline_however_long_the_cli_keeps_talking(
     CLI that kept narrating put the clock back to the start every time. Stop
     then never landed: the turn ran on, and the tab's process with it.
     """
-    import blindpilot_app
+    import claude_worker
 
-    monkeypatch.setattr(blindpilot_app, "_CANCEL_DRAIN_SECONDS", 0.3)
+    monkeypatch.setattr(claude_worker, "_CANCEL_DRAIN_SECONDS", 0.3)
     workers: list = []
     first_row = threading.Event()
 

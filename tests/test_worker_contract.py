@@ -15,8 +15,8 @@ that the Protocol was short.
 from __future__ import annotations
 
 import agent_backends
-import blindpilot_app
 from commandcode_worker import CommandcodeWorker
+from claude_worker import ClaudeWorker
 from copilot_backend import CopilotWorker
 from google_worker import AntigravityWorker, GeminiWorker
 from hermes_worker import HermesWorker
@@ -24,7 +24,7 @@ from muse_worker import MuseWorker
 from museai_worker import MuseAiWorker
 
 WORKERS = [
-    blindpilot_app.ClaudeWorker,
+    ClaudeWorker,
     agent_backends.CodexWorker,
     agent_backends.FreebuffWorker,
     agent_backends.OpencodeWorker,
