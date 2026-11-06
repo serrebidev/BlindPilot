@@ -268,6 +268,33 @@ def test_codex_app_server_prefers_packaged_windows_binary(monkeypatch, tmp_path)
 
     assert agent_backends._codex_app_server_binary(str(wrapper)) == str(native)
     assert CodexWorker._policy("acceptEdits")[0] == "on-request"
+
+
+def test_codex_app_server_finds_the_hoisted_windows_binary(monkeypatch, tmp_path):
+    """npm hoists the platform package beside @openai/codex, not inside it.
+
+    That is the layout a plain `npm install -g @openai/codex` produces
+    (issue #150): the only nested copy exists when npm could not hoist.
+    Missing the hoisted one fell back to the codex.cmd wrapper, which
+    CreateProcess cannot run, and every Codex turn died with WinError 5.
+    """
+    wrapper = tmp_path / "npm" / "codex.cmd"
+    native = (
+        tmp_path
+        / "npm"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.touch()
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+
+    assert agent_backends._codex_app_server_binary(str(wrapper)) == str(native)
     assert CodexWorker._policy("bypassPermissions") == (
         "never",
         {"type": "dangerFullAccess"},

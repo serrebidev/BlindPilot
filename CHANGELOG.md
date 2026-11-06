@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.12 - 2026-11-06
+
+Fix for issue #150: on Windows, a plain `npm install -g @openai/codex` left the Codex backend unable to launch at all — every turn failed with "Failed to launch Codex: [WinError 5] Access denied". BlindPilot launches Codex's native executable rather than the npm wrapper, but it only looked for that executable nested inside the @openai/codex package. npm hoists the platform package beside @openai/codex instead, so the search found nothing and fell back to the codex.cmd wrapper, which CreateProcess cannot run. The hoisted location is searched now (a nested copy still wins when one exists), and the model-catalog probe resolves the native executable the same way instead of silently failing against the wrapper.
+
 ## v0.55.3 - 2026-11-04
 
 - The 50 ms GUI budget from spec #125 is now enforced across the app: a blocking contract names the operations that may never run on the GUI thread (process starts, network reads, file scans, synchronous speech calls) and a guard test fails if a GUI callback reaches one. The remaining slow actions run on workers instead: GitHub clone, desktop-shortcut creation, setup CLI checks, history resume, changed-file and Claude file views, Hermes session actions, Muse.ai actions, and quitting, which now ends owned backend process trees off-thread; backend processes are pooled so starting one is not paid on the GUI thread either. Farhan Khan's PRs #128 and #129 landed as replacement #130, which also restores the `search_all_conversations` helper shipped in v0.55.1 (#126) that the branch had inlined away, and makes the branch's Windows-only test seams pass cross-platform. Landing note: the branch predated v0.55.1/v0.55.2 and carried APP_VERSION 0.55.0; the version regression was caught at release time and this release sets 0.55.3 directly - the Hermes running-gateway attach from v0.55.2 is present and unchanged.

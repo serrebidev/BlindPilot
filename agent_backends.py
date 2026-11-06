@@ -2048,13 +2048,23 @@ def _codex_app_server_binary(binary: str) -> str:
     """
     if platform.system() != "Windows" or Path(binary).suffix.casefold() == ".exe":
         return binary
+    # The platform package is an optional dependency of @openai/codex, and
+    # npm installs those hoisted: a sibling of the codex package inside the
+    # shared @openai folder, not nested under the package itself. A nested
+    # copy appears only when npm could not hoist, so look there first (that
+    # is also the copy Node's own resolution finds first) and fall back to
+    # the hoisted one. Finding neither leaves the .cmd wrapper, which
+    # CreateProcess cannot run at all: Popen raises WinError 5.
     package_root = Path(binary).parent / "node_modules" / "@openai" / "codex"
-    try:
-        candidates = sorted(
-            package_root.glob("node_modules/@openai/codex-win32-*/vendor/**/bin/codex.exe")
-        )
-    except OSError:
-        candidates = []
+    hoisted_root = Path(binary).parent / "node_modules" / "@openai"
+    candidates: list[Path] = []
+    for root in (package_root / "node_modules" / "@openai", hoisted_root):
+        try:
+            candidates = sorted(root.glob("codex-win32-*/vendor/**/bin/codex.exe"))
+        except OSError:
+            candidates = []
+        if candidates:
+            break
     return str(candidates[0]) if candidates else binary
 
 
@@ -2068,7 +2078,7 @@ def _codex_model_payload(binary: str, cwd: Optional[str], extra: Sequence[str]) 
     """
     try:
         result = subprocess.run(
-            [binary, "debug", "models", *extra],
+            [_codex_app_server_binary(binary), "debug", "models", *extra],
             cwd=cwd,
             capture_output=True,
             text=True,

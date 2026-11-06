@@ -1,3 +1,7 @@
+# BlindPilot 0.55.12
+
+- Fixed: the Codex backend failed to launch on Windows with "[WinError 5] Access denied" for anyone who installed Codex the standard way, `npm install -g @openai/codex` (issue #150). BlindPilot runs Codex's native executable rather than the npm wrapper, but only looked for it in the nested package location; npm hoists the platform package beside @openai/codex, so the search missed and the launch fell back to the codex.cmd wrapper, which Windows cannot start as a process. The hoisted location is now found, and the model list probe uses the native executable too.
+
 # BlindPilot 0.55.11
 
 - Fixed: Codex turns funded by a ChatGPT-plan Account no longer fail before the model is asked with `subscription_sharing_unsupported_capability`. Plan turns now go through a loopback relay inside the app that drops the conversation items the plan endpoint refuses (configuration updates, compaction triggers, shell and other unsupported call/output items) and forwards everything else unchanged, streaming the reply back; Codex's own login never goes through the relay. The same change removes the shared plan-token cache (a process that waited for a token rotation now re-reads the record and does its own exchange) and stops translating Codex's own refusal text. From Farhan Khan, PR #148, fixing #147.
