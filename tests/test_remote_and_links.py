@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
+import claude_worker
 import remote_sessions as rs
 
 LISTING = """This session is Laptop [aaaa]
@@ -61,7 +62,7 @@ class _Session:
 
 
 def _worker(remote):
-    worker = app.ClaudeWorker(
+    worker = claude_worker.ClaudeWorker(
         "hi",
         None,
         ".",

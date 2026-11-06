@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import blindpilot_app  # noqa: E402
 import claude_session  # noqa: E402
+import claude_worker  # noqa: E402
 from blindpilot_app import (  # noqa: E402
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
@@ -279,11 +280,11 @@ def _worker_command(**kwargs) -> list[str]:
         captured.append(list(cmd))
         raise OSError("stop here — the command line is all we need")
 
-    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    real_popen, real_find = claude_session._popen, claude_worker._find_claude
     claude_session._popen = fake_popen  # type: ignore[assignment]
-    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
+    claude_worker._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        blindpilot_app.ClaudeWorker(
+        claude_worker.ClaudeWorker(
             "hi",
             None,
             os.getcwd(),
@@ -298,7 +299,7 @@ def _worker_command(**kwargs) -> list[str]:
         ).run()
     finally:
         claude_session._popen = real_popen  # type: ignore[assignment]
-        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        claude_worker._find_claude = real_find  # type: ignore[assignment]
     return captured[0]
 
 
