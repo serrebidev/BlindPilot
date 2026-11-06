@@ -234,6 +234,11 @@ class BackendInfo:
     # which keeps running afterwards, so the wizard watches for the CLI to
     # report itself signed in rather than for the terminal to close.
     login_watch_until_signed_in: bool = False
+    # The npm package BlindPilot installs and updates this backend from. Empty
+    # for a backend that ships its own installer, which is what says npm is not
+    # the tool to send the user after. One field, so the installer, the update
+    # check and the wizard cannot disagree about the package name.
+    npm_package: str = ""
 
 
 BACKENDS = {
@@ -268,6 +273,7 @@ BACKENDS = {
         # the hidden process BlindPilot starts; its page is opened here instead
         # (see the login_opens_browser comment above).
         login_opens_browser=False,
+        npm_package="@openai/codex",
     ),
     BACKEND_FREEBUFF: BackendInfo(
         BACKEND_FREEBUFF,
@@ -279,6 +285,7 @@ BACKENDS = {
         False,
         False,
         supports_compaction=False,
+        npm_package="freebuff",
     ),
     BACKEND_OPENCODE: BackendInfo(
         BACKEND_OPENCODE,
@@ -293,6 +300,7 @@ BACKENDS = {
         # Pictures and text files travel as file parts the model reads, so
         # the worker takes the files themselves rather than their paths.
         uploads_attachments=True,
+        npm_package="opencode-ai",
     ),
     BACKEND_HERMES: BackendInfo(
         BACKEND_HERMES,
@@ -364,6 +372,7 @@ BACKENDS = {
         login_needs_terminal=True,
         login_terminal_hidden=True,
         login_reset_args=("logout",),
+        npm_package="command-code",
     ),
     BACKEND_GEMINI: BackendInfo(
         BACKEND_GEMINI,
@@ -382,6 +391,7 @@ BACKENDS = {
         supports_compaction=False,
         login_needs_terminal=True,
         login_watch_until_signed_in=True,
+        npm_package="@google/gemini-cli",
     ),
     BACKEND_ANTIGRAVITY: BackendInfo(
         BACKEND_ANTIGRAVITY,
@@ -433,6 +443,7 @@ BACKENDS = {
         # Its /compact is interactive-only; a headless turn cannot ask for it.
         supports_compaction=False,
         login_needs_terminal=True,
+        npm_package="@github/copilot",
     ),
 }
 

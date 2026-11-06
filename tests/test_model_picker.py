@@ -185,6 +185,16 @@ def test_probe_falls_back_when_claude_is_not_installed():
     assert "not found" in options.error
 
 
+def test_every_backend_has_a_model_probe():
+    """No backend may fall through to Claude's catalog.
+
+    The chain this replaced ended in Claude's probe, so a backend that forgot
+    its branch was offered Claude's models. A missing entry is a KeyError here
+    instead of a wrong picker in the window.
+    """
+    assert set(blindpilot_app.MODEL_PROBES) == set(blindpilot_app.BACKENDS)
+
+
 def _clear_probe_cache() -> None:
     with blindpilot_app._probe_lock:
         blindpilot_app._probe_cache.clear()

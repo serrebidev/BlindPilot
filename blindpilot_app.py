@@ -1525,15 +1525,6 @@ def install_claude(log: Callable[[str], None]) -> Optional[str]:
     return binary
 
 
-_NPM_BACKEND_PACKAGES = {
-    BACKEND_CODEX: "@openai/codex",
-    BACKEND_FREEBUFF: "freebuff",
-    BACKEND_OPENCODE: "opencode-ai",
-    BACKEND_COMMANDCODE: "command-code",
-    BACKEND_GEMINI: "@google/gemini-cli",
-    BACKEND_COPILOT: "@github/copilot",
-}
-
 # Backends whose turn is one process per message. A message typed while one
 # runs cannot join it, so it is queued and sent when the turn ends, and Steer
 # stops the turn and resumes with the instruction.
@@ -1556,7 +1547,7 @@ def _backend_installs_with_npm(backend: str) -> bool:
     installer, so telling the user that npm is required would send them after
     the wrong thing entirely.
     """
-    return normalize_backend(backend) in _NPM_BACKEND_PACKAGES
+    return bool(BACKENDS[normalize_backend(backend)].npm_package)
 
 
 NODE_RELEASE_INDEX_URL = "https://nodejs.org/dist/index.json"
@@ -1787,7 +1778,7 @@ def _npm_install_argv(backend: str, latest: bool = False) -> Optional[List[str]]
 
     `latest` pins the package's latest tag, which is what an update wants.
     """
-    package = _NPM_BACKEND_PACKAGES.get(normalize_backend(backend))
+    package = BACKENDS[normalize_backend(backend)].npm_package
     npm = _find_npm()
     if not package or not npm:
         return None
@@ -1900,21 +1891,16 @@ def install_museai(log: Callable[[str], None], upgrade: bool = False) -> Optiona
     return binary
 
 
-def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
-    """Install one selected backend and return its discovered executable."""
-    backend = normalize_backend(backend)
-    if backend == BACKEND_CLAUDE:
-        return install_claude(log)
-    if backend == BACKEND_HERMES:
-        # Hermes is not on npm. Its official per-platform script installer is
-        # the install path, the same shape as Claude's.
-        return install_hermes(log)
-    if backend == BACKEND_MUSE:
-        return install_muse(log)
-    if backend == BACKEND_MUSEAI:
-        return install_museai(log)
-    if backend == BACKEND_ANTIGRAVITY:
-        return install_antigravity(log)
+# How each backend is installed, in one place. The npm-backed ones share one
+# installer; the rest have their own because their official install path is
+# their own. A missing entry is a KeyError here rather than npm being tried on
+# a backend that never ships there.
+
+Installer = Callable[[Callable[[str], None]], Optional[str]]
+
+
+def _install_npm_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
+    """Install the backend's npm package and verify its launcher starts."""
     label = backend_label(backend)
     npm = _find_npm()
     if npm is None:
@@ -1959,6 +1945,32 @@ def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
         return None
     log(f"Installed and verified: {binary}")
     return binary
+
+
+INSTALLERS: dict[str, Installer] = {
+    # Lambdas rather than the functions themselves: a test (and any future
+    # caller) replaces `install_hermes` in this module's namespace, and the
+    # table must call what is there now, not what was there at import.
+    BACKEND_CLAUDE: lambda log: install_claude(log),
+    BACKEND_HERMES: lambda log: install_hermes(log),
+    BACKEND_MUSE: lambda log: install_muse(log),
+    BACKEND_MUSEAI: lambda log: install_museai(log),
+    BACKEND_ANTIGRAVITY: lambda log: install_antigravity(log),
+    BACKEND_CODEX: lambda log: _install_npm_backend(BACKEND_CODEX, log),
+    BACKEND_FREEBUFF: lambda log: _install_npm_backend(BACKEND_FREEBUFF, log),
+    BACKEND_OPENCODE: lambda log: _install_npm_backend(BACKEND_OPENCODE, log),
+    BACKEND_COMMANDCODE: lambda log: _install_npm_backend(BACKEND_COMMANDCODE, log),
+    BACKEND_GEMINI: lambda log: _install_npm_backend(BACKEND_GEMINI, log),
+    BACKEND_COPILOT: lambda log: _install_npm_backend(BACKEND_COPILOT, log),
+}
+
+
+def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
+    """Install one selected backend and return its discovered executable."""
+    installer = INSTALLERS.get(normalize_backend(backend))
+    if installer is None:
+        raise KeyError(f"no installer for {backend}")
+    return installer(log)
 
 
 def _executable_version(binary: str) -> str:
@@ -2024,88 +2036,42 @@ def _drop_codex_server(log: Callable[[str], None]) -> None:
     backend_pool.pool().drop_backend(BACKEND_CODEX)
 
 
-def update_backend(backend: str, log: Callable[[str], None]) -> bool:
-    """Update an installed provider CLI and stream accessible progress."""
-    backend = normalize_backend(backend)
-    label = backend_label(backend)
-    binary = _find_claude() if backend == BACKEND_CLAUDE else find_backend_cli(backend)
-    if binary is None:
-        log(f"{label} is not installed yet.")
+# How each backend is updated, in one place. The npm-backed ones share one
+# path; Hermes and Muse upgrade through their own installers and measure
+# success by the launcher afterwards, which is why they are their own flows
+# rather than an argv each.
+
+Updater = Callable[[str, Callable[[str], None]], bool]
+
+
+def _update_claude(binary: str, log: Callable[[str], None]) -> bool:
+    label = backend_label(BACKEND_CLAUDE)
+    argv = [binary, "update"]
+    log(f"Checking for {label} updates...")
+    rc = _run_logged_process(argv, log)
+    if rc != 0:
+        log(f"{label} update exited with code {rc}.")
         return False
-    if backend == BACKEND_MUSEAI:
-        return install_museai(log, upgrade=True) is not None
+    if not _repair_claude_native_update(binary, log):
+        return False
+    log(f"{label} is up to date.")
+    return True
+
+
+def _update_npm_backend(backend: str, binary: str, log: Callable[[str], None]) -> bool:
+    label = backend_label(backend)
+    # Read before the update replaces the launcher: the model list this
+    # backend is set to is restored afterwards, because an upgrade can drop it.
     previous_freebuff_model = ""
     if backend == BACKEND_FREEBUFF:
         _models, previous_freebuff_model, _error = freebuff_model_options()
-    if backend == BACKEND_CLAUDE:
-        argv = [binary, "update"]
-    elif backend == BACKEND_HERMES:
-        # Not on npm: its official installer is the update path too. It
-        # upgrades in place, and success is measured by the launcher
-        # afterwards, not the exit code.
-        hermes_argv = _hermes_install_argv()
-        if hermes_argv is None:
-            log(_hermes_missing_prereq_message())
-            return False
-        # The iex'd PowerShell installer never exits on its own -- install.ps1
-        # says so deliberately, so it cannot close the user's window -- so the
-        # process exit code is whatever the last native command inside the
-        # installer returned, and a negative one arrives unsigned: a friend's
-        # "exited with code 4294901760" is plain -65536, measured against this
-        # machine's PowerShell. The installer's own failure guard (assigning
-        # $global:LASTEXITCODE, not exiting) does not reach the process code
-        # either. The exit code says nothing about the update; the version the
-        # launcher reports afterwards is the only fact that does.
-        before = version_tuple(_executable_version(binary))
-        log(f"Running the official {label} installer to update...")
-        rc = _run_logged_process(hermes_argv, log, env=_hermes_installer_env(log))
-        if rc is None:
-            return False
-        found = _hermes_binary_after_install()
-        if found is None:
-            if rc != 0:
-                log(f"{label} update exited with code {rc}.")
-            log(f"{label} update finished, but `hermes` was not found afterwards.")
-            return False
-        text = _executable_version(found)
-        if version_tuple(text) > before:
-            log(f"{label} updated. It now reports {text}.")
-        elif rc != 0:
-            log(
-                f"{label} is still at its current version and the installer did not "
-                "finish cleanly, so the update may not have completed. Read the "
-                "installer output above, or try the update again -- running it "
-                "again is safe."
-            )
-            return False
-        log(f"{label} is up to date.")
-        return True
-    elif backend == BACKEND_MUSE:
-        # Same shape as Hermes: the official script installer upgrades in
-        # place, and success is a working launcher afterwards -- inside WSL
-        # on Windows.
-        muse_argv = _muse_install_argv()
-        if muse_argv is None:
-            log(_muse_missing_prereq_message())
-            return False
-        log(f"Running the official {label} installer to update...")
-        rc = _run_logged_process(muse_argv, log)
-        if rc is None:
-            return False
-        if not muse_installed():
-            log(f"{label} update finished, but `muse` was not found afterwards.")
-            return False
-        log(f"{label} is up to date.")
-        return True
-    else:
-        if _find_npm() is None and install_portable_node(log) is None:
-            log(f"npm could not be installed, so BlindPilot cannot update {label} automatically.")
-            return False
-        updating = _npm_update_argv(backend)
-        if updating is None:
-            log(f"npm could not be found, so BlindPilot cannot update {label} automatically.")
-            return False
-        argv = updating
+    if _find_npm() is None and install_portable_node(log) is None:
+        log(f"npm could not be installed, so BlindPilot cannot update {label} automatically.")
+        return False
+    argv = _npm_update_argv(backend)
+    if argv is None:
+        log(f"npm could not be found, so BlindPilot cannot update {label} automatically.")
+        return False
     if backend == BACKEND_CODEX:
         _drop_codex_server(log)
     if backend == BACKEND_OPENCODE:
@@ -2115,33 +2081,30 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
         log("Stopping opencode's server so its executable can be replaced...")
         stop_opencode_server()
     log(f"Checking for {label} updates...")
-    npm = _find_npm() if backend != BACKEND_CLAUDE else None
+    npm = _find_npm()
     rc = _run_logged_process(argv, log, env=_npm_environment(npm) if npm else None)
     if rc != 0:
         log(f"{label} update exited with code {rc}.")
         return False
-    if backend == BACKEND_CLAUDE and not _repair_claude_native_update(binary, log):
+    _add_to_process_path(_managed_npm_bin_dir())
+    managed_binary = _managed_backend_binary(backend)
+    if managed_binary is None:
+        log(f"{label} updated, but its executable was not found afterwards.")
         return False
-    if backend != BACKEND_CLAUDE:
-        _add_to_process_path(_managed_npm_bin_dir())
-        managed_binary = _managed_backend_binary(backend)
-        if managed_binary is None:
-            log(f"{label} updated, but its executable was not found afterwards.")
-            return False
-        try:
-            changed = ensure_on_path(Path(managed_binary).parent)
-            if changed:
-                log(f"Added {Path(managed_binary).parent} to {changed}.")
-        except OSError as exc:
-            log(f"{label} updated, but adding it to PATH failed: {exc}")
-        verify_rc = _run_logged_process(
-            [managed_binary, "--version"], log, env=_npm_environment(npm or "")
-        )
-        if verify_rc is None:
-            return False
-        if verify_rc != 0:
-            log(f"{label} updated but failed its startup check (exit code {verify_rc}).")
-            return False
+    try:
+        changed = ensure_on_path(Path(managed_binary).parent)
+        if changed:
+            log(f"Added {Path(managed_binary).parent} to {changed}.")
+    except OSError as exc:
+        log(f"{label} updated, but adding it to PATH failed: {exc}")
+    verify_rc = _run_logged_process(
+        [managed_binary, "--version"], log, env=_npm_environment(npm or "")
+    )
+    if verify_rc is None:
+        return False
+    if verify_rc != 0:
+        log(f"{label} updated but failed its startup check (exit code {verify_rc}).")
+        return False
     if backend == BACKEND_FREEBUFF:
         invalidate_backend_cache(BACKEND_FREEBUFF)
         models, _current, _error = freebuff_model_options()
@@ -2161,6 +2124,102 @@ def update_backend(backend: str, log: Callable[[str], None]) -> bool:
             return False
     log(f"{label} is up to date.")
     return True
+
+
+def _update_hermes(binary: str, log: Callable[[str], None]) -> bool:
+    # Not on npm: its official installer is the update path too. It upgrades in
+    # place, and success is measured by the launcher afterwards, not the exit
+    # code.
+    label = backend_label(BACKEND_HERMES)
+    hermes_argv = _hermes_install_argv()
+    if hermes_argv is None:
+        log(_hermes_missing_prereq_message())
+        return False
+    # The iex'd PowerShell installer never exits on its own -- install.ps1 says
+    # so deliberately, so it cannot close the user's window -- so the process
+    # exit code is whatever the last native command inside the installer
+    # returned, and a negative one arrives unsigned: a friend's "exited with
+    # code 4294901760" is plain -65536, measured against this machine's
+    # PowerShell. The installer's own failure guard (assigning
+    # $global:LASTEXITCODE, not exiting) does not reach the process code either.
+    # The exit code says nothing about the update; the version the launcher
+    # reports afterwards is the only fact that does.
+    before = version_tuple(_executable_version(binary))
+    log(f"Running the official {label} installer to update...")
+    rc = _run_logged_process(hermes_argv, log, env=_hermes_installer_env(log))
+    if rc is None:
+        return False
+    found = _hermes_binary_after_install()
+    if found is None:
+        if rc != 0:
+            log(f"{label} update exited with code {rc}.")
+        log(f"{label} update finished, but `hermes` was not found afterwards.")
+        return False
+    text = _executable_version(found)
+    if version_tuple(text) > before:
+        log(f"{label} updated. It now reports {text}.")
+    elif rc != 0:
+        log(
+            f"{label} is still at its current version and the installer did not "
+            "finish cleanly, so the update may not have completed. Read the "
+            "installer output above, or try the update again -- running it "
+            "again is safe."
+        )
+        return False
+    log(f"{label} is up to date.")
+    return True
+
+
+def _update_muse(binary: str, log: Callable[[str], None]) -> bool:
+    # Same shape as Hermes: the official script installer upgrades in place,
+    # and success is a working launcher afterwards -- inside WSL on Windows.
+    label = backend_label(BACKEND_MUSE)
+    muse_argv = _muse_install_argv()
+    if muse_argv is None:
+        log(_muse_missing_prereq_message())
+        return False
+    log(f"Running the official {label} installer to update...")
+    rc = _run_logged_process(muse_argv, log)
+    if rc is None:
+        return False
+    if not muse_installed():
+        log(f"{label} update finished, but `muse` was not found afterwards.")
+        return False
+    log(f"{label} is up to date.")
+    return True
+
+
+def _update_museai(binary: str, log: Callable[[str], None]) -> bool:
+    return install_museai(log, upgrade=True) is not None
+
+
+UPDATERS: dict[str, Updater] = {
+    BACKEND_CLAUDE: _update_claude,
+    BACKEND_CODEX: lambda binary, log: _update_npm_backend(BACKEND_CODEX, binary, log),
+    BACKEND_FREEBUFF: lambda binary, log: _update_npm_backend(BACKEND_FREEBUFF, binary, log),
+    BACKEND_OPENCODE: lambda binary, log: _update_npm_backend(BACKEND_OPENCODE, binary, log),
+    BACKEND_COMMANDCODE: lambda binary, log: _update_npm_backend(BACKEND_COMMANDCODE, binary, log),
+    BACKEND_GEMINI: lambda binary, log: _update_npm_backend(BACKEND_GEMINI, binary, log),
+    BACKEND_COPILOT: lambda binary, log: _update_npm_backend(BACKEND_COPILOT, binary, log),
+    BACKEND_HERMES: _update_hermes,
+    BACKEND_MUSE: _update_muse,
+    BACKEND_MUSEAI: _update_museai,
+    BACKEND_ANTIGRAVITY: lambda binary, log: _update_npm_backend(BACKEND_ANTIGRAVITY, binary, log),
+}
+
+
+def update_backend(backend: str, log: Callable[[str], None]) -> bool:
+    """Update an installed provider CLI and stream accessible progress."""
+    backend = normalize_backend(backend)
+    label = backend_label(backend)
+    binary = _find_claude() if backend == BACKEND_CLAUDE else find_backend_cli(backend)
+    if binary is None:
+        log(f"{label} is not installed yet.")
+        return False
+    updater = UPDATERS.get(backend)
+    if updater is None:
+        raise KeyError(f"no updater for {backend}")
+    return updater(binary, log)
 
 
 AUTH_ERROR_MARKERS = (
@@ -2385,6 +2444,175 @@ def cached_model_options(
     return replace(options, from_cache=True)
 
 
+# Each backend's model catalog, asked in the way that backend can answer.
+# `probe_model_options` owns what is common -- the missing CLI, the cache, the
+# one backend that names no model -- and these own only what differs. The table
+# is complete: a backend with no entry is a KeyError the test suite catches,
+# where the old chain silently treated it as Claude Code.
+
+ModelProbe = Callable[[Optional[str], Optional[str]], ModelOptions]
+
+
+def _probe_claude_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    if binary is None:
+        return ModelOptions([], [], error="Claude Code was not found.")
+    # The two probes are independent, so the help text is fetched while the
+    # slower `/model` status call is still running.
+    help_text: List[str] = []
+    help_thread = threading.Thread(
+        target=lambda: help_text.append(_run_claude(binary, ["--help"], None, 30)),
+        daemon=True,
+    )
+    help_thread.start()
+    # `/model` with no argument only prints status — it does not start a turn.
+    status = _run_claude(binary, ["-p", "/model", "--output-format", "text"], cwd, 45)
+    models = _parse_model_aliases(status)
+    current_model, current_effort = _parse_current_model(status)
+    labels = _resolve_claude_aliases(binary, models, cwd) if models else {}
+    help_thread.join(30)
+    efforts = _parse_effort_levels(help_text[0] if help_text else "")
+
+    problems = []
+    if not models:
+        models = list(_FALLBACK_MODELS)
+        problems.append("model list")
+    if not efforts:
+        efforts = list(_FALLBACK_EFFORTS)
+        problems.append("effort levels")
+    error = ""
+    if problems:
+        error = f"Could not read the {' and '.join(problems)} from Claude Code; showing the built-in list."
+    options = ModelOptions(models, efforts, current_model, current_effort, error, labels=labels)
+    if not problems:
+        # Only a clean answer is worth reusing; a failed probe should be retried.
+        _remember_model_options(BACKEND_CLAUDE, cwd, binary, options)
+    return options
+
+
+def _probe_codex_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    models, efforts, current_model, current_effort, error = codex_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_CODEX, cwd, binary, options)
+    return options
+
+
+def _probe_freebuff_models(_cwd: Optional[str], _binary: Optional[str]) -> ModelOptions:
+    models, current_model, error = freebuff_model_options()
+    return ModelOptions(models, [], current_model, "", error)
+
+
+def _probe_opencode_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_OPENCODE, cwd, binary, options)
+    return options
+
+
+def _probe_muse_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # The catalog comes from Muse's own `model/list` on a live `muse serve`
+    # host, which is the same request a model switch is served by. On Windows
+    # that host runs inside WSL, so the probe is asked of the translated
+    # directory rather than this one.
+    from muse_backend import muse_model_options
+
+    models, efforts, current_model, current_effort, error = muse_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_MUSE, cwd, binary, options)
+    return options
+
+
+def _probe_gemini_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # Gemini CLI has no model-list command, so its aliases are offered with
+    # whatever the Gemini API lists for the key.
+    from google_backend import gemini_model_options
+
+    models, efforts, current_model, current_effort, error = gemini_model_options()
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_GEMINI, cwd, binary, options)
+    return options
+
+
+def _probe_antigravity_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # agy answers `agy models` itself, signed in or on a key.
+    from google_backend import antigravity_model_options
+
+    models, efforts, current_model, current_effort, error = antigravity_model_options()
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_ANTIGRAVITY, cwd, binary, options)
+    return options
+
+
+def _probe_copilot_models(_cwd: Optional[str], _binary: Optional[str]) -> ModelOptions:
+    # No model-list command: "auto" and the configured model, and any id typed
+    # into the picker.
+    from copilot_backend import copilot_model_options
+
+    models, efforts, current_model, current_effort, error = copilot_model_options()
+    return ModelOptions(models, efforts, current_model, current_effort, error)
+
+
+def _probe_commandcode_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # The catalog comes from `command-code --list-models`, and the model and
+    # effort in use are read out of its stored config rather than asked for, so
+    # the picker opens on what is actually selected.
+    from commandcode_backend import commandcode_model_options
+
+    models, efforts, current_model, current_effort, error = commandcode_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_COMMANDCODE, cwd, binary, options)
+    return options
+
+
+def _probe_hermes_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # A Hermes reached over the network answers the same model request as one
+    # on this machine: `hermes serve` dispatches its WebSocket through the
+    # identical JSON-RPC handlers. This used to return an error telling the
+    # user to pick the model "on the machine it runs on", which for a headless
+    # server (the whole point of the remote mode) meant there was nowhere to
+    # pick it at all.
+    remote_url = REMOTE_HERMES.url()
+    models, efforts, current_model, current_effort, error = hermes_model_options(
+        cwd,
+        remote_url=remote_url,
+        remote_token=REMOTE_HERMES.key if remote_url else "",
+        remote_credential=(REMOTE_HERMES.credential if remote_url else "token"),
+        remote_username=REMOTE_HERMES.username if remote_url else "",
+    )
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        # Only the local path has a binary to stamp the cache against; a remote
+        # catalog is re-read instead of being keyed on a file that does not
+        # exist here.
+        _remember_model_options(BACKEND_HERMES, cwd, binary, options)
+    return options
+
+
+def _probe_museai_models(_cwd: Optional[str], _binary: Optional[str]) -> ModelOptions:
+    # muse.ai picks its own model on its own machine; there is no list to offer.
+    return ModelOptions([], [])
+
+
+MODEL_PROBES: dict[str, ModelProbe] = {
+    BACKEND_CLAUDE: _probe_claude_models,
+    BACKEND_CODEX: _probe_codex_models,
+    BACKEND_FREEBUFF: _probe_freebuff_models,
+    BACKEND_OPENCODE: _probe_opencode_models,
+    BACKEND_HERMES: _probe_hermes_models,
+    BACKEND_MUSE: _probe_muse_models,
+    BACKEND_MUSEAI: _probe_museai_models,
+    BACKEND_COMMANDCODE: _probe_commandcode_models,
+    BACKEND_GEMINI: _probe_gemini_models,
+    BACKEND_ANTIGRAVITY: _probe_antigravity_models,
+    BACKEND_COPILOT: _probe_copilot_models,
+}
+
+
 def probe_model_options(
     cwd: Optional[str] = None,
     max_age: float = 0,
@@ -2420,128 +2648,10 @@ def probe_model_options(
     if fresh is not None:
         return fresh
 
-    if backend == BACKEND_HERMES:
-        # A Hermes reached over the network answers the same model request as
-        # one on this machine: `hermes serve` dispatches its WebSocket through
-        # the identical JSON-RPC handlers. This used to return an error telling
-        # the user to pick the model "on the machine it runs on", which for a
-        # headless server (the whole point of the remote mode) meant there was
-        # nowhere to pick it at all.
-        models, efforts, current_model, current_effort, error = hermes_model_options(
-            cwd,
-            remote_url=remote_hermes_url,
-            remote_token=REMOTE_HERMES.key if remote_hermes_url else "",
-            remote_credential=(REMOTE_HERMES.credential if remote_hermes_url else "token"),
-            remote_username=REMOTE_HERMES.username if remote_hermes_url else "",
-        )
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            # Only the local path has a binary to stamp the cache against; a
-            # remote catalog is re-read instead of being keyed on a file that
-            # does not exist here.
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if binary is None:
-        # Only the remote-Hermes path above is allowed to get this far without
-        # a local CLI, and it has already returned.
-        return ModelOptions([], [], error=f"{backend_label(backend)} was not found.")
-
-    if backend == BACKEND_CODEX:
-        models, efforts, current_model, current_effort, error = codex_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend == BACKEND_FREEBUFF:
-        models, current_model, error = freebuff_model_options()
-        return ModelOptions(models, [], current_model, "", error)
-
-    if backend == BACKEND_OPENCODE:
-        models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend == BACKEND_MUSE:
-        # The catalog comes from Muse's own `model/list` on a live `muse
-        # serve` host, which is the same request a model switch is served
-        # by. On Windows that host runs inside WSL, so the probe is asked
-        # of the translated directory rather than this one.
-        from muse_backend import muse_model_options
-
-        models, efforts, current_model, current_effort, error = muse_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend in (BACKEND_GEMINI, BACKEND_ANTIGRAVITY):
-        # Gemini CLI has no model-list command, so its aliases are offered
-        # with whatever the Gemini API lists for the key; agy answers
-        # `agy models` itself, signed in or on a key.
-        from google_backend import antigravity_model_options, gemini_model_options
-
-        probe = gemini_model_options if backend == BACKEND_GEMINI else antigravity_model_options
-        models, efforts, current_model, current_effort, error = probe()
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend == BACKEND_COPILOT:
-        # No model-list command: "auto" and the configured model, and any id
-        # typed into the picker.
-        from copilot_backend import copilot_model_options
-
-        models, efforts, current_model, current_effort, error = copilot_model_options()
-        return ModelOptions(models, efforts, current_model, current_effort, error)
-
-    if backend == BACKEND_COMMANDCODE:
-        # The catalog comes from `command-code --list-models`, and the model
-        # and effort in use are read out of its stored config rather than
-        # asked for, so the picker opens on what is actually selected.
-        from commandcode_backend import commandcode_model_options
-
-        models, efforts, current_model, current_effort, error = commandcode_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    # The two probes are independent, so the help text is fetched while the
-    # slower `/model` status call is still running.
-    help_text: List[str] = []
-    help_thread = threading.Thread(
-        target=lambda: help_text.append(_run_claude(binary, ["--help"], None, 30)),
-        daemon=True,
-    )
-    help_thread.start()
-    # `/model` with no argument only prints status — it does not start a turn.
-    status = _run_claude(binary, ["-p", "/model", "--output-format", "text"], cwd, 45)
-    models = _parse_model_aliases(status)
-    current_model, current_effort = _parse_current_model(status)
-    labels = _resolve_claude_aliases(binary, models, cwd) if models else {}
-    help_thread.join(30)
-    efforts = _parse_effort_levels(help_text[0] if help_text else "")
-
-    problems = []
-    if not models:
-        models = list(_FALLBACK_MODELS)
-        problems.append("model list")
-    if not efforts:
-        efforts = list(_FALLBACK_EFFORTS)
-        problems.append("effort levels")
-    error = ""
-    if problems:
-        error = f"Could not read the {' and '.join(problems)} from Claude Code; showing the built-in list."
-    options = ModelOptions(models, efforts, current_model, current_effort, error, labels=labels)
-    if not problems:
-        # Only a clean answer is worth reusing; a failed probe should be retried.
-        _remember_model_options(backend, cwd, binary, options)
-    return options
+    probe = MODEL_PROBES.get(backend)
+    if probe is None:
+        raise KeyError(f"no model probe for {backend}")
+    return probe(cwd, binary)
 
 
 # BlindPilot's provider-neutral permission choices. Adapters translate these

@@ -44,12 +44,9 @@ _VERSION_RE = re.compile(
     r"(?<![0-9])v?(?P<main>[0-9]+(?:\.[0-9]+){0,3})(?:-(?P<pre>[0-9A-Za-z.-]+))?(?![0-9])"
 )
 _NPM_PACKAGES = {
-    agent_backends.BACKEND_CODEX: "@openai/codex",
-    agent_backends.BACKEND_FREEBUFF: "freebuff",
-    agent_backends.BACKEND_OPENCODE: "opencode-ai",
-    agent_backends.BACKEND_COMMANDCODE: "command-code",
-    agent_backends.BACKEND_GEMINI: "@google/gemini-cli",
-    agent_backends.BACKEND_COPILOT: "@github/copilot",
+    backend: info.npm_package
+    for backend, info in agent_backends.BACKENDS.items()
+    if info.npm_package
 }
 
 

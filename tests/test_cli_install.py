@@ -634,6 +634,21 @@ def test_backend_install_rejects_a_cli_that_cannot_start():
         assert install_backend(BACKEND_FREEBUFF, lambda _line: None) is None
 
 
+def test_every_backend_has_an_installer():
+    """No backend may fall through to npm, and none may be missing a path.
+
+    The chain this replaced ended in the npm installer, so a backend with no
+    branch was sent to npm even when it does not ship there. One table means a
+    new backend has to answer this question, or fail here.
+    """
+    assert set(blindpilot_app.INSTALLERS) == set(blindpilot_app.BACKENDS)
+
+
+def test_every_backend_has_an_updater():
+    """No backend may fall through to the npm update path."""
+    assert set(blindpilot_app.UPDATERS) == set(blindpilot_app.BACKENDS)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
