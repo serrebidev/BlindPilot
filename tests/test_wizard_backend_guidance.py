@@ -268,3 +268,50 @@ def test_hermes_sign_in_copy_still_names_its_provider_picker(monkeypatch, wx_app
     app.SetupWizard._refresh_backend_copy(wizard)
     assert "provider and model" in wizard._signin_intro.text
     assert "terminal window" in wizard._signin_intro.text
+
+
+def test_codex_setup_uses_the_plan_account_instead_of_asking_for_another_login(monkeypatch):
+    """One sign-in: a connected ChatGPT plan Account means no Codex login step.
+
+    The plan Account is also saved as the backend's choice, so the default
+    survives the wizard closing rather than evaporating with it.
+    """
+    import agent_backends
+
+    plan = agent_backends.PlanAccount(7, "Work plan")
+    wizard = _Wizard(BACKEND_CODEX)
+    wizard._find_selected_cli = lambda: "codex"
+    wizard._plan_account_for_codex = lambda: plan
+    wizard._show_plan_account = lambda chosen: app.SetupWizard._show_plan_account(wizard, chosen)
+    spoken = _said(monkeypatch)
+    checked: list[str] = []
+    monkeypatch.setattr(
+        app, "backend_auth_ok", lambda backend, **kwargs: checked.append(backend) or False
+    )
+
+    app.SetupWizard._check_signin(wizard)
+
+    assert checked == [], "setup asked Codex for a separate sign-in"
+    assert agent_backends.codex_plan_account() == plan, "setup did not make it the default"
+    assert "Work plan" in wizard._signin_status.text
+    assert not wizard._signin_btn.enabled
+    assert not wizard._already_btn.enabled
+    assert not wizard._open_page_btn.shown, "a sign-in page was still offered"
+    assert wizard._signin_status.text in spoken, "the reason was not announced"
+
+
+def test_codex_setup_asks_for_its_own_login_when_no_plan_account_is_connected():
+    """No plan Account: the wizard still offers Codex's own login as before."""
+    wizard = _Wizard(BACKEND_CODEX)
+
+    assert app.SetupWizard._plan_account_for_codex(wizard) is None
+
+
+def test_a_plan_account_that_no_longer_exists_is_not_offered(monkeypatch):
+    """A saved choice nothing can run on must not hide the sign-in step."""
+    import agent_backends
+
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(7, "Gone"))
+    wizard = _Wizard(BACKEND_CODEX)
+
+    assert app.SetupWizard._plan_account_for_codex(wizard) is None

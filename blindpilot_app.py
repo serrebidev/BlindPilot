@@ -114,6 +114,7 @@ from agent_backends import (
     SUBAGENT_STOPPED,
     UNBOUND,
     AgentWorker,
+    PlanAccount,
     SubagentReport,
     backend_auth_ok,
     backend_label,
@@ -123,6 +124,7 @@ from agent_backends import (
     migrate_macos_legacy_dirs,
     codex_model_options,
     codex_plan_account,
+    save_codex_plan_account,
     compaction_request,
     discard_freebuff_prewarm,
     end_hidden_terminal,
@@ -14202,6 +14204,10 @@ class SetupWizard(wx.Dialog):
         info = BACKENDS[self.backend]
         label = info.label
         login = " ".join((info.executable, *info.login_args))
+        # A backend is chosen afresh here, so a plan Account that left the
+        # sign-in buttons disabled on the previous one must not carry over.
+        self._signin_btn.Enable(True)
+        self._already_btn.Enable(True)
         self._signin_btn.SetLabel(
             "Connect a Provider" if self.backend == BACKEND_OPENCODE else "Sign In"
         )
@@ -14919,6 +14925,73 @@ class SetupWizard(wx.Dialog):
 
     # ---- Sign-in step ----
 
+    def _plan_account_for_codex(self) -> Optional[PlanAccount]:
+        """The ChatGPT-plan Account setup can run Codex on, or None.
+
+        A choice already saved is taken when it is still usable. Otherwise
+        Chat mode's default Account is preferred, then the first signed-in
+        ChatGPT-plan Account by name. One that is not signed in cannot pay for
+        a turn, so it is not offered: an Account that exists but is signed out
+        must not become a second sign-in to complete.
+        """
+        from accessible_ai.models import PROVIDER_CHATGPT
+        from accessible_ai.providers import chatgpt
+        from accessible_ai.storage.credentials import CredentialStore
+        from accessible_ai.storage.database import Database
+        from accessible_ai.storage.paths import database_path
+
+        database = Database(database_path())
+        credentials = CredentialStore()
+
+        def signed_in(account_id: int) -> bool:
+            try:
+                return chatgpt.is_signed_in(chatgpt.load_session(credentials, account_id))
+            except Exception:  # noqa: BLE001 - a store that cannot be read is "not signed in"
+                return False
+
+        chosen = codex_plan_account()
+        if chosen is not None:
+            account = database.get_account(int(chosen.account_id))
+            if account is not None and account.provider == PROVIDER_CHATGPT:
+                chosen_id = account.id
+                if chosen_id is not None and signed_in(int(chosen_id)):
+                    return chosen
+
+        candidates = [
+            account for account in database.list_accounts() if account.provider == PROVIDER_CHATGPT
+        ]
+        preferred = database.default_account()
+        if preferred is not None:
+            candidates.sort(key=lambda account: account.id != preferred.id)
+        for account in candidates:
+            account_id = account.id
+            if account_id is not None and signed_in(int(account_id)):
+                return PlanAccount(int(account_id), account.name)
+        return None
+
+    def _show_plan_account(self, plan: PlanAccount) -> None:
+        """Say Codex will use the plan Account and save that as the choice.
+
+        Saving is what makes the same Account the backend's default after
+        setup, rather than only while the wizard is open.
+        """
+        if codex_plan_account() != plan:
+            save_codex_plan_account(plan)
+        self._signin_intro.SetLabel(
+            f"Codex will use your ChatGPT plan Account {plan.label}.\n\n"
+            "There is no separate Codex sign-in to complete here. "
+            "Codex's own login stays available in Accounts if you need it."
+        )
+        self._signin_status.SetLabel(f"Using your ChatGPT plan Account {plan.label}.")
+        # Nothing on this page signs anything in, and leaving the buttons in
+        # the Tab order would offer actions that undo the choice.
+        self._signin_btn.Disable()
+        self._already_btn.Disable()
+        self._open_page_btn.Hide()
+        for page in self._pages:
+            page.Layout()
+        announce(self._signin_status.GetLabel())
+
     def _check_signin(self) -> None:
         if not self:
             # `_show_step` queues these, so one can land an event-loop
@@ -14932,6 +15005,11 @@ class SetupWizard(wx.Dialog):
                 f"{label} is not installed. Go Back and complete the CLI step first."
             )
             return
+        if self.backend == BACKEND_CODEX:
+            plan = self._plan_account_for_codex()
+            if plan is not None:
+                self._show_plan_account(plan)
+                return
         self._show_signin_status(f"Checking whether {label} is signed in…")
         backend = self.backend
 

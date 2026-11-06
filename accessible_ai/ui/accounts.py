@@ -50,8 +50,10 @@ LIST_DIALOG_SIZE = wx.Size(650, 480)
 # Which Account the Codex backend runs on is a choice about the backend, like
 # the default Account is about Chat mode: not a setting belonging to any one
 # Account. So it is offered under the list, and the words it is said in live
-# here rather than being spelled out again at each site.
-CODEX_LOGIN_LABEL = "Codex's own login"
+# here rather than being spelled out again at each site. A ChatGPT-plan Account
+# is the preferred way to pay for a Codex turn; Codex's own login is the
+# fallback for anybody who does not use one, so the entry says that it is one.
+CODEX_LOGIN_LABEL = "Use Codex's own login (fallback)"
 # Said when the Account being left still has a Codex turn running on it. The
 # Held process is never closed underneath a live turn -- that turn finishes on
 # the sign-in it started with, which is what switching promises -- so the wait
@@ -751,10 +753,26 @@ class AccountsDialog(wx.Dialog):
         codex_label = wx.StaticText(panel, label="Codex &backend account:")
         self.codex_account = wx.Choice(panel)
         self.codex_account.SetName("Codex backend account")
-        self.codex_account.SetToolTip("The Account the Codex backend runs on")
+        self.codex_account.SetToolTip(
+            "The Account the Codex backend runs on. A ChatGPT plan Account is preferred; "
+            "Codex's own login is the fallback."
+        )
         codex_row.Add(codex_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         codex_row.Add(self.codex_account, 1, wx.EXPAND)
         outer.Add(codex_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
+
+        # Said in ordinary text rather than only in a tooltip: a screen reader
+        # reads the dialog's text, and a tooltip is not somewhere a keyboard
+        # user can reach to learn which of the two choices is the fallback.
+        self.codex_note = wx.StaticText(
+            panel,
+            label=(
+                "A ChatGPT plan Account is used when one is connected. "
+                "Codex's own login is the fallback for anyone who does not use one."
+            ),
+        )
+        self.codex_note.Wrap(self.FromDIP(NOTE_WRAP))
+        outer.Add(self.codex_note, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         # One row. The actions sit on the left; Close goes through the
         # standard button sizer so it lands where the platform puts it.
