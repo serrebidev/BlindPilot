@@ -38,4 +38,28 @@ _Avoid_: daemon, pool entry, session process, background process.
 
 **Drop**:
 Releasing a held process: ending it and its children, and forgetting it.
-_Avoid_: Stop, kill, reap, cancel, terminate.
+_Avoid_: Stop, kill, reap, cancel, terminate
+
+## Accounts
+
+**Account**:
+A saved way to reach one provider: a name, a provider type, and its credential — an API key or a sign-in.
+_Avoid_: Connection, credential, profile
+
+**ChatGPT plan**:
+The provider type whose usage is paid for by signing in with ChatGPT instead of by entering an API key. A **ChatGPT-plan account** is one **Account** carrying it.
+_Avoid_: ChatGPT account, subscription account, OAuth account
+
+**Registration**:
+The client id ChatGPT issued for this installation, kept across sign-outs so the next sign-in reuses it instead of registering again.
+_Avoid_: Client, app registration, connection
+
+**Codex login**:
+The Codex backend authenticating through Codex itself, instead of through a **ChatGPT-plan Account**.
+_Avoid_: Codex account, Codex sign-in, Codex auth
+
+## Conversations
+
+**Session**:
+A provider-side identity for one ongoing conversation, held by the backend that owns it — a Codex thread, a Hermes session, a Muse chat.
+_Avoid_: Using "session" for a Held process or for a ChatGPT sign-in.

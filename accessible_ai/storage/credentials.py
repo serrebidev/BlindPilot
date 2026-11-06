@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 
 SERVICE_NAME = "BlindPilotChat"
@@ -222,3 +224,46 @@ class CredentialStore:
             raise CredentialStoreError(
                 f"Windows Credential Manager delete failed with error {error}."
             )
+
+
+class FileCredentialStore(CredentialStore):
+    """A filesystem credential store for the plan-token command's test seam.
+
+    One record per account id, written beside the other test data. Records are
+    replaced atomically so a crash leaves either the old record or the new one,
+    never a half-written one.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def _path(self, account_id: int) -> Path:
+        return self.directory / f"account-{account_id}.json"
+
+    def get_api_key(self, account_id: int) -> str:
+        try:
+            return self._path(account_id).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    def set_api_key(self, account_id: int, api_key: str) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        target = self._path(account_id)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=self.directory
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(api_key)
+            os.replace(temporary, target)
+        finally:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+    def delete_api_key(self, account_id: int) -> None:
+        try:
+            self._path(account_id).unlink()
+        except FileNotFoundError:
+            pass

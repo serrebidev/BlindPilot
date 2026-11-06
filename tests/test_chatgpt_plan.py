@@ -25,6 +25,7 @@ from accessible_ai.models import (
     MessageAttachment,
     PROVIDER_CHATGPT,
     PROVIDER_LABELS,
+    PROVIDER_OPENROUTER,
 )
 from accessible_ai.providers import chatgpt
 from accessible_ai.providers.base import ProviderError
@@ -129,6 +130,117 @@ def test_a_tampered_id_token_is_refused(rsa_key):
         chatgpt.validate_id_token(
             f"{head}.{forged}.{signature}", "oaiapp_issued", "the-nonce", keys
         )
+
+
+# ----- The signature check, against a signature this code did not produce -----
+
+# RFC 7515 Appendix A.2: the public key, the signing input and the signature
+# for an RSASSA-PKCS1-v1_5 SHA-256 JWS, as published in the RFC.
+RFC_N = (
+    "ofgWCuLjybRlzo0tZWJjNiuSfb4p4fAkd_wWJcyQoTbji9k0l8W26mPddx"
+    "HmfHQp-Vaw-4qPCJrcS2mJPMEzP1Pt0Bm4d4QlL-yRT-SFd2lZS-pCgNMs"
+    "D1W_YpRPEwOWvG6b32690r2jZ47soMZo9wGzjb_7OMg0LOL-bSf63kpaSH"
+    "SXndS5z5rexMdbBYUsLA9e-KXBdQOS-UTo7WTBEMa2R2CapHg665xsmtdV"
+    "MTBQY4uDZlxvb3qCo5ZwKh9kG4LT6_I5IhlJH7aGhyxXFvUK-DWNmoudF8"
+    "NAco9_h9iaGNj8q2ethFkMLs91kzk2PAcDTW9gb54h4FRWyuXpoQ"
+)
+RFC_E = "AQAB"
+RFC_SIGNING_INPUT = (
+    "eyJhbGciOiJSUzI1NiJ9."
+    "eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFt"
+    "cGxlLmNvbS9pc19yb290Ijp0cnVlfQ"
+)
+RFC_SIGNATURE = (
+    "cC4hiUPoj9Eetdgtv3hF80EGrhuB__dzERat0XF9g2VtQgr9PJbu3XOiZj5RZmh7"
+    "AAuHIm4Bh-0Qc_lF5YKt_O8W2Fp5jujGbds9uJdbF9CUAr7t1dnZcAcQjbKBYNX4"
+    "BAynRFdiuB--f_nZLgrnbyTyWzO75vRK5h6xBArLIARNPvkSjtQBMHlb1L07Qe7K"
+    "0GarZRmB_eSN9383LcOLn6_dO--xi12jzDwusC-eOkHWEsqtFZESc6BfI7noOPqv"
+    "hJ1phCnvWh6IeYI2w9QOYEUipUTI8np6LbgGY9Fs98rqVt5AXLIhWkWywlVmtVrB"
+    "p0igcN_IoypGlUPQGe77Rw"
+)
+
+
+def _rfc_key() -> tuple[int, int]:
+    return (
+        int.from_bytes(chatgpt._unb64url(RFC_N), "big"),
+        int.from_bytes(chatgpt._unb64url(RFC_E), "big"),
+    )
+
+
+def test_the_rfc_7515_signature_is_accepted():
+    signature = chatgpt._unb64url(RFC_SIGNATURE)
+    assert chatgpt.rs256_valid(RFC_SIGNING_INPUT.encode("ascii"), signature, *_rfc_key())
+
+
+def test_the_rfc_7515_signature_is_refused_once_a_byte_changes():
+    signature = bytearray(chatgpt._unb64url(RFC_SIGNATURE))
+    signature[0] ^= 0x01
+    assert not chatgpt.rs256_valid(RFC_SIGNING_INPUT.encode("ascii"), bytes(signature), *_rfc_key())
+
+
+def test_a_key_smaller_than_2048_bits_is_refused():
+    small = (1 << 1024) - 1
+    assert not chatgpt.rs256_valid(b"anything", b"\x01" * 128, small, 65537)
+
+
+def test_a_signature_not_below_the_modulus_is_refused(rsa_key):
+    n, e, _d = rsa_key
+    size = (n.bit_length() + 7) // 8
+    assert not chatgpt.rs256_valid(b"anything", n.to_bytes(size, "big"), n, e)
+    assert not chatgpt.rs256_valid(b"anything", b"\xff" * size, n, e)
+
+
+def test_a_signature_of_the_wrong_length_is_refused(rsa_key):
+    n, e, _d = rsa_key
+    assert not chatgpt.rs256_valid(b"anything", b"\x01" * 255, n, e)
+
+
+# ----- Whose keys are trusted -----
+
+
+def test_only_openai_addresses_serve_the_signing_keys():
+    assert chatgpt._openai_https("https://auth.openai.com/keys")
+    assert chatgpt._openai_https("https://openai.com/.well-known/jwks.json")
+    assert not chatgpt._openai_https("http://auth.openai.com/keys")
+    assert not chatgpt._openai_https("https://openai.com.evil.example/keys")
+    assert not chatgpt._openai_https("https://evilopenai.com/keys")
+    assert not chatgpt._openai_https("https://auth.openai.com@evil.example/keys")
+    assert not chatgpt._openai_https("")
+
+
+def test_signing_keys_refuses_a_key_address_that_is_not_openai(monkeypatch):
+    def boom(url, **kwargs):
+        raise AssertionError(f"fetched keys from {url}")
+
+    monkeypatch.setattr(chatgpt, "_discovery", lambda: {"jwks_uri": "https://evil.example/keys"})
+    monkeypatch.setattr(chatgpt.httpx, "get", boom)
+    with pytest.raises(chatgpt.ChatGPTError):
+        chatgpt.signing_keys()
+
+
+def test_signing_keys_reads_the_rsa_keys_and_skips_the_rest(monkeypatch, rsa_key):
+    n, e, _d = rsa_key
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "keys": [
+                    {
+                        "kty": "RSA",
+                        "kid": "k1",
+                        "n": _b64(n.to_bytes((n.bit_length() + 7) // 8, "big")),
+                        "e": _b64(e.to_bytes(3, "big")),
+                    },
+                    {"kty": "EC", "kid": "another-algorithm"},
+                ]
+            }
+
+    monkeypatch.setattr(chatgpt, "_discovery", lambda: {"jwks_uri": "https://auth.openai.com/jwks"})
+    monkeypatch.setattr(chatgpt.httpx, "get", lambda url, **kwargs: Response())
+    assert chatgpt.signing_keys() == {"k1": (n, e)}
 
 
 # ----- The browser sign-in, with the browser played by a test -----
@@ -527,6 +639,324 @@ def test_the_account_dialog_signs_in_instead_of_asking_for_a_key(frame, tmp_path
         assert json.loads(credentials.values[account_id])["refresh_token"] == "refresh-1"
     finally:
         dialog.Destroy()
+
+
+# ----- The Account the Codex backend uses, chosen in the account dialog -----
+
+
+def _codex_account_dialog(frame, db, spoken: list[str], mirrored: list[str]):
+    """The account dialog as Chat mode opens it: one sentence, spoken and shown."""
+    from accessible_ai.services.model_service import ModelService
+    from accessible_ai.storage.credentials import CredentialStore
+    from accessible_ai.ui.accounts import AccountsDialog
+
+    credentials = CredentialStore()
+    return AccountsDialog(
+        frame,
+        db,
+        credentials,
+        ModelService(db, credentials),
+        mirrored.append,
+        spoken.append,
+    )
+
+
+def _codex_items(dialog) -> list[str]:
+    return [dialog.codex_account.GetString(i) for i in range(dialog.codex_account.GetCount())]
+
+
+def test_the_account_dialog_offers_a_labelled_choice_of_the_codex_account(frame, tmp_path):
+    """One choice, said in words, that a screen reader can read and Tab can reach."""
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Personal", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Keyed", provider=PROVIDER_OPENROUTER))
+    dialog = _codex_account_dialog(frame, db, [], [])
+    try:
+        # The name is what the screen reader reads out on the control itself.
+        assert dialog.codex_account.GetName() == "Codex backend account"
+        # A choice takes focus, so Tab reaches it and the arrow keys change it.
+        assert dialog.codex_account.IsEnabled() and dialog.codex_account.AcceptsFocus()
+        # Codex's own login is still offered, still selectable, and is what an
+        # install that has chosen nothing runs on.
+        assert dialog.codex_account.GetString(0) == "Codex's own login"
+        assert dialog.codex_account.GetSelection() == 0
+        # Only a ChatGPT-plan Account can pay for a Codex turn on a plan.
+        assert _codex_items(dialog) == ["Codex's own login", "Personal", "Work"]
+        # It keeps the dialog's own Tab order: after the checkbox, before the buttons.
+        siblings = dialog.codex_account.GetParent().GetChildren()
+        assert siblings.index(dialog.default_check) < siblings.index(dialog.codex_account)
+        assert siblings.index(dialog.codex_account) < siblings.index(dialog.add_button)
+    finally:
+        dialog.Destroy()
+
+
+def test_the_account_dialog_opens_on_the_account_codex_will_use(frame, tmp_path):
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(account_id, "Work"))
+
+    spoken: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, [])
+    try:
+        assert dialog.codex_account.GetStringSelection() == "Work"
+        assert spoken == [], "opening the dialog is not a change to announce"
+    finally:
+        dialog.Destroy()
+
+
+def test_choosing_an_account_saves_it_and_says_which_one_codex_will_use(frame, tmp_path):
+    import wx
+
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    spoken: list[str] = []
+    mirrored: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, mirrored)
+    try:
+        dialog.codex_account.SetSelection(_codex_items(dialog).index("Work"))
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        assert agent_backends.codex_plan_account() == agent_backends.PlanAccount(account_id, "Work")
+        # Announced at once, in the words the status bar mirror carries.
+        assert spoken == mirrored == ["Codex will use the ChatGPT plan Account Work."]
+
+        dialog.codex_account.SetSelection(0)
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        assert agent_backends.codex_plan_account() is None
+        assert spoken[-1] == mirrored[-1] == "Codex will use its own login."
+    finally:
+        dialog.Destroy()
+
+
+# ----- Signing out, deleting, and switching: the choice and the process -----
+#
+# A person who signs out of an Account, deletes it, or chooses another one is
+# promised two things: no later Codex turn is sent on the one being left, and a
+# turn already running is told to finish rather than being cut off. The second
+# is said out loud, because a drop that waits silently is one nobody knows to
+# wait for.
+
+
+class _HeldCodex:
+    """A held Codex process as the pool sees one: alive, borrowed, closable."""
+
+    def __init__(self, borrowers: int = 0) -> None:
+        self.borrowers = borrowers
+        self.closed = False
+
+    def alive(self) -> bool:
+        return not self.closed
+
+    def borrower_count(self) -> int:
+        return self.borrowers
+
+    def stop(self) -> None:
+        self.closed = True
+
+
+def _held_on(account_id: int, borrowers: int = 0) -> _HeldCodex:
+    """Put a held process for this Account in the pool, as a turn leaves one."""
+    import backend_pool
+
+    import agent_backends
+
+    process = _HeldCodex(borrowers)
+    backend_pool.pool().keep(
+        backend_pool.pool_key(agent_backends.BACKEND_CODEX, account=account_id),
+        backend_pool.HeldProcess(process, agent_backends.codex_adapter()),
+    )
+    return process
+
+
+def _soon(ready, what: str, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ready():
+            return
+        time.sleep(0.005)
+    raise AssertionError(what)
+
+
+def test_switching_accounts_while_idle_drops_the_previous_accounts_process(frame, tmp_path):
+    import wx
+
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    work_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Personal", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(work_id, "Work"))
+    work = _held_on(work_id)
+    spoken: list[str] = []
+    mirrored: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, mirrored)
+    try:
+        dialog.codex_account.SetSelection(_codex_items(dialog).index("Personal"))
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        # Nothing was running, so there is no wait to announce -- and the old
+        # Account's process goes before the next turn can be sent on it.
+        assert spoken == mirrored == ["Codex will use the ChatGPT plan Account Personal."]
+        _soon(lambda: work.closed, "the previous Account's Held process was never dropped")
+    finally:
+        dialog.Destroy()
+
+
+def test_switching_accounts_mid_turn_says_the_running_turn_must_finish(frame, tmp_path):
+    import wx
+
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    work_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    db.save_account(Account(name="Personal", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(work_id, "Work"))
+    work = _held_on(work_id, borrowers=1)
+    spoken: list[str] = []
+    mirrored: list[str] = []
+    dialog = _codex_account_dialog(frame, db, spoken, mirrored)
+    try:
+        dialog.codex_account.SetSelection(_codex_items(dialog).index("Personal"))
+        dialog.on_codex_account_changed(wx.CommandEvent())
+
+        # The switch is not made while the turn runs: that turn finishes on the
+        # Account it began on, so the saved choice is still the one being left.
+        assert agent_backends.codex_plan_account().name == "Work", (
+            "the switch was saved while a turn was still running on the old Account"
+        )
+        # Said once, with the wait it comes with, and shown on the control as
+        # the choice that is going to happen.
+        assert len(spoken) == 1 and spoken == mirrored
+        assert "Personal" in spoken[0] and "has to finish" in spoken[0], spoken
+        assert dialog.codex_account.GetStringSelection() == "Personal"
+        assert not work.closed, "the process was closed underneath a running turn"
+
+        # And the switch, with the drop, happens once that turn is over: a
+        # finished turn asks for the work a wait was leaving.
+        work.borrowers = 0
+        agent_backends.drop_pending_codex_processes()
+
+        assert agent_backends.codex_plan_account().name == "Personal", (
+            "the switch never happened after the running turn finished"
+        )
+        _soon(lambda: work.closed, "the drop never landed after the turn had finished")
+    finally:
+        dialog.Destroy()
+
+
+def test_deleting_the_chosen_account_leaves_the_saved_value_and_control_agreeing(
+    frame, tmp_path, monkeypatch
+):
+    """What is saved and what the control shows must be one answer."""
+    import wx
+
+    import agent_backends
+    from accessible_ai.storage.database import Database
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(account_id, "Work"))
+    work = _held_on(account_id)
+    monkeypatch.setattr(wx, "MessageBox", lambda *_args, **_kwargs: wx.YES)
+    dialog = _codex_account_dialog(frame, db, [], [])
+    try:
+        assert dialog.codex_account.GetStringSelection() == "Work"
+        dialog.on_delete(wx.CommandEvent())
+
+        assert agent_backends.codex_plan_account() is None, (
+            "the deleted Account stayed stored as the Codex backend's Account"
+        )
+        assert dialog.codex_account.GetStringSelection() == "Codex's own login", (
+            "the saved value and the control disagree about which Account Codex uses"
+        )
+        _soon(lambda: work.closed, "the deleted Account's Held process was never dropped")
+    finally:
+        dialog.Destroy()
+
+
+def test_signing_out_of_the_chosen_account_leaves_the_saved_value_and_control_agreeing(
+    frame, tmp_path, monkeypatch
+):
+    import wx
+
+    import agent_backends
+    import backend_pool
+    from accessible_ai.storage.database import Database
+    from accessible_ai.ui.accounts import AccountEditorDialog
+
+    db = Database(tmp_path / "chat.sqlite3")
+    account_id = db.save_account(Account(name="Work", provider=PROVIDER_CHATGPT))
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(account_id, "Work"))
+    credentials = FakeCredentials()
+    chatgpt.save_session(
+        credentials,
+        account_id,
+        {"client_id": "oaiapp_issued", "email": "w@example.com", "refresh_token": "refresh-1"},
+    )  # type: ignore[arg-type]
+    work = _held_on(account_id, borrowers=1)
+    boxes: list[str] = []
+    monkeypatch.setattr(wx, "MessageBox", lambda message, *_a, **_k: boxes.append(message))
+
+    listing = _codex_account_dialog(frame, db, [], [])
+    editor = AccountEditorDialog(frame, db, credentials, db.get_account(account_id))  # type: ignore[arg-type]
+    try:
+        assert listing.codex_account.GetStringSelection() == "Work"
+        editor._chatgpt_signed_out(True)  # what on_chatgpt_sign_out reports
+
+        assert agent_backends.codex_plan_account() is None, (
+            "the signed-out Account stayed stored as the Codex backend's Account"
+        )
+        assert boxes and "Codex will use its own login" in boxes[0], boxes
+        assert "has to finish" in boxes[0], boxes
+        assert not work.closed, "the process was closed underneath a running turn"
+
+        # The dialog that offers the choice says the same thing as the file.
+        listing.reload()
+        assert listing.codex_account.GetStringSelection() == "Codex's own login"
+
+        work.borrowers = 0
+        backend_pool.pool().drop_pending()
+        _soon(lambda: work.closed, "the drop never landed after the turn had finished")
+    finally:
+        editor.Destroy()
+        listing.Destroy()
+
+
+# ----- A failed plan turn is said once, and kept where it can be read -----
+
+
+def test_a_failed_plan_turn_is_announced_once_and_kept_visible():
+    """One error, spoken once and mirrored once, and still in the list after.
+
+    The usage-limit sentence is the chat half's own, so what a listener hears
+    here is what they would have heard from a chat, the page to review usage on
+    included.
+    """
+    import blindpilot_app as app
+    from doubles import panel_stub
+
+    panel = panel_stub()
+    sentence = chatgpt.PLAN_ERRORS["subscription_sharing_usage_limit_exceeded"]
+
+    app.SessionPanel._on_failed(panel, sentence)
+
+    assert panel.announced == [f"Error: {sentence}"], "the failure was said twice or not at all"
+    assert panel.status == [f"Error: {sentence}"], "the status bar did not mirror it exactly once"
+    errors = [row for row in panel._rows if row.kind == "error"]
+    assert len(errors) == 1, "the failure was not kept as one row of its own"
+    assert chatgpt.USAGE_URL in errors[0].payload
 
 
 # ----- Thinking, web search and answer length on the plan -----

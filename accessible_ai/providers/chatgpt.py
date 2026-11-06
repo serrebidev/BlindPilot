@@ -23,17 +23,20 @@ import hmac
 import ipaddress
 import json
 import logging
+import os
 import secrets
 import socket
+import struct
 import threading
 import time
 import uuid
 import webbrowser
 from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from html import escape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from threading import Event
 from typing import Any
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
@@ -196,6 +199,141 @@ _access_tokens: dict[int, tuple[str, float]] = {}
 _refresh_lock = threading.Lock()
 
 
+# ----- Cross-process refresh -----
+#
+# The plan-token entry point runs as its own process, so a refresh must be
+# serialized across processes, not just across threads: two processes that both
+# read the stored refresh token and both exchange it race a rotating token, and
+# the loser's answer signs the account out. The lock file lives beside the chat
+# data and is never unlinked, so every process locks the same inode. The freshly
+# issued access token is shared through an in-memory named cache, so only one
+# process performs the exchange while the other takes the result.
+
+_REFRESH_LOCK_TIMEOUT = AUTH_TIMEOUT * 2 + 30.0
+_TOKEN_CACHE_SIZE = 8192
+_TOKEN_CACHE_HEADER = struct.Struct("!dI")
+
+
+def _refresh_lock_path(account_id: int) -> Path:
+    return app_data_dir() / f".chatgpt-plan-{account_id}.refresh.lock"
+
+
+@contextmanager
+def _cross_process_refresh_lock(account_id: int) -> Generator[None, None, None]:
+    """Hold the cross-process refresh lock for one account.
+
+    The wait is bounded: a holder that never releases fails the refresh rather
+    than blocking the token command or a chat turn forever.
+    """
+    path = _refresh_lock_path(account_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as lock_file:
+        lock_file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            deadline = time.monotonic() + _REFRESH_LOCK_TIMEOUT
+            while True:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise ChatGPTError(
+                            "Timed out waiting for another BlindPilot process to finish "
+                            "refreshing the ChatGPT plan token."
+                        ) from None
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            deadline = time.monotonic() + _REFRESH_LOCK_TIMEOUT
+            while True:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise ChatGPTError(
+                            "Timed out waiting for another BlindPilot process to finish "
+                            "refreshing the ChatGPT plan token."
+                        ) from None
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _token_cache_name(account_id: int) -> str:
+    root = os.path.normcase(os.path.abspath(str(app_data_dir())))
+    digest = hashlib.sha256(f"{root}\0{account_id}".encode("utf-8")).hexdigest()[:20]
+    return f"bpct_{digest}"
+
+
+def _open_token_cache(account_id: int) -> Any:
+    """Open the named in-memory cache for one account, creating it if needed."""
+    try:
+        from multiprocessing.shared_memory import SharedMemory
+    except ImportError:
+        return None
+    name = _token_cache_name(account_id)
+    try:
+        try:
+            cache = SharedMemory(name=name, create=True, size=_TOKEN_CACHE_SIZE)
+        except FileExistsError:
+            cache = SharedMemory(name=name)
+    except OSError:
+        return None
+    if cache.size < _TOKEN_CACHE_HEADER.size + 1:
+        try:
+            cache.close()
+        except OSError:
+            pass
+        return None
+    return cache
+
+
+def _read_token_cache(cache: Any) -> tuple[str, float] | None:
+    if cache is None:
+        return None
+    buf = cache.buf
+    if len(buf) < _TOKEN_CACHE_HEADER.size:
+        return None
+    expires_at, length = _TOKEN_CACHE_HEADER.unpack_from(buf, 0)
+    if length == 0 or _TOKEN_CACHE_HEADER.size + length > len(buf):
+        return None
+    raw = bytes(buf[_TOKEN_CACHE_HEADER.size : _TOKEN_CACHE_HEADER.size + length])
+    try:
+        token = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not token or time.time() >= expires_at - REFRESH_MARGIN:
+        return None
+    return token, expires_at
+
+
+def _write_token_cache(cache: Any, token: str, expires_at: float) -> None:
+    if cache is None:
+        return
+    raw = token.encode("utf-8")
+    if _TOKEN_CACHE_HEADER.size + len(raw) > len(cache.buf):
+        return
+    _TOKEN_CACHE_HEADER.pack_into(cache.buf, 0, expires_at, len(raw))
+    cache.buf[_TOKEN_CACHE_HEADER.size : _TOKEN_CACHE_HEADER.size + len(raw)] = raw
+
+
+def _clear_token_cache(cache: Any) -> None:
+    if cache is None:
+        return
+    _TOKEN_CACHE_HEADER.pack_into(cache.buf, 0, 0.0, 0)
+
+
 def store_sign_in(credentials: CredentialStore, account_id: int, result: dict[str, Any]) -> None:
     """Keep what ``sign_in`` returned for a saved account."""
     with _refresh_lock:
@@ -204,7 +342,12 @@ def store_sign_in(credentials: CredentialStore, account_id: int, result: dict[st
 
 
 def access_token(credentials: CredentialStore, account_id: int, force: bool = False) -> str:
-    """A usable access token, refreshed when it is about to expire or ``force``."""
+    """A usable access token, refreshed when it is about to expire or ``force``.
+
+    The refresh read/exchange/write is serialized across processes and the
+    issued access token is shared through an in-memory named cache, so two
+    processes asking at once perform one exchange between them.
+    """
     with _refresh_lock:
         cached = _access_tokens.get(account_id)
         if cached and not force and time.time() < cached[1] - REFRESH_MARGIN:
@@ -215,37 +358,55 @@ def access_token(credentials: CredentialStore, account_id: int, force: bool = Fa
                 "This account is not signed in to ChatGPT. Open Chat, Accounts, edit the account "
                 "and choose Continue with ChatGPT."
             )
-        try:
-            tokens = _token_request(
-                {
-                    "grant_type": "refresh_token",
-                    "client_id": session["client_id"],
-                    "refresh_token": session["refresh_token"],
-                    "resource": RESOURCE,
-                }
-            )
-        except ChatGPTError as exc:
-            if exc.code in SESSION_OVER:
-                session.pop("refresh_token", None)
-                if exc.code == "invalid_client":
-                    # The registration itself is gone; the next sign-in registers anew.
-                    session = {}
-                save_session(credentials, account_id, session)
-                _access_tokens.pop(account_id, None)
-                raise ChatGPTError(SIGN_IN_AGAIN, exc.code) from exc
-            raise
-        token = tokens.get("access_token")
-        if not isinstance(token, str) or not token:
-            raise ChatGPTError("ChatGPT answered the token refresh without an access token.")
-        # The refresh token rotates: the replacement must be saved before use.
-        session["refresh_token"] = tokens.get("refresh_token") or session["refresh_token"]
-        if tokens.get("scope"):
-            session["scopes"] = scope_list(tokens["scope"])
-        save_session(credentials, account_id, session)
-        _access_tokens[account_id] = (token, time.time() + _lifetime(tokens))
-        if PLAN_SCOPE not in session.get("scopes", [PLAN_SCOPE]):
-            raise ChatGPTError(PLAN_ERRORS["chatpass_v2_scope_not_authorized"])
-        return token
+        cache = _open_token_cache(account_id)
+        with _cross_process_refresh_lock(account_id):
+            if not force:
+                shared = _read_token_cache(cache)
+                if shared is not None:
+                    _access_tokens[account_id] = shared
+                    return shared[0]
+            # Another process may have rotated the stored refresh token while
+            # we waited for the lock; read the latest record before exchanging.
+            session = load_session(credentials, account_id)
+            if not is_signed_in(session):
+                raise ChatGPTError(
+                    "This account is not signed in to ChatGPT. Open Chat, Accounts, edit the account "
+                    "and choose Continue with ChatGPT."
+                )
+            try:
+                tokens = _token_request(
+                    {
+                        "grant_type": "refresh_token",
+                        "client_id": session["client_id"],
+                        "refresh_token": session["refresh_token"],
+                        "resource": RESOURCE,
+                    }
+                )
+            except ChatGPTError as exc:
+                if exc.code in SESSION_OVER:
+                    session.pop("refresh_token", None)
+                    if exc.code == "invalid_client":
+                        # The registration itself is gone; the next sign-in registers anew.
+                        session = {}
+                    save_session(credentials, account_id, session)
+                    _access_tokens.pop(account_id, None)
+                    _clear_token_cache(cache)
+                    raise ChatGPTError(SIGN_IN_AGAIN, exc.code) from exc
+                raise
+            token = tokens.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise ChatGPTError("ChatGPT answered the token refresh without an access token.")
+            # The refresh token rotates: the replacement must be saved before use.
+            session["refresh_token"] = tokens.get("refresh_token") or session["refresh_token"]
+            if tokens.get("scope"):
+                session["scopes"] = scope_list(tokens["scope"])
+            save_session(credentials, account_id, session)
+            if PLAN_SCOPE not in session.get("scopes", [PLAN_SCOPE]):
+                raise ChatGPTError(PLAN_ERRORS["chatpass_v2_scope_not_authorized"])
+            expires_at = time.time() + _lifetime(tokens)
+            _access_tokens[account_id] = (token, expires_at)
+            _write_token_cache(cache, token, expires_at)
+            return token
 
 
 def _lifetime(tokens: dict[str, Any]) -> float:
@@ -279,8 +440,9 @@ def _auth_error(response: httpx.Response) -> ChatGPTError:
 
 
 def _token_request(form: dict[str, str]) -> dict[str, Any]:
+    url = os.environ.get("BLINDPILOT_CHATGPT_TOKEN_URL", TOKEN_URL)
     try:
-        response = httpx.post(TOKEN_URL, data=form, timeout=AUTH_TIMEOUT)
+        response = httpx.post(url, data=form, timeout=AUTH_TIMEOUT)
     except httpx.HTTPError as exc:
         raise ChatGPTError(f"Could not reach the ChatGPT sign-in service: {exc}") from exc
     if response.status_code >= 400:

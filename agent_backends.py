@@ -45,6 +45,9 @@ from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import backend_pool
 import diagnostics
+from accessible_ai import plan_token
+from accessible_ai.providers import chatgpt
+from accessible_ai.storage import preferences
 from owned_process import _WindowsJob, owned_popen
 import questions
 import process_utils
@@ -1398,8 +1401,13 @@ def _codex_usage_result(binary: str, timeout: int) -> object:
     for the length of the question so the reaper cannot stop it underneath.
     Where no process is held, one is started for the question and stopped
     again, the way every other part of this report is asked.
+
+    Asked of the Account the backend is set to use, because that is whose
+    windows the report is about: a plan's remaining usage is not the same
+    question as the one Codex's own login answers.
     """
-    key = backend_pool.pool_key(BACKEND_CODEX)
+    account = codex_plan_account()
+    key = codex_pool_key(account)
     shared = backend_pool.pool()
     server: Optional[CodexServer] = None
     with _CODEX_START_LOCK:
@@ -1414,7 +1422,7 @@ def _codex_usage_result(binary: str, timeout: int) -> object:
         finally:
             server.give_back()
     try:
-        started = _start_codex_server(binary)
+        started = _start_codex_server(binary, plan_account=account)
     except OSError:
         return None
     try:
@@ -2680,6 +2688,412 @@ def codex_question_args() -> tuple[str, ...]:
     return (*_CODEX_QUESTION_ARGS, "-c", f"developer_instructions={value}")
 
 
+# ----- Codex on a ChatGPT-plan account -----
+#
+# Codex is pointed at OpenAI's Responses endpoint for plan usage through
+# configuration overrides on its own command line, and fetches its own bearer
+# token by running this app's token-printing mode on an interval. The token is
+# therefore in neither the child's command line nor its environment. Rejected:
+# the token as an environment key, with the process restarted hourly -- that
+# exposes it to every child Codex starts, and restarting means resuming threads
+# on a clock. Overrides rather than a written configuration file, because the
+# user's own config.toml also holds their MCP servers and preferences.
+
+PLAN_PROVIDER_ID = "blindpilot-chatgpt"
+PLAN_BASE_URL = "https://api.openai.com/v1"
+
+# How often Codex runs the token command again. An access token lives an hour and
+# the command refreshes it only when it is within two minutes of expiry, so ten
+# minutes leaves six intervals of life: a run that fails -- another process
+# holding the store, a machine that was asleep -- is retried long before the
+# token under it expires. After the first run each one is answered from the
+# shared token cache, so it costs a process start and no exchange.
+PLAN_TOKEN_REFRESH_MS = 600_000
+# Longer than the command's own bounded wait for another process's refresh (two
+# 30-second exchanges plus 30), so a shared refresh is not reported as a failing
+# token command.
+PLAN_TOKEN_TIMEOUT_MS = 120_000
+
+
+@dataclass(frozen=True)
+class PlanAccount:
+    """The ChatGPT-plan account a Codex turn runs on.
+
+    The id is what the token command takes; the name is how a failure is
+    reported, because an id on its own does not say which account it was.
+    """
+
+    account_id: int
+    name: str = ""
+
+    @property
+    def label(self) -> str:
+        return self.name or f"account {self.account_id}"
+
+
+class _Unbound:
+    """No Account taken for this conversation yet: read the saved choice.
+
+    ``None`` is a real answer -- Codex's own login -- so "nothing chosen yet"
+    cannot be spelled as ``None`` as well. A tab tells a turn which Account its
+    conversation is bound to; one that is not bound yet is told this, and the
+    turn reads the saved choice once and keeps it for the rest of the turn.
+    """
+
+    def __repr__(self) -> str:
+        return "UNBOUND"
+
+
+UNBOUND = _Unbound()
+
+
+# ----- Which Account the Codex backend uses -----
+#
+# Chosen once for the backend, saved beside the window's own preferences, and
+# inherited by new conversations: nothing here is per conversation. The value is
+# either a specific ChatGPT-plan Account or nothing at all, and nothing at all
+# means Codex's own login -- the behaviour every existing setup has, so an
+# install that has chosen nothing runs exactly as it did.
+#
+# A conversation that has begun keeps the Account it began on, so this is read
+# once per conversation rather than once per turn: a switch affects the next
+# conversation, not the thread somebody is in the middle of. A tab hands its
+# bound Account to each of its turns (see `CodexWorker`), and only a turn told
+# `UNBOUND` reads this at all.
+#
+# Read on the thread about to launch a process, never on the window's: it is a
+# small file, but it is a file. Kept in this module rather than with the other
+# preferences because the Codex launch is what needs it, and the window already
+# imports this module rather than the other way round.
+
+# The key the choice is stored under in the settings file. Named for the
+# backend, because it is that backend's choice and not a global one.
+CODEX_PLAN_ACCOUNT = "codex_plan_account"
+
+
+def _settings_file() -> Path:
+    """The settings file the window keeps its preferences in."""
+    return blindpilot_config_dir() / "config.json"
+
+
+def codex_plan_account() -> Optional[PlanAccount]:
+    """The Account the Codex backend is set to use, or None for its own login."""
+    saved = preferences.load_config((_settings_file(),)).get(CODEX_PLAN_ACCOUNT)
+    if not isinstance(saved, dict):
+        return None
+    try:
+        account_id = int(saved.get("account_id", 0))
+    except (TypeError, ValueError):
+        # Written by hand, or by a release that meant something else by it.
+        # Codex's own login is the answer that always works.
+        return None
+    if account_id <= 0:
+        return None
+    return PlanAccount(account_id=account_id, name=str(saved.get("name") or ""))
+
+
+def save_codex_plan_account(account: Optional[PlanAccount]) -> bool:
+    """Remember which Account the Codex backend uses. False if it was not saved.
+
+    Only this key changes: the same file holds the window's preferences, and
+    the write is `preferences.update_config`, which reads and writes the file
+    under one lock -- the same save path the window uses -- so a choice saved
+    here cannot put back a preference saved a moment earlier, and a
+    preference saved by the window cannot cost somebody their choice.
+    """
+    value = (
+        None if account is None else {"account_id": int(account.account_id), "name": account.name}
+    )
+    return preferences.update_config(_settings_file(), {CODEX_PLAN_ACCOUNT: value})
+
+
+def codex_pool_key(account: Optional[PlanAccount] = None) -> tuple:
+    """The pool key for the Codex backend, on this Account if one is chosen.
+
+    One place decides what an Account means to the pool, so the turn that takes
+    a process, the drop that gives it up and the usage report that reads it can
+    never disagree about which Account's process they are talking about.
+    """
+    return backend_pool.pool_key(
+        BACKEND_CODEX, account=None if account is None else account.account_id
+    )
+
+
+class AccountDrop(NamedTuple):
+    """What letting go of an Account's Held process did, in terms the caller says.
+
+    ``waited``: a turn was speaking through the process, so the drop waits for
+    that turn to finish and somebody has to be told so. ``choice_cleared``: the
+    Codex backend was set to this Account, and is now back on Codex's own login.
+    """
+
+    waited: bool = False
+    choice_cleared: bool = False
+
+
+def drop_codex_plan_account(account_id: int) -> bool:
+    """Drop what Codex holds for this Account, now or once its turn finishes.
+
+    Signing out of an Account, deleting it, or choosing another one takes its
+    Held process away: nothing may be sent on a credential that has just been
+    ended, and nothing on a process whose Account is no longer chosen. A turn
+    already running through it is never interrupted -- it finishes on the token
+    it started with, which is what switching promises -- so the drop waits for
+    it and returns True, which is the caller's cue to say the wait out loud.
+
+    The start lock is the turn's own, so a turn between being handed this
+    process and being counted in it cannot be dropped underneath. It is never
+    waited for here: a turn holds it across a launch, which runs the token
+    command and starts a process, and this is called from the window's thread.
+    Not getting it means a turn is launching right now, which is reason enough
+    to owe the drop and say it is waiting.
+    """
+    key = codex_pool_key(PlanAccount(account_id=account_id))
+    pool = backend_pool.pool()
+    if not _CODEX_START_LOCK.acquire(blocking=False):
+        pool.wait_to_drop(key)
+        return True
+    try:
+        return pool.drop_when_idle(key)
+    finally:
+        _CODEX_START_LOCK.release()
+
+
+def drop_pending_codex_processes() -> None:
+    """Carry out the drops owed by finished turns, now that it is safe to.
+
+    Called as a turn hands its process back, which is where a wait owed to that
+    turn is paid. The start lock is taken without waiting, because a turn holds
+    it from taking a process to being counted in it, and a drop landing in that
+    gap would stop the very process the next turn has just been handed. Not
+    getting it means a turn is being handed one right now: the keys stay owed,
+    and the next turn to finish asks again.
+
+    A choice of Account that was waiting for a turn is applied here too, for
+    the same reason and at the same moment: the turn it was waiting for has
+    just finished.
+    """
+    if _CODEX_START_LOCK.acquire(blocking=False):
+        try:
+            backend_pool.pool().drop_pending()
+        finally:
+            _CODEX_START_LOCK.release()
+    _apply_pending_plan_choice()
+
+
+# ----- Choosing another Account while a turn is running -----
+#
+# A turn already running finishes on the Account it started with, so the switch
+# cannot take effect while it runs: the choice is made, said, and kept here
+# until the turn that blocked it hands its process back (see
+# `drop_pending_codex_processes`). Until then the saved choice -- and so the
+# Account every new conversation is bound to -- is still the one being left.
+
+_PENDING_CHOICE_LOCK = threading.Lock()
+_pending_choice: Optional[PlanAccount] = None
+_pending_choice_owed = False
+
+
+class AccountSwitch(NamedTuple):
+    """What choosing another Account for Codex did, in terms the caller says.
+
+    ``saved``: the choice in the settings file is now the one asked for.
+    ``waited``: a turn was running on the Account being left, so it is not --
+    the switch happens when that turn finishes, and somebody has to be told so.
+    """
+
+    saved: bool = False
+    waited: bool = False
+
+
+class PendingSwitch(NamedTuple):
+    """A switch waiting for a turn, if there is one, and the Account it names."""
+
+    owed: bool = False
+    account: Optional[PlanAccount] = None
+
+
+def switch_codex_plan_account(account: Optional[PlanAccount]) -> AccountSwitch:
+    """Choose the Account the Codex backend uses, now or once its turn finishes.
+
+    Nothing is running: the choice is saved and the Account being left has its
+    process dropped, so the next conversation starts on the new Account.
+
+    A turn is running on the Account being left: it finishes on that Account,
+    which is what switching promises, so the choice is kept rather than saved
+    and takes effect when the turn hands its process back. The caller is told
+    it is waiting so it can say so; a switch that silently waits is one nobody
+    knows to wait for.
+
+    The start lock is the turn's own, so this answers without queueing behind a
+    turn that is launching a process (see `drop_codex_plan_account`).
+    """
+    global _pending_choice, _pending_choice_owed
+
+    previous = codex_plan_account()
+    same = (
+        account is not None and previous is not None and account.account_id == previous.account_id
+    )
+    if previous is None or same:
+        # Nothing is being left -- Codex's own login either way, or the same
+        # Account under a new name -- so there is no process to wait for.
+        return AccountSwitch(save_codex_plan_account(account), waited=False)
+    if not drop_codex_plan_account(previous.account_id):
+        return AccountSwitch(save_codex_plan_account(account), waited=False)
+    with _PENDING_CHOICE_LOCK:
+        _pending_choice = account
+        _pending_choice_owed = True
+    return AccountSwitch(saved=False, waited=True)
+
+
+def pending_codex_plan_account() -> PendingSwitch:
+    """The switch waiting for a turn to finish, if one is waiting."""
+    with _PENDING_CHOICE_LOCK:
+        return PendingSwitch(_pending_choice_owed, _pending_choice)
+
+
+def _forget_pending_plan_choice(account_id: int) -> None:
+    """Drop a switch that names an Account which is no longer usable."""
+    global _pending_choice, _pending_choice_owed
+
+    with _PENDING_CHOICE_LOCK:
+        account = _pending_choice
+        if account is not None and account.account_id == int(account_id):
+            _pending_choice = None
+            _pending_choice_owed = False
+
+
+def _apply_pending_plan_choice() -> None:
+    """Save the choice that was waiting for a turn, if that turn has finished.
+
+    Asked where a turn hands its process back. A process another tab is still
+    speaking through is left where it is, and the choice stays owed: the wait
+    is for all of the turns running on the Account being left, not for
+    whichever of them finishes first. A write the file refuses also leaves it
+    owed, so the next turn to finish asks again rather than the choice being
+    lost in silence.
+    """
+    global _pending_choice, _pending_choice_owed
+
+    with _PENDING_CHOICE_LOCK:
+        if not _pending_choice_owed:
+            return
+        choice = _pending_choice
+    previous = codex_plan_account()
+    if previous is not None and backend_pool.pool().busy(codex_pool_key(previous)):
+        return
+    if not save_codex_plan_account(choice):
+        return
+    with _PENDING_CHOICE_LOCK:
+        _pending_choice = None
+        _pending_choice_owed = False
+
+
+def forget_codex_plan_account(account_id: int) -> AccountDrop:
+    """Stop using an Account for Codex, and drop the process it was running on.
+
+    For the three ways an Account stops being usable -- signed out, deleted, or
+    switched away from. If it is the Account the backend is set to use, the
+    choice goes back to Codex's own login: a signed-out Account cannot pay for
+    a turn, and a saved id that nothing can run on is a choice that lies about
+    what Codex will use. Everything stays stored but the choice itself, so the
+    control that offers it and the file it is saved in agree.
+
+    The drop is the one `drop_codex_plan_account` makes, with the same wait. A
+    switch still waiting for a turn to finish is dropped if it names this
+    Account, because an Account nobody can run on must not be saved later.
+    """
+    chosen = codex_plan_account()
+    cleared = chosen is not None and chosen.account_id == int(account_id)
+    if cleared:
+        save_codex_plan_account(None)
+    _forget_pending_plan_choice(int(account_id))
+    return AccountDrop(drop_codex_plan_account(int(account_id)), cleared)
+
+
+def plan_token_command(account_id: int) -> tuple[str, ...]:
+    """The command that prints one access token for an account and exits.
+
+    Codex runs it itself, from whatever folder it was started in. A frozen
+    build's ``sys.executable`` is BlindPilot, whose entry point answers the flag
+    before importing the window; from source it is a Python, so it is given the
+    entry point by absolute path rather than relying on a working directory.
+    """
+    tail = (plan_token.FLAG, str(int(account_id)))
+    if getattr(sys, "frozen", False):
+        return (sys.executable, *tail)
+    entry = Path(__file__).resolve().with_name("blind_pilot.py")
+    return (sys.executable, str(entry), *tail)
+
+
+def codex_plan_args(account_id: int) -> tuple[str, ...]:
+    """Arguments that put Codex on OpenAI's Responses endpoint for a plan.
+
+    The token is not among them: Codex runs the token command beside them to
+    obtain its own bearer token, and runs it again on an interval. Quoted as
+    TOML strings because ``-c`` parses its value as TOML; ``ensure_ascii`` is
+    off for the paths, since JSON would write a character outside the BMP as an
+    escaped surrogate pair, which TOML refuses.
+    """
+    provider = f"model_providers.{PLAN_PROVIDER_ID}"
+    command = plan_token_command(account_id)
+    overrides = (
+        ("model_provider", json.dumps(PLAN_PROVIDER_ID)),
+        (f"{provider}.name", json.dumps("OpenAI")),
+        (f"{provider}.base_url", json.dumps(PLAN_BASE_URL)),
+        (f"{provider}.wire_api", json.dumps("responses")),
+        (f"{provider}.supports_websockets", "false"),
+        # requires_openai_auth is deliberately absent: Codex's reference says
+        # not to combine it with auth, and its default is already false.
+        (f"{provider}.auth.command", json.dumps(command[0], ensure_ascii=False)),
+        (f"{provider}.auth.args", json.dumps(list(command[1:]), ensure_ascii=False)),
+        (f"{provider}.auth.refresh_interval_ms", str(PLAN_TOKEN_REFRESH_MS)),
+        (f"{provider}.auth.timeout_ms", str(PLAN_TOKEN_TIMEOUT_MS)),
+    )
+    args: list[str] = []
+    for key, value in overrides:
+        args += ["-c", f"{key}={value}"]
+    return tuple(args)
+
+
+# ----- When the plan refuses a turn -----
+#
+# The plan request is Codex's own, so a refusal reaches this half as whatever
+# Codex printed: the OpenAI error body with its code in it, or the transport's
+# line for a refused status. The chat half already has the sentence for each of
+# those failures in `chatgpt.PLAN_ERRORS` and `chatgpt.SIGN_IN_AGAIN`, and
+# somebody with both halves open must not be told the same failure two different
+# ways. Written out again here is how the two would drift apart; so the sentences
+# are the chat half's own, and this only decides which one applies.
+
+# How a refused status reads in Codex's output, and which status it was. The
+# number alone is not enough -- an id, a token count or a line number can wear
+# one -- so each is matched in the words Codex prints it in.
+_PLAN_REFUSALS = (
+    ("status 401", 401),
+    ("401 unauthorized", 401),
+    ("status 429", 429),
+    ("429 too many requests", 429),
+)
+
+
+def plan_failure(said: str) -> str:
+    """The chat half's sentence for a plan failure Codex reported, or "".
+
+    Empty when the words are not a plan refusal this recognises, which is every
+    ordinary Codex failure: a turn that fell over for its own reasons keeps its
+    own words rather than being dressed in a sentence about a plan.
+    """
+    text = said.casefold()
+    for code in chatgpt.PLAN_ERRORS:
+        if code in text:
+            return str(chatgpt.plan_error({"code": code}))
+    for marker, status in _PLAN_REFUSALS:
+        if marker in text:
+            return str(chatgpt.plan_error({}, status))
+    return ""
+
+
 def _codex_questions(raw: object) -> tuple[questions.Question, ...]:
     """Read request_user_input's params into BlindPilot's own question shape.
 
@@ -3253,14 +3667,72 @@ def _app_version() -> str:
     return str(getattr(app, "APP_VERSION", "") or "unknown")
 
 
-def _start_codex_server(binary: str = "") -> CodexServer:
-    """Launch the shared app-server. Raises OSError if it cannot be started."""
+def _run_token_command(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run the plan-token command once and hand back what it printed and said."""
+    return subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=PLAN_TOKEN_TIMEOUT_MS / 1000.0,
+        **process_utils.no_window_kwargs(),
+    )
+
+
+def _plan_token_failure(account: PlanAccount, reason: str) -> str:
+    return (
+        f"The ChatGPT-plan account {account.label} could not be used for Codex: "
+        f"its token command failed. {reason}"
+    )
+
+
+def _plan_token_or_report(account: PlanAccount) -> None:
+    """Fetch a token now, so a broken credential is reported instead of a turn.
+
+    Codex runs this same command itself before each request, and a failure there
+    reaches the person as a turn that came back with nothing said. Running it
+    here makes the failure an error naming the account, before any process is
+    started. It costs one process and no exchange: the command hands the freshly
+    issued token to the chat path through the in-memory token cache.
+    """
+    command = plan_token_command(account.account_id)
+    try:
+        done = _run_token_command(command)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(_plan_token_failure(account, str(exc).strip())) from exc
+    printed = (done.stdout or "").strip()
+    if done.returncode == 0 and printed:
+        return
+    said = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
+    reason = said[-1].removeprefix("error:").strip() if said else ""
+    raise OSError(
+        _plan_token_failure(
+            account, reason or f"it exited with {done.returncode} and printed no token"
+        )
+    )
+
+
+def _start_codex_server(
+    binary: str = "", plan_account: Optional[PlanAccount] = None
+) -> CodexServer:
+    """Launch the shared app-server. Raises OSError if it cannot be started.
+
+    Given a ``plan_account``, the server runs on that ChatGPT-plan account: it is
+    pointed at OpenAI's Responses endpoint and runs ``plan_token_command`` to
+    obtain its own bearer token. Without one, Codex uses whatever login the user
+    already has, which is the behaviour every existing setup relies on.
+    """
     binary = binary or find_backend_cli(BACKEND_CODEX) or ""
     if not binary:
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
+    plan: tuple[str, ...] = ()
+    if plan_account is not None:
+        _plan_token_or_report(plan_account)
+        plan = codex_plan_args(plan_account.account_id)
     proc = owned_popen(
-        [server_binary, *codex_question_args(), "app-server", "--stdio"],
+        [server_binary, *plan, *codex_question_args(), "app-server", "--stdio"],
         cwd=str(Path.home()),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -3349,6 +3821,7 @@ class _TurnWorker(threading.Thread):
         on_question: Optional[questions.AskQuestions] = None,
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         on_subagent: Optional[SubagentReport] = None,
+        plan_account: object = UNBOUND,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -3373,6 +3846,10 @@ class _TurnWorker(threading.Thread):
         self._on_question = on_question
         self._on_permission = on_permission
         self._on_subagent = on_subagent or ignore_subagents
+        # The Account the turn's conversation is bound to, or `UNBOUND` to take
+        # the saved choice. Only Codex reads this; the rest never see one. It
+        # is `object` because `None` is itself a binding -- Codex's own login.
+        self._plan_account = plan_account
         self._cancelled = False
         # Set once the turn's ending has been reported, whichever way it
         # ended. The first account of a failure is the one that can be acted
@@ -3478,6 +3955,15 @@ class CodexWorker(_TurnWorker):
         # Borrowed from the pool, which starts and stops it; other tabs read it too.
         self._server: Optional[CodexServer] = None
         self._held: Optional[backend_pool.HeldProcess] = None
+        # The pool key this turn borrowed its process under, which carries the
+        # Account it runs on. Remembered rather than recomputed, so a choice
+        # changed while the turn is running cannot make the turn give up
+        # somebody else's process.
+        self._pool_key: Optional[tuple] = None
+        # `_plan_account` -- the Account this turn runs on, or None for Codex's
+        # own login -- is the base class's, given by the tab that owns the
+        # conversation. What decides whether a refusal is a plan's, and so
+        # whether it is reported in the chat half's words.
         # Where this turn's stderr begins in a process older than the turn.
         self._stderr_mark = 0
         # This turn's queue, read by it alone. Unbounded, because a turn's own
@@ -3721,6 +4207,10 @@ class CodexWorker(_TurnWorker):
         if self._borrowed:
             self._borrowed = False
             server.give_back()
+            # A turn that has just finished may be the last one on a process
+            # whose Account was signed out, deleted or switched away from while
+            # it ran. That drop was waiting for exactly this.
+            drop_pending_codex_processes()
 
     def _borrow_server(self) -> Optional[backend_pool.HeldProcess]:
         """The app-server this turn will speak through, or None having failed.
@@ -3728,8 +4218,26 @@ class CodexWorker(_TurnWorker):
         Taking and handing back happen under one lock so that two tabs sending
         their first Codex message together cannot each launch a server, with
         the second one kept displacing and stopping the first mid-turn.
+
+        Which process this is depends on the Account the conversation is bound
+        to: the tabs on one Account share its process, and a tab on another
+        Account is given -- or starts -- that Account's own. A conversation
+        resumed from history comes through here too, so it lands on the Account
+        its conversation was held under rather than on whichever tab resumed
+        it.
+
+        The Account is the tab's answer, taken when the conversation began, and
+        only a turn told `UNBOUND` reads the saved choice -- once, and then it
+        is this turn's too. So choosing another Account cannot move a
+        conversation that has already started, and the rest of a running turn
+        cannot be sent somewhere else under it.
         """
-        key = backend_pool.pool_key(BACKEND_CODEX)
+        account = self._plan_account
+        if account is UNBOUND:
+            account = codex_plan_account()
+        account = cast(Optional[PlanAccount], account)
+        self._plan_account = account
+        key = codex_pool_key(account)
         shared = backend_pool.pool()
         with _CODEX_START_LOCK:
             held = shared.take(key)
@@ -3738,7 +4246,7 @@ class CodexWorker(_TurnWorker):
             reused = held is not None
             if held is None:
                 try:
-                    started = _start_codex_server()
+                    started = _start_codex_server(plan_account=account)
                 except OSError as exc:
                     self._fail(f"Failed to launch Codex: {exc}")
                     return None
@@ -3753,6 +4261,7 @@ class CodexWorker(_TurnWorker):
                     self._fail(detail)
                     return None
             shared.keep(key, held)
+            self._pool_key = key
             # Registered under the same lock the drop takes, so a turn that
             # has been handed this server is never counted as absent by a turn
             # deciding whether anyone still wants it.
@@ -3781,14 +4290,19 @@ class CodexWorker(_TurnWorker):
         exactly the turn that must not have its process stopped underneath it.
         This must never be the way one conversation's bad session id ends
         another's live turn.
+
+        Dropped under the key this turn borrowed, which remembers the Account
+        the process was started on: a choice changed mid-turn must not take a
+        different Account's process down with it.
         """
         server = self._server
         if server is None:
             return
+        key = self._pool_key or codex_pool_key()
         with _CODEX_START_LOCK:
             if server.borrower_count() > 1:
                 return
-            backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
+            backend_pool.pool().drop(key)
 
     @staticmethod
     def _policy(mode: str) -> tuple[str, dict]:
@@ -4253,9 +4767,10 @@ class CodexWorker(_TurnWorker):
         self._await_last_words()
         detail = "\n".join(self._stderr_lines[-10:]).strip()
         if detail:
-            return detail
+            return self._plan_words(detail)
         server = self._server
-        return (server.read_error() if server is not None else "") or fallback
+        died = (server.read_error() if server is not None else "") or fallback
+        return self._plan_words(died)
 
     def _await_last_words(self) -> None:
         """Let the final line of stderr land before reporting why Codex died.
@@ -4266,12 +4781,24 @@ class CodexWorker(_TurnWorker):
         if server is not None:
             server.await_last_words(_CODEX_LAST_WORDS_SECONDS)
 
-    @staticmethod
-    def _error_text(error: object, fallback: str) -> str:
+    def _plan_words(self, said: str) -> str:
+        """A plan's refusal in the chat half's words, or `said` unchanged.
+
+        Only a turn running on a ChatGPT-plan Account has a plan that can
+        refuse it. Codex on its own login keeps its own words: that sign-in is
+        Codex's, and `codex login` is what fixes it, so dressing its failures
+        in a sentence about a ChatGPT plan would send the person to the wrong
+        place.
+        """
+        if self._plan_account is None:
+            return said
+        return plan_failure(said) or said
+
+    def _error_text(self, error: object, fallback: str) -> str:
         if isinstance(error, dict):
             message = error.get("message")
             if isinstance(message, str) and message:
-                return message
+                return self._plan_words(message)
         return fallback
 
     def _handle_server_request(self, message: dict) -> None:

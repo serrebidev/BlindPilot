@@ -5,6 +5,7 @@ import logging
 import os
 import sqlite3
 import threading
+from typing import Callable
 
 import wx
 
@@ -45,6 +46,30 @@ JSON_FIELD_HEIGHT = 70
 NOTE_WRAP = 640
 COMPAT_NOTE_WRAP = 620
 LIST_DIALOG_SIZE = wx.Size(650, 480)
+
+# Which Account the Codex backend runs on is a choice about the backend, like
+# the default Account is about Chat mode: not a setting belonging to any one
+# Account. So it is offered under the list, and the words it is said in live
+# here rather than being spelled out again at each site.
+CODEX_LOGIN_LABEL = "Codex's own login"
+# Said when the Account being left still has a Codex turn running on it. The
+# Held process is never closed underneath a live turn -- that turn finishes on
+# the sign-in it started with, which is what switching promises -- so the wait
+# is said rather than left to be inferred from a process that is still there.
+CODEX_TURN_WAIT = "The Codex turn running on {label} has to finish before its process is closed."
+# Said when a choice of Account is made while a turn is running. The choice is
+# kept rather than saved, because the running turn finishes on the Account it
+# started with: it is the switch itself that waits, not only the closing of the
+# process, so that is what the sentence has to say.
+CODEX_SWITCH_WAITS = (
+    "The Codex turn running on {label} has to finish first, and then the switch happens."
+)
+# What the choice says when it has gone back to Codex's own login because the
+# Account it named can no longer pay for a turn.
+CODEX_OWN_LOGIN_AGAIN = "Codex will use its own login."
+# The window's own words for the same failure, so the status bar behind this
+# dialog and the screen reader say one thing when the file refuses a write.
+CODEX_SAVE_FAILED = "Error: could not save settings"
 
 
 PROVIDER_ORDER = [
@@ -504,6 +529,10 @@ class AccountEditorDialog(wx.Dialog):
     def _chatgpt_signed_out(self, confirmed: bool) -> None:
         if not self:
             return
+        # Read before the stored session is cleared, because this is what says
+        # the credential really ended and a Held process is running on it.
+        had_stored = chatgpt.is_signed_in(self.chatgpt_session)
+        account_id = self.account.id
         self.chatgpt_session.pop("refresh_token", None)
         self._update_chatgpt_status()
         self.chatgpt_button.SetFocus()
@@ -513,6 +542,18 @@ class AccountEditorDialog(wx.Dialog):
                 " OpenAI did not confirm the sign-out. To be sure, disconnect BlindPilot in "
                 "ChatGPT's settings."
             )
+        if had_stored and account_id is not None:
+            # Nothing may be sent on a sign-in that has just ended, and if this
+            # is the Account Codex was set to use, the choice cannot stay on it.
+            # A turn already running finishes on the token it started with, and
+            # that wait is said rather than left to be guessed at.
+            import agent_backends
+
+            drop = agent_backends.forget_codex_plan_account(int(account_id))
+            if drop.choice_cleared:
+                text += " " + CODEX_OWN_LOGIN_AGAIN
+            if drop.waited:
+                text += " " + CODEX_TURN_WAIT.format(label=self.account.name)
         wx.MessageBox(text, "ChatGPT", wx.OK | wx.ICON_INFORMATION, self)
 
     def on_cancel(self, event: wx.CommandEvent) -> None:
@@ -660,6 +701,8 @@ class AccountsDialog(wx.Dialog):
         db: Database,
         credentials: CredentialStore,
         model_service: ModelService,
+        set_status: Callable[[str], None] | None = None,
+        speak: Callable[[str], None] | None = None,
     ):
         super().__init__(
             parent,
@@ -670,6 +713,12 @@ class AccountsDialog(wx.Dialog):
         self.db = db
         self.credentials = credentials
         self.model_service = model_service
+        # Announcement, the same way Chat mode does it: one sentence, spoken by
+        # `speak` and mirrored by `set_status`, so the status bar behind this
+        # dialog says what was heard. Absent when the dialog is built without
+        # them, and then nothing is announced rather than half of it.
+        self._set_status = set_status
+        self._speak = speak
         self.accounts: list[Account] = []
         self.model_action_running = False
 
@@ -692,6 +741,20 @@ class AccountsDialog(wx.Dialog):
         self.default_check.SetName("Use as default account")
         self.default_check.SetToolTip("Chat mode starts on this account")
         outer.Add(self.default_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
+
+        # Which Account the Codex backend runs on, under the list for the same
+        # reason the checkbox is: it is a choice about the backend rather than
+        # a setting belonging to whichever account the cursor happens to be on.
+        # Built here, between the checkbox and the buttons, so it takes its
+        # place in the dialog's own Tab order rather than one of its own.
+        codex_row = wx.BoxSizer(wx.HORIZONTAL)
+        codex_label = wx.StaticText(panel, label="Codex &backend account:")
+        self.codex_account = wx.Choice(panel)
+        self.codex_account.SetName("Codex backend account")
+        self.codex_account.SetToolTip("The Account the Codex backend runs on")
+        codex_row.Add(codex_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        codex_row.Add(self.codex_account, 1, wx.EXPAND)
+        outer.Add(codex_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         # One row. The actions sit on the left; Close goes through the
         # standard button sizer so it lands where the platform puts it.
@@ -729,6 +792,7 @@ class AccountsDialog(wx.Dialog):
         self.listbox.Bind(wx.EVT_LISTBOX_DCLICK, self.on_edit)
         self.listbox.Bind(wx.EVT_LISTBOX, self.on_selection_changed)
         self.default_check.Bind(wx.EVT_CHECKBOX, self.on_default_changed)
+        self.codex_account.Bind(wx.EVT_CHOICE, self.on_codex_account_changed)
         self.Bind(wx.EVT_CLOSE, self.on_close)
         self.reload()
         self.CentreOnParent()
@@ -736,6 +800,9 @@ class AccountsDialog(wx.Dialog):
     def reload(self, select_account_id: int | None = None) -> None:
         self.accounts = self.db.list_accounts()
         self.listbox.Set([self._row_label(account) for account in self.accounts])
+        # Rebuilt with the list, so an Account added, renamed or deleted above
+        # leaves the choice telling the truth about what Codex will use.
+        self._sync_codex_account()
         if not self.accounts:
             self._sync_default_check()
             return
@@ -788,6 +855,102 @@ class AccountsDialog(wx.Dialog):
             return None
         return self.accounts[index]
 
+    def _codex_choices(self) -> list[tuple[str, Account | None]]:
+        """Codex's own login, then every ChatGPT-plan Account by name.
+
+        An Account of any other provider cannot pay for a Codex turn on a plan,
+        so it is not offered. The list is the one the listbox already holds,
+        read once for both rather than a second time for this.
+        """
+        choices: list[tuple[str, Account | None]] = [(CODEX_LOGIN_LABEL, None)]
+        choices.extend(
+            (account.name, account)
+            for account in self.accounts
+            if account.provider == PROVIDER_CHATGPT
+        )
+        return choices
+
+    def _sync_codex_account(self) -> None:
+        """Point the choice at the Account the Codex backend is saved on.
+
+        A switch that is waiting for a running turn to finish is shown as the
+        choice, because it is the one that will be saved: showing the Account
+        being left would tell somebody their choice had been undone.
+
+        The saved value is one small settings file, read here whole, the way
+        this dialog reads the rest of what it shows -- and the same file the
+        window writes from its own menu handlers -- which ADR 0001 allows a GUI
+        callback to do, so there is nothing to wait for. Read again rather than
+        remembered, because an Account may just have been added, renamed or
+        deleted in this dialog.
+        """
+        # Imported here rather than at the top: the setting belongs to the
+        # application, and these dialogs are also built without it.
+        import agent_backends
+
+        choices = self._codex_choices()
+        self.codex_account.Set([label for label, _account in choices])
+        chosen = agent_backends.codex_plan_account()
+        pending = agent_backends.pending_codex_plan_account()
+        if pending.owed:
+            chosen = pending.account
+        selection = 0
+        if chosen is not None:
+            for index, (_label, account) in enumerate(choices):
+                if account is not None and account.id == chosen.account_id:
+                    selection = index
+                    break
+        self.codex_account.SetSelection(selection)
+
+    def _say(self, text: str) -> None:
+        """Announce `text`, and mirror the same words to the status bar."""
+        if self._speak is not None:
+            self._speak(text)
+        if self._set_status is not None:
+            self._set_status(text)
+
+    def on_codex_account_changed(self, event: wx.CommandEvent) -> None:
+        """Choose which Account Codex runs on, and say which one that now is."""
+        import agent_backends
+
+        # Which Account it was before the choice, so the process it was running
+        # on can be let go of and the wait for a running turn can name it. Read
+        # first, because a choice that lands is what changes the answer.
+        previous = agent_backends.codex_plan_account()
+        choices = self._codex_choices()
+        selection = self.codex_account.GetSelection()
+        label, account = choices[selection] if 0 <= selection < len(choices) else ("", None)
+        plan = None
+        if account is not None and account.id is not None:
+            plan = agent_backends.PlanAccount(account_id=int(account.id), name=account.name)
+        # One small settings file, read and written whole and moved into place,
+        # on this thread: ADR 0001 allows a small bounded filesystem operation
+        # in a GUI callback, and the window's own menu handlers write this same
+        # file the same way. Nothing here waits on anything off this machine.
+        said = (
+            f"Codex will use the ChatGPT plan Account {label}."
+            if plan is not None
+            else CODEX_OWN_LOGIN_AGAIN
+        )
+        switch = agent_backends.switch_codex_plan_account(plan)
+        if switch.waited:
+            # A turn is running on the Account being left, so nothing has been
+            # saved yet: it finishes on that Account, which is what switching
+            # promises, and the switch happens once it has. Said, because a
+            # switch that silently waits is one nobody knows to wait for.
+            if previous is not None:
+                said += " " + CODEX_SWITCH_WAITS.format(label=previous.label)
+        elif switch.saved:
+            logger.info(
+                "Codex backend Account is now name=%s", plan.name if plan else CODEX_LOGIN_LABEL
+            )
+        else:
+            # What the choice shows goes back to what is actually saved.
+            self._sync_codex_account()
+            said = CODEX_SAVE_FAILED
+        self._say(said)
+        event.Skip()
+
     def on_add(self, event: wx.CommandEvent) -> None:
         dialog = AccountEditorDialog(self, self.db, self.credentials)
         try:
@@ -804,10 +967,18 @@ class AccountsDialog(wx.Dialog):
         try:
             if dialog.ShowModal() == wx.ID_OK:
                 self.reload(dialog.account.id)
+            else:
+                # A sign-out inside the editor happens whether or not the
+                # Account is kept, and it can take the Account Codex was set to
+                # use with it. The choice has to say what is actually saved
+                # either way rather than only when the editor was saved.
+                self._sync_codex_account()
         finally:
             dialog.Destroy()
 
     def on_delete(self, event: wx.CommandEvent) -> None:
+        import agent_backends
+
         account = self.selected()
         if not account or account.id is None:
             return
@@ -819,12 +990,17 @@ class AccountsDialog(wx.Dialog):
         )
         if answer != wx.YES:
             return
+        waited = False
         if account.provider == PROVIDER_CHATGPT:
             try:
                 session = chatgpt.load_session(self.credentials, int(account.id))
             except CredentialStoreError:
                 session = {}
             threading.Thread(target=chatgpt.revoke, args=(session,), daemon=True).start()
+            # The Account is gone, so Codex cannot run on it whatever was
+            # saved: letting it go also puts the choice back on Codex's own
+            # login, which is what the control below will then show.
+            waited = agent_backends.forget_codex_plan_account(int(account.id)).waited
         try:
             self.credentials.delete_api_key(int(account.id))
         except CredentialStoreError:
@@ -834,6 +1010,8 @@ class AccountsDialog(wx.Dialog):
         self.db.delete_account(int(account.id))
         logger.info("Deleted account name=%s provider=%s", account.name, account.provider)
         self.reload()
+        if waited:
+            self._say(CODEX_TURN_WAIT.format(label=account.name))
 
     def _run_model_action(self, success_prefix: str) -> None:
         if self.model_action_running:

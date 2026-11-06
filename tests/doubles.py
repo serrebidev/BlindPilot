@@ -131,6 +131,11 @@ def panel_stub(base=None, **overrides):
     panel._claude_generation = 0
     panel._museai_main_serial = 0
     panel._held_hermes = None
+    # The real method, so a stub starts each conversation on the Account the
+    # saved choice names rather than on whatever the previous one used.
+    panel._forget_codex_conversation_account = lambda: (
+        app.SessionPanel._forget_codex_conversation_account(panel)
+    )
 
     # ----- what it would show and say -----
     panel._earcons = Earcons()

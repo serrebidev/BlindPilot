@@ -65,6 +65,7 @@ from linux_accessibility import announce as _linux_native_announce
 
 import wx
 import wx.adv
+from accessible_ai.storage import preferences
 from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
@@ -111,6 +112,7 @@ from agent_backends import (
     SUBAGENT_FAILED,
     SUBAGENT_RUNNING,
     SUBAGENT_STOPPED,
+    UNBOUND,
     AgentWorker,
     SubagentReport,
     backend_auth_ok,
@@ -120,6 +122,7 @@ from agent_backends import (
     blindpilot_data_dir,
     migrate_macos_legacy_dirs,
     codex_model_options,
+    codex_plan_account,
     compaction_request,
     discard_freebuff_prewarm,
     end_hidden_terminal,
@@ -2009,12 +2012,14 @@ def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> boo
 
 
 def _drop_codex_server(log: Callable[[str], None]) -> None:
-    """Let go of the held Codex app-server before npm replaces its executable.
+    """Let go of every held Codex app-server before npm replaces its executable.
 
-    Windows will not overwrite an executable that is running.
+    Windows will not overwrite an executable that is running. Codex may be held
+    per ChatGPT-plan Account, so this reaches every Account's process: leaving
+    one behind fails the update exactly as one left behind used to.
     """
     log("Stopping Codex's app-server so its executable can be replaced...")
-    backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CODEX))
+    backend_pool.pool().drop_backend(BACKEND_CODEX)
 
 
 def update_backend(backend: str, log: Callable[[str], None]) -> bool:
@@ -4178,39 +4183,19 @@ def _record_setup_complete(cfg: dict) -> bool:
 
 
 def _load_config() -> dict:
-    for path in (_config_path(), _legacy_config_path()):
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-                return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            continue
-    return {}
+    return preferences.load_config((_config_path(), _legacy_config_path()))
 
 
 def _save_config(cfg: dict) -> bool:
     """Write the settings. False if they did not get written.
 
-    Callers announce what they saved, so they need to know. Written to one
-    side and moved into place, so an interruption partway through cannot
-    leave a half-written file: `_load_config` cannot parse one of those and
-    falls back to the legacy claude-reader file, or to empty.
+    Callers announce what they saved, so they need to know. The write itself is
+    `accessible_ai.storage.preferences`, shared with the Codex backend's Account
+    choice, which lives in this same file: only the keys handed in are changed,
+    so a save built from the settings as they were read cannot put back an
+    Account choice -- or anything else -- that was written in between.
     """
-    path = _config_path()
-    temporary = path.with_name(path.name + ".new")
-    try:
-        _config_dir().mkdir(parents=True, exist_ok=True)
-        with open(temporary, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh, indent=2)
-        os.replace(temporary, path)
-        return True
-    except (OSError, ValueError, TypeError):
-        logging.getLogger("blindpilot").warning("could not write the settings to %s", path)
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        return False
+    return preferences.update_config(_config_path(), cfg)
 
 
 def _save_or_announce(cfg: dict) -> bool:
@@ -9322,6 +9307,11 @@ class SessionPanel(wx.Panel):
         # drains, if the conversation it belongs to is still the one here.
         self._late_turn_waiting: Optional[int] = None
         self._session_id: Optional[str] = None
+        # The Account this tab's Codex conversation is bound to, or UNBOUND
+        # until its first turn takes one from the saved choice. A conversation
+        # stays on the Account it began on, so choosing another one affects the
+        # next conversation rather than moving the thread somebody is in.
+        self._codex_plan_account: object = UNBOUND
         self._backend = normalize_backend(self._get_backend())
         self._session_backend = self._backend
         self._museai_main_required = False
@@ -11852,6 +11842,9 @@ class SessionPanel(wx.Panel):
                 # is nothing to leave behind, and the name still applies.
                 self._session_title = ""
             self._session_id = None
+            # The next backend's conversation is a new one, and takes the
+            # Account Codex uses when it starts rather than the last one's.
+            self._forget_codex_conversation_account()
             # A held Hermes connection belongs to the conversation being left.
             self._drop_held_backends()
             self._session_backend = selected_backend
@@ -11922,6 +11915,25 @@ class SessionPanel(wx.Panel):
             extra["auto_context_tokens"] = SessionPanel._known_context(self)[0] or None
         self._launch_turn(send_text, selected_backend, extra)
 
+    def _codex_conversation_account(self) -> object:
+        """The Account this tab's Codex conversation is bound to, taking one if new.
+
+        A conversation stays on the Account it began on: choosing another one
+        in the accounts dialog affects the next conversation, not the thread
+        somebody is in the middle of. The Account is taken once, from the saved
+        choice, and remembered until this tab starts a conversation of its own
+        (see `_forget_codex_conversation_account`).
+        """
+        bound = getattr(self, "_codex_plan_account", UNBOUND)
+        if bound is UNBOUND:
+            bound = codex_plan_account()
+            self._codex_plan_account = bound
+        return bound
+
+    def _forget_codex_conversation_account(self) -> None:
+        """Let the next Codex conversation in this tab take its Account afresh."""
+        self._codex_plan_account = UNBOUND
+
     def _set_auto_route(self, note: str) -> None:
         """Say a changed Auto route after the worker's live model check."""
         if note != getattr(self, "_auto_route", ""):
@@ -11957,6 +11969,10 @@ class SessionPanel(wx.Panel):
         self._prune_subagents()
         self._subagents_outlive_turn = bool(getattr(worker_type, "subagents_outlive_turn", False))
         model, effort = SessionPanel._turn_model(self, send_text, selected_backend)
+        if selected_backend == BACKEND_CODEX:
+            # The Account this conversation began on, so its turns -- and any
+            # resume of it -- stay there however the saved choice moves.
+            extra["plan_account"] = self._codex_conversation_account()
         self._worker = worker_type(
             send_text,
             self._session_id,
@@ -12317,6 +12333,9 @@ class SessionPanel(wx.Panel):
             return
         self._museai_main_serial += 1
         self._session_id = None
+        # A new conversation takes the Account Codex uses when it starts, so a
+        # choice made since the last one reaches it.
+        self._forget_codex_conversation_account()
         self._museai_main_required = False
         self._museai_main_loading = False
         self._museai_pending_send = False
@@ -12971,6 +12990,9 @@ class SessionPanel(wx.Panel):
             # names nothing. The next message starts a fresh one, as the
             # worker has already said, rather than failing the same way again.
             self._session_id = None
+            # And a fresh one is a new conversation: it takes the Account Codex
+            # uses when it starts, not the one the lost thread was held under.
+            self._forget_codex_conversation_account()
         # The failure stays in the list as a row of its own. The status bar
         # line is overwritten by the next event, and a list that looks the
         # same after a failed turn as after a finished one tells a reader
