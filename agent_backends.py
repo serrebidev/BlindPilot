@@ -44,9 +44,10 @@ from pathlib import Path
 from typing import IO, Callable, NamedTuple, Optional, Protocol, Sequence, cast
 
 import backend_pool
+import certificates
 import diagnostics
 from accessible_ai import plan_token
-from accessible_ai.providers import chatgpt
+from accessible_ai.providers import plan_relay
 from accessible_ai.storage import preferences
 from owned_process import _WindowsJob, owned_popen
 import questions
@@ -2690,28 +2691,25 @@ def codex_question_args() -> tuple[str, ...]:
 
 # ----- Codex on a ChatGPT-plan account -----
 #
-# Codex is pointed at OpenAI's Responses endpoint for plan usage through
-# configuration overrides on its own command line, and fetches its own bearer
-# token by running this app's token-printing mode on an interval. The token is
-# therefore in neither the child's command line nor its environment. Rejected:
-# the token as an environment key, with the process restarted hourly -- that
-# exposes it to every child Codex starts, and restarting means resuming threads
-# on a clock. Overrides rather than a written configuration file, because the
-# user's own config.toml also holds their MCP servers and preferences.
+# Codex is pointed at the plan's Responses endpoint through configuration
+# overrides on its own command line, and fetches its own bearer token by
+# running this app's token-printing mode on an interval. The token is
+# therefore in neither the child's command line nor its environment. The
+# endpoint itself is reached through a loopback relay (accessible_ai.providers.
+# plan_relay) because the plan token is a subscription-sharing token, and that
+# endpoint refuses several item types Codex emits; the relay drops them.
 
 PLAN_PROVIDER_ID = "blindpilot-chatgpt"
-PLAN_BASE_URL = "https://api.openai.com/v1"
 
-# How often Codex runs the token command again. An access token lives an hour and
-# the command refreshes it only when it is within two minutes of expiry, so ten
-# minutes leaves six intervals of life: a run that fails -- another process
-# holding the store, a machine that was asleep -- is retried long before the
-# token under it expires. After the first run each one is answered from the
-# shared token cache, so it costs a process start and no exchange.
+# How often Codex runs the token command again. Each run is its own process with
+# no token in memory, so each one performs an exchange and rotates the refresh
+# token; ten minutes is how often that is worth paying, and a run that fails --
+# another process holding the store, a machine that was asleep -- is retried long
+# before the token under it expires.
 PLAN_TOKEN_REFRESH_MS = 600_000
 # Longer than the command's own bounded wait for another process's refresh (two
-# 30-second exchanges plus 30), so a shared refresh is not reported as a failing
-# token command.
+# 30-second exchanges plus 30), so a refresh that waited is not reported as a
+# failing token command.
 PLAN_TOKEN_TIMEOUT_MS = 120_000
 
 
@@ -3037,7 +3035,7 @@ def plan_token_command(account_id: int) -> tuple[str, ...]:
 
 
 def codex_plan_args(account_id: int) -> tuple[str, ...]:
-    """Arguments that put Codex on OpenAI's Responses endpoint for a plan.
+    """Arguments that put Codex on the plan's Responses endpoint through the relay.
 
     The token is not among them: Codex runs the token command beside them to
     obtain its own bearer token, and runs it again on an interval. Quoted as
@@ -3050,7 +3048,10 @@ def codex_plan_args(account_id: int) -> tuple[str, ...]:
     overrides = (
         ("model_provider", json.dumps(PLAN_PROVIDER_ID)),
         (f"{provider}.name", json.dumps("OpenAI")),
-        (f"{provider}.base_url", json.dumps(PLAN_BASE_URL)),
+        (
+            f"{provider}.base_url",
+            json.dumps(plan_relay.plan_base_url(ssl_context=certificates.certificate_context())),
+        ),
         (f"{provider}.wire_api", json.dumps("responses")),
         (f"{provider}.supports_websockets", "false"),
         # requires_openai_auth is deliberately absent: Codex's reference says
@@ -3064,44 +3065,6 @@ def codex_plan_args(account_id: int) -> tuple[str, ...]:
     for key, value in overrides:
         args += ["-c", f"{key}={value}"]
     return tuple(args)
-
-
-# ----- When the plan refuses a turn -----
-#
-# The plan request is Codex's own, so a refusal reaches this half as whatever
-# Codex printed: the OpenAI error body with its code in it, or the transport's
-# line for a refused status. The chat half already has the sentence for each of
-# those failures in `chatgpt.PLAN_ERRORS` and `chatgpt.SIGN_IN_AGAIN`, and
-# somebody with both halves open must not be told the same failure two different
-# ways. Written out again here is how the two would drift apart; so the sentences
-# are the chat half's own, and this only decides which one applies.
-
-# How a refused status reads in Codex's output, and which status it was. The
-# number alone is not enough -- an id, a token count or a line number can wear
-# one -- so each is matched in the words Codex prints it in.
-_PLAN_REFUSALS = (
-    ("status 401", 401),
-    ("401 unauthorized", 401),
-    ("status 429", 429),
-    ("429 too many requests", 429),
-)
-
-
-def plan_failure(said: str) -> str:
-    """The chat half's sentence for a plan failure Codex reported, or "".
-
-    Empty when the words are not a plan refusal this recognises, which is every
-    ordinary Codex failure: a turn that fell over for its own reasons keeps its
-    own words rather than being dressed in a sentence about a plan.
-    """
-    text = said.casefold()
-    for code in chatgpt.PLAN_ERRORS:
-        if code in text:
-            return str(chatgpt.plan_error({"code": code}))
-    for marker, status in _PLAN_REFUSALS:
-        if marker in text:
-            return str(chatgpt.plan_error({}, status))
-    return ""
 
 
 def _codex_questions(raw: object) -> tuple[questions.Question, ...]:
@@ -3703,8 +3666,8 @@ def _plan_token_or_report(account: PlanAccount) -> None:
     Codex runs this same command itself before each request, and a failure there
     reaches the person as a turn that came back with nothing said. Running it
     here makes the failure an error naming the account, before any process is
-    started. It costs one process and no exchange: the command hands the freshly
-    issued token to the chat path through the in-memory token cache.
+    started. It costs one process and its exchange; the chat path refreshes
+    again when it first asks, since nothing but the stored record is shared.
     """
     command = plan_token_command(account.account_id)
     try:
@@ -4779,14 +4742,17 @@ class CodexWorker(_TurnWorker):
         last one written, which is exactly the one still in flight. Everything
         earlier is already in the list, so the race did not lose noise, it lost
         the reason, and it lost it differently each time.
+
+        Codex's words are passed on as Codex wrote them: a ChatGPT-plan failure
+        this app can name is one its own token command failed on, and that is
+        reported where the command is run.
         """
         self._await_last_words()
         detail = "\n".join(self._stderr_lines[-10:]).strip()
         if detail:
-            return self._plan_words(detail)
+            return detail
         server = self._server
-        died = (server.read_error() if server is not None else "") or fallback
-        return self._plan_words(died)
+        return (server.read_error() if server is not None else "") or fallback
 
     def _await_last_words(self) -> None:
         """Let the final line of stderr land before reporting why Codex died.
@@ -4797,24 +4763,11 @@ class CodexWorker(_TurnWorker):
         if server is not None:
             server.await_last_words(_CODEX_LAST_WORDS_SECONDS)
 
-    def _plan_words(self, said: str) -> str:
-        """A plan's refusal in the chat half's words, or `said` unchanged.
-
-        Only a turn running on a ChatGPT-plan Account has a plan that can
-        refuse it. Codex on its own login keeps its own words: that sign-in is
-        Codex's, and `codex login` is what fixes it, so dressing its failures
-        in a sentence about a ChatGPT plan would send the person to the wrong
-        place.
-        """
-        if self._plan_account is None:
-            return said
-        return plan_failure(said) or said
-
     def _error_text(self, error: object, fallback: str) -> str:
         if isinstance(error, dict):
             message = error.get("message")
             if isinstance(message, str) and message:
-                return self._plan_words(message)
+                return message
         return fallback
 
     def _handle_server_request(self, message: dict) -> None:

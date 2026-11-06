@@ -26,7 +26,6 @@ import logging
 import os
 import secrets
 import socket
-import struct
 import threading
 import time
 import uuid
@@ -205,13 +204,11 @@ _refresh_lock = threading.Lock()
 # serialized across processes, not just across threads: two processes that both
 # read the stored refresh token and both exchange it race a rotating token, and
 # the loser's answer signs the account out. The lock file lives beside the chat
-# data and is never unlinked, so every process locks the same inode. The freshly
-# issued access token is shared through an in-memory named cache, so only one
-# process performs the exchange while the other takes the result.
+# data and is never unlinked, so every process locks the same inode. A process
+# that waited reads the record the holder saved, with its rotated refresh token,
+# and exchanges that one itself.
 
 _REFRESH_LOCK_TIMEOUT = AUTH_TIMEOUT * 2 + 30.0
-_TOKEN_CACHE_SIZE = 8192
-_TOKEN_CACHE_HEADER = struct.Struct("!dI")
 
 
 def _refresh_lock_path(account_id: int) -> Path:
@@ -270,70 +267,6 @@ def _cross_process_refresh_lock(account_id: int) -> Generator[None, None, None]:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _token_cache_name(account_id: int) -> str:
-    root = os.path.normcase(os.path.abspath(str(app_data_dir())))
-    digest = hashlib.sha256(f"{root}\0{account_id}".encode("utf-8")).hexdigest()[:20]
-    return f"bpct_{digest}"
-
-
-def _open_token_cache(account_id: int) -> Any:
-    """Open the named in-memory cache for one account, creating it if needed."""
-    try:
-        from multiprocessing.shared_memory import SharedMemory
-    except ImportError:
-        return None
-    name = _token_cache_name(account_id)
-    try:
-        try:
-            cache = SharedMemory(name=name, create=True, size=_TOKEN_CACHE_SIZE)
-        except FileExistsError:
-            cache = SharedMemory(name=name)
-    except OSError:
-        return None
-    if cache.size < _TOKEN_CACHE_HEADER.size + 1:
-        try:
-            cache.close()
-        except OSError:
-            pass
-        return None
-    return cache
-
-
-def _read_token_cache(cache: Any) -> tuple[str, float] | None:
-    if cache is None:
-        return None
-    buf = cache.buf
-    if len(buf) < _TOKEN_CACHE_HEADER.size:
-        return None
-    expires_at, length = _TOKEN_CACHE_HEADER.unpack_from(buf, 0)
-    if length == 0 or _TOKEN_CACHE_HEADER.size + length > len(buf):
-        return None
-    raw = bytes(buf[_TOKEN_CACHE_HEADER.size : _TOKEN_CACHE_HEADER.size + length])
-    try:
-        token = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    if not token or time.time() >= expires_at - REFRESH_MARGIN:
-        return None
-    return token, expires_at
-
-
-def _write_token_cache(cache: Any, token: str, expires_at: float) -> None:
-    if cache is None:
-        return
-    raw = token.encode("utf-8")
-    if _TOKEN_CACHE_HEADER.size + len(raw) > len(cache.buf):
-        return
-    _TOKEN_CACHE_HEADER.pack_into(cache.buf, 0, expires_at, len(raw))
-    cache.buf[_TOKEN_CACHE_HEADER.size : _TOKEN_CACHE_HEADER.size + len(raw)] = raw
-
-
-def _clear_token_cache(cache: Any) -> None:
-    if cache is None:
-        return
-    _TOKEN_CACHE_HEADER.pack_into(cache.buf, 0, 0.0, 0)
-
-
 def store_sign_in(credentials: CredentialStore, account_id: int, result: dict[str, Any]) -> None:
     """Keep what ``sign_in`` returned for a saved account."""
     with _refresh_lock:
@@ -344,9 +277,10 @@ def store_sign_in(credentials: CredentialStore, account_id: int, result: dict[st
 def access_token(credentials: CredentialStore, account_id: int, force: bool = False) -> str:
     """A usable access token, refreshed when it is about to expire or ``force``.
 
-    The refresh read/exchange/write is serialized across processes and the
-    issued access token is shared through an in-memory named cache, so two
-    processes asking at once perform one exchange between them.
+    The refresh read/exchange/write is serialized across processes, but the
+    issued token is not shared: a process that waited on the lock reads the
+    record the holder saved and performs its own exchange with the rotated
+    refresh token in it, so two processes asking at once perform two exchanges.
     """
     with _refresh_lock:
         cached = _access_tokens.get(account_id)
@@ -358,13 +292,7 @@ def access_token(credentials: CredentialStore, account_id: int, force: bool = Fa
                 "This account is not signed in to ChatGPT. Open Chat, Accounts, edit the account "
                 "and choose Continue with ChatGPT."
             )
-        cache = _open_token_cache(account_id)
         with _cross_process_refresh_lock(account_id):
-            if not force:
-                shared = _read_token_cache(cache)
-                if shared is not None:
-                    _access_tokens[account_id] = shared
-                    return shared[0]
             # Another process may have rotated the stored refresh token while
             # we waited for the lock; read the latest record before exchanging.
             session = load_session(credentials, account_id)
@@ -390,7 +318,6 @@ def access_token(credentials: CredentialStore, account_id: int, force: bool = Fa
                         session = {}
                     save_session(credentials, account_id, session)
                     _access_tokens.pop(account_id, None)
-                    _clear_token_cache(cache)
                     raise ChatGPTError(SIGN_IN_AGAIN, exc.code) from exc
                 raise
             token = tokens.get("access_token")
@@ -405,7 +332,6 @@ def access_token(credentials: CredentialStore, account_id: int, force: bool = Fa
                 raise ChatGPTError(PLAN_ERRORS["chatpass_v2_scope_not_authorized"])
             expires_at = time.time() + _lifetime(tokens)
             _access_tokens[account_id] = (token, expires_at)
-            _write_token_cache(cache, token, expires_at)
             return token
 
 

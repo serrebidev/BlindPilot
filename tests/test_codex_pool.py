@@ -16,7 +16,6 @@ import pytest
 import agent_backends
 import process_utils
 import backend_pool
-from accessible_ai.providers import chatgpt
 from pool_contract import check_pool_contract
 
 
@@ -2258,7 +2257,7 @@ def _auth_command(overrides: dict) -> list[str]:
     return [overrides[f"{provider}.auth.command"], *overrides[f"{provider}.auth.args"]]
 
 
-def test_a_plan_launch_points_codex_at_openai_and_fetches_its_token_by_command(monkeypatch):
+def test_a_plan_launch_points_codex_at_the_relay_and_fetches_its_token_by_command(monkeypatch):
     captured = _capture_launch(monkeypatch)
 
     agent_backends._start_codex_server("codex", plan_account=_plan_account())
@@ -2266,7 +2265,9 @@ def test_a_plan_launch_points_codex_at_openai_and_fetches_its_token_by_command(m
     provider = "model_providers.blindpilot-chatgpt"
     overrides = _overrides(captured.server["args"])
     assert overrides["model_provider"] == "blindpilot-chatgpt"
-    assert overrides[f"{provider}.base_url"] == "https://api.openai.com/v1"
+    base_url = overrides[f"{provider}.base_url"]
+    assert base_url.startswith("http://127.0.0.1:"), base_url
+    assert base_url.endswith("/v1"), base_url
     assert overrides[f"{provider}.wire_api"] == "responses"
     assert f"{provider}.requires_openai_auth" not in overrides, (
         "Codex refuses auth combined with requires_openai_auth; its default is false already"
@@ -2627,8 +2628,9 @@ def test_a_turn_running_on_the_account_is_never_dropped_under_it(monkeypatch, tm
 #
 # The plan request is Codex's own, so a refusal reaches this half as Codex's
 # words: the OpenAI error body, its code included, or the transport's line for a
-# refused status. The chat half already has a sentence for each of those, and
-# somebody with both halves open must not be told the same failure two ways.
+# refused status. None of that is read as evidence of a plan failure: another
+# program's words are passed on as it wrote them. A failure this app can name is
+# one its own token command reported, and that is reported where it is run.
 
 
 class _RefusesOnPlan(_FakeProc):
@@ -2682,25 +2684,24 @@ USAGE_LIMIT_SAID = (
 )
 
 
-def test_a_usage_limit_on_the_plan_is_said_in_the_chat_halves_words(monkeypatch, tmp_path):
+def test_a_usage_limit_on_the_plan_is_said_in_codex_s_own_words(monkeypatch, tmp_path):
     _choose(tmp_path, 7, "Work plan")
     proc = _RefusesOnPlan(USAGE_LIMIT_SAID)
 
     _worker, _completed, failures, _activity = _plan_turn(proc, monkeypatch)
 
-    assert failures == [chatgpt.PLAN_ERRORS["subscription_sharing_usage_limit_exceeded"]], failures
-    assert chatgpt.USAGE_URL in failures[0], "the way to review usage was not given"
+    assert failures == [USAGE_LIMIT_SAID], failures
 
 
-def test_a_plan_sign_in_that_has_ended_asks_for_a_new_one(monkeypatch, tmp_path):
-    """A dead credential must not read as a generic failure with no way out."""
+def test_a_plan_sign_in_that_has_ended_is_left_to_the_token_command(monkeypatch, tmp_path):
+    """A bare refused status is not read as a dead sign-in; the token command says so."""
     _choose(tmp_path, 7, "Work plan")
-    proc = _RefusesOnPlan("unexpected status 401 Unauthorized: no token")
+    said = "unexpected status 401 Unauthorized: no token"
+    proc = _RefusesOnPlan(said)
 
     _worker, _completed, failures, _activity = _plan_turn(proc, monkeypatch)
 
-    assert failures == [str(chatgpt.plan_error({}, 401))], failures
-    assert chatgpt.SIGN_IN_AGAIN in failures[0], failures
+    assert failures == [said], failures
 
 
 def test_a_plan_account_with_no_token_is_let_go_of_for_the_next_conversation(monkeypatch, tmp_path):

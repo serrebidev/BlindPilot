@@ -3,8 +3,9 @@
 These tests run the real entry point as a subprocess against a temporary
 credential store and a local fake token endpoint, so they only see what a
 caller sees: stdout, stderr, and the exit code. The two-process test proves
-that a rotating refresh token is exchanged once between two processes and that
-both receive the same usable access token.
+that a rotating refresh token reaches both processes: each one exchanges again
+rather than sharing an issued token, and the stored record is never left
+half-written.
 """
 
 from __future__ import annotations
@@ -96,10 +97,13 @@ def _subprocess_kwargs() -> dict:
     return {}
 
 
+def _home(tmp_path: Path) -> Path:
+    return tmp_path / "home"
+
+
 def _env(tmp_path: Path, server: TokenServer) -> dict[str, str]:
     env = os.environ.copy()
-    env["BLINDPILOT_CONFIG_DIR"] = str(tmp_path / "config")
-    env["BLINDPILOT_CREDENTIALS_DIR"] = str(tmp_path / "credentials")
+    env["BLINDPILOT_HOME"] = str(_home(tmp_path))
     env["BLINDPILOT_CHATGPT_TOKEN_URL"] = server.url()
     return env
 
@@ -119,6 +123,11 @@ def _write_session(credentials_dir: Path, account_id: int) -> None:
     )
 
 
+def _stored_record(tmp_path: Path, account_id: int) -> dict:
+    store = FileCredentialStore(_home(tmp_path) / "credentials")
+    return json.loads(store.get_api_key(account_id))
+
+
 def _command(account_id: int) -> list[str]:
     return [sys.executable, str(BLIND_PILOT), FLAG, str(account_id)]
 
@@ -127,7 +136,7 @@ def test_the_plan_token_mode_prints_a_refreshed_token_to_stdout(tmp_path):
     server = TokenServer()
     try:
         account_id = 7
-        _write_session(tmp_path / "credentials", account_id)
+        _write_session(_home(tmp_path) / "credentials", account_id)
         result = subprocess.run(
             _command(account_id),
             cwd=str(REPO_ROOT),
@@ -141,18 +150,18 @@ def test_the_plan_token_mode_prints_a_refreshed_token_to_stdout(tmp_path):
         assert result.returncode == 0
         assert result.stdout == "access-1\n"
         assert server.state["count"] == 1
-        stored = json.loads(FileCredentialStore(tmp_path / "credentials").get_api_key(account_id))
+        stored = _stored_record(tmp_path, account_id)
         assert stored["refresh_token"] == "refresh-1"
         assert "access_token" not in stored
     finally:
         server.stop()
 
 
-def test_two_processes_refresh_once_and_both_receive_the_same_token(tmp_path):
+def test_two_processes_each_get_a_usable_token_and_never_a_half_written_record(tmp_path):
     server = TokenServer(delay=1.0)
     try:
         account_id = 11
-        _write_session(tmp_path / "credentials", account_id)
+        _write_session(_home(tmp_path) / "credentials", account_id)
         env = _env(tmp_path, server)
         command = _command(account_id)
         processes = [
@@ -169,13 +178,19 @@ def test_two_processes_refresh_once_and_both_receive_the_same_token(tmp_path):
         ]
 
         results = []
+        records = []
         for process in processes:
             stdout, stderr = process.communicate(timeout=60)
             results.append((process.returncode, stdout, stderr))
+            records.append(_stored_record(tmp_path, account_id))
 
         assert [code for code, _stdout, _stderr in results] == [0, 0]
-        assert {stdout for _code, stdout, _stderr in results} == {"access-1\n"}
-        assert server.state["count"] == 1
+        tokens = [stdout.strip() for _code, stdout, _stderr in results]
+        assert all(token.startswith("access-") for token in tokens), tokens
+        assert server.state["count"] == 2, "each process must exchange the rotated token again"
+        # Read after each process exited: a half-written record would not parse.
+        assert all(record["refresh_token"] for record in records), records
+        assert records[-1]["refresh_token"] == "refresh-2", "the last exchange was not kept"
     finally:
         server.stop()
 
@@ -205,7 +220,7 @@ def test_the_access_token_is_never_written_to_disk_or_passed_on_the_command_line
     server = TokenServer()
     try:
         account_id = 9
-        _write_session(tmp_path / "credentials", account_id)
+        _write_session(_home(tmp_path) / "credentials", account_id)
         result = subprocess.run(
             _command(account_id),
             cwd=str(REPO_ROOT),
@@ -220,14 +235,13 @@ def test_the_access_token_is_never_written_to_disk_or_passed_on_the_command_line
         token = result.stdout.strip()
         assert token == "access-1"
 
-        for root in (tmp_path / "config", tmp_path / "credentials"):
-            if not root.is_dir():
-                continue
-            for path in root.rglob("*"):
+        home = _home(tmp_path)
+        if home.is_dir():
+            for path in home.rglob("*"):
                 if path.is_file():
                     assert token not in path.read_text(encoding="utf-8", errors="ignore")
 
-        stored = json.loads(FileCredentialStore(tmp_path / "credentials").get_api_key(account_id))
+        stored = _stored_record(tmp_path, account_id)
         assert "access_token" not in stored
         assert stored["refresh_token"] == "refresh-1"
     finally:

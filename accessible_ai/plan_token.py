@@ -10,18 +10,18 @@ command line and is never written to disk.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from accessible_ai.providers import chatgpt
 from accessible_ai.storage.credentials import CredentialStore, FileCredentialStore
+from accessible_ai.storage.paths import app_data_dir
 
 FLAG = "--print-plan-token"
 
 
 def _credential_store() -> CredentialStore:
-    override = os.environ.get("BLINDPILOT_CREDENTIALS_DIR")
-    if override:
-        return FileCredentialStore(Path(override))
+    # A test home keeps its records in files, so a test never reads the keychain.
+    if os.environ.get("BLINDPILOT_HOME"):
+        return FileCredentialStore(app_data_dir() / "credentials")
     return CredentialStore()
 
 
