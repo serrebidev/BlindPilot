@@ -2731,13 +2731,35 @@ class PlanAccount:
         return self.name or f"account {self.account_id}"
 
 
+class _Unbound:
+    """No Account taken for this conversation yet: read the saved choice.
+
+    ``None`` is a real answer -- Codex's own login -- so "nothing chosen yet"
+    cannot be spelled as ``None`` as well. A tab tells a turn which Account its
+    conversation is bound to; one that is not bound yet is told this, and the
+    turn reads the saved choice once and keeps it for the rest of the turn.
+    """
+
+    def __repr__(self) -> str:
+        return "UNBOUND"
+
+
+UNBOUND = _Unbound()
+
+
 # ----- Which Account the Codex backend uses -----
 #
 # Chosen once for the backend, saved beside the window's own preferences, and
-# inherited by every tab: nothing here is per conversation. The value is either
-# a specific ChatGPT-plan Account or nothing at all, and nothing at all means
-# Codex's own login -- the behaviour every existing setup has, so an install
-# that has chosen nothing runs exactly as it did.
+# inherited by new conversations: nothing here is per conversation. The value is
+# either a specific ChatGPT-plan Account or nothing at all, and nothing at all
+# means Codex's own login -- the behaviour every existing setup has, so an
+# install that has chosen nothing runs exactly as it did.
+#
+# A conversation that has begun keeps the Account it began on, so this is read
+# once per conversation rather than once per turn: a switch affects the next
+# conversation, not the thread somebody is in the middle of. A tab hands its
+# bound Account to each of its turns (see `CodexWorker`), and only a turn told
+# `UNBOUND` reads this at all.
 #
 # Read on the thread about to launch a process, never on the window's: it is a
 # small file, but it is a file. Kept in this module rather than with the other
@@ -2773,17 +2795,16 @@ def codex_plan_account() -> Optional[PlanAccount]:
 def save_codex_plan_account(account: Optional[PlanAccount]) -> bool:
     """Remember which Account the Codex backend uses. False if it was not saved.
 
-    The rest of the settings are read back and written with it, because one
-    file holds both and saving a choice must not cost somebody their
-    preferences. Off the window's thread when it is called from there.
+    Only this key changes: the same file holds the window's preferences, and
+    the write is `preferences.update_config`, which reads and writes the file
+    under one lock -- the same save path the window uses -- so a choice saved
+    here cannot put back a preference saved a moment earlier, and a
+    preference saved by the window cannot cost somebody their choice.
     """
-    path = _settings_file()
-    cfg = preferences.load_config((path,))
-    if account is None:
-        cfg.pop(CODEX_PLAN_ACCOUNT, None)
-    else:
-        cfg[CODEX_PLAN_ACCOUNT] = {"account_id": int(account.account_id), "name": account.name}
-    return preferences.save_config(path, cfg)
+    value = (
+        None if account is None else {"account_id": int(account.account_id), "name": account.name}
+    )
+    return preferences.update_config(_settings_file(), {CODEX_PLAN_ACCOUNT: value})
 
 
 def codex_pool_key(account: Optional[PlanAccount] = None) -> tuple:
@@ -2847,13 +2868,125 @@ def drop_pending_codex_processes() -> None:
     gap would stop the very process the next turn has just been handed. Not
     getting it means a turn is being handed one right now: the keys stay owed,
     and the next turn to finish asks again.
+
+    A choice of Account that was waiting for a turn is applied here too, for
+    the same reason and at the same moment: the turn it was waiting for has
+    just finished.
     """
-    if not _CODEX_START_LOCK.acquire(blocking=False):
+    if _CODEX_START_LOCK.acquire(blocking=False):
+        try:
+            backend_pool.pool().drop_pending()
+        finally:
+            _CODEX_START_LOCK.release()
+    _apply_pending_plan_choice()
+
+
+# ----- Choosing another Account while a turn is running -----
+#
+# A turn already running finishes on the Account it started with, so the switch
+# cannot take effect while it runs: the choice is made, said, and kept here
+# until the turn that blocked it hands its process back (see
+# `drop_pending_codex_processes`). Until then the saved choice -- and so the
+# Account every new conversation is bound to -- is still the one being left.
+
+_PENDING_CHOICE_LOCK = threading.Lock()
+_pending_choice: Optional[PlanAccount] = None
+_pending_choice_owed = False
+
+
+class AccountSwitch(NamedTuple):
+    """What choosing another Account for Codex did, in terms the caller says.
+
+    ``saved``: the choice in the settings file is now the one asked for.
+    ``waited``: a turn was running on the Account being left, so it is not --
+    the switch happens when that turn finishes, and somebody has to be told so.
+    """
+
+    saved: bool = False
+    waited: bool = False
+
+
+class PendingSwitch(NamedTuple):
+    """A switch waiting for a turn, if there is one, and the Account it names."""
+
+    owed: bool = False
+    account: Optional[PlanAccount] = None
+
+
+def switch_codex_plan_account(account: Optional[PlanAccount]) -> AccountSwitch:
+    """Choose the Account the Codex backend uses, now or once its turn finishes.
+
+    Nothing is running: the choice is saved and the Account being left has its
+    process dropped, so the next conversation starts on the new Account.
+
+    A turn is running on the Account being left: it finishes on that Account,
+    which is what switching promises, so the choice is kept rather than saved
+    and takes effect when the turn hands its process back. The caller is told
+    it is waiting so it can say so; a switch that silently waits is one nobody
+    knows to wait for.
+
+    The start lock is the turn's own, so this answers without queueing behind a
+    turn that is launching a process (see `drop_codex_plan_account`).
+    """
+    global _pending_choice, _pending_choice_owed
+
+    previous = codex_plan_account()
+    same = (
+        account is not None and previous is not None and account.account_id == previous.account_id
+    )
+    if previous is None or same:
+        # Nothing is being left -- Codex's own login either way, or the same
+        # Account under a new name -- so there is no process to wait for.
+        return AccountSwitch(save_codex_plan_account(account), waited=False)
+    if not drop_codex_plan_account(previous.account_id):
+        return AccountSwitch(save_codex_plan_account(account), waited=False)
+    with _PENDING_CHOICE_LOCK:
+        _pending_choice = account
+        _pending_choice_owed = True
+    return AccountSwitch(saved=False, waited=True)
+
+
+def pending_codex_plan_account() -> PendingSwitch:
+    """The switch waiting for a turn to finish, if one is waiting."""
+    with _PENDING_CHOICE_LOCK:
+        return PendingSwitch(_pending_choice_owed, _pending_choice)
+
+
+def _forget_pending_plan_choice(account_id: int) -> None:
+    """Drop a switch that names an Account which is no longer usable."""
+    global _pending_choice, _pending_choice_owed
+
+    with _PENDING_CHOICE_LOCK:
+        account = _pending_choice
+        if account is not None and account.account_id == int(account_id):
+            _pending_choice = None
+            _pending_choice_owed = False
+
+
+def _apply_pending_plan_choice() -> None:
+    """Save the choice that was waiting for a turn, if that turn has finished.
+
+    Asked where a turn hands its process back. A process another tab is still
+    speaking through is left where it is, and the choice stays owed: the wait
+    is for all of the turns running on the Account being left, not for
+    whichever of them finishes first. A write the file refuses also leaves it
+    owed, so the next turn to finish asks again rather than the choice being
+    lost in silence.
+    """
+    global _pending_choice, _pending_choice_owed
+
+    with _PENDING_CHOICE_LOCK:
+        if not _pending_choice_owed:
+            return
+        choice = _pending_choice
+    previous = codex_plan_account()
+    if previous is not None and backend_pool.pool().busy(codex_pool_key(previous)):
         return
-    try:
-        backend_pool.pool().drop_pending()
-    finally:
-        _CODEX_START_LOCK.release()
+    if not save_codex_plan_account(choice):
+        return
+    with _PENDING_CHOICE_LOCK:
+        _pending_choice = None
+        _pending_choice_owed = False
 
 
 def forget_codex_plan_account(account_id: int) -> AccountDrop:
@@ -2866,12 +2999,15 @@ def forget_codex_plan_account(account_id: int) -> AccountDrop:
     what Codex will use. Everything stays stored but the choice itself, so the
     control that offers it and the file it is saved in agree.
 
-    The drop is the one `drop_codex_plan_account` makes, with the same wait.
+    The drop is the one `drop_codex_plan_account` makes, with the same wait. A
+    switch still waiting for a turn to finish is dropped if it names this
+    Account, because an Account nobody can run on must not be saved later.
     """
     chosen = codex_plan_account()
     cleared = chosen is not None and chosen.account_id == int(account_id)
     if cleared:
         save_codex_plan_account(None)
+    _forget_pending_plan_choice(int(account_id))
     return AccountDrop(drop_codex_plan_account(int(account_id)), cleared)
 
 
@@ -3685,6 +3821,7 @@ class _TurnWorker(threading.Thread):
         on_question: Optional[questions.AskQuestions] = None,
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         on_subagent: Optional[SubagentReport] = None,
+        plan_account: object = UNBOUND,
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -3709,6 +3846,10 @@ class _TurnWorker(threading.Thread):
         self._on_question = on_question
         self._on_permission = on_permission
         self._on_subagent = on_subagent or ignore_subagents
+        # The Account the turn's conversation is bound to, or `UNBOUND` to take
+        # the saved choice. Only Codex reads this; the rest never see one. It
+        # is `object` because `None` is itself a binding -- Codex's own login.
+        self._plan_account = plan_account
         self._cancelled = False
         # Set once the turn's ending has been reported, whichever way it
         # ended. The first account of a failure is the one that can be acted
@@ -3819,10 +3960,10 @@ class CodexWorker(_TurnWorker):
         # changed while the turn is running cannot make the turn give up
         # somebody else's process.
         self._pool_key: Optional[tuple] = None
-        # The Account the process was started on, or None for Codex's own
-        # login. What decides whether a refusal is a plan's, and so whether it
-        # is reported in the chat half's words.
-        self._plan_account: Optional[PlanAccount] = None
+        # `_plan_account` -- the Account this turn runs on, or None for Codex's
+        # own login -- is the base class's, given by the tab that owns the
+        # conversation. What decides whether a refusal is a plan's, and so
+        # whether it is reported in the chat half's words.
         # Where this turn's stderr begins in a process older than the turn.
         self._stderr_mark = 0
         # This turn's queue, read by it alone. Unbounded, because a turn's own
@@ -4078,17 +4219,27 @@ class CodexWorker(_TurnWorker):
         their first Codex message together cannot each launch a server, with
         the second one kept displacing and stopping the first mid-turn.
 
-        Which process this is depends on the Account the backend is set to use:
-        the tabs on one Account share its process, and a tab on another Account
-        is given -- or starts -- that Account's own. A conversation resumed from
-        history comes through here too, so it lands on the Account its
-        conversation was held under rather than on whichever tab resumed it.
+        Which process this is depends on the Account the conversation is bound
+        to: the tabs on one Account share its process, and a tab on another
+        Account is given -- or starts -- that Account's own. A conversation
+        resumed from history comes through here too, so it lands on the Account
+        its conversation was held under rather than on whichever tab resumed
+        it.
+
+        The Account is the tab's answer, taken when the conversation began, and
+        only a turn told `UNBOUND` reads the saved choice -- once, and then it
+        is this turn's too. So choosing another Account cannot move a
+        conversation that has already started, and the rest of a running turn
+        cannot be sent somewhere else under it.
         """
-        account = codex_plan_account()
+        account = self._plan_account
+        if account is UNBOUND:
+            account = codex_plan_account()
+        account = cast(Optional[PlanAccount], account)
+        self._plan_account = account
         key = codex_pool_key(account)
         shared = backend_pool.pool()
         with _CODEX_START_LOCK:
-            self._plan_account = account
             held = shared.take(key)
             # A process started for this turn has said nothing that is not
             # this turn's, so the mark stays where it began.

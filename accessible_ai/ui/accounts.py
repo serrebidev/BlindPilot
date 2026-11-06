@@ -57,6 +57,13 @@ CODEX_LOGIN_LABEL = "Codex's own login"
 # the sign-in it started with, which is what switching promises -- so the wait
 # is said rather than left to be inferred from a process that is still there.
 CODEX_TURN_WAIT = "The Codex turn running on {label} has to finish before its process is closed."
+# Said when a choice of Account is made while a turn is running. The choice is
+# kept rather than saved, because the running turn finishes on the Account it
+# started with: it is the switch itself that waits, not only the closing of the
+# process, so that is what the sentence has to say.
+CODEX_SWITCH_WAITS = (
+    "The Codex turn running on {label} has to finish first, and then the switch happens."
+)
 # What the choice says when it has gone back to Codex's own login because the
 # Account it named can no longer pay for a turn.
 CODEX_OWN_LOGIN_AGAIN = "Codex will use its own login."
@@ -866,6 +873,10 @@ class AccountsDialog(wx.Dialog):
     def _sync_codex_account(self) -> None:
         """Point the choice at the Account the Codex backend is saved on.
 
+        A switch that is waiting for a running turn to finish is shown as the
+        choice, because it is the one that will be saved: showing the Account
+        being left would tell somebody their choice had been undone.
+
         The saved value is one small settings file, read here whole, the way
         this dialog reads the rest of what it shows -- and the same file the
         window writes from its own menu handlers -- which ADR 0001 allows a GUI
@@ -880,6 +891,9 @@ class AccountsDialog(wx.Dialog):
         choices = self._codex_choices()
         self.codex_account.Set([label for label, _account in choices])
         chosen = agent_backends.codex_plan_account()
+        pending = agent_backends.pending_codex_plan_account()
+        if pending.owed:
+            chosen = pending.account
         selection = 0
         if chosen is not None:
             for index, (_label, account) in enumerate(choices):
@@ -896,12 +910,12 @@ class AccountsDialog(wx.Dialog):
             self._set_status(text)
 
     def on_codex_account_changed(self, event: wx.CommandEvent) -> None:
-        """Save which Account Codex runs on, and say which one that now is."""
+        """Choose which Account Codex runs on, and say which one that now is."""
         import agent_backends
 
-        # Which Account it was before the save, so the Held process it was
-        # running on can be let go of. Read first, because the save below is
-        # what changes the answer.
+        # Which Account it was before the choice, so the process it was running
+        # on can be let go of and the wait for a running turn can name it. Read
+        # first, because a choice that lands is what changes the answer.
         previous = agent_backends.codex_plan_account()
         choices = self._codex_choices()
         selection = self.codex_account.GetSelection()
@@ -913,22 +927,23 @@ class AccountsDialog(wx.Dialog):
         # on this thread: ADR 0001 allows a small bounded filesystem operation
         # in a GUI callback, and the window's own menu handlers write this same
         # file the same way. Nothing here waits on anything off this machine.
-        if agent_backends.save_codex_plan_account(plan):
-            said = (
-                f"Codex will use the ChatGPT plan Account {label}."
-                if plan is not None
-                else CODEX_OWN_LOGIN_AGAIN
-            )
+        said = (
+            f"Codex will use the ChatGPT plan Account {label}."
+            if plan is not None
+            else CODEX_OWN_LOGIN_AGAIN
+        )
+        switch = agent_backends.switch_codex_plan_account(plan)
+        if switch.waited:
+            # A turn is running on the Account being left, so nothing has been
+            # saved yet: it finishes on that Account, which is what switching
+            # promises, and the switch happens once it has. Said, because a
+            # switch that silently waits is one nobody knows to wait for.
+            if previous is not None:
+                said += " " + CODEX_SWITCH_WAITS.format(label=previous.label)
+        elif switch.saved:
             logger.info(
                 "Codex backend Account is now name=%s", plan.name if plan else CODEX_LOGIN_LABEL
             )
-            if previous is not None and (plan is None or plan.account_id != previous.account_id):
-                # The process the old Account was running on goes: nothing may
-                # be sent on an Account that is no longer chosen. A turn already
-                # running through it finishes first, and that is said.
-                drop = agent_backends.forget_codex_plan_account(previous.account_id)
-                if drop.waited:
-                    said += " " + CODEX_TURN_WAIT.format(label=previous.label)
         else:
             # What the choice shows goes back to what is actually saved.
             self._sync_codex_account()

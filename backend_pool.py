@@ -227,6 +227,11 @@ class BackendPool:
             weakref.WeakKeyDictionary()
         )
         self._stopping: set[threading.Thread] = set()
+        # Processes taken out of the registry whose stopping worker has not
+        # been and gone yet. `drop_all` and the reaper stop anything left here
+        # from their own thread, so a drop that could not get a worker is still
+        # stopped -- just never on the caller's thread. See `drop_async`.
+        self._unstopped: list[HeldProcess] = []
         # Keys whose process was let go of while a turn was still speaking
         # through it, and whose drop is owed to the turn that finishes last.
         # See `drop_when_idle`.
@@ -312,33 +317,62 @@ class BackendPool:
         if held is not None:
             held.stop()
 
+    def _stop_on_a_worker(self, held: HeldProcess) -> None:
+        """Stop one process on a thread of its own, and say it is out of hand."""
+        try:
+            held.stop()
+        finally:
+            with self._lock:
+                self._stopping.discard(threading.current_thread())
+                if held in self._unstopped:
+                    self._unstopped.remove(held)
+
     def drop_async(self, key: tuple) -> None:
-        """Forget this key now and stop off-thread unless shutting down."""
+        """Forget this key now and stop it on a worker. Never on the caller.
+
+        A drop is reachable from a window callback -- signing out of an Account
+        is one, and the close handler's teardown reaches the rest -- and ADR
+        0001 does not allow stopping a process there, shutting down or not. So
+        the stop is always handed to a worker thread, and `drop_all` is what
+        waits for them.
+
+        The process is remembered until that worker has stopped it, so a sweep
+        -- the shutdown one, or the reaper past it -- can stop anything the
+        workers never got to. The process is still stopped; it is just never
+        stopped on the thread that asked.
+        """
         with self._lock:
             slot = self._slot(key)
             held = slot.pop(_filed_as(key), None) if slot is not None else None
             if held is None:
                 return
-            synchronous = self._closing
-            if not synchronous:
+            self._unstopped.append(held)
+            worker = threading.Thread(
+                target=self._stop_on_a_worker,
+                args=(held,),
+                name="backend-pool-stop",
+                daemon=True,
+            )
+            self._stopping.add(worker)
+            try:
+                worker.start()
+            except Exception:
+                # No worker could be started. It stays on `_unstopped`, which
+                # the shutdown sweep and the reaper both stop from their own
+                # thread, so the process is still stopped by somebody.
+                self._stopping.discard(worker)
 
-                def stop() -> None:
-                    try:
-                        held.stop()
-                    finally:
-                        with self._lock:
-                            self._stopping.discard(threading.current_thread())
+    def busy(self, key: tuple) -> bool:
+        """Whether a turn is speaking through this key's process right now.
 
-                worker = threading.Thread(target=stop, name="backend-pool-stop", daemon=True)
-                self._stopping.add(worker)
-                try:
-                    worker.start()
-                except Exception:
-                    self._stopping.remove(worker)
-                    synchronous = True
-        if synchronous:
-            # A failed spawn or a drop after shutdown must still stop the process.
-            held.stop()
+        Asked with no lock held, the way `reap` and `drop_pending` ask: the
+        answer comes from the backend's own state, and holding the registry
+        lock across a call into a backend is how a lock order gets inverted.
+        """
+        with self._lock:
+            slot = self._slot(key)
+            held = slot.get(_filed_as(key)) if slot is not None else None
+        return held is not None and held.busy()
 
     def drop_when_idle(self, key: tuple) -> bool:
         """Drop this key's process now, or once the turn running on it ends.
@@ -417,7 +451,12 @@ class BackendPool:
             held.stop()
 
     def drop_all(self) -> None:
-        """Stop everything, at quit. An update drops only the key it replaces."""
+        """Stop everything, at quit. An update drops only the key it replaces.
+
+        This runs on the shutdown worker or at exit, never on a window
+        callback, so it is the one place that may stop a process itself rather
+        than hand it to a worker of its own.
+        """
         with self._lock:
             self._closing = True
             self._waited_for.clear()
@@ -437,6 +476,21 @@ class BackendPool:
                 break
             for worker in stopping:
                 worker.join()
+        self._stop_strays()
+
+    def _stop_strays(self) -> None:
+        """Stop anything a drop handed on that no worker has stopped yet.
+
+        For a stop that could not get a thread of its own, and for one a worker
+        was still starting when the sweep looked for work. Only ever called from
+        this pool's own threads -- the shutdown worker, the reaper, or exit --
+        because it stops the process where it stands.
+        """
+        with self._lock:
+            left = list(self._unstopped)
+            self._unstopped.clear()
+        for held in left:
+            held.stop()
 
     def held_count(self) -> int:
         with self._lock:
@@ -467,6 +521,9 @@ class BackendPool:
         for key, held in expired:
             held.stop()
             self._announce(key[0], REAP_IDLE)
+        # A drop whose stopping worker could not be started is still a process
+        # to stop. This sweep runs on a thread of its own, so it may.
+        self._stop_strays()
         return [key for key, _held in expired]
 
     def _idle(self, now: float, idle_limit: float) -> list[tuple[tuple, HeldProcess]]:

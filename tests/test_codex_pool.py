@@ -181,13 +181,19 @@ def test_what_a_finished_turn_says_on_its_way_out_is_not_kept_for_the_next_one()
     assert second.empty(), "the next turn was handed the last turn's leftovers"
 
 
-def _bare_worker(session_id=None, prompt="hello"):
-    """A worker with none of its callbacks doing anything, for unit work."""
+def _bare_worker(session_id=None, prompt="hello", plan_account=agent_backends.UNBOUND):
+    """A worker with none of its callbacks doing anything, for unit work.
+
+    ``plan_account`` is the Account the tab that owns the conversation hands
+    its turn. Left alone it is `UNBOUND`, and the turn takes the saved choice
+    the way a conversation's first turn does.
+    """
     return agent_backends.CodexWorker(
         prompt,
         session_id,
         ".",
         "default",
+        plan_account=plan_account,
         on_session=lambda _s: None,
         on_started=lambda: None,
         on_activity=lambda _k, _v: None,
@@ -2445,20 +2451,48 @@ def test_two_tabs_on_one_account_share_its_process(monkeypatch, tmp_path):
 
 def test_a_conversation_resumed_from_history_resumes_on_its_account(monkeypatch, tmp_path):
     """The conversation was held under that Account, so resuming it uses the
-    process that has its thread rather than starting one on Codex's own login."""
+    process that has its thread -- after the choice has moved on, which is what
+    makes a switch a change for new conversations and not for this one."""
     _choose(tmp_path, 7, "Work plan")
     work = agent_backends.CodexServer(_FakeProc())
     backend_pool.pool().keep(
         backend_pool.pool_key(agent_backends.BACKEND_CODEX, account=7),
         backend_pool.HeldProcess(work, agent_backends.codex_adapter()),
     )
+    # Somebody chooses another Account for the backend while this conversation
+    # is between turns. Its thread is still on Account 7's process.
+    _choose(tmp_path, 9, "Personal plan")
     launched = _launch_on_each_account(monkeypatch, [_FakeProc()])
 
-    resumed = _bare_worker(session_id="saved-thread")
+    resumed = _bare_worker(
+        session_id="saved-thread", plan_account=agent_backends.PlanAccount(7, "Work plan")
+    )
     assert resumed._borrow_server() is not None
 
     assert launched == [], "resuming started a process instead of using its Account's"
     assert resumed._server is work
+    assert _held_for(7) is work
+    assert _held_for(9) is None, "the resumed conversation followed the new choice"
+
+
+def test_a_switch_does_not_move_a_conversation_that_has_already_started(monkeypatch, tmp_path):
+    """Choosing another Account affects new conversations. A tab in the middle
+    of one keeps handing its turns the Account the conversation began on."""
+    _choose(tmp_path, 7, "Work plan")
+    launched = _launch_on_each_account(monkeypatch, [_FakeProc()])
+    began_on = agent_backends.PlanAccount(7, "Work plan")
+    first = _bare_worker(plan_account=began_on)
+    assert first._borrow_server() is not None
+    first._release()  # the turn ends; the process stays held for the tab
+
+    _choose(tmp_path, 9, "Personal plan")
+    second = _bare_worker(plan_account=began_on)
+    assert second._borrow_server() is not None
+
+    assert len(launched) == 1, "the next turn of a started conversation moved to the new Account"
+    assert second._server is first._server
+    assert _held_for(7) is second._server
+    assert _held_for(9) is None
 
 
 def test_another_account_never_takes_this_accounts_process(monkeypatch, tmp_path):

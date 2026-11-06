@@ -817,7 +817,6 @@ def test_switching_accounts_mid_turn_says_the_running_turn_must_finish(frame, tm
     import wx
 
     import agent_backends
-    import backend_pool
     from accessible_ai.storage.database import Database
 
     db = Database(tmp_path / "chat.sqlite3")
@@ -832,16 +831,26 @@ def test_switching_accounts_mid_turn_says_the_running_turn_must_finish(frame, tm
         dialog.codex_account.SetSelection(_codex_items(dialog).index("Personal"))
         dialog.on_codex_account_changed(wx.CommandEvent())
 
-        # The choice is saved at once, and said with the wait it comes with.
-        assert agent_backends.codex_plan_account().name == "Personal"
+        # The switch is not made while the turn runs: that turn finishes on the
+        # Account it began on, so the saved choice is still the one being left.
+        assert agent_backends.codex_plan_account().name == "Work", (
+            "the switch was saved while a turn was still running on the old Account"
+        )
+        # Said once, with the wait it comes with, and shown on the control as
+        # the choice that is going to happen.
         assert len(spoken) == 1 and spoken == mirrored
         assert "Personal" in spoken[0] and "has to finish" in spoken[0], spoken
+        assert dialog.codex_account.GetStringSelection() == "Personal"
         assert not work.closed, "the process was closed underneath a running turn"
 
-        # And the drop happens once that turn is over, and not before. The turn
-        # hands its process back the way a finished one does.
+        # And the switch, with the drop, happens once that turn is over: a
+        # finished turn asks for the work a wait was leaving.
         work.borrowers = 0
-        backend_pool.pool().drop_pending()
+        agent_backends.drop_pending_codex_processes()
+
+        assert agent_backends.codex_plan_account().name == "Personal", (
+            "the switch never happened after the running turn finished"
+        )
         _soon(lambda: work.closed, "the drop never landed after the turn had finished")
     finally:
         dialog.Destroy()

@@ -218,7 +218,13 @@ def test_drop_all_waits_for_a_previous_async_drop():
     assert finished.is_set()
 
 
-def test_async_drop_after_shutdown_stops_before_returning():
+def test_async_drop_after_shutdown_still_stops_the_process_and_never_on_the_caller():
+    """ADR 0001 forbids stopping a process on a window callback.
+
+    Shutdown changes who waits, not who stops: the drop is handed to a worker
+    and the process is remembered until that worker has stopped it, so a sweep
+    still catches anything the workers never reached.
+    """
     pool = backend_pool.BackendPool()
     pool.drop_all()
     key = backend_pool.pool_key("codex")
@@ -231,9 +237,14 @@ def test_async_drop_after_shutdown_stops_before_returning():
 
     pool.keep(key, backend_pool.HeldProcess(handle, _adapter()._replace(stop=stop)))
     pool.drop_async(key)
-    assert stopped_on == [threading.current_thread()]
-    assert handle.stops == 1
     assert pool.held_count() == 0
+    deadline = time.monotonic() + 5
+    while (not stopped_on or pool._stopping) and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert handle.stops == 1, "the process was not stopped exactly once"
+    assert stopped_on and stopped_on[0] is not threading.current_thread(), (
+        "a drop stopped a process on the thread that asked for it"
+    )
     assert not pool._stopping
 
 
