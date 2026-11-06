@@ -2049,13 +2049,58 @@ def _codex_app_server_binary(binary: str) -> str:
     if platform.system() != "Windows" or Path(binary).suffix.casefold() == ".exe":
         return binary
     package_root = Path(binary).parent / "node_modules" / "@openai" / "codex"
-    try:
-        candidates = sorted(
-            package_root.glob("node_modules/@openai/codex-win32-*/vendor/**/bin/codex.exe")
-        )
-    except OSError:
-        candidates = []
-    return str(candidates[0]) if candidates else binary
+    # Where the platform package lands depends on the installer: nested under
+    # the codex package (npm's usual layout), hoisted beside it (other npm
+    # versions and pnpm), or vendored inside the codex package itself (the
+    # layout Codex's own launcher falls back to). Search all three; a miss
+    # here leaves a `.cmd` shim as the binary, which CreateProcess cannot run
+    # at all (WinError 5), so every layout Codex ships has to be covered.
+    searches = (
+        (package_root, "node_modules/@openai/codex-win32-*/vendor/**/bin/codex.exe"),
+        (package_root.parent, "codex-win32-*/vendor/**/bin/codex.exe"),
+        (package_root, "vendor/**/bin/codex.exe"),
+    )
+    for base, pattern in searches:
+        try:
+            candidates = sorted(base.glob(pattern))
+        except OSError:
+            candidates = []
+        if candidates:
+            return str(candidates[0])
+    return binary
+
+
+def _codex_launch_argv(server_binary: str, args: Sequence[str]) -> list[str]:
+    """The argv that actually starts the app-server.
+
+    A `.cmd`/`.bat` shim is a batch file, and CreateProcess cannot run one:
+    handed the shim, the launch dies with WinError 5 even though the same
+    shim works from a shell. When the native executable was not found, run
+    the shim's own target instead -- the package's `bin/codex.js` under
+    Node, which is exactly what the shim itself invokes -- so the arguments
+    pass through untouched (a `cmd /c` host would mangle the quoted `-c`
+    overrides). Only when neither Node nor the script can be found is the
+    install reported as unusable, naming the real cause instead of WinError 5.
+    """
+    argv = [server_binary, *args]
+    if platform.system() != "Windows" or Path(server_binary).suffix.casefold() not in (
+        ".cmd",
+        ".bat",
+    ):
+        return argv
+    package_root = Path(server_binary).parent / "node_modules" / "@openai" / "codex"
+    script = package_root / "bin" / "codex.js"
+    node = Path(server_binary).parent / "node.exe"
+    if not node.is_file():
+        found = shutil.which("node")
+        node = Path(found) if found else node
+    if script.is_file() and node.is_file():
+        return [str(node), str(script), *args]
+    raise OSError(
+        "Codex's native executable was not found under "
+        f"{package_root}, and its launcher could not be run another way. "
+        "Reinstall Codex: npm install -g @openai/codex"
+    )
 
 
 def _codex_model_payload(binary: str, cwd: Optional[str], extra: Sequence[str]) -> object:
@@ -3705,7 +3750,7 @@ def _start_codex_server(
         _plan_token_or_report(plan_account)
         plan = codex_plan_args(plan_account.account_id)
     proc = owned_popen(
-        [server_binary, *plan, *codex_question_args(), "app-server", "--stdio"],
+        _codex_launch_argv(server_binary, [*plan, *codex_question_args(), "app-server", "--stdio"]),
         cwd=str(Path.home()),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

@@ -274,6 +274,88 @@ def test_codex_app_server_prefers_packaged_windows_binary(monkeypatch, tmp_path)
     )
 
 
+def test_codex_app_server_finds_hoisted_and_bundled_windows_binaries(monkeypatch, tmp_path):
+    """Issue #150: a native exe outside the nested layout must still be found.
+
+    A miss leaves the `.cmd` shim as the binary, and CreateProcess cannot run
+    a batch file -- the launch dies with WinError 5 even though Codex works
+    from a shell.
+    """
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    wrapper = tmp_path / "npm" / "codex.cmd"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.touch()
+
+    hoisted = (
+        tmp_path
+        / "npm"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-arm64"
+        / "vendor"
+        / "aarch64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    hoisted.parent.mkdir(parents=True)
+    hoisted.touch()
+    assert agent_backends._codex_app_server_binary(str(wrapper)) == str(hoisted)
+
+    hoisted.unlink()
+    bundled = (
+        tmp_path
+        / "npm"
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    bundled.parent.mkdir(parents=True)
+    bundled.touch()
+    assert agent_backends._codex_app_server_binary(str(wrapper)) == str(bundled)
+
+
+def test_codex_launch_runs_the_shims_script_under_node(monkeypatch, tmp_path):
+    """Issue #150: with no native exe, launch codex.js under Node, not the shim."""
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    wrapper = tmp_path / "npm" / "codex.cmd"
+    script = tmp_path / "npm" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    script.parent.mkdir(parents=True)
+    wrapper.touch()
+    script.touch()
+    node = tmp_path / "npm" / "node.exe"
+    node.touch()
+
+    argv = agent_backends._codex_launch_argv(str(wrapper), ["app-server", "--stdio"])
+
+    assert argv == [str(node), str(script), "app-server", "--stdio"]
+
+
+def test_codex_launch_without_any_runnable_codex_names_the_cause(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(agent_backends.shutil, "which", lambda _name: None)
+    wrapper = tmp_path / "npm" / "codex.cmd"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.touch()
+
+    with pytest.raises(OSError, match="native executable was not found"):
+        agent_backends._codex_launch_argv(str(wrapper), ["app-server", "--stdio"])
+
+
+def test_codex_launch_leaves_a_native_binary_alone(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_backends.platform, "system", lambda: "Windows")
+    native = tmp_path / "codex.exe"
+    native.touch()
+
+    assert agent_backends._codex_launch_argv(str(native), ["app-server"]) == [
+        str(native),
+        "app-server",
+    ]
+
+
 def test_codex_stream_deltas_become_one_accessible_activity_row():
     events = []
     callbacks = _callbacks()
