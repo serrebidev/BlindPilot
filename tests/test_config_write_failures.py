@@ -664,3 +664,13 @@ def test_a_narration_pick_that_saves_claims_it(config_at, tmp_path, restored_set
     app.MainFrame._set_narration(frame, key)
 
     assert frame.announced == [f"Narration: {label.replace('&', '')}"]
+
+
+def test_the_window_writes_the_throwaway_settings_file_a_test_gave_it():
+    """The autouse redirect must reach the window's own config path.
+
+    blindpilot_app imported blindpilot_config_dir by name at import time, so
+    patching agent_backends alone left `_config_path()` on the real %APPDATA%
+    file and a test that saved settings wrote the user's config.
+    """
+    assert "blindpilot-test-settings-" in str(app._config_path())

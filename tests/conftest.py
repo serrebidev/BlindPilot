@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -134,6 +135,13 @@ def the_account_choice_stays_out_of_the_real_settings(request, monkeypatch):
         return
     settings = Path(tempfile.mkdtemp(prefix="blindpilot-test-settings-"))
     monkeypatch.setattr(agent_backends, "blindpilot_config_dir", lambda: settings)
+    # The window imported that name at import time, so patching the module it
+    # came from leaves the window's own `_config_path()` pointing at the real
+    # settings file. Patch the window's copy too, but only when it is already
+    # loaded: importing it here would pull in wx for tests that do not use it.
+    window = sys.modules.get("blindpilot_app")
+    if window is not None:
+        monkeypatch.setattr(window, "blindpilot_config_dir", lambda: settings)
     try:
         yield settings
     finally:
