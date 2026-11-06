@@ -1,9 +1,10 @@
 # ChatGPT sign-in: research and proposed integration
 
-Date: 2026-09-30. Status: partly implemented. The chat half — the ChatGPT plan
-account type in Chat mode — shipped in v0.44.0 and was refined in v0.45.0 and
-v0.46.0. The Codex-server half (proposals 5 and 6) is unbuilt and remains a
-proposal. See "Implementation status" below.
+Date: 2026-09-30. Status: implemented. The chat half — the ChatGPT plan account
+type in Chat mode — shipped in v0.44.0 and was refined in v0.45.0 and v0.46.0.
+The Codex-server half (proposals 5 and 6) was built under the tracked spec in
+issue #24 on thebetterfarhan/BlindPilot, which supersedes those two proposals.
+See "Implementation status" below.
 
 ## Requested outcome
 
@@ -28,15 +29,23 @@ As of 2026-11-05:
   sign-in, ID-token check, token refresh and revocation live in
   `accessible_ai/providers/chatgpt.py`; the account UI is in
   `accessible_ai/ui/accounts.py`.
-- **Codex server (proposals 5 and 6): not implemented.** Nothing binds a
-  ChatGPT-plan account to the Codex backend, and no code supplies the plan's
-  access token to the Codex child process.
+- **Codex server (proposals 5 and 6): implemented** under the tracked spec in
+  issue #24 on thebetterfarhan/BlindPilot, whose sub-issues built it; proposals 5
+  and 6 are kept below as written, not amended. A saved choice makes the Codex
+  backend run on a ChatGPT-plan Account, and its held process is keyed by that
+  Account. The chosen provider entry reaches Codex as overrides on its own
+  command line, and Codex fetches its own token by running this app's
+  token-printing mode (`accessible_ai/plan_token.py`), so the token is in
+  neither its arguments nor its environment — see ADR 0003. Signing out or
+  switching Accounts drops that Account's held process rather than leaving it to
+  make requests on a credential that has ended.
 - **Divergences from this document.** Signature verification is implemented
   in-house with the standard library rather than with a maintained verifier (see
-  ADR 0002; proposal 3 is kept below as written, not amended). Only the client
-  id, e-mail, subject, refresh token and scopes are stored, with the access token
-  kept in memory, so the record fits Windows Credential Manager without the
-  DPAPI fallback this document allowed for.
+  ADR 0002; proposal 3 is kept below as written, not amended). Token delivery is
+  by command rather than the environment variable proposals 5 and 6 name, for the
+  reasons recorded in ADR 0003. Only the client id, e-mail, subject, refresh token
+  and scopes are stored, with the access token kept in memory, so the record fits
+  Windows Credential Manager without the DPAPI fallback this document allowed for.
 
 ## Ten web results inspected
 
