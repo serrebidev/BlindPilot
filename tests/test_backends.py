@@ -692,7 +692,7 @@ def test_a_powershell_script_is_not_offered_as_a_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_backends.Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
-    monkeypatch.setattr(agent_backends.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(agent_backends.process_utils, "which_without_cwd", lambda _name: None)
     managed, appdata = tmp_path / "data" / "npm", tmp_path / "appdata" / "npm"
     for folder in (managed, appdata):
         folder.mkdir(parents=True)
