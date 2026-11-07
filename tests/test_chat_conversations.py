@@ -359,9 +359,10 @@ def test_deleting_a_conversation_is_spoken_and_names_the_new_selection(tmp_path,
         dialog.on_delete(wx.CommandEvent())
 
         assert going.title not in [each.title for each in db.list_conversations()]
-        after = dialog.selected()
-        assert after is not None
-        assert spoken == [f"Deleted {going.title}. {after.title} is selected."]
+        # Taken from the database, not from the dialog being tested: the point
+        # is which row is named, not that the dialog agrees with itself.
+        remaining = [each.title for each in db.list_conversations()]
+        assert spoken == [f"Deleted {going.title}. {remaining[0]} is selected."]
     finally:
         dialog.Destroy()
         app.ProcessPendingEvents()

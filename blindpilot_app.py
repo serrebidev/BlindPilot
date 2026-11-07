@@ -2669,8 +2669,8 @@ def _note_damaged_config(path, kept: bool) -> None:
             "and BlindPilot has started from the defaults."
         )
         return
-    # No status bar exists yet to mirror this to; the announcement is the only
-    # telling, and it is repeated by the review-cursor command.
+    # Nothing mirrors this: at startup there is no status bar to mirror to, and
+    # the late callers do not add one. F6 repeats the last announcement.
     announce(
         "Your settings file could not be read and could not be kept. BlindPilot has "
         "started from the defaults, and the next save will replace it."
@@ -13104,9 +13104,9 @@ class PreferencesDialog(wx.Dialog):
 def _start_legacy_chat_import() -> None:
     """Copy an older AccessibleAI database now, off the window's thread.
 
-    Imported inside the thread: chat_integration pulls in the whole Chat panel,
-    and the copy runs on every launch either way, so this moves that cost off
-    the window's thread rather than avoiding it.
+    Imported inside the thread: chat_integration pulls in the whole Chat panel.
+    The reader runs on every launch either way, so this moves that cost off the
+    window's thread rather than avoiding it.
     """
 
     def work() -> None:

@@ -108,8 +108,9 @@ def which_without_cwd(name: str) -> Optional[str]:
     A name that already carries an extension is tried first, then PATHEXT, so
     ``powershell.exe`` and ``codex`` are both found the way ``which`` finds them.
     """
+    on_windows = platform.system() == "Windows"
     extensions = [""]
-    if platform.system() == "Windows":
+    if on_windows:
         listed = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
         extensions += [each.strip().lower() for each in listed if each.strip()]
     for entry in os.environ.get("PATH", "").split(os.pathsep):
@@ -120,7 +121,7 @@ def which_without_cwd(name: str) -> Optional[str]:
         # drive the process happens to be on.
         if not entry or not os.path.isabs(entry):
             continue
-        if platform.system() == "Windows" and not os.path.splitdrive(entry)[0]:
+        if on_windows and not os.path.splitdrive(entry)[0]:
             continue
         for extension in extensions:
             candidate = Path(entry) / f"{name}{extension}"
