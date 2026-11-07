@@ -13,12 +13,13 @@ app says something true and says it once.
 
 | Flow | Steps | Expected to hear | Known risk |
 |---|---|---|---|
-| New session with a worktree | New Session, tick worktree, type a branch, OK | Nothing during the checkout, then the session opens | Silence and a frozen window if the checkout is on the GUI thread |
+| New session with a worktree | New Session, tick worktree, type a branch, OK | "Creating a worktree for fix." as the dialog closes, then "New session: <name>" when the tab opens | The tab opening long after the sentence, so the two sound unrelated; a failed checkout must speak git's own reason |
 | Setup wizard, sign-in step | Next until step 3 | "Checking whether … is signed in…" | A stall before that line if CLI discovery runs on the GUI thread |
 | Chat: send during a live turn | Start a reply, then Send again | "A response is already being generated." | Silence: the status bar changes but nothing is spoken |
-| Chat mode, first open | Switch to Chat | "…were imported." when a legacy database exists | A freeze before the tab appears, with no announcement |
-| Accounts: delete | Select an account, Delete, Yes | A spoken confirmation | Silence, and focus on a row that is now a different account |
-| Conversations: delete | Delete a conversation | A spoken confirmation | Silence, and the list reshuffles under focus |
+| Chat mode, first open | Switch to Chat | "…were imported." in the status bar when a legacy database was copied | The copy runs at startup now; opening Chat before it finishes waits with nothing said |
+| Accounts: delete | Select an account, Delete, Yes | "Deleted Beta. Alpha is selected.", or "Deleted Beta." when it was the last | The wrong name if the list re-sorts under focus |
+| Conversations: delete | Delete a conversation | "Deleted <title>. <next title> is selected." | A long title running into the next sentence |
+| Damaged settings file | Corrupt `config.json`, then start the app | "Your settings file could not be read. It was kept as config.json.broken-<stamp>, and BlindPilot has started from the defaults." | Said during startup, before the window takes focus, so it may go unheard |
 | Any long action | e.g. refresh models, install a CLI | Progress, then completion | Anything that only changes the status bar |
 
 ## While it runs
