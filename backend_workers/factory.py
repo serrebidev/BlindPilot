@@ -35,9 +35,9 @@ class _WorkerSpec:
 
 _WORKERS = {
     "claude": _WorkerSpec("claude_worker", "ClaudeWorker", ClaudeOptions, WorkerCapabilities(True)),
-    "codex": _WorkerSpec("agent_backends", "CodexWorker", CodexOptions),
+    "codex": _WorkerSpec("backend_workers.codex_worker", "CodexWorker", CodexOptions),
     "freebuff": _WorkerSpec("agent_backends", "FreebuffWorker", FreebuffOptions),
-    "opencode": _WorkerSpec("agent_backends", "OpencodeWorker", OpencodeOptions),
+    "opencode": _WorkerSpec("backend_workers.opencode_worker", "OpencodeWorker", OpencodeOptions),
     "hermes": _WorkerSpec("hermes_worker", "HermesWorker", HermesOptions),
     "muse": _WorkerSpec("muse_worker", "MuseWorker", MuseOptions),
     "museai": _WorkerSpec("museai_worker", "MuseAiWorker", MuseAiOptions),

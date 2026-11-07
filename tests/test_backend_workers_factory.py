@@ -113,6 +113,26 @@ def test_factory_preserves_callbacks_and_provider_options(callbacks):
     assert events == [("tasks", ("one",)), ("remote", {"enabled": True})]
 
 
+@pytest.mark.parametrize(
+    ("backend", "options", "module"),
+    [
+        ("codex", CodexOptions(compact=True), "backend_workers.codex_worker"),
+        ("opencode", OpencodeOptions(compact=True), "backend_workers.opencode_worker"),
+    ],
+)
+def test_protocol_workers_live_behind_the_factory(backend, options, module, callbacks):
+    import agent_backends
+
+    worker = create_worker(
+        backend,
+        WorkerRequest("hello", None, ".", "default", callbacks=callbacks, options=options),
+    )
+    assert type(worker).__module__ == module
+    assert isinstance(worker, agent_backends._TurnWorker)
+    assert type(worker) is getattr(agent_backends, type(worker).__name__)
+    assert worker._compact is True
+
+
 def test_factory_preserves_museai_follow_cursor(callbacks):
     worker = create_worker(
         "museai",
