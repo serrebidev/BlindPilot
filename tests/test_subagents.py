@@ -10,6 +10,8 @@ them itself.
 
 from types import SimpleNamespace
 
+from backend_workers.codex_worker import CodexWorker
+from backend_workers.opencode_worker import OpencodeWorker
 import agent_backends
 from agent_backends import (
     SUBAGENT_COMPLETED,
@@ -357,7 +359,7 @@ def test_hermes_stop_interrupts_each_running_child_by_name():
 
 def test_codex_spawned_agents_are_read_on_this_turns_inbox():
     reports = []
-    worker = agent_backends.CodexWorker("hi", "thr_parent", ".", "default", **_callbacks(reports))
+    worker = CodexWorker("hi", "thr_parent", ".", "default", **_callbacks(reports))
     attached = []
     worker._server = SimpleNamespace(attach=lambda thread, inbox: attached.append(thread))
     worker._inbox = object()
@@ -397,9 +399,7 @@ def test_codex_spawned_agents_are_read_on_this_turns_inbox():
 
 
 def test_codex_child_approvals_are_answered_not_declined_unread():
-    worker = agent_backends.CodexWorker(
-        "hi", "thr_parent", ".", "bypassPermissions", **_callbacks([])
-    )
+    worker = CodexWorker("hi", "thr_parent", ".", "bypassPermissions", **_callbacks([]))
     sent = []
     worker._send = lambda message: sent.append(message) or True
     worker._children = {"thr_child": SUBAGENT_RUNNING}
@@ -413,7 +413,7 @@ def test_codex_child_approvals_are_answered_not_declined_unread():
 
 
 def test_codex_stop_interrupts_each_running_agent():
-    worker = agent_backends.CodexWorker("hi", "thr_parent", ".", "default", **_callbacks([]))
+    worker = CodexWorker("hi", "thr_parent", ".", "default", **_callbacks([]))
     worker._children = {"a": SUBAGENT_RUNNING, "b": SUBAGENT_COMPLETED}
     worker._child_turns = {"a": "turn_a", "b": "turn_b"}
     sent = []
@@ -429,9 +429,7 @@ def test_codex_stop_interrupts_each_running_agent():
 
 def test_opencode_task_children_are_followed_and_kept_out_of_the_answer():
     reports = []
-    worker = agent_backends.OpencodeWorker(
-        "hi", "ses_parent", ".", "default", **_callbacks(reports)
-    )
+    worker = OpencodeWorker("hi", "ses_parent", ".", "default", **_callbacks(reports))
     worker._part(
         {
             "id": "p1",

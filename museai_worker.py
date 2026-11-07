@@ -169,6 +169,10 @@ class MuseAiWorker(_TurnWorker):
 
     _backend = BACKEND_MUSEAI
 
+    def __init__(self, *args, follow_after: Optional[int] = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.follow_after = follow_after
+
     def _setup(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
         # Each message's text as last read: muse.ai marks a message complete
@@ -180,7 +184,7 @@ class MuseAiWorker(_TurnWorker):
         self._steps: list[tuple[int, int]] = []
         # The newest event seen in the chat, for the tab to watch past.
         self.last_seq = 0
-        self.follow_after: Optional[int] = None
+        self.follow_after = None
         self._step_said = ""
         self._approval_seen: set[str] = set()
         self._approval_error_said = False

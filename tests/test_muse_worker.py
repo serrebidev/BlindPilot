@@ -19,6 +19,7 @@ import threading
 import pytest
 
 import muse_worker
+from backend_workers import worker_type
 from muse_worker import MuseWorker
 
 
@@ -1081,9 +1082,7 @@ def test_a_replay_listener_that_raises_is_not_a_failed_turn(monkeypatch):
 
 
 def test_the_window_can_hold_the_muse_worker_like_any_other():
-    from agent_backends import worker_class
-
-    assert worker_class("muse", None).__name__ == "MuseWorker"
+    assert worker_type("muse") is MuseWorker
 
 
 # The contract harness sweeps this module for transport-shaped fakes; this one

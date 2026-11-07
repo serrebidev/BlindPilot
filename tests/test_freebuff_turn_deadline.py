@@ -20,7 +20,7 @@ from __future__ import annotations
 
 
 import agent_backends
-from agent_backends import FreebuffWorker
+from backend_workers.freebuff_worker import FreebuffWorker
 
 # The composer, and a turn in progress. `_PROMPT_RE` looks for the first;
 # `_BUSY_RE` for "Esc to stop".

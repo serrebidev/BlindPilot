@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 
 import agent_backends
-from agent_backends import FreebuffWorker
+from backend_workers.freebuff_worker import FreebuffWorker
 
 
 class _FakeTerminal:

@@ -8,11 +8,11 @@ other modes keep their automatic answers.
 
 from __future__ import annotations
 
-import agent_backends as ab
+from backend_workers.codex_worker import CodexWorker
 
 
 def _worker(answer):
-    worker = ab.CodexWorker.__new__(ab.CodexWorker)
+    worker = CodexWorker.__new__(CodexWorker)
     worker._on_permission = lambda tool, payload, suggestions: answer
     return worker
 
@@ -31,7 +31,7 @@ def test_a_failed_ask_denies():
     def boom(tool, payload, suggestions):
         raise RuntimeError("tab gone")
 
-    worker = ab.CodexWorker.__new__(ab.CodexWorker)
+    worker = CodexWorker.__new__(CodexWorker)
     worker._on_permission = boom
     assert worker._ask_codex_permission({"params": {"command": "rm -rf /"}}, "command") == "decline"
 
@@ -44,7 +44,7 @@ def test_the_dialog_sees_the_command():
         seen["payload"] = payload
         return {"behavior": "deny"}
 
-    worker = ab.CodexWorker.__new__(ab.CodexWorker)
+    worker = CodexWorker.__new__(CodexWorker)
     worker._on_permission = capture
     worker._ask_codex_permission(
         {"params": {"command": "git push", "cwd": "/repo", "noise": True}}, "command"

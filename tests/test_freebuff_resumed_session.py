@@ -19,7 +19,7 @@ prewarm for the next message.
 from __future__ import annotations
 
 import agent_backends
-from agent_backends import FreebuffWorker
+from backend_workers.freebuff_worker import FreebuffWorker
 
 READY = "Describe your task"
 WORKING = "do the work\nHere is the answer.\nEsc to stop"

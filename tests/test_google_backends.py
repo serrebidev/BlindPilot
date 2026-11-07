@@ -27,8 +27,8 @@ from agent_backends import (
     BACKEND_GEMINI,
     backend_auth_ok,
     normalize_backend,
-    worker_class,
 )
+from backend_workers import worker_type
 from google_worker import AntigravityWorker, GeminiWorker
 
 
@@ -94,8 +94,8 @@ def test_names_resolve_to_the_new_backends():
     assert normalize_backend("Gemini CLI") == BACKEND_GEMINI
     assert normalize_backend("agy") == BACKEND_ANTIGRAVITY
     assert normalize_backend("Google Antigravity") == BACKEND_ANTIGRAVITY
-    assert worker_class(BACKEND_GEMINI, object) is GeminiWorker
-    assert worker_class(BACKEND_ANTIGRAVITY, object) is AntigravityWorker
+    assert worker_type(BACKEND_GEMINI) is GeminiWorker
+    assert worker_type(BACKEND_ANTIGRAVITY) is AntigravityWorker
 
 
 def test_agy_is_found_where_its_windows_installer_puts_it(monkeypatch, tmp_path):

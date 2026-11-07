@@ -93,12 +93,12 @@ def _panel(session_title: str, prompt: str = "start", session_id=None):
 
 
 def _send(panel) -> None:
-    real = app.worker_class
-    app.worker_class = lambda *_a, **_k: _Worker
+    real = app.backend_workers.create_worker
+    app.backend_workers.create_worker = lambda *_a, **_k: _Worker()
     try:
         app.SessionPanel._on_send(panel)
     finally:
-        app.worker_class = real
+        app.backend_workers.create_worker = real
 
 
 # --------------------------------------------------------------------------
@@ -235,12 +235,12 @@ def test_reopening_a_hermes_conversation_drops_the_name() -> None:
     panel.stop_btn = Button()
     panel._worker = None
 
-    real = app.worker_class
-    app.worker_class = lambda *_a, **_k: _Worker
+    real = app.backend_workers.create_worker
+    app.backend_workers.create_worker = lambda *_a, **_k: _Worker()
     try:
         app.SessionPanel.open_hermes_session(panel, "sess-9", "Uti research", False)
     finally:
-        app.worker_class = real
+        app.backend_workers.create_worker = real
 
     assert panel._session_title == ""
     assert panel.titles == ["Uti research"], panel.titles

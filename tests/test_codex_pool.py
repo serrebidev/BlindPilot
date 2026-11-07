@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from backend_workers.codex_worker import CodexWorker
 import agent_backends
 import process_utils
 import backend_pool
@@ -187,7 +188,7 @@ def _bare_worker(session_id=None, prompt="hello", plan_account=agent_backends.UN
     its turn. Left alone it is `UNBOUND`, and the turn takes the saved choice
     the way a conversation's first turn does.
     """
-    return agent_backends.CodexWorker(
+    return CodexWorker(
         prompt,
         session_id,
         ".",
@@ -476,7 +477,7 @@ def test_a_turn_borrows_the_server_and_leaves_it_running(monkeypatch):
     monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: proc)
     completed: list[str] = []
     failures: list[str] = []
-    worker = agent_backends.CodexWorker(
+    worker = CodexWorker(
         "hello",
         None,
         ".",
@@ -591,7 +592,7 @@ def _turn(proc, monkeypatch, session_id=None, prompt="hello"):
     completed: list[str] = []
     failures: list[str] = []
     activity: list[tuple] = []
-    worker = agent_backends.CodexWorker(
+    worker = CodexWorker(
         prompt,
         session_id,
         ".",
@@ -645,7 +646,7 @@ def test_two_first_turns_at_once_start_one_server_and_neither_is_killed(monkeypa
     borrowed: list = []
 
     def borrow() -> None:
-        worker = agent_backends.CodexWorker(
+        worker = CodexWorker(
             "hello",
             None,
             ".",
@@ -872,7 +873,7 @@ def test_a_turn_knows_its_own_whichever_message_names_it_first():
 
     item = {"threadId": "thread-1", "turnId": "turn-c", "item": {}}
     assert worker._is_this_turn("item/started", item) is True
-    assert agent_backends.CodexWorker._turn_named(item) == "turn-c"
+    assert CodexWorker._turn_named(item) == "turn-c"
     # And the announcement that follows it is recognised as the same turn.
     worker._turn_id = "turn-c"
     started = {"threadId": "thread-1", "turn": {"id": "turn-c"}}
@@ -960,7 +961,7 @@ def test_a_compaction_whose_items_arrive_before_its_announcement_still_finishes(
     completed: list[str] = []
     failures: list[str] = []
     activity: list[tuple] = []
-    worker = agent_backends.CodexWorker(
+    worker = CodexWorker(
         "/compact",
         "thread-1",
         ".",
@@ -1077,7 +1078,7 @@ def test_a_turn_already_known_to_be_somebody_elses_stays_that_way():
 
     # Before the mark, position alone rejects it - and the name is noted.
     assert worker._is_this_turn("item/completed", leftover) is False
-    worker._stale_turns.add(agent_backends.CodexWorker._turn_named(leftover))
+    worker._stale_turns.add(CodexWorker._turn_named(leftover))
 
     # After the mark, position would have let the rest of it through.
     worker._turn_asked = True
@@ -1481,7 +1482,7 @@ def test_a_turn_stopped_before_it_was_named_is_still_stopped(monkeypatch):
     monkeypatch.setattr(agent_backends, "subprocess_env", lambda _b: {})
     monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: proc)
     failures: list[str] = []
-    worker = agent_backends.CodexWorker(
+    worker = CodexWorker(
         "hello",
         None,
         ".",
@@ -1736,7 +1737,7 @@ def test_a_compaction_stopped_before_its_turn_is_named_gives_up_the_thread(monke
     monkeypatch.setattr(agent_backends, "_codex_app_server_binary", lambda b: b)
     monkeypatch.setattr(agent_backends, "subprocess_env", lambda _b: {})
     monkeypatch.setattr(agent_backends.subprocess, "Popen", lambda *_a, **_k: proc)
-    worker = agent_backends.CodexWorker(
+    worker = CodexWorker(
         "",
         "thread-1",
         ".",

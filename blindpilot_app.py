@@ -64,9 +64,25 @@ from accessible_ai.storage import preferences
 from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
+import backend_workers
+from backend_workers import (
+    AntigravityOptions,
+    ClaudeOptions,
+    CodexOptions,
+    CommandcodeOptions,
+    CopilotOptions,
+    FreebuffOptions,
+    GeminiOptions,
+    HermesOptions,
+    MuseAiOptions,
+    MuseOptions,
+    OpencodeOptions,
+    WorkerCallbacks,
+    WorkerRequest,
+    worker_capabilities,
+)
 from backend_updates import BackendUpdateResult, BackendUpdateService, BackendUpdateState
 from claude_session import _find_claude
-import claude_worker
 import diagnostics
 import earcons
 import install_path
@@ -145,7 +161,6 @@ from agent_backends import (
     prewarm_freebuff,
     spawn_hidden_terminal,
     subprocess_env,
-    worker_class,
 )
 from questions import (
     Question,
@@ -6596,7 +6611,7 @@ class SessionPanel(wx.Panel):
         # One Hermes connection per tab, reused by each turn of this
         # conversation. Created on first use rather than here, so a machine
         # without Hermes never imports its adapter -- the same reason
-        # ``worker_class`` defers that import.
+        # The worker factory defers that import.
         self._held_hermes: Optional[object] = None
         # Worker callbacks arrive on a background thread. Keep them in one
         # ordered mailbox with at most one pending GUI callback; otherwise a
@@ -9223,31 +9238,49 @@ class SessionPanel(wx.Panel):
             return self.model, self.effort
         return "", self.effort
 
-    def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
-        """Start the worker for one turn. `send_text` is None for a late turn,
-        which has nothing to send and only reads what has already arrived."""
-        self._active_send_text = send_text or ""
-        self._turn_started_at: Optional[float] = time.monotonic()
-        self._turn_attached = False
-        self._last_step = ""
-        worker_type = worker_class(selected_backend, claude_worker.ClaudeWorker)
-        # Agents that finished in an earlier turn have been read or ignored by
-        # now; the ones still running stay, however old the turn that began
-        # them.
-        self._prune_subagents()
-        self._subagents_outlive_turn = bool(getattr(worker_type, "subagents_outlive_turn", False))
-        model, effort = SessionPanel._turn_model(self, send_text, selected_backend)
-        if selected_backend == BACKEND_CODEX:
-            # The Account this conversation began on, so its turns -- and any
-            # resume of it -- stay there however the saved choice moves.
-            extra["plan_account"] = self._codex_conversation_account()
-        self._worker = worker_type(
-            send_text,
-            self._session_id,
-            self.cwd,
-            self.mode,
-            model=model,
-            effort=effort,
+    def _worker_request(
+        self,
+        backend: str,
+        prompt: Optional[str],
+        extra: dict,
+        *,
+        model: str,
+        effort: str,
+        normal_turn: bool = True,
+    ) -> WorkerRequest:
+        """Collect every constructor option and callback before creating a worker."""
+        option_types = {
+            BACKEND_CLAUDE: ClaudeOptions,
+            BACKEND_CODEX: CodexOptions,
+            BACKEND_FREEBUFF: FreebuffOptions,
+            BACKEND_OPENCODE: OpencodeOptions,
+            BACKEND_HERMES: HermesOptions,
+            BACKEND_MUSE: MuseOptions,
+            BACKEND_MUSEAI: MuseAiOptions,
+            BACKEND_COMMANDCODE: CommandcodeOptions,
+            BACKEND_GEMINI: GeminiOptions,
+            BACKEND_ANTIGRAVITY: AntigravityOptions,
+            BACKEND_COPILOT: CopilotOptions,
+        }
+        option_values = {
+            key: value
+            for key, value in extra.items()
+            if key not in ("on_permission", "on_unsolicited")
+        }
+        if backend == BACKEND_MUSEAI and prompt is None:
+            option_values["follow_after"] = getattr(self, "_museai_follow_after", None)
+        options = option_types[backend](**option_values)
+        if "on_permission" in extra:
+            on_permission = extra["on_permission"]
+        elif normal_turn:
+
+            def ask_permission(tool: str, payload: dict, suggestions: list) -> dict:
+                return self._ask_permission(backend, tool, payload, suggestions)
+
+            on_permission = ask_permission
+        else:
+            on_permission = None
+        callbacks = WorkerCallbacks(
             on_session=lambda sid: self._queue_worker_event("session", sid),
             on_started=lambda: self._queue_worker_event("started"),
             on_activity=lambda kind, text: self._queue_worker_event("activity", kind, text),
@@ -9255,23 +9288,48 @@ class SessionPanel(wx.Panel):
             on_failed=lambda msg: self._queue_worker_event("failed", msg),
             on_done=lambda: self._queue_worker_event("done"),
             on_question=self._ask_questions,
+            on_permission=on_permission,
             on_subagent=lambda *report: self._queue_worker_event("subagent", *report),
-            # A Claude turn brings its own, which holds the tab weakly.
-            **{
-                "on_permission": lambda tool, payload, suggestions: self._ask_permission(
-                    selected_backend, tool, payload, suggestions
-                ),
-                **extra,
-            },
+            on_tasks=(lambda *call: self._queue_worker_event("tasks", *call))
+            if normal_turn
+            else None,
+            on_remote=(lambda data: self._queue_worker_event("remote", data))
+            if normal_turn
+            else None,
+            on_unsolicited=extra.get("on_unsolicited"),
         )
-        # Set rather than passed: only the Claude and Codex workers look for it.
-        cast(Any, self._worker).on_tasks = lambda *call: self._queue_worker_event("tasks", *call)
-        cast(Any, self._worker).on_remote = lambda data: self._queue_worker_event("remote", data)
-        if selected_backend == BACKEND_MUSEAI and send_text is None:
-            from museai_worker import MuseAiWorker
+        return WorkerRequest(
+            prompt,
+            self._session_id,
+            self.cwd,
+            self.mode,
+            callbacks=callbacks,
+            options=options,
+            model=model,
+            effort=effort,
+        )
 
-            if isinstance(self._worker, MuseAiWorker):
-                self._worker.follow_after = getattr(self, "_museai_follow_after", None)
+    def _launch_turn(self, send_text: Optional[str], selected_backend: str, extra: dict) -> None:
+        """Start the worker for one turn. `send_text` is None for a late turn,
+        which has nothing to send and only reads what has already arrived."""
+        self._active_send_text = send_text or ""
+        self._turn_started_at: Optional[float] = time.monotonic()
+        self._turn_attached = False
+        self._last_step = ""
+        # Agents that finished in an earlier turn have been read or ignored by
+        # now; the ones still running stay, however old the turn that began
+        # them.
+        self._prune_subagents()
+        self._subagents_outlive_turn = worker_capabilities(selected_backend).subagents_outlive_turn
+        model, effort = SessionPanel._turn_model(self, send_text, selected_backend)
+        if selected_backend == BACKEND_CODEX:
+            # The Account this conversation began on, so its turns -- and any
+            # resume of it -- stay there however the saved choice moves.
+            extra["plan_account"] = self._codex_conversation_account()
+        request = SessionPanel._worker_request(
+            self, selected_backend, send_text, extra, model=model, effort=effort
+        )
+        self._worker = backend_workers.create_worker(selected_backend, request)
         if (
             selected_backend == BACKEND_COMMANDCODE
             and self.model == AUTO_MODEL
@@ -9857,23 +9915,16 @@ class SessionPanel(wx.Panel):
         self._announce("Attaching" if attaching else "Reopening")
         self._earcons.start_progress()
         self._show_working()
-        self._worker = worker_class(BACKEND_HERMES, claude_worker.ClaudeWorker)(
+        request = SessionPanel._worker_request(
+            self,
+            BACKEND_HERMES,
             "",
-            self._session_id,
-            self.cwd,
-            self.mode,
+            extra,
             model=self.model,
             effort=self.effort,
-            on_session=lambda sid: self._queue_worker_event("session", sid),
-            on_started=lambda: self._queue_worker_event("started"),
-            on_activity=lambda kind, text: self._queue_worker_event("activity", kind, text),
-            on_complete=self._worker_complete,
-            on_failed=lambda msg: self._queue_worker_event("failed", msg),
-            on_done=lambda: self._queue_worker_event("done"),
-            on_question=self._ask_questions,
-            on_subagent=lambda *report: self._queue_worker_event("subagent", *report),
-            **extra,
+            normal_turn=False,
         )
+        self._worker = backend_workers.create_worker(BACKEND_HERMES, request)
         self._worker.start()
         if attaching:
             # A turn somebody else started: how long it ran before is unknown,

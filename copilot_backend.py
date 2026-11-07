@@ -50,7 +50,7 @@ import subprocess
 import threading
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import agent_backends
 from owned_process import owned_popen
@@ -241,8 +241,15 @@ class CopilotWorker(_TurnWorker):
 
     _backend = BACKEND_COPILOT
 
-    def __init__(self, *args, additional_dirs: tuple[str, ...] = (), **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        additional_dirs: tuple[str, ...] = (),
+        on_tasks: Optional[Callable[..., None]] = None,
+        **kwargs,
+    ) -> None:
         self._additional_dirs = tuple(additional_dirs or ())
+        self.on_tasks = on_tasks
         super().__init__(*args, **kwargs)
 
     def _setup(self) -> None:
@@ -438,7 +445,7 @@ class CopilotWorker(_TurnWorker):
             self._tools[call_id] = name
         params = data.get("arguments")
         if name == "update_todo" and isinstance(params, dict):
-            report_tasks = getattr(self, "on_tasks", None)
+            report_tasks = self.on_tasks
             if report_tasks:
                 report_tasks("copilot", params.get("todos"))
             return
