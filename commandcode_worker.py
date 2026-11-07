@@ -56,6 +56,7 @@ from process_utils import (
     end_process_group,
     no_window_kwargs,
     own_group_kwargs,
+    read_stderr_lines,
 )
 from commandcode_router import (
     LIMIT_LABELS,
@@ -790,21 +791,7 @@ class CommandcodeWorker(threading.Thread):
                 pass
 
     def _read_stderr(self, proc: subprocess.Popen) -> None:
-        stderr = proc.stderr
-        if stderr is None:
-            return
-        try:
-            for line in stderr:
-                text = line.strip()
-                if not text:
-                    continue
-                with self._error_lock:
-                    self._error_lines.append(text)
-                    del self._error_lines[:-STDERR_KEEP_LINES]
-        except ValueError:
-            # _close_process closed the pipe under this reader: nothing
-            # is left to read, and the lines already read are kept.
-            return
+        read_stderr_lines(proc.stderr, self._error_lines, STDERR_KEEP_LINES, self._error_lock)
 
     def _error_tail(self) -> str:
         with self._error_lock:

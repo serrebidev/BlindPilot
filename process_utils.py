@@ -12,7 +12,8 @@ import os
 import platform
 import signal
 import subprocess
-from typing import Optional
+from contextlib import AbstractContextManager
+from typing import Iterable, Optional
 
 
 # A windowed app owns no console, so every child process Windows considers a
@@ -113,6 +114,41 @@ def _close_process_pipes(proc: object) -> None:
             close()
         except (OSError, ValueError, AttributeError):
             pass
+
+
+def read_stderr_lines(
+    stream: Optional[Iterable[str]],
+    lines: list[str],
+    keep: int,
+    lock: Optional[AbstractContextManager[object]] = None,
+) -> None:
+    """Read a child's stderr to its end, keeping the last ``keep`` lines.
+
+    The workers that capture stderr all keep the same thing: stripped,
+    non-empty lines, oldest dropped past a cap, appended under the worker's
+    own lock. Codex keeps its own reader because its cursor counts every line,
+    and a shared cap would make ``stderr_since`` skip the lines it dropped.
+
+    The pipe closing under the reader, or a cancelled turn taking it away, is
+    ordinary: the lines already read are kept, and a failure to finish reading
+    stderr must not become a second failure of its own.
+    """
+    if stream is None:
+        return
+    try:
+        for raw in stream:
+            text = raw.strip()
+            if not text:
+                continue
+            if lock is None:
+                lines.append(text)
+                del lines[:-keep]
+                continue
+            with lock:
+                lines.append(text)
+                del lines[:-keep]
+    except (OSError, ValueError):
+        return
 
 
 _CONSOLE_WINDOW_CLASSES = ("ConsoleWindowClass", "PseudoConsoleWindow")

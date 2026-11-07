@@ -43,6 +43,7 @@ from typing import Any, Optional, Protocol, Sequence
 
 from certificates import certificate_context
 from owned_process import owned_popen
+from process_utils import read_stderr_lines
 
 # Hermes' launcher is a plain executable on PATH, but the gateway itself is a
 # Python module inside Hermes' own virtual environment. A GUI cannot rely on
@@ -1222,13 +1223,11 @@ class StdioTransport:
 
     def _read_stderr(self) -> None:
         proc = self._proc
-        if proc is None or proc.stderr is None:
+        if proc is None:
             return
-        for line in proc.stderr:
-            line = line.strip()
-            if line:
-                self._stderr.append(line)
-                del self._stderr[:-STDERR_KEEP_LINES]
+        # No lock: this reader is the only one for the connection's stderr, and
+        # the list is read as a tail by the same turn.
+        read_stderr_lines(proc.stderr, self._stderr, STDERR_KEEP_LINES)
 
     def send(self, message: dict) -> bool:
         proc = self._proc

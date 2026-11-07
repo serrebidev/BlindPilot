@@ -21,9 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import blindpilot_app  # noqa: E402
 import claude_session  # noqa: E402
+import claude_worker  # noqa: E402
 from blindpilot_app import (  # noqa: E402
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
+    BACKEND_COPILOT,
     BACKEND_FREEBUFF,
     _npm_update_argv,
     _repair_claude_native_update,
@@ -231,6 +233,36 @@ def test_each_directory_is_cached_separately():
     assert _RUNS, "another directory must be probed on its own"
 
 
+@pytest.mark.parametrize("backend", [BACKEND_FREEBUFF, BACKEND_COPILOT])
+def test_freebuff_and_copilot_reuse_a_recent_catalogue(monkeypatch, backend):
+    """These two were the only backends that skipped the model cache."""
+    _clear_probe_cache()
+    calls: list[int] = []
+
+    if backend == BACKEND_FREEBUFF:
+        monkeypatch.setattr(
+            blindpilot_app,
+            "freebuff_model_options",
+            lambda: (calls.append(1) or ["freebuff-auto"], "freebuff-auto", ""),
+        )
+    else:
+        import copilot_backend
+
+        monkeypatch.setattr(
+            copilot_backend,
+            "copilot_model_options",
+            lambda: (calls.append(1) or ["auto"], [], "auto", "", ""),
+        )
+    monkeypatch.setattr(blindpilot_app, "find_backend_cli", lambda _backend: "fake-cli")
+
+    first = probe_model_options(None, max_age=60, backend=backend)
+    second = probe_model_options(None, max_age=60, backend=backend)
+
+    assert len(calls) == 1, "the second probe re-asked instead of reusing the cache"
+    assert first.from_cache is False
+    assert second.from_cache is True
+
+
 def test_a_failed_probe_is_not_cached():
     _clear_probe_cache()
     _probe_with("unrecognizable", "unrecognizable", cwd="/tmp/proj")
@@ -279,11 +311,11 @@ def _worker_command(**kwargs) -> list[str]:
         captured.append(list(cmd))
         raise OSError("stop here — the command line is all we need")
 
-    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    real_popen, real_find = claude_session._popen, claude_worker._find_claude
     claude_session._popen = fake_popen  # type: ignore[assignment]
-    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
+    claude_worker._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        blindpilot_app.ClaudeWorker(
+        claude_worker.ClaudeWorker(
             "hi",
             None,
             os.getcwd(),
@@ -298,7 +330,7 @@ def _worker_command(**kwargs) -> list[str]:
         ).run()
     finally:
         claude_session._popen = real_popen  # type: ignore[assignment]
-        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        claude_worker._find_claude = real_find  # type: ignore[assignment]
     return captured[0]
 
 

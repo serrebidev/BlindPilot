@@ -3403,6 +3403,9 @@ class CodexServer:
         self._close("")
 
     def _read_stderr(self) -> None:
+        # Its own reader, not `process_utils.read_stderr_lines`: the cursor a
+        # turn uses to read only its own stderr counts every line, so capping
+        # the list would make that cursor skip the lines the cap dropped.
         stderr = getattr(self.proc, "stderr", None)
         if stderr is None:
             return

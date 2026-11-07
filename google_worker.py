@@ -66,6 +66,7 @@ from process_utils import (
     end_process_group,
     no_window_kwargs,
     own_group_kwargs,
+    read_stderr_lines,
 )
 from markdown_rows import SentenceStreamer
 
@@ -306,16 +307,7 @@ class _GoogleTurnWorker(_TurnWorker):
                 pass
 
     def _read_stderr(self, proc: subprocess.Popen) -> None:
-        stderr = proc.stderr
-        if stderr is None:
-            return
-        for line in stderr:
-            text = line.strip()
-            if not text:
-                continue
-            with self._error_lock:
-                self._error_lines.append(text)
-                del self._error_lines[:-_STDERR_KEEP]
+        read_stderr_lines(proc.stderr, self._error_lines, _STDERR_KEEP, self._error_lock)
 
     def _read(self, proc: subprocess.Popen) -> None:
         stdout = proc.stdout

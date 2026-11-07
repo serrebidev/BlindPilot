@@ -31,11 +31,9 @@ from blindpilot_app import (  # noqa: E402
     BACKEND_FREEBUFF,
     PATH_STANZA_MARKER,
     _first_login_url,
-    _fallback_claude_paths,
     _install_argv,
     _is_on_persistent_path,
     _node_archive_spec,
-    _native_bin_dir,
     _path_export_line,
     _path_with_entry,
     _same_dir,
@@ -44,6 +42,7 @@ from blindpilot_app import (  # noqa: E402
     install_backend,
     install_claude,
 )
+from claude_session import _fallback_claude_paths, _native_bin_dir  # noqa: E402
 
 WINDOWS = platform.system() == "Windows"
 

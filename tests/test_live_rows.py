@@ -18,7 +18,9 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from blindpilot_app import _result_label, _tool_result_text, _tool_use_label  # noqa: E402
+from agent_backends import _tool_use_label  # noqa: E402
+from blindpilot_app import _result_label  # noqa: E402
+from claude_worker import _tool_result_text  # noqa: E402
 from doubles import panel_stub  # noqa: E402
 from markdown_rows import Row, reassemble, reassemble_all  # noqa: E402
 from test_claude_stream_resilience import _FakeProc as _ClaudeFakeProc  # noqa: E402
@@ -180,8 +182,8 @@ def _run_worker(events, on_activity=None, mode="default"):
     """Drive ClaudeWorker over `events` and collect its activity callbacks."""
     import json
 
-    import blindpilot_app
     import claude_session
+    import claude_worker
 
     lines = [json.dumps(e) + "\n" for e in events]
     activity: list[tuple[str, str]] = []
@@ -198,11 +200,11 @@ def _run_worker(events, on_activity=None, mode="default"):
         if on_activity is not None:
             on_activity(procs[0] if procs else None, kind, text)
 
-    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    real_popen, real_find = claude_session._popen, claude_worker._find_claude
     claude_session._popen = fake_popen  # type: ignore[assignment]
-    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
+    claude_worker._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        worker = blindpilot_app.ClaudeWorker(
+        worker = claude_worker.ClaudeWorker(
             "hi",
             None,
             os.getcwd(),
@@ -217,7 +219,7 @@ def _run_worker(events, on_activity=None, mode="default"):
         worker.run()
     finally:
         claude_session._popen = real_popen  # type: ignore[assignment]
-        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        claude_worker._find_claude = real_find  # type: ignore[assignment]
         # Not this function's job to drop the held process: a caller that
         # asserts on `procs[0]` needs it exactly as the worker left it.
         # `no_backend_process_outlives_its_test` in conftest.py empties the
@@ -315,8 +317,8 @@ def test_steer_writes_a_second_message_into_the_running_process():
         {"type": "result", "subtype": "success"},
     ]
 
-    import blindpilot_app
     import claude_session
+    import claude_worker
 
     lines = [_json.dumps(e) + "\n" for e in events]
     procs = []
@@ -326,11 +328,11 @@ def test_steer_writes_a_second_message_into_the_running_process():
         procs.append(proc)
         return proc
 
-    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    real_popen, real_find = claude_session._popen, claude_worker._find_claude
     claude_session._popen = fake_popen  # type: ignore[assignment]
-    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
+    claude_worker._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        worker = blindpilot_app.ClaudeWorker(
+        worker = claude_worker.ClaudeWorker(
             "do a thing",
             None,
             os.getcwd(),
@@ -346,7 +348,7 @@ def test_steer_writes_a_second_message_into_the_running_process():
         worker.run()
     finally:
         claude_session._popen = real_popen  # type: ignore[assignment]
-        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        claude_worker._find_claude = real_find  # type: ignore[assignment]
 
     assert sent.get("steered") is True
     written = [_json.loads(w) for w in procs[0].stdin.written]
@@ -357,9 +359,9 @@ def test_steer_writes_a_second_message_into_the_running_process():
 
 
 def test_steer_is_refused_once_the_run_is_over():
-    import blindpilot_app
+    import claude_worker
 
-    worker = blindpilot_app.ClaudeWorker(
+    worker = claude_worker.ClaudeWorker(
         "hi",
         None,
         os.getcwd(),
@@ -763,8 +765,8 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
     """Drive ClaudeWorker over `events`, answering any question it asks."""
     import json
 
-    import blindpilot_app
     import claude_session
+    import claude_worker
 
     lines = [json.dumps(event) + "\n" for event in events]
     asked: list[tuple] = []
@@ -782,11 +784,11 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
         asked.append(tuple(questions))
         return answer
 
-    real_popen, real_find = claude_session._popen, blindpilot_app._find_claude
+    real_popen, real_find = claude_session._popen, claude_worker._find_claude
     claude_session._popen = fake_popen  # type: ignore[assignment]
-    blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
+    claude_worker._find_claude = lambda: "claude"  # type: ignore[assignment]
     try:
-        worker = blindpilot_app.ClaudeWorker(
+        worker = claude_worker.ClaudeWorker(
             "hi",
             None,
             os.getcwd(),
@@ -802,7 +804,7 @@ def _run_worker_with_questions(events, answer, mode="bypassPermissions"):
         worker.run()
     finally:
         claude_session._popen = real_popen  # type: ignore[assignment]
-        blindpilot_app._find_claude = real_find  # type: ignore[assignment]
+        claude_worker._find_claude = real_find  # type: ignore[assignment]
     written = [json.loads(line) for line in procs[0].stdin.written]
     return asked, written, activity, commands[0]
 
