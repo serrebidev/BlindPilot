@@ -101,7 +101,7 @@ def test_other_backends_leave_the_codex_server_alone(held, monkeypatch):
     monkeypatch.setattr(
         portable_node, "_npm_update_argv", lambda backend: ["npm", "install", "freebuff"]
     )
-    monkeypatch.setattr(app, "freebuff_model_options", lambda: ([], "", ""))
+    monkeypatch.setattr(installers, "freebuff_model_options", lambda: ([], "", ""))
     work = _held(held, backend_pool.pool_key(app.BACKEND_CODEX, account=7))
 
     installers.update_backend(app.BACKEND_FREEBUFF, lambda _line: None)
