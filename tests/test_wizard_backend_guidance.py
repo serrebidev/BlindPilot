@@ -85,6 +85,9 @@ class _Wizard:
         self._already_btn = _Widget()
         self._open_page_btn = _Widget()
         self._signin_status = _Widget()
+        # The check now says it is checking before it dispatches the work, so
+        # this path is reached even when a plan Account exists.
+        self._show_signin_status = lambda text: app.SetupWizard._show_signin_status(self, text)
         self._signin_intro = _Widget()
         self._welcome_text = _Widget()
         self._done_text = _Widget()
@@ -292,6 +295,18 @@ def test_codex_setup_uses_the_plan_account_instead_of_asking_for_another_login(m
     monkeypatch.setattr(
         app, "backend_auth_ok", lambda backend, **kwargs: checked.append(backend) or False
     )
+
+    # The lookup now runs on a worker so it cannot freeze the wizard, so the
+    # test runs that worker inline and joins it here.
+    class _Thread:
+        def __init__(self, target, daemon=False, name=""):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(app.threading, "Thread", _Thread)
+    monkeypatch.setattr(app.wx, "CallAfter", lambda fn, *a: fn(*a))
 
     app.SetupWizard._check_signin(wizard)
 

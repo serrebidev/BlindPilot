@@ -21,8 +21,9 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 
 # One lock around every write, because one file has two writers. Both halves of
@@ -33,18 +34,51 @@ from typing import Iterable, Mapping
 _WRITE_LOCK = threading.RLock()
 
 
-def load_config(paths: Iterable[Path]) -> dict:
+def _set_aside(path: Path) -> Path | None:
+    """Move an unreadable settings file out of the way, keeping its contents.
+
+    The next save writes a whole new file, so leaving the broken one in place
+    would destroy the only copy of whatever it held. The stamp keeps both.
+    """
+    if not path.is_file():
+        return None
+    target = path.with_name(f"{path.name}.broken-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        os.replace(path, target)
+    except OSError:
+        logging.getLogger("blindpilot").exception("could not set aside %s", path)
+        return None
+    logging.getLogger("blindpilot").warning(
+        "settings file could not be read and was kept as %s", target
+    )
+    return target
+
+
+def load_config(
+    paths: Iterable[Path],
+    on_damaged: Callable[[Path], None] | None = None,
+) -> dict:
     """The first of these settings files that can be read, or an empty dict.
 
     The order is the caller's: the current file first, then any older one it
     has not been migrated from yet.
+
+    A file that is there but cannot be read is not the same as one that is
+    absent. It is moved aside as ``<name>.broken-<stamp>`` so the next save
+    cannot overwrite it, and `on_damaged` is told, so the caller can say that
+    the settings were lost instead of starting from defaults in silence.
     """
     for path in paths:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
                 return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            continue
         except (OSError, ValueError):
+            kept = _set_aside(path)
+            if kept is not None and on_damaged is not None:
+                on_damaged(kept)
             continue
     return {}
 

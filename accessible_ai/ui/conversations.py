@@ -13,6 +13,7 @@ apart out loud, and a row of buttons ending in Close.
 from __future__ import annotations
 
 import datetime
+from typing import Callable
 
 import wx
 
@@ -51,7 +52,12 @@ def _when(updated_at: str) -> str:
 
 
 class ConversationsDialog(wx.Dialog):
-    def __init__(self, parent: wx.Window, db: Database):
+    def __init__(
+        self,
+        parent: wx.Window,
+        db: Database,
+        speak: Callable[[str], None] | None = None,
+    ):
         super().__init__(
             parent,
             title="Recent Conversations",
@@ -63,6 +69,9 @@ class ConversationsDialog(wx.Dialog):
         self.shown: list[ConversationSummary] = []
         # What the caller opens once this closes with OK.
         self.chosen: ConversationSummary | None = None
+        # Spoken feedback for an action that changes the list, or None when the
+        # dialog was built without one.
+        self._speak = speak
 
         panel = wx.Panel(self)
         pad = panel.FromDIP(PAD)
@@ -207,3 +216,12 @@ class ConversationsDialog(wx.Dialog):
         self.db.delete_conversation(conversation.id)
         self.reload()
         self.listbox.SetFocus()
+        # The row that had focus is gone and the list reselected without a word,
+        # so say what was deleted and what the reader is on now.
+        remaining = self.selected()
+        if self._speak is not None:
+            self._speak(
+                f"Deleted {conversation.title}."
+                if remaining is None
+                else f"Deleted {conversation.title}. {remaining.title} is selected."
+            )

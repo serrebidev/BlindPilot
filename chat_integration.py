@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 from typing import Callable
@@ -73,6 +74,36 @@ def import_existing_accessible_ai_data(target: Path) -> Path | None:
     return None
 
 
+_IMPORT_LOCK = threading.Lock()
+_IMPORT_STARTED = False
+_IMPORT_DONE = threading.Event()
+_IMPORTED: Path | None = None
+
+
+def ensure_legacy_import() -> Path | None:
+    """Copy an older AccessibleAI database once, or return what was copied.
+
+    Safe from any thread and any number of times: the first caller does the
+    copy and later ones take its answer, waiting for it if it is still running.
+    Waiting is the lesser evil -- opening the database while sqlite is writing
+    it would show a half-copied set of conversations.
+
+    Startup calls this off the window's thread, so the first switch to Chat
+    mode no longer freezes while a large database is copied.
+    """
+    global _IMPORT_STARTED, _IMPORTED
+    with _IMPORT_LOCK:
+        if not _IMPORT_STARTED:
+            _IMPORT_STARTED = True
+            try:
+                _IMPORTED = import_existing_accessible_ai_data(database_path())
+            finally:
+                _IMPORT_DONE.set()
+            return _IMPORTED
+    _IMPORT_DONE.wait()
+    return _IMPORTED
+
+
 def create_chat_panel(
     parent: wx.Window,
     set_status: Callable[[str], None],
@@ -81,7 +112,7 @@ def create_chat_panel(
 ) -> ChatPanel:
     _configure_chat_logging()
     path = database_path()
-    imported = import_existing_accessible_ai_data(path)
+    imported = ensure_legacy_import()
     database = Database(path)
     credentials = CredentialStore()
     panel = ChatPanel(

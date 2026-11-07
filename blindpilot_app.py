@@ -1611,8 +1611,21 @@ def _remote_sessions() -> dict:
 
 
 def _remember_remote(session_id: str, bridge: str, url: str) -> None:
+    """Save where this session's Remote Control bridge is, newest last.
+
+    The newest `_REMOTE_SESSIONS_KEPT` are the ones kept: this session is taken
+    out and put back at the end, and the front, the oldest, is what falls off.
+    A record is written when Remote Control is turned on and only removed when
+    it is turned off, so a session that ended any other way would otherwise be
+    kept for ever while the whole file is read at startup.
+    """
+    if not session_id:
+        return
+    saved = _remote_sessions()
+    ordered = [(sid, row) for sid, row in saved.items() if sid != session_id]
+    ordered.append((session_id, {"bridge": bridge, "url": url}))
     cfg = _load_config()
-    cfg["remote_control"] = {**_remote_sessions(), session_id: {"bridge": bridge, "url": url}}
+    cfg["remote_control"] = dict(ordered[-_REMOTE_SESSIONS_KEPT:])
     _save_config(cfg)
 
 
@@ -1630,6 +1643,10 @@ def _forget_remote(session_id: str) -> None:
 # while the file is read whole at startup, and would otherwise grow with every
 # conversation ever opened.
 _SESSION_RULES_KEPT = 50
+
+# The same bound for Remote Control records, which name a session's bridge and
+# URL and are removed only when Remote Control is turned off.
+_REMOTE_SESSIONS_KEPT = 20
 
 
 def _saved_session_rules() -> dict:
@@ -2644,8 +2661,18 @@ def _record_setup_complete(cfg: dict) -> bool:
     return False
 
 
+def _note_damaged_config(path) -> None:
+    """Say that the settings could not be read, once, naming the kept copy."""
+    announce(
+        f"Your settings file could not be read. It was kept as {path.name}, "
+        "and BlindPilot has started from the defaults."
+    )
+
+
 def _load_config() -> dict:
-    return preferences.load_config((_config_path(), _legacy_config_path()))
+    return preferences.load_config(
+        (_config_path(), _legacy_config_path()), on_damaged=_note_damaged_config
+    )
 
 
 def _save_config(cfg: dict) -> bool:
@@ -4979,6 +5006,9 @@ class NewSessionDialog(wx.Dialog):
         self._remote_label = remote_label.strip()
         self.path = ""
         self.title_text = ""
+        # (folder, branch) when a worktree was asked for. Made after the dialog
+        # closes: a git checkout can take long enough to freeze the window.
+        self.worktree: Optional[tuple[str, str]] = None
         self.worktree_box: Optional[wx.CheckBox] = None
         self.branch_box: Optional[wx.TextCtrl] = None
         self._github_serial = 0
@@ -5332,11 +5362,10 @@ class NewSessionDialog(wx.Dialog):
             if not branch:
                 self._reject("Type a branch name for the worktree.")
                 return
-            with wx.BusyCursor():
-                path, why = create_worktree(path, branch)
-            if why:
-                self._reject(why)
-                return
+            # Kept for the caller, which makes it away from this thread: doing
+            # it here froze the dialog for as long as git took, with the window
+            # saying nothing about whether it was working.
+            self.worktree = (path, branch)
         self.path = path
         self._stop_github()
         event.Skip()
@@ -12234,25 +12263,36 @@ class SetupWizard(wx.Dialog):
             return
         label = backend_label(self.backend)
         self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
-        self._backend_path = self._find_selected_cli()
-        if not self._backend_path:
-            self._show_signin_status(
-                f"{label} is not installed. Go Back and complete the CLI step first."
-            )
-            return
-        if self.backend == BACKEND_CODEX:
-            plan = self._plan_account_for_codex()
-            if plan is not None:
-                self._show_plan_account(plan)
-                return
         self._show_signin_status(f"Checking whether {label} is signed in…")
         backend = self.backend
 
         def work() -> None:
-            # The probe runs a CLI with a timeout of up to 25 seconds. On the
-            # GUI thread that froze the wizard and the screen reader with it.
-            ok = backend_auth_ok(backend)
-            wx.CallAfter(self._on_signin_checked, backend, ok)
+            # Everything slow happens here. Discovery searches PATH and, for
+            # Muse, asks WSL; the Codex plan lookup opens SQLite and reads
+            # Windows credentials; the probe runs a CLI with a timeout of up to
+            # 25 seconds. All three used to run on the GUI thread, which froze
+            # the wizard and the screen reader with it.
+            path = self._find_selected_cli()
+            plan = None
+            if path and backend == BACKEND_CODEX:
+                plan = self._plan_account_for_codex()
+            ok = bool(path) and plan is None and backend_auth_ok(backend)
+
+            def finish() -> None:
+                if not self or backend != self.backend:
+                    return
+                self._backend_path = path
+                if not path:
+                    self._show_signin_status(
+                        f"{label} is not installed. Go Back and complete the CLI step first."
+                    )
+                    return
+                if plan is not None:
+                    self._show_plan_account(plan)
+                    return
+                self._on_signin_checked(backend, ok)
+
+            wx.CallAfter(finish)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -13053,6 +13093,21 @@ class PreferencesDialog(wx.Dialog):
         return APPEARANCES[self._appearance_box.GetSelection()][0]
 
 
+def _start_legacy_chat_import() -> None:
+    """Copy an older AccessibleAI database now, off the window's thread.
+
+    Imported inside the thread: chat_integration pulls in the whole Chat panel,
+    which startup should not pay for unless the copy is actually going to run.
+    """
+
+    def work() -> None:
+        from chat_integration import ensure_legacy_import
+
+        ensure_legacy_import()
+
+    threading.Thread(target=work, daemon=True).start()
+
+
 class MainFrame(wx.Frame):
     def __init__(self, initial_cwd: str):
         super().__init__(None, title=APP_NAME)
@@ -13073,6 +13128,9 @@ class MainFrame(wx.Frame):
             settings=SETTINGS,
         )
         self._update_checking = False
+        # Started now, so the one-time copy of an older AccessibleAI database
+        # is already done by the time anyone switches to Chat mode.
+        _start_legacy_chat_import()
 
         # Remembered "Projects folder" — the parent folder that holds the
         # user's project directories. New Session browses from there.
@@ -15455,11 +15513,15 @@ class MainFrame(wx.Frame):
                 return
             cwd = dlg.path
             title = dlg.title_text
+            worktree = dlg.worktree
         finally:
             dlg.Destroy()
         if not cwd and not remote_label:
             # Locally a folder is required; remotely an empty one is normal and
             # means "wherever that Hermes runs".
+            return
+        if worktree is not None:
+            self._open_worktree_session(worktree[0], worktree[1], title)
             return
         if not remote_label:
             _remember_folder(cwd)
@@ -15471,6 +15533,25 @@ class MainFrame(wx.Frame):
         else:
             spoken = f"New session on {remote_label}"
         wx.CallAfter(announce, spoken)
+
+    def _open_worktree_session(self, folder: str, branch: str, title: str) -> None:
+        """Make the worktree off the window's thread, then open its session."""
+        announce(f"Creating a worktree for {branch}.")
+
+        def work() -> None:
+            path, why = create_worktree(folder, branch)
+            wx.CallAfter(self._worktree_ready, path, why, branch, title)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _worktree_ready(self, path: str, why: str, branch: str, title: str) -> None:
+        """Open the session git just made, or say why it could not."""
+        if why:
+            announce(why)
+            return
+        _remember_folder(path)
+        self._add_session(path, session_title=title)
+        announce(f"New session: {title}" if title else f"New session: {_short_label(path)}")
 
     def _history_cwd(self) -> str:
         """The directory the history picker starts out scoped to."""

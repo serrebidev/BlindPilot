@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import chat_integration
@@ -28,6 +29,46 @@ def test_tests_never_touch_the_installed_apps_data_folder(tmp_path):
     real = Path.home() / "AppData" / "Roaming" / "BlindPilot"
     assert not str(paths.app_data_dir()).startswith(str(real))
     assert not str(logging_setup.log_path()).startswith(str(real))
+
+
+def test_the_legacy_copy_happens_once_and_reports_its_source(monkeypatch, tmp_path):
+    """The copy used to happen on the first switch, freezing the window."""
+    target = tmp_path / "chat.sqlite3"
+    legacy = tmp_path / "legacy.sqlite3"
+    monkeypatch.setattr(chat_integration, "database_path", lambda: target)
+    monkeypatch.setattr(chat_integration, "_IMPORT_STARTED", False)
+    monkeypatch.setattr(chat_integration, "_IMPORT_DONE", threading.Event())
+    monkeypatch.setattr(chat_integration, "_IMPORTED", None)
+    copied: list[Path] = []
+    monkeypatch.setattr(
+        chat_integration,
+        "import_existing_accessible_ai_data",
+        lambda path: copied.append(path) or legacy,
+    )
+
+    assert chat_integration.ensure_legacy_import() == legacy
+    assert copied == [target]
+
+    # Startup has already done it, so switching to Chat does not copy again.
+    assert chat_integration.ensure_legacy_import() == legacy
+    assert copied == [target]
+
+
+def test_a_copy_that_finds_nothing_still_happens_before_the_panel_opens(monkeypatch, tmp_path):
+    target = tmp_path / "chat.sqlite3"
+    monkeypatch.setattr(chat_integration, "database_path", lambda: target)
+    monkeypatch.setattr(chat_integration, "_IMPORT_STARTED", False)
+    monkeypatch.setattr(chat_integration, "_IMPORT_DONE", threading.Event())
+    monkeypatch.setattr(chat_integration, "_IMPORTED", None)
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        chat_integration,
+        "import_existing_accessible_ai_data",
+        lambda path: seen.append(path) or None,
+    )
+
+    assert chat_integration.ensure_legacy_import() is None
+    assert seen == [target]
 
 
 def test_a_damaged_accessibleai_database_is_skipped_and_leaves_no_half_copy(monkeypatch, tmp_path):

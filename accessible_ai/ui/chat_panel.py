@@ -788,7 +788,7 @@ class ChatPanel(wx.Panel):
                 self,
             )
             return
-        dialog = ConversationsDialog(self, self.db)
+        dialog = ConversationsDialog(self, self.db, speak=self._speak)
         try:
             if dialog.ShowModal() != wx.ID_OK or dialog.chosen is None:
                 return
@@ -1072,7 +1072,12 @@ class ChatPanel(wx.Panel):
             self.generating,
         )
         if self.generating:
-            self.SetStatusText("A response is already being generated.")
+            message = "A response is already being generated."
+            self.SetStatusText(message)
+            # The status bar is visual only. Every other refusal in this file
+            # speaks, and a message that silently goes nowhere is the worst case
+            # for someone who cannot see that nothing happened.
+            self._speak(message)
             return
         if not account:
             wx.MessageBox(
@@ -1122,7 +1127,12 @@ class ChatPanel(wx.Panel):
 
     def on_regenerate(self, event: wx.CommandEvent | None) -> None:
         if self.generating:
-            self.SetStatusText("A response is already being generated.")
+            message = "A response is already being generated."
+            self.SetStatusText(message)
+            # The status bar is visual only. Every other refusal in this file
+            # speaks, and a message that silently goes nowhere is the worst case
+            # for someone who cannot see that nothing happened.
+            self._speak(message)
             return
         account = self.selected_account()
         model = self.model_combo.GetStringSelection().strip()

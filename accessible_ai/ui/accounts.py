@@ -1029,6 +1029,16 @@ class AccountsDialog(wx.Dialog):
         self.db.delete_account(int(account.id))
         logger.info("Deleted account name=%s provider=%s", account.name, account.provider)
         self.reload()
+        # The focused row is gone. Move focus somewhere real and say both what
+        # was deleted and what the list holds now, rather than leaving the
+        # reader on a row the reload silently replaced.
+        self.listbox.SetFocus()
+        remaining = self.selected()
+        self._say(
+            f"Deleted {account.name}."
+            if remaining is None
+            else f"Deleted {account.name}. {remaining.name} is selected."
+        )
         if waited:
             self._say(CODEX_TURN_WAIT.format(label=account.name))
 
