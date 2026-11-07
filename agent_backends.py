@@ -595,7 +595,7 @@ def find_backend_cli(backend: str) -> Optional[str]:
         candidate = managed_bin / f"{info.executable}{suffix}"
         if candidate.is_file():
             return str(candidate)
-    found = shutil.which(info.executable)
+    found = process_utils.which_without_cwd(info.executable)
     if found:
         return found
     for candidate in _fallback_cli_paths(info.executable):

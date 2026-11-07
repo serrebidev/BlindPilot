@@ -31,6 +31,7 @@ from typing import Callable, List, Optional, Sequence
 
 import backend_pool
 import install_path
+import process_utils
 import portable_node
 from agent_backends import (
     BACKENDS,
@@ -87,7 +88,7 @@ HERMES_INSTALL_SH_URL = "https://hermes-agent.nousresearch.com/install.sh"
 def _powershell_exe() -> Optional[str]:
     """Windows PowerShell first — it ships with Windows 11, pwsh may not."""
     for name in ("powershell.exe", "powershell", "pwsh.exe", "pwsh"):
-        found = shutil.which(name)
+        found = process_utils.which_without_cwd(name)
         if found:
             return found
     return None

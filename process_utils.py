@@ -13,6 +13,7 @@ import platform
 import signal
 import subprocess
 from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import Iterable, Optional
 
 
@@ -94,6 +95,32 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
             wait(timeout=timeout or 5)
         except Exception:
             pass
+
+
+def which_without_cwd(name: str) -> Optional[str]:
+    """Find ``name`` on PATH, never in the current directory.
+
+    ``shutil.which`` prepends the current directory on Windows, so starting
+    BlindPilot from a folder that happens to contain ``codex.cmd`` made that
+    file the agent for every turn. An empty PATH entry means the current
+    directory on POSIX too, so both are skipped here.
+
+    A name that already carries an extension is tried first, then PATHEXT, so
+    ``powershell.exe`` and ``codex`` are both found the way ``which`` finds them.
+    """
+    extensions = [""]
+    if platform.system() == "Windows":
+        listed = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+        extensions += [each.strip().lower() for each in listed if each.strip()]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip()
+        if not entry or entry == os.curdir:
+            continue
+        for extension in extensions:
+            candidate = Path(entry) / f"{name}{extension}"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
 
 
 def _close_process_pipes(proc: object) -> None:
