@@ -16,6 +16,35 @@ import backend_pool
 
 
 @pytest.fixture(autouse=True)
+def git_commands_use_their_own_repository(monkeypatch):
+    """A Git hook's repository must not leak into temporary test repositories.
+
+    Hooks export repository-local variables such as GIT_DIR. Git honours them
+    even with ``git -C temporary_folder``, so a test's ``git add`` can otherwise
+    replace the real checkout's index. These are the variables reported by
+    ``git rev-parse --local-env-vars``; global and system config stay in place.
+    """
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def diagnostics_stay_out_of_the_real_log(monkeypatch):
     """Keep everything a test writes down out of the installed app's own log.
 
