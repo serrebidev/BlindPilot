@@ -76,17 +76,15 @@ def import_existing_accessible_ai_data(target: Path) -> Path | None:
 
 _IMPORT_LOCK = threading.Lock()
 _IMPORT_STARTED = False
-_IMPORT_DONE = threading.Event()
 _IMPORTED: Path | None = None
 
 
 def ensure_legacy_import() -> Path | None:
     """Copy an older AccessibleAI database once, or return what was copied.
 
-    Safe from any thread and any number of times: the first caller does the
-    copy and later ones take its answer, waiting for it if it is still running.
-    Waiting is the lesser evil -- opening the database while sqlite is writing
-    it would show a half-copied set of conversations.
+    Safe from any thread and any number of times: the copy runs under the lock,
+    so a second caller waits for it instead of opening a half-written database,
+    then takes the same answer.
 
     Startup calls this off the window's thread, so the first switch to Chat
     mode no longer freezes while a large database is copied.
@@ -95,13 +93,8 @@ def ensure_legacy_import() -> Path | None:
     with _IMPORT_LOCK:
         if not _IMPORT_STARTED:
             _IMPORT_STARTED = True
-            try:
-                _IMPORTED = import_existing_accessible_ai_data(database_path())
-            finally:
-                _IMPORT_DONE.set()
-            return _IMPORTED
-    _IMPORT_DONE.wait()
-    return _IMPORTED
+            _IMPORTED = import_existing_accessible_ai_data(database_path())
+        return _IMPORTED
 
 
 def create_chat_panel(
