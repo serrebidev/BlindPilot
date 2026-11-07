@@ -98,13 +98,13 @@ class _FakePlatform:
         return self._system
 
 
-class _FakeShutil:
-    """Stands in for `shutil`, with only the tools we say are installed."""
+class _FakeTools:
+    """Stands in for the PATH lookup, with only the tools we say are installed."""
 
     def __init__(self, available):
         self._available = available
 
-    def which(self, name):
+    def which_without_cwd(self, name):
         return self._available.get(os.path.basename(name))
 
 
@@ -457,14 +457,14 @@ def test_install_command_is_the_official_powershell_one_liner():
 def test_install_command_is_the_official_shell_one_liner_on_macos():
     with _Patch(
         platform=_FakePlatform("Darwin"),
-        shutil=_FakeShutil({"curl": "/usr/bin/curl", "bash": "/bin/bash"}),
+        process_utils=_FakeTools({"curl": "/usr/bin/curl", "bash": "/bin/bash"}),
     ):
         argv = _install_argv()
     assert argv == ["/bin/bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]
 
 
 def test_install_command_absent_without_curl():
-    with _Patch(platform=_FakePlatform("Darwin"), shutil=_FakeShutil({"bash": "/bin/bash"})):
+    with _Patch(platform=_FakePlatform("Darwin"), process_utils=_FakeTools({"bash": "/bin/bash"})):
         assert _install_argv() is None
 
 

@@ -114,9 +114,9 @@ def _script_installer_argv(powershell_command: str, posix_url: str) -> Optional[
             "-Command",
             powershell_command,
         ]
-    if shutil.which("curl") is None:
+    if process_utils.which_without_cwd("curl") is None:
         return None
-    shell = shutil.which("bash") or shutil.which("sh")
+    shell = process_utils.which_without_cwd("bash") or process_utils.which_without_cwd("sh")
     if shell is None:
         return None
     return [shell, "-c", f"curl -fsSL {posix_url} | bash"]
@@ -452,9 +452,9 @@ def _muse_install_argv() -> Optional[List[str]]:
         # POSIX-only, so running it from Windows is not an option to fall
         # back to.
         return [launcher, "-e", "bash", "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]
-    if shutil.which("curl") is None:
+    if process_utils.which_without_cwd("curl") is None:
         return None
-    shell = shutil.which("bash") or shutil.which("sh")
+    shell = process_utils.which_without_cwd("bash") or process_utils.which_without_cwd("sh")
     if shell is None:
         return None
     return [shell, "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]

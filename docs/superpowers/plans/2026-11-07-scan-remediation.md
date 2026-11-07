@@ -15,7 +15,7 @@ filed as GitHub issues #51–#58.
 | #54 | A damaged settings file is silently replaced by defaults | `accessible_ai/storage/preferences.py`, `blindpilot_app.py` |
 | #55 | Deleting an account is announced only in the log | `accessible_ai/ui/accounts.py` |
 | #56 | First switch to Chat copies the legacy database on the GUI thread | `chat_integration.py`, `blindpilot_app.py` |
-| #57 | Creating a worktree freezes the New Session dialog | `blindpilot_app.py` |
+| #57 | Creating a worktree Stalls the New Session dialog | `blindpilot_app.py` |
 | #58 | Deleting a conversation is silent and moves focus | `accessible_ai/ui/conversations.py` |
 
 ## Constraints

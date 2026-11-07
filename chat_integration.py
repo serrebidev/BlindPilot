@@ -78,6 +78,10 @@ _IMPORT_LOCK = threading.Lock()
 _IMPORT_STARTED = False
 _IMPORTED: Path | None = None
 
+# shortcut: a copy killed as the app exits can leave a partial database that
+# target.exists() then treats as done; upgrade if copies grow slow enough for
+# that window to be hit.
+
 
 def ensure_legacy_import() -> Path | None:
     """Copy an older AccessibleAI database once, or return what was copied.
@@ -87,7 +91,7 @@ def ensure_legacy_import() -> Path | None:
     then takes the same answer.
 
     Startup calls this off the window's thread, so the first switch to Chat
-    mode no longer freezes while a large database is copied.
+    mode no longer Stalls while a large database is copied.
     """
     global _IMPORT_STARTED, _IMPORTED
     with _IMPORT_LOCK:

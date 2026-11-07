@@ -114,7 +114,13 @@ def which_without_cwd(name: str) -> Optional[str]:
         extensions += [each.strip().lower() for each in listed if each.strip()]
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         entry = entry.strip()
-        if not entry or entry == os.curdir:
+        # Relative entries resolve from the working directory too, so a PATH
+        # of "bin" is the same hole as "." with one more step in it. On Windows
+        # a rooted path without a drive ("\bin") is still relative to whatever
+        # drive the process happens to be on.
+        if not entry or not os.path.isabs(entry):
+            continue
+        if platform.system() == "Windows" and not os.path.splitdrive(entry)[0]:
             continue
         for extension in extensions:
             candidate = Path(entry) / f"{name}{extension}"

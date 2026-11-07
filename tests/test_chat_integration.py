@@ -32,7 +32,7 @@ def test_tests_never_touch_the_installed_apps_data_folder(tmp_path):
 
 
 def test_the_legacy_copy_happens_once_and_reports_its_source(monkeypatch, tmp_path):
-    """The copy used to happen on the first switch, freezing the window."""
+    """The copy used to happen on the first switch, Stalling the window."""
     target = tmp_path / "chat.sqlite3"
     legacy = tmp_path / "legacy.sqlite3"
     monkeypatch.setattr(chat_integration, "database_path", lambda: target)

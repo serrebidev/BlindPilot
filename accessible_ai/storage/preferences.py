@@ -56,7 +56,7 @@ def _set_aside(path: Path) -> Path | None:
 
 def load_config(
     paths: Iterable[Path],
-    on_damaged: Callable[[Path], None] | None = None,
+    on_damaged: Callable[[Path, bool], None] | None = None,
 ) -> dict:
     """The first of these settings files that can be read, or an empty dict.
 
@@ -65,8 +65,9 @@ def load_config(
 
     A file that is there but cannot be read is not the same as one that is
     absent. It is moved aside as ``<name>.broken-<stamp>`` so the next save
-    cannot overwrite it, and `on_damaged` is told, so the caller can say that
-    the settings were lost instead of starting from defaults in silence.
+    cannot overwrite it, and `on_damaged` is told which path and whether it was
+    kept, so the caller can say what happened either way -- including when the
+    move failed and the next save will replace it.
     """
     for path in paths:
         try:
@@ -77,8 +78,8 @@ def load_config(
             continue
         except (OSError, ValueError):
             kept = _set_aside(path)
-            if kept is not None and on_damaged is not None:
-                on_damaged(kept)
+            if on_damaged is not None:
+                on_damaged(path if kept is None else kept, kept is not None)
             continue
     return {}
 

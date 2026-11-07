@@ -67,3 +67,19 @@ def test_an_empty_path_entry_does_not_mean_the_current_directory(tmp_path, monke
         assert process_utils.which_without_cwd(_name()) is None
     finally:
         os.chdir(original)
+
+
+def test_a_relative_path_entry_is_not_resolved_from_the_current_directory(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    (work / "bin").mkdir(parents=True)
+    _binary(work / "bin", _name())
+
+    monkeypatch.setenv("PATH", "bin")
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+
+    original = Path.cwd()
+    os.chdir(work)
+    try:
+        assert process_utils.which_without_cwd(_name()) is None
+    finally:
+        os.chdir(original)

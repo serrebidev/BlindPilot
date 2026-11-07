@@ -2661,11 +2661,19 @@ def _record_setup_complete(cfg: dict) -> bool:
     return False
 
 
-def _note_damaged_config(path) -> None:
-    """Say that the settings could not be read, once, naming the kept copy."""
+def _note_damaged_config(path, kept: bool) -> None:
+    """Say that the settings could not be read, and whether a copy was kept."""
+    if kept:
+        announce(
+            f"Your settings file could not be read. It was kept as {path.name}, "
+            "and BlindPilot has started from the defaults."
+        )
+        return
+    # No status bar exists yet to mirror this to; the announcement is the only
+    # telling, and it is repeated by the review-cursor command.
     announce(
-        f"Your settings file could not be read. It was kept as {path.name}, "
-        "and BlindPilot has started from the defaults."
+        "Your settings file could not be read and could not be kept. BlindPilot has "
+        "started from the defaults, and the next save will replace it."
     )
 
 
@@ -5007,7 +5015,7 @@ class NewSessionDialog(wx.Dialog):
         self.path = ""
         self.title_text = ""
         # (folder, branch) when a worktree was asked for. Made after the dialog
-        # closes: a git checkout can take long enough to freeze the window.
+        # closes: a git checkout can take long enough to Stall the window.
         self.worktree: Optional[tuple[str, str]] = None
         self.worktree_box: Optional[wx.CheckBox] = None
         self.branch_box: Optional[wx.TextCtrl] = None
@@ -5363,8 +5371,8 @@ class NewSessionDialog(wx.Dialog):
                 self._reject("Type a branch name for the worktree.")
                 return
             # Kept for the caller, which makes it away from this thread: doing
-            # it here froze the dialog for as long as git took, with the window
-            # saying nothing about whether it was working.
+            # it here Stalled the dialog for as long as git took, with the
+            # window saying nothing about whether it was working.
             self.worktree = (path, branch)
         self.path = path
         self._stop_github()
@@ -13097,7 +13105,8 @@ def _start_legacy_chat_import() -> None:
     """Copy an older AccessibleAI database now, off the window's thread.
 
     Imported inside the thread: chat_integration pulls in the whole Chat panel,
-    which startup should not pay for unless the copy is actually going to run.
+    and the copy runs on every launch either way, so this moves that cost off
+    the window's thread rather than avoiding it.
     """
 
     def work() -> None:
@@ -15547,11 +15556,16 @@ class MainFrame(wx.Frame):
     def _worktree_ready(self, path: str, why: str, branch: str, title: str) -> None:
         """Open the session git just made, or say why it could not."""
         if why:
+            self._set_status_text(why)
             announce(why)
             return
         _remember_folder(path)
         self._add_session(path, session_title=title)
-        announce(f"New session: {title}" if title else f"New session: {_short_label(path)}")
+        spoken = f"New session: {title}" if title else f"New session: {_short_label(path)}"
+        # Mirrored so the review cursor can reach words nobody heard, which is
+        # what every other announcement in this window does.
+        self._set_status_text(spoken)
+        announce(spoken)
 
     def _history_cwd(self) -> str:
         """The directory the history picker starts out scoped to."""
