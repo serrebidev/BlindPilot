@@ -48,7 +48,7 @@ def test_muse_install_argv_windows_is_none_without_wsl(monkeypatch):
 
 def test_muse_install_argv_posix_uses_the_official_installer(monkeypatch):
     monkeypatch.setattr(app.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(app.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("process_utils.which_without_cwd", lambda name: f"/usr/bin/{name}")
 
     argv = installers._muse_install_argv()
 

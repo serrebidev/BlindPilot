@@ -68,14 +68,16 @@ def test_hermes_install_argv_uses_the_official_powershell_one_liner(monkeypatch)
 def test_hermes_install_argv_uses_the_official_shell_one_liner(monkeypatch):
     monkeypatch.setattr(app.platform, "system", lambda: "Linux")
 
-    original_which = app.shutil.which
+    import process_utils
+
+    original_which = process_utils.which_without_cwd
 
     def which(name):
         if name in ("curl", "bash"):
             return f"/usr/bin/{name}"
         return original_which(name)
 
-    monkeypatch.setattr(app.shutil, "which", which)
+    monkeypatch.setattr("process_utils.which_without_cwd", which)
 
     argv = installers._hermes_install_argv()
 
@@ -90,7 +92,7 @@ def test_hermes_install_argv_is_none_without_prerequisites(monkeypatch):
     assert installers._hermes_install_argv() is None
 
     monkeypatch.setattr(app.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(app.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("process_utils.which_without_cwd", lambda _name: None)
     assert installers._hermes_install_argv() is None
 
 
