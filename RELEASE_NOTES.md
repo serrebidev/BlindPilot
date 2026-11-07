@@ -1,3 +1,7 @@
+# BlindPilot 0.55.13
+
+- Changed: backend integrations and accessible workflows refactored and hardened - backend and UI modules restructured, installer, process-ownership and GUI-thread fixes, accessibility feedback and scan remediation, CI and test-suite improvements, announcement-queue isolation and a UTF-8 BOM guard. From Farhan Khan, PR #152.
+
 # BlindPilot 0.55.12
 
 - Fixed: the Codex backend failed to launch on Windows with "[WinError 5] Access denied" for anyone who installed Codex the standard way, `npm install -g @openai/codex` (issue #150). BlindPilot runs Codex's native executable rather than the npm wrapper, but only looked for it in the nested package location; npm hoists the platform package beside @openai/codex, so the search missed and the launch fell back to the codex.cmd wrapper, which Windows cannot start as a process. The hoisted location is now found, and the model list probe uses the native executable too.
