@@ -8,6 +8,10 @@ mypy>=2.4.1
 # another having run first - which has already happened here twice.
 pytest-timeout>=2.4
 pytest-randomly>=5
+# Runs the whole suite in four processes: 5:14 to 2:55 on a developer
+# machine. --dist loadfile keeps a file's tests in one worker, which wx's
+# single application and the module-level speech state both need.
+pytest-xdist>=3.8
 # Earns its place: it found the casefold length bug in _keyed in seconds,
 # on ordinary German text no example test had thought to use.
 hypothesis>=6.170.14

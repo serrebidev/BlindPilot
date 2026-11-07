@@ -91,9 +91,9 @@ jobs:
         # reaches a release. xvfb-run gives wxPython a display to open into.
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a python -m pytest -q -W error
+            xvfb-run -a python -m pytest -q -W error -n 4 --dist loadfile
           else
-            python -m pytest -q -W error
+            python -m pytest -q -W error -n 4 --dist loadfile
           fi
 
       - name: Check the application still starts
