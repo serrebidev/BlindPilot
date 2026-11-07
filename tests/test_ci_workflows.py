@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import re
 
 WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
@@ -98,6 +99,29 @@ def test_the_types_are_checked_somewhere():
     assert any("mypy" in text for text in testing), (
         "nothing that runs the tests also checks the types"
     )
+
+
+def test_every_production_module_is_type_checked():
+    """`mypy.ini` lists its files by hand, so a new module is unchecked until
+    somebody remembers to add it. `backend_updates.py` sat outside the checked
+    set that way. Adding a module has to fail here until it is listed."""
+    root = Path(__file__).resolve().parent.parent
+    config = (root / "mypy.ini").read_text(encoding="utf-8")
+    listed = set()
+    in_files = False
+    for line in config.splitlines():
+        if line.startswith("files"):
+            in_files = True
+            line = line.split("=", 1)[1]
+        elif in_files and line.startswith(" "):
+            pass
+        elif in_files:
+            break
+        for name in re.findall(r"[\w.]+\.py", line):
+            listed.add(name)
+    modules = {path.name for path in root.glob("*.py")}
+    missing = sorted(modules - listed)
+    assert not missing, f"these modules are not type checked: {', '.join(missing)}"
 
 
 def test_the_release_builds_every_platform_it_ships():

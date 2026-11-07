@@ -11,3 +11,6 @@ pytest-randomly>=5
 # Earns its place: it found the casefold length bug in _keyed in seconds,
 # on ordinary German text no example test had thought to use.
 hypothesis>=6.170.14
+# The gate before the gate: `.pre-commit-config.yaml` names these same hooks,
+# so a clone that installs this file can wire it with `pre-commit install`.
+pre-commit>=4.7
