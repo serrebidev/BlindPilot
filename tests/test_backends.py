@@ -98,17 +98,16 @@ def test_worker_class_selects_each_adapter():
     assert worker_class(BACKEND_FREEBUFF, Claude) is FreebuffWorker
 
 
-def test_every_backend_answers_every_question_the_app_asks():
+def test_every_backend_answers_every_account_question_the_app_asks():
     """No backend may fall through to another backend's answer.
 
-    The four chains this replaced each ended in a fallback: an unchecked
-    backend answered "not signed in", and `worker_class` handed it Claude's
-    worker. A missing adapter is now a KeyError here, where it costs a test run
-    rather than a silently wrong window.
+    The account chains this replaced each ended in a fallback: an unchecked
+    backend answered "not signed in". A missing adapter is now a KeyError
+    here, where it costs a test run rather than a silently wrong window.
     """
     assert set(agent_backends.ADAPTERS) == set(agent_backends.BACKENDS)
     for backend, adapter in agent_backends.ADAPTERS.items():
-        for field in ("auth_ok", "account_lines", "usage_lines", "worker"):
+        for field in ("auth_ok", "account_lines", "usage_lines"):
             assert callable(getattr(adapter, field)), f"{backend} is missing {field}"
 
 

@@ -9054,20 +9054,16 @@ class AgentWorker(Protocol):
     def cancel(self) -> None: ...
 
 
-# Callable rather than type[...]: each backend's worker takes the keywords its
-# own turn needs — Codex alone understands `compact` — and the caller passes
-# the extras for the backend it picked.
+# Kept for the old worker_class construction path while the window migrates to
+# backend_workers.create_worker.
 AgentWorkerFactory = Callable[..., AgentWorker]
 
 
 # ----- What every backend must answer -----
 #
-# The app asks the same four questions of every backend: is it signed in, what
-# can it say about the account, how much allowance is left, and which worker
-# runs its turns. These were four hand-written if/elif chains, so a new backend
-# that missed one answered "not signed in" or ran Claude's worker without
-# saying so. One adapter per backend makes a missing answer a KeyError in a
-# test instead of a quiet wrong answer in the window.
+# The app asks the same three account questions of every backend: is it signed
+# in, what can it say about the account, and how much allowance is left. Worker
+# selection now belongs to backend_workers, alongside its typed request.
 
 
 @dataclass(frozen=True)
@@ -9077,7 +9073,6 @@ class BackendAdapter:
     auth_ok: Callable[[int], bool]
     account_lines: Callable[[str, int], list[str]]
     usage_lines: Callable[[str, int], list[str]]
-    worker: Callable[[AgentWorkerFactory], AgentWorkerFactory]
 
 
 def _cli_signed_in(backend: str, args: tuple[str, ...]) -> Callable[[int], bool]:
@@ -9182,48 +9177,6 @@ def _copilot_account_lines() -> list[str]:
     return copilot_account_lines()
 
 
-def _hermes_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
-    from hermes_worker import HermesWorker
-
-    return HermesWorker
-
-
-def _muse_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
-    from muse_worker import MuseWorker
-
-    return MuseWorker
-
-
-def _museai_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
-    from museai_worker import MuseAiWorker
-
-    return MuseAiWorker
-
-
-def _commandcode_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
-    from commandcode_worker import CommandcodeWorker
-
-    return CommandcodeWorker
-
-
-def _gemini_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
-    from google_worker import GeminiWorker
-
-    return GeminiWorker
-
-
-def _antigravity_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
-    from google_worker import AntigravityWorker
-
-    return AntigravityWorker
-
-
-def _copilot_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
-    from copilot_backend import CopilotWorker
-
-    return CopilotWorker
-
-
 ADAPTERS: dict[str, BackendAdapter] = {
     BACKEND_CLAUDE: BackendAdapter(
         auth_ok=_cli_signed_in(BACKEND_CLAUDE, ("auth", "status")),
@@ -9233,7 +9186,6 @@ ADAPTERS: dict[str, BackendAdapter] = {
         usage_lines=lambda binary, timeout: _usage_lines(
             _claude_usage_windows(_claude_usage_payload(binary, timeout))
         ),
-        worker=lambda claude_worker: claude_worker,
     ),
     BACKEND_CODEX: BackendAdapter(
         auth_ok=_cli_signed_in(BACKEND_CODEX, ("login", "status")),
@@ -9243,7 +9195,6 @@ ADAPTERS: dict[str, BackendAdapter] = {
         usage_lines=lambda binary, timeout: _usage_lines(
             _codex_usage_windows(_codex_usage_result(binary, timeout))
         ),
-        worker=lambda _claude: CodexWorker,
     ),
     BACKEND_FREEBUFF: BackendAdapter(
         auth_ok=_stored_signed_in(
@@ -9253,13 +9204,11 @@ ADAPTERS: dict[str, BackendAdapter] = {
         usage_lines=lambda _binary, timeout: _usage_lines(
             _freebuff_usage_windows(_freebuff_usage_payload(timeout))
         ),
-        worker=lambda _claude: FreebuffWorker,
     ),
     BACKEND_OPENCODE: BackendAdapter(
         auth_ok=_stored_signed_in(BACKEND_OPENCODE, lambda: bool(_opencode_providers())),
         account_lines=lambda _binary, _timeout: _opencode_account_lines(),
         usage_lines=lambda _binary, _timeout: [],
-        worker=lambda _claude: OpencodeWorker,
     ),
     BACKEND_HERMES: BackendAdapter(
         auth_ok=_hermes_auth_ok,
@@ -9267,7 +9216,6 @@ ADAPTERS: dict[str, BackendAdapter] = {
         usage_lines=lambda _binary, _timeout: _usage_lines(
             _hermes_usage_windows(_hermes_pool_payload())
         ),
-        worker=_hermes_worker,
     ),
     BACKEND_MUSE: BackendAdapter(
         auth_ok=lambda _timeout: _muse_signed_in_checked(),
@@ -9275,37 +9223,31 @@ ADAPTERS: dict[str, BackendAdapter] = {
         usage_lines=lambda _binary, _timeout: _usage_lines(
             _muse_usage_windows(_muse_usage_payload())
         ),
-        worker=_muse_worker,
     ),
     BACKEND_MUSEAI: BackendAdapter(
         auth_ok=_museai_auth_ok,
         account_lines=lambda _binary, _timeout: _museai_account_lines(),
         usage_lines=lambda _binary, _timeout: [],
-        worker=_museai_worker,
     ),
     BACKEND_COMMANDCODE: BackendAdapter(
         auth_ok=_commandcode_auth_ok,
         account_lines=lambda _binary, _timeout: _commandcode_account_lines(),
         usage_lines=lambda _binary, _timeout: [],
-        worker=_commandcode_worker,
     ),
     BACKEND_GEMINI: BackendAdapter(
         auth_ok=_gemini_auth_ok,
         account_lines=lambda _binary, _timeout: _gemini_account_lines(),
         usage_lines=lambda _binary, _timeout: [],
-        worker=_gemini_worker,
     ),
     BACKEND_ANTIGRAVITY: BackendAdapter(
         auth_ok=_antigravity_auth_ok,
         account_lines=lambda _binary, _timeout: _antigravity_account_lines(),
         usage_lines=lambda _binary, _timeout: [],
-        worker=_antigravity_worker,
     ),
     BACKEND_COPILOT: BackendAdapter(
         auth_ok=_copilot_auth_ok,
         account_lines=lambda _binary, _timeout: _copilot_account_lines(),
         usage_lines=lambda _binary, _timeout: [],
-        worker=_copilot_worker,
     ),
 }
 
@@ -9320,5 +9262,7 @@ def _adapter(backend: str) -> BackendAdapter:
 
 
 def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorkerFactory:
-    """The worker that runs this backend's turns."""
-    return _adapter(backend).worker(claude_worker)
+    """Legacy selector for callers that still pass constructor keywords."""
+    from backend_workers import worker_type
+
+    return worker_type(normalize_backend(backend), claude_worker=claude_worker)
