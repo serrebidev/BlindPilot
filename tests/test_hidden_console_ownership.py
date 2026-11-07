@@ -36,7 +36,9 @@ def test_the_hidden_console_is_started_through_owned_popen(tmp_path, monkeypatch
         seen["kwargs"] = kwargs
         return _FakeProc()
 
-    monkeypatch.setattr(agent_backends, "owned_popen", fake_owned_popen)
+    # The module's own seam: patching the name it imported by value would
+    # leave the real call in place and prove nothing.
+    monkeypatch.setattr(agent_backends, "_start_owned", fake_owned_popen)
 
     handle = agent_backends._spawn_hidden_console(["cmd", "/c", "exit"], str(tmp_path))
 

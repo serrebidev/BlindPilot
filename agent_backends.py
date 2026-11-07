@@ -6326,6 +6326,15 @@ class _HiddenConsoleProcess:
             pass
 
 
+def _start_owned(*args, **kwargs):
+    """Start a hidden console as an owned process.
+
+    A seam of its own so the ownership rule can be tested without patching a
+    name this module imported by value, which proves nothing about the call.
+    """
+    return owned_popen(*args, **kwargs)
+
+
 def _spawn_hidden_console(args: list[str], cwd: str) -> object:
     """Start a command with a console of its own that is never shown.
 
@@ -6342,7 +6351,7 @@ def _spawn_hidden_console(args: list[str], cwd: str) -> object:
     # Owned, so terminating it can end the tree rather than the wrapper: a
     # .cmd launcher's node child otherwise outlives it and keeps the sign-in
     # state nobody can see or release.
-    proc = owned_popen(
+    proc = _start_owned(
         args,
         cwd=cwd,
         env=subprocess_env(args[0]),
