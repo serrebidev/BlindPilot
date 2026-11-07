@@ -5006,6 +5006,9 @@ class NewSessionDialog(wx.Dialog):
         self._remote_label = remote_label.strip()
         self.path = ""
         self.title_text = ""
+        # (folder, branch) when a worktree was asked for. Made after the dialog
+        # closes: a git checkout can take long enough to freeze the window.
+        self.worktree: Optional[tuple[str, str]] = None
         self.worktree_box: Optional[wx.CheckBox] = None
         self.branch_box: Optional[wx.TextCtrl] = None
         self._github_serial = 0
@@ -5359,11 +5362,10 @@ class NewSessionDialog(wx.Dialog):
             if not branch:
                 self._reject("Type a branch name for the worktree.")
                 return
-            with wx.BusyCursor():
-                path, why = create_worktree(path, branch)
-            if why:
-                self._reject(why)
-                return
+            # Kept for the caller, which makes it away from this thread: doing
+            # it here froze the dialog for as long as git took, with the window
+            # saying nothing about whether it was working.
+            self.worktree = (path, branch)
         self.path = path
         self._stop_github()
         event.Skip()
@@ -13091,6 +13093,21 @@ class PreferencesDialog(wx.Dialog):
         return APPEARANCES[self._appearance_box.GetSelection()][0]
 
 
+def _start_legacy_chat_import() -> None:
+    """Copy an older AccessibleAI database now, off the window's thread.
+
+    Imported inside the thread: chat_integration pulls in the whole Chat panel,
+    which startup should not pay for unless the copy is actually going to run.
+    """
+
+    def work() -> None:
+        from chat_integration import ensure_legacy_import
+
+        ensure_legacy_import()
+
+    threading.Thread(target=work, daemon=True).start()
+
+
 class MainFrame(wx.Frame):
     def __init__(self, initial_cwd: str):
         super().__init__(None, title=APP_NAME)
@@ -13111,6 +13128,9 @@ class MainFrame(wx.Frame):
             settings=SETTINGS,
         )
         self._update_checking = False
+        # Started now, so the one-time copy of an older AccessibleAI database
+        # is already done by the time anyone switches to Chat mode.
+        _start_legacy_chat_import()
 
         # Remembered "Projects folder" — the parent folder that holds the
         # user's project directories. New Session browses from there.
@@ -15493,11 +15513,15 @@ class MainFrame(wx.Frame):
                 return
             cwd = dlg.path
             title = dlg.title_text
+            worktree = dlg.worktree
         finally:
             dlg.Destroy()
         if not cwd and not remote_label:
             # Locally a folder is required; remotely an empty one is normal and
             # means "wherever that Hermes runs".
+            return
+        if worktree is not None:
+            self._open_worktree_session(worktree[0], worktree[1], title)
             return
         if not remote_label:
             _remember_folder(cwd)
@@ -15509,6 +15533,25 @@ class MainFrame(wx.Frame):
         else:
             spoken = f"New session on {remote_label}"
         wx.CallAfter(announce, spoken)
+
+    def _open_worktree_session(self, folder: str, branch: str, title: str) -> None:
+        """Make the worktree off the window's thread, then open its session."""
+        announce(f"Creating a worktree for {branch}.")
+
+        def work() -> None:
+            path, why = create_worktree(folder, branch)
+            wx.CallAfter(self._worktree_ready, path, why, branch, title)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _worktree_ready(self, path: str, why: str, branch: str, title: str) -> None:
+        """Open the session git just made, or say why it could not."""
+        if why:
+            announce(why)
+            return
+        _remember_folder(path)
+        self._add_session(path, session_title=title)
+        announce(f"New session: {title}" if title else f"New session: {_short_label(path)}")
 
     def _history_cwd(self) -> str:
         """The directory the history picker starts out scoped to."""
