@@ -6339,7 +6339,10 @@ def _spawn_hidden_console(args: list[str], cwd: str) -> object:
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = subprocess.SW_HIDE
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+    # Owned, so terminating it can end the tree rather than the wrapper: a
+    # .cmd launcher's node child otherwise outlives it and keeps the sign-in
+    # state nobody can see or release.
+    proc = owned_popen(
         args,
         cwd=cwd,
         env=subprocess_env(args[0]),
