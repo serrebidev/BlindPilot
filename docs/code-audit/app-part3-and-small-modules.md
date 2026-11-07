@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # Audit: blindpilot_app.py 8736-end (MainFrame, main) and small modules
 
 Read-only audit, 2026-09-04. Scope: `MainFrame`, `main()`, `update_dialog.py`,

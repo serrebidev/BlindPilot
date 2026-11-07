@@ -16,6 +16,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import blindpilot_app as app
+import installers
+import install_path
+import portable_node
 from agent_backends import BACKEND_HERMES
 
 
@@ -28,13 +31,21 @@ class _Patch:
 
     def __enter__(self):
         for name, value in self._patches.items():
-            self._saved.append((name, getattr(app, name)))
-            setattr(app, name, value)
+            owners = [
+                module
+                for module in (app, install_path, portable_node, installers)
+                if name in vars(module)
+            ]
+            if not owners:
+                raise AttributeError(name)
+            for module in owners:
+                self._saved.append((module, name, getattr(module, name)))
+                setattr(module, name, value)
         return self
 
     def __exit__(self, *_exc):
-        for name, value in reversed(self._saved):
-            setattr(app, name, value)
+        for module, name, value in reversed(self._saved):
+            setattr(module, name, value)
         return False
 
 
@@ -44,9 +55,9 @@ HERMES_SH = "https://hermes-agent.nousresearch.com/install.sh"
 
 def test_hermes_install_argv_uses_the_official_powershell_one_liner(monkeypatch):
     monkeypatch.setattr(app.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(app, "_powershell_exe", lambda: "C:/Windows/powershell.exe")
+    monkeypatch.setattr(installers, "_powershell_exe", lambda: "C:/Windows/powershell.exe")
 
-    argv = app._hermes_install_argv()
+    argv = installers._hermes_install_argv()
 
     assert argv is not None
     assert argv[0] == "C:/Windows/powershell.exe"
@@ -66,7 +77,7 @@ def test_hermes_install_argv_uses_the_official_shell_one_liner(monkeypatch):
 
     monkeypatch.setattr(app.shutil, "which", which)
 
-    argv = app._hermes_install_argv()
+    argv = installers._hermes_install_argv()
 
     assert argv is not None
     assert argv[0] == "/usr/bin/bash"
@@ -75,16 +86,16 @@ def test_hermes_install_argv_uses_the_official_shell_one_liner(monkeypatch):
 
 def test_hermes_install_argv_is_none_without_prerequisites(monkeypatch):
     monkeypatch.setattr(app.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(app, "_powershell_exe", lambda: None)
-    assert app._hermes_install_argv() is None
+    monkeypatch.setattr(installers, "_powershell_exe", lambda: None)
+    assert installers._hermes_install_argv() is None
 
     monkeypatch.setattr(app.platform, "system", lambda: "Linux")
     monkeypatch.setattr(app.shutil, "which", lambda _name: None)
-    assert app._hermes_install_argv() is None
+    assert installers._hermes_install_argv() is None
 
 
 def test_hermes_install_missing_prereq_message_names_the_missing_tool():
-    monkeypatch_message = app._hermes_missing_prereq_message()
+    monkeypatch_message = installers._hermes_missing_prereq_message()
     assert "PowerShell" in monkeypatch_message or "curl" in monkeypatch_message
 
 
@@ -107,7 +118,7 @@ def test_install_hermes_runs_the_installer_and_reports_the_found_binary():
         ensure_on_path=lambda _directory: None,
         _hermes_binary_after_install=lambda: found,
     ):
-        result = app.install_hermes(log.append)
+        result = installers.install_hermes(log.append)
 
     assert result == found
     assert runs == [["powershell.exe", "-Command", "install"]]
@@ -125,7 +136,7 @@ def test_install_hermes_measures_success_by_the_binary_not_the_exit_code():
         ensure_on_path=lambda _directory: None,
         _hermes_binary_after_install=lambda: found,
     ):
-        assert app.install_hermes(lambda _line: None) == found
+        assert installers.install_hermes(lambda _line: None) == found
 
 
 def test_install_hermes_says_what_is_missing_when_prerequisites_are_absent():
@@ -135,7 +146,7 @@ def test_install_hermes_says_what_is_missing_when_prerequisites_are_absent():
         _hermes_install_argv=lambda: None,
         _run_logged_process=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("ran")),
     ):
-        assert app.install_hermes(log.append) is None
+        assert installers.install_hermes(log.append) is None
 
     assert log and ("PowerShell" in log[0] or "curl" in log[0])
 
@@ -149,7 +160,7 @@ def test_install_hermes_reports_failure_when_nothing_is_found_afterwards():
         _add_to_process_path=lambda _path: None,
         _hermes_binary_after_install=lambda: None,
     ):
-        assert app.install_hermes(log.append) is None
+        assert installers.install_hermes(log.append) is None
 
     assert any("not found afterwards" in line for line in log)
 
@@ -170,8 +181,8 @@ def _clean_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(app.platform, "system", lambda: "Windows")
     # The registry lives only on real Windows; this fake must not import it
     # when the suite runs on the macOS/Linux CI lanes.
-    monkeypatch.setattr(app, "ensure_on_windows_path", lambda _directory: True)
-    monkeypatch.delenv(app.UV_PYTHON_DIR_ENV, raising=False)
+    monkeypatch.setattr(install_path, "ensure_on_windows_path", lambda _directory: True)
+    monkeypatch.delenv(installers.UV_PYTHON_DIR_ENV, raising=False)
     monkeypatch.delenv("OneDrive", raising=False)
     monkeypatch.delenv("OneDriveConsumer", raising=False)
     monkeypatch.delenv("OneDriveCommercial", raising=False)
@@ -182,57 +193,57 @@ def _clean_windows(monkeypatch, tmp_path):
 def test_uv_python_folder_default_is_the_roaming_one_that_breaks(tmp_path, monkeypatch):
     """The reason this exists: uv's own answer is the roaming folder."""
     _clean_windows(monkeypatch, tmp_path)
-    assert app._uv_roaming_python_dir() == tmp_path / "Roaming" / "uv" / "python"
-    assert app._uv_local_python_dir() == tmp_path / "Local" / "uv" / "python"
+    assert installers._uv_roaming_python_dir() == tmp_path / "Roaming" / "uv" / "python"
+    assert installers._uv_local_python_dir() == tmp_path / "Local" / "uv" / "python"
 
 
 def test_an_ordinary_folder_is_not_reported_as_synced(tmp_path):
     """The walk must not fire on a machine that never had the problem."""
     nested = tmp_path / "uv" / "python"
-    assert app._folder_is_cloud_synced(tmp_path) is False
-    assert app._folder_is_cloud_synced(nested) is False
+    assert installers._folder_is_cloud_synced(tmp_path) is False
+    assert installers._folder_is_cloud_synced(nested) is False
 
 
 def test_a_folder_inside_one_drive_is_reported_as_synced(tmp_path, monkeypatch):
     """OneDrive names its own root, which catches it before placeholders do."""
     monkeypatch.setenv("OneDrive", str(tmp_path))
-    assert app._folder_is_cloud_synced(tmp_path / "AppData" / "Roaming" / "uv") is True
+    assert installers._folder_is_cloud_synced(tmp_path / "AppData" / "Roaming" / "uv") is True
 
 
 def test_a_reparse_point_on_the_way_makes_a_folder_unusable(tmp_path, monkeypatch):
     """The other signal: a step on the path that Windows will not traverse."""
     target = tmp_path / "Roaming" / "uv" / "python"
     monkeypatch.setattr(
-        app,
+        installers,
         "_windows_file_attributes",
         lambda path: 0x400 if "Roaming" in str(path) else 0,
     )
-    assert app._folder_is_cloud_synced(target) is True
+    assert installers._folder_is_cloud_synced(target) is True
 
 
 def test_hermes_installer_env_moves_uvs_python_off_the_roaming_folder(monkeypatch, tmp_path):
     _clean_windows(monkeypatch, tmp_path)
     log: list[str] = []
 
-    env = app._hermes_installer_env(log.append)
+    env = installers._hermes_installer_env(log.append)
 
-    assert env == {app.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
+    assert env == {installers.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
     assert log == []  # a healthy machine has nothing to hear
 
 
 def test_hermes_installer_env_leaves_a_chosen_folder_alone(monkeypatch, tmp_path):
     """Someone who already set the variable knows where they want it."""
     _clean_windows(monkeypatch, tmp_path)
-    monkeypatch.setenv(app.UV_PYTHON_DIR_ENV, str(tmp_path / "mine"))
+    monkeypatch.setenv(installers.UV_PYTHON_DIR_ENV, str(tmp_path / "mine"))
 
-    assert app._hermes_installer_env(lambda _line: None) is None
+    assert installers._hermes_installer_env(lambda _line: None) is None
 
 
 def test_hermes_installer_env_does_nothing_off_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(app.platform, "system", lambda: "Linux")
-    monkeypatch.delenv(app.UV_PYTHON_DIR_ENV, raising=False)
+    monkeypatch.delenv(installers.UV_PYTHON_DIR_ENV, raising=False)
 
-    assert app._hermes_installer_env(lambda _line: None) is None
+    assert installers._hermes_installer_env(lambda _line: None) is None
 
 
 def test_hermes_installer_env_is_remembered_when_roaming_is_synced(monkeypatch, tmp_path):
@@ -243,27 +254,29 @@ def test_hermes_installer_env_is_remembered_when_roaming_is_synced(monkeypatch, 
     """
     _clean_windows(monkeypatch, tmp_path)
     remembered: list[tuple[str, str]] = []
-    monkeypatch.setattr(app, "_folder_is_cloud_synced", lambda path: "Roaming" in str(path))
+    monkeypatch.setattr(installers, "_folder_is_cloud_synced", lambda path: "Roaming" in str(path))
     monkeypatch.setattr(
-        app, "_remember_windows_env_var", lambda name, value: remembered.append((name, value))
+        installers,
+        "_remember_windows_env_var",
+        lambda name, value: remembered.append((name, value)),
     )
     log: list[str] = []
 
-    env = app._hermes_installer_env(log.append)
+    env = installers._hermes_installer_env(log.append)
 
     local = str(tmp_path / "Local" / "uv" / "python")
-    assert env == {app.UV_PYTHON_DIR_ENV: local}
-    assert remembered == [(app.UV_PYTHON_DIR_ENV, local)]
+    assert env == {installers.UV_PYTHON_DIR_ENV: local}
+    assert remembered == [(installers.UV_PYTHON_DIR_ENV, local)]
     assert any("synced" in line and "local" in line.lower() for line in log)
 
 
 def test_hermes_installer_env_says_so_when_both_folders_are_synced(monkeypatch, tmp_path):
     """No automatic answer exists, so name the setting to change instead."""
     _clean_windows(monkeypatch, tmp_path)
-    monkeypatch.setattr(app, "_folder_is_cloud_synced", lambda _path: True)
+    monkeypatch.setattr(installers, "_folder_is_cloud_synced", lambda _path: True)
     log: list[str] = []
 
-    assert app._hermes_installer_env(log.append) is None
+    assert installers._hermes_installer_env(log.append) is None
 
     assert any("UV_PYTHON_INSTALL_DIR" in line for line in log)
 
@@ -282,14 +295,14 @@ def test_hermes_bootstrap_failure_names_the_refused_folder_from_the_real_output(
         "[X] bootstrap Python installation failed",
     ]
 
-    message = app._hermes_bootstrap_failure(heard)
+    message = installers._hermes_bootstrap_failure(heard)
 
     assert "cloud-sync" in message
     assert "UV_PYTHON_INSTALL_DIR" in message
 
 
 def test_hermes_bootstrap_failure_stays_quiet_about_other_output():
-    assert app._hermes_bootstrap_failure(["everything is fine"]) == ""
+    assert installers._hermes_bootstrap_failure(["everything is fine"]) == ""
 
 
 def test_install_hermes_tells_the_user_what_to_do_when_windows_refused_the_folder():
@@ -307,7 +320,7 @@ def test_install_hermes_tells_the_user_what_to_do_when_windows_refused_the_folde
         _add_to_process_path=lambda _path: None,
         _hermes_binary_after_install=lambda: None,
     ):
-        assert app.install_hermes(log.append) is None
+        assert installers.install_hermes(log.append) is None
 
     assert any("UV_PYTHON_INSTALL_DIR" in line for line in log)
 
@@ -329,9 +342,9 @@ def test_install_hermes_passes_the_python_folder_to_the_installer(monkeypatch, t
             "C:/Users/u/.hermes/hermes-agent/venv/Scripts/hermes.exe"
         ),
     ):
-        app.install_hermes(lambda _line: None)
+        installers.install_hermes(lambda _line: None)
 
-    assert seen["env"] == {app.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
+    assert seen["env"] == {installers.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
 
 
 def test_update_backend_updates_hermes_in_the_same_environment(monkeypatch, tmp_path):
@@ -354,9 +367,9 @@ def test_update_backend_updates_hermes_in_the_same_environment(monkeypatch, tmp_
             "C:/Users/u/.hermes/hermes-agent/venv/Scripts/hermes.exe"
         ),
     ):
-        assert app.update_backend(BACKEND_HERMES, lambda _line: None) is True
+        assert installers.update_backend(BACKEND_HERMES, lambda _line: None) is True
 
-    assert seen["env"] == {app.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
+    assert seen["env"] == {installers.UV_PYTHON_DIR_ENV: str(tmp_path / "Local" / "uv" / "python")}
 
 
 def test_install_backend_installs_hermes_through_its_own_installer(monkeypatch):
@@ -366,9 +379,9 @@ def test_install_backend_installs_hermes_through_its_own_installer(monkeypatch):
         seen["called"] = True
         return "C:/Users/u/.local/bin/hermes.exe"
 
-    monkeypatch.setattr(app, "install_hermes", fake_install_hermes)
+    monkeypatch.setattr(installers, "install_hermes", fake_install_hermes)
 
-    assert app.install_backend(BACKEND_HERMES, lambda _line: None) == (
+    assert installers.install_backend(BACKEND_HERMES, lambda _line: None) == (
         "C:/Users/u/.local/bin/hermes.exe"
     )
     assert seen["called"]
@@ -388,7 +401,7 @@ def test_update_backend_updates_hermes_with_the_official_installer(monkeypatch):
         _add_to_process_path=lambda _path: None,
         _hermes_binary_after_install=lambda: binary,
     ):
-        assert app.update_backend(BACKEND_HERMES, log.append) is True
+        assert installers.update_backend(BACKEND_HERMES, log.append) is True
 
     assert not any("npm" in line for line in log)
     assert any("up to date" in line for line in log)
@@ -414,7 +427,7 @@ def test_update_backend_measures_a_hermes_update_by_the_new_version_not_the_exit
         _hermes_binary_after_install=lambda: binary,
         _executable_version=lambda _binary: next(versions),
     ):
-        assert app.update_backend(BACKEND_HERMES, log.append) is True
+        assert installers.update_backend(BACKEND_HERMES, log.append) is True
 
     assert any("0.9.1" in line for line in log)
     assert not any("4294901760" in line for line in log)
@@ -437,6 +450,6 @@ def test_update_backend_still_fails_a_hermes_update_that_left_the_old_version():
         _hermes_binary_after_install=lambda: binary,
         _executable_version=lambda _binary: "hermes 0.9.0",
     ):
-        assert app.update_backend(BACKEND_HERMES, log.append) is False
+        assert installers.update_backend(BACKEND_HERMES, log.append) is False
 
     assert any("may not have completed" in line for line in log)

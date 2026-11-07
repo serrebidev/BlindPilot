@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # Audit: accessible_ai, tests, CI and packaging
 
 Read-only audit, 2026-09-04. Scope: `accessible_ai/**`, `chat_integration.py` (its only entry point), `tests/`, `conftest.py`, `pytest.ini`, `.github/workflows/*.yml`, `BlindPilot.spec`, `installer/BlindPilot.iss`, `requirements*.txt`, `ruff.toml`, `mypy.ini`.

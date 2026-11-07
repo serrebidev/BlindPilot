@@ -22,22 +22,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import blindpilot_app  # noqa: E402
 import claude_session  # noqa: E402
 import claude_worker  # noqa: E402
+import installers  # noqa: E402
+import portable_node  # noqa: E402
 from blindpilot_app import (  # noqa: E402
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
     BACKEND_COPILOT,
     BACKEND_FREEBUFF,
-    _npm_update_argv,
-    _repair_claude_native_update,
     _parse_current_model,
     _parse_effort_levels,
     _parse_model_aliases,
     probe_model_options,
 )
+from installers import _repair_claude_native_update  # noqa: E402
+from portable_node import _npm_update_argv  # noqa: E402
 
 
 def test_npm_backend_updates_request_the_latest_package(monkeypatch):
-    monkeypatch.setattr(blindpilot_app.shutil, "which", lambda _name: "npm")
+    monkeypatch.setattr(portable_node.shutil, "which", lambda _name: "npm")
 
     assert _npm_update_argv(BACKEND_CODEX)[-1] == "@openai/codex@latest"
     assert _npm_update_argv(BACKEND_FREEBUFF)[-1] == "freebuff@latest"
@@ -53,7 +55,7 @@ def test_claude_update_repairs_an_old_windows_launcher(monkeypatch, tmp_path):
     monkeypatch.setattr(blindpilot_app.platform, "system", lambda: "Windows")
     monkeypatch.setattr(blindpilot_app.Path, "home", classmethod(lambda _cls: tmp_path))
     monkeypatch.setattr(
-        blindpilot_app,
+        installers,
         "_executable_version",
         lambda binary: (
             "2.1.226" if Path(binary).read_text(encoding="utf-8") == "new" else "2.1.225"

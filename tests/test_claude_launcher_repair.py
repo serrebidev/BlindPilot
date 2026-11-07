@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import blindpilot_app as app
+import installers
 
 
 def test_an_npm_shim_is_never_overwritten(monkeypatch, tmp_path):
@@ -20,8 +21,8 @@ def test_an_npm_shim_is_never_overwritten(monkeypatch, tmp_path):
     newest.write_bytes(b"MZ new")
     monkeypatch.setattr(app.platform, "system", lambda: "Windows")
     monkeypatch.setattr(app.Path, "home", classmethod(lambda _cls: tmp_path))
-    monkeypatch.setattr(app, "_executable_version", lambda binary: "2.1.225")
+    monkeypatch.setattr(installers, "_executable_version", lambda binary: "2.1.225")
 
-    assert app._repair_claude_native_update(str(shim), lambda _text: None) is True
+    assert installers._repair_claude_native_update(str(shim), lambda _text: None) is True
     assert shim.read_text(encoding="utf-8") == "@echo off"
     assert Path(shim).suffix == ".cmd"

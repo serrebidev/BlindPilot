@@ -3,6 +3,7 @@
 import io
 
 import agent_backends
+import portable_node
 import process_utils
 import blindpilot_app as app
 
@@ -41,11 +42,13 @@ def test_npm_update_is_noninteractive_hidden_and_logged(monkeypatch):
         calls.append((argv, kwargs))
         return type("Process", (), {"stdout": output, "wait": lambda _self: 0})()
 
-    monkeypatch.setattr(app.subprocess, "Popen", popen)
+    monkeypatch.setattr(portable_node.subprocess, "Popen", popen)
     logs = []
-    env = app._npm_environment("npm.cmd")
+    env = portable_node._npm_environment("npm.cmd")
     assert (
-        app._run_logged_process(["npm.cmd", "install", "command-code@latest"], logs.append, env)
+        portable_node._run_logged_process(
+            ["npm.cmd", "install", "command-code@latest"], logs.append, env
+        )
         == 0
     )
     assert logs == ["updated successfully"]

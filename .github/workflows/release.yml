@@ -24,10 +24,14 @@ jobs:
             runner: windows-2025
             asset: BlindPilot-Windows-x64.zip
             kind: windows
-          - label: macOS Apple Silicon
+          - label: macOS Universal (Apple Silicon + Intel)
             runner: macos-15
-            asset: BlindPilot-macOS-arm64.zip
+            asset: BlindPilot-macOS-universal2.zip
             kind: macos
+          - label: Linux x64
+            runner: ubuntu-24.04
+            asset: BlindPilot-Linux-x64.tar.gz
+            kind: linux
     runs-on: ${{ matrix.runner }}
     # PyInstaller and Inno Setup make this the slow one; a green build is
     # about fifteen minutes. The default is six hours, which is what a
@@ -39,10 +43,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Set up Python
+        # Linux uses the distribution's Python and the wxPython wheel built for
+        # it; the venv and the libraries are made in the next step.
+        if: runner.os != 'Linux'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
           cache: pip
+
+      - name: Install Linux wxPython and a virtual display
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-wxgtk4.0 xvfb libsdl2-2.0-0
+          python3 -m venv --system-site-packages .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: python -m pip install --upgrade pip -r requirements-build.txt
@@ -101,6 +117,20 @@ jobs:
           $setupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "artifacts\$setupAsset").Hash.ToLowerInvariant()
           Set-Content -Encoding ascii -NoNewline -LiteralPath "artifacts\$setupAsset.sha256" -Value "$setupHash  $setupAsset"
 
+      - name: Check the macOS Python is universal2
+        if: matrix.kind == 'macos'
+        shell: bash
+        # PyInstaller takes both slices from the interpreter it runs under. An
+        # arm64-only or x64-only Python cannot produce a universal2 bundle, so
+        # say that here rather than in PyInstaller's error.
+        run: |
+          set -euo pipefail
+          binary="$(python -c 'import sys; print(sys.executable)')"
+          archs="$(lipo -archs "$binary")"
+          echo "Python architectures: $archs"
+          echo "$archs" | grep -q arm64
+          echo "$archs" | grep -q x86_64
+
       - name: Build macOS application
         if: matrix.kind == 'macos'
         shell: bash
@@ -114,6 +144,21 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent dist/BlindPilot.app "artifacts/${{ matrix.asset }}"
           cd artifacts
           shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
+      - name: Build Linux application
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m PyInstaller --noconfirm --clean BlindPilot.spec
+          # Same two startup checks the other platforms run, with the display
+          # wxPython needs on a headless runner.
+          xvfb-run -a dist/BlindPilot/BlindPilot --startup-smoke
+          xvfb-run -a dist/BlindPilot/BlindPilot --startup-gui-smoke
+          mkdir -p artifacts
+          tar -C dist -czf "artifacts/${{ matrix.asset }}" BlindPilot
+          cd artifacts
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
 
       - name: Upload release files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

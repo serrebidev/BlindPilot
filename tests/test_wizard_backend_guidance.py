@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 import blindpilot_app as app
+import installers
+import portable_node
 from agent_backends import (
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
@@ -121,7 +123,7 @@ def test_an_npm_backend_without_node_promises_node_not_npm(monkeypatch, wx_app):
     """Regression pin for an npm backend on a clean machine: the guidance is
     about Node.js, and the npm lie never appears anywhere."""
     wizard = _Wizard(BACKEND_CODEX)
-    monkeypatch.setattr(app, "_find_npm", lambda: None)
+    monkeypatch.setattr(portable_node, "_find_npm", lambda: None)
 
     app.SetupWizard._check_npm_backend_cli(wizard)
 
@@ -134,8 +136,10 @@ def test_hermes_is_offered_an_install_of_its_own(monkeypatch, wx_app):
     """Hermes installs through its official installer now, so the wizard
     offers it — with Hermes' instructions, not npm's."""
     wizard = _Wizard(BACKEND_HERMES)
-    monkeypatch.setattr(app, "_find_npm", lambda: "C:/npm/npm.cmd")
-    monkeypatch.setattr(app, "_hermes_install_argv", lambda: ["powershell.exe", "-Command", "x"])
+    monkeypatch.setattr(portable_node, "_find_npm", lambda: "C:/npm/npm.cmd")
+    monkeypatch.setattr(
+        installers, "_hermes_install_argv", lambda: ["powershell.exe", "-Command", "x"]
+    )
 
     app.SetupWizard._check_npm_backend_cli(wizard)
 
@@ -150,8 +154,8 @@ def test_hermes_without_prerequisites_still_gets_its_own_guidance(monkeypatch, w
     """No PowerShell (or no curl): the message names what is missing and the
     manual instructions, never npm."""
     wizard = _Wizard(BACKEND_HERMES)
-    monkeypatch.setattr(app, "_find_npm", lambda: "C:/npm/npm.cmd")
-    monkeypatch.setattr(app, "_hermes_install_argv", lambda: None)
+    monkeypatch.setattr(portable_node, "_find_npm", lambda: "C:/npm/npm.cmd")
+    monkeypatch.setattr(installers, "_hermes_install_argv", lambda: None)
 
     app.SetupWizard._check_npm_backend_cli(wizard)
 
@@ -165,12 +169,12 @@ def test_hermes_install_backend_goes_through_its_own_installer(monkeypatch):
     """install_backend routes Hermes to install_hermes — never npm."""
     lines: list[str] = []
     monkeypatch.setattr(
-        app,
+        installers,
         "install_hermes",
         lambda log: log("installing through the official installer") or "hermes.exe",
     )
 
-    assert app.install_backend(BACKEND_HERMES, lines.append) == "hermes.exe"
+    assert installers.install_backend(BACKEND_HERMES, lines.append) == "hermes.exe"
     assert any("official installer" in line for line in lines)
 
 
@@ -180,7 +184,7 @@ def test_the_failed_install_message_is_a_sentence_for_every_backend():
     The failure message must carry the command without splicing it into a
     sentence, for every backend the registry holds."""
     for backend in app.BACKENDS:
-        message = app._install_failure_message(backend)
+        message = installers._install_failure_message(backend)
         command = app.BACKENDS[backend].install_command
         assert f"using {command}" not in message
         assert command in message
@@ -191,7 +195,7 @@ def test_installing_hermes_promises_nothing_until_it_is_running(monkeypatch, wx_
     promise now belongs to the install that is actually going to run."""
     spoken = _said(monkeypatch)
     wizard = _Wizard(BACKEND_HERMES)
-    monkeypatch.setattr(app, "_hermes_install_argv", lambda: None)
+    monkeypatch.setattr(installers, "_hermes_install_argv", lambda: None)
 
     app.SetupWizard._install_cli(wizard)
 

@@ -65,6 +65,10 @@ def test_the_windows_terminal_is_a_pseudoconsole_only(monkeypatch):
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="ConPTY is Windows-only")
+# A real pythonw start and a ConPTY probe. It takes a couple of seconds on an
+# idle machine and was measured over the 55-second bound under a loaded full
+# suite, so both this test's bound and its wait get headroom.
+@pytest.mark.timeout(120)
 def test_a_windowless_process_gains_no_console_from_the_terminal(tmp_path):
     """Spawned as BlindPilot runs -- no console -- it must stay that way.
 
@@ -108,7 +112,7 @@ def test_a_windowless_process_gains_no_console_from_the_terminal(tmp_path):
         [str(pythonw), str(helper)],
         capture_output=True,
         text=True,
-        timeout=55,
+        timeout=90,
         cwd=os.getcwd(),
     )
     assert proc.returncode == 0, proc.stderr

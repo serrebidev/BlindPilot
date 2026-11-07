@@ -63,6 +63,18 @@ def test_the_manifest_declares_per_monitor_dpi_awareness_with_a_fallback():
     assert aware.text.strip().lower().startswith("true")
 
 
+def test_the_macos_bundle_is_universal2_and_claims_macos_11():
+    """One artifact for both Mac architectures, and a minimum that matches it.
+
+    Apple silicon cannot run below 11.0, and the universal2 wxPython wheel is
+    built for macOS 11+.
+    """
+    text = SPEC.read_text(encoding="utf-8")
+    assert 'target_arch = "universal2"' in text
+    assert "target_arch=target_arch," in text
+    assert '"LSMinimumSystemVersion": "11.0"' in text
+
+
 def test_the_installer_shows_the_app_icon():
     """Otherwise the downloaded setup.exe wears Inno Setup's stock picture."""
     text = INSTALLER.read_text(encoding="utf-8")

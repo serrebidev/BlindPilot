@@ -125,6 +125,27 @@ def test_the_move_happens_once_and_then_leaves_your_choice_alone():
     assert cfg["permission_mode"] == "plan"
 
 
+def test_a_new_config_never_gets_the_obsolete_marker():
+    cfg = {"permission_mode": "default"}
+    adopt_full_auto_default(cfg)
+    assert "permission_default" not in cfg
+
+
+def test_the_move_does_not_repeat_on_a_config_it_already_moved():
+    cfg = {}
+    assert adopt_full_auto_default(cfg) is True
+    # Nothing left behind says "unmoved", so loading again changes nothing.
+    assert adopt_full_auto_default(cfg) is False
+
+
+def test_an_old_config_loses_the_obsolete_marker_as_it_moves():
+    cfg = {"permission_default": "default", "backend": "codex"}
+    assert adopt_full_auto_default(cfg) is True
+    assert "permission_default" not in cfg
+    assert cfg["permission_mode"] == "bypassPermissions"
+    assert cfg["backend"] == "codex"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

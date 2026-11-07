@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # Documentation audit: debloat and de-AI the prose
 
 Read-only pass, 2026-09-04. Nothing outside this file was changed. Line numbers refer to the files as they stand at commit 8320abf. Every proposed rewrite below is a proposal; approve, edit, or reject each before anything is applied.

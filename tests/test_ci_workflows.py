@@ -100,6 +100,14 @@ def test_the_types_are_checked_somewhere():
     )
 
 
+def test_the_release_builds_every_platform_it_ships():
+    """Windows, universal2 macOS, and the Linux tarball are all published."""
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "kind: windows" in release
+    assert "kind: macos" in release and "universal2" in release
+    assert "kind: linux" in release and "xvfb-run" in release
+
+
 def test_a_job_cannot_run_for_six_hours():
     """GitHub's default job timeout is 360 minutes. This suite drives real
     subprocesses, pseudo-terminals and worker threads, so a deadlock is a
