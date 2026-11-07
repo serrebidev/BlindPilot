@@ -182,18 +182,15 @@ def no_backend_process_outlives_its_test():
 def tmp_path() -> Path:
     """Use ordinary workspace ACLs instead of pytest's restrictive Windows ACL."""
     root = Path.cwd() / ".test-tmp"
-    root.mkdir(exist_ok=True)
     temporary = root / uuid.uuid4().hex
-    temporary.mkdir()
+    # parents=True so a worker that removed the shared root - the cleanup
+    # below used to, and it raced another worker creating its own child -
+    # recreates it instead of failing with FileNotFoundError.
+    temporary.mkdir(parents=True, exist_ok=True)
     try:
         yield temporary
     finally:
-        shutil.rmtree(temporary)
-        try:
-            root.rmdir()
-        except OSError:
-            # Parallel tests may still own another child directory.
-            pass
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
