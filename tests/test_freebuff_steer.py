@@ -18,7 +18,7 @@ or not the turn was steered.
 from __future__ import annotations
 
 import agent_backends
-from agent_backends import FreebuffWorker
+from backend_workers.freebuff_worker import FreebuffWorker
 
 READY = "Describe your task"
 # A turn in progress, before and after a steer, and the same turn finished: the

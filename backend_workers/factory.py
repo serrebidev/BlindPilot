@@ -56,14 +56,12 @@ def worker_capabilities(backend: str) -> WorkerCapabilities:
         raise KeyError(f"no worker for backend {backend!r}") from None
 
 
-def worker_type(backend: str, *, claude_worker: Callable | None = None) -> Callable:
-    """Load only the selected implementation; Claude override keeps old callers."""
+def worker_type(backend: str) -> Callable:
+    """Load only the selected implementation."""
     try:
         spec = _WORKERS[backend]
     except KeyError:
         raise KeyError(f"no worker for backend {backend!r}") from None
-    if backend == "claude" and claude_worker is not None:
-        return claude_worker
     return cast(Callable, getattr(import_module(spec.module), spec.name))
 
 

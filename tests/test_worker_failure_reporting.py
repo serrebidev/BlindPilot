@@ -16,12 +16,12 @@ import threading
 
 import pytest
 
+from backend_workers.codex_worker import CodexWorker
+from backend_workers.freebuff_worker import FreebuffWorker
+from backend_workers.opencode_worker import OpencodeWorker
 import agent_backends
 from agent_backends import (
     BACKEND_CODEX,
-    CodexWorker,
-    FreebuffWorker,
-    OpencodeWorker,
 )
 
 WORKERS = [CodexWorker, FreebuffWorker, OpencodeWorker]

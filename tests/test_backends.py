@@ -12,6 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend_workers.codex_worker import CodexWorker
+from backend_workers.freebuff_worker import FreebuffWorker
+from backend_workers.opencode_worker import OpencodeWorker
 import agent_backends
 import process_utils
 import questions
@@ -20,9 +23,6 @@ from agent_backends import (
     BACKEND_CODEX,
     BACKEND_FREEBUFF,
     BACKEND_OPENCODE,
-    CodexWorker,
-    FreebuffWorker,
-    OpencodeWorker,
     backend_auth_ok,
     backend_label,
     backend_status,
@@ -30,8 +30,9 @@ from agent_backends import (
     freebuff_model_options,
     normalize_backend,
     set_freebuff_model,
-    worker_class,
 )
+from backend_workers import worker_type
+from claude_worker import ClaudeWorker
 
 
 @pytest.fixture
@@ -89,13 +90,10 @@ def test_freebuff_auth_requires_a_complete_parseable_credential(monkeypatch, tmp
     assert backend_auth_ok(BACKEND_FREEBUFF)
 
 
-def test_worker_class_selects_each_adapter():
-    class Claude:
-        pass
-
-    assert worker_class(BACKEND_CLAUDE, Claude) is Claude
-    assert worker_class(BACKEND_CODEX, Claude) is CodexWorker
-    assert worker_class(BACKEND_FREEBUFF, Claude) is FreebuffWorker
+def test_worker_type_selects_each_provider():
+    assert worker_type(BACKEND_CLAUDE) is ClaudeWorker
+    assert worker_type(BACKEND_CODEX) is CodexWorker
+    assert worker_type(BACKEND_FREEBUFF) is FreebuffWorker
 
 
 def test_every_backend_answers_every_account_question_the_app_asks():
@@ -1264,10 +1262,7 @@ def test_opencode_is_one_of_the_backends():
 
 
 def test_opencode_worker_is_the_adapter_for_opencode():
-    class Claude:
-        pass
-
-    assert worker_class(BACKEND_OPENCODE, Claude) is OpencodeWorker
+    assert worker_type(BACKEND_OPENCODE) is OpencodeWorker
 
 
 def test_opencode_event_handler_does_not_collide_with_python_313_thread_handle(monkeypatch):

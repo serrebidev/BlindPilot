@@ -23,7 +23,7 @@ import time
 
 import agent_backends
 import process_utils
-from agent_backends import CodexWorker
+from backend_workers.codex_worker import CodexWorker
 
 PANIC = "thread 'main' panicked at src/auth.rs:91: unauthorized"
 

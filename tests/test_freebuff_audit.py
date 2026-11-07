@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend_workers.freebuff_worker import FreebuffWorker
 import agent_backends as ab
 import process_utils
 import session_history as history
@@ -26,7 +27,7 @@ def _worker(**callbacks):
         "on_done": lambda: None,
     }
     defaults.update(callbacks)
-    return ab.FreebuffWorker("do the work", None, ".", "default", **defaults)
+    return FreebuffWorker("do the work", None, ".", "default", **defaults)
 
 
 @pytest.mark.parametrize("mtime", ["broken", [1], {"bad": 1}])

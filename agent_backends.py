@@ -6226,11 +6226,6 @@ class AgentWorker(Protocol):
     def cancel(self) -> None: ...
 
 
-# Kept for the old worker_class construction path while the window migrates to
-# backend_workers.create_worker.
-AgentWorkerFactory = Callable[..., AgentWorker]
-
-
 # ----- What every backend must answer -----
 #
 # The app asks the same three account questions of every backend: is it signed
@@ -6431,27 +6426,3 @@ def _adapter(backend: str) -> BackendAdapter:
     if adapter is None:
         raise KeyError(f"no backend adapter for {backend}")
     return adapter
-
-
-def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorkerFactory:
-    """Legacy selector for callers that still pass constructor keywords."""
-    from backend_workers import worker_type
-
-    return worker_type(normalize_backend(backend), claude_worker=claude_worker)
-
-
-def __getattr__(name: str):
-    """Temporary imports for callers still using agent_backends workers."""
-    if name == "CodexWorker":
-        from backend_workers.codex_worker import CodexWorker
-
-        return CodexWorker
-    if name == "FreebuffWorker":
-        from backend_workers.freebuff_worker import FreebuffWorker
-
-        return FreebuffWorker
-    if name == "OpencodeWorker":
-        from backend_workers.opencode_worker import OpencodeWorker
-
-        return OpencodeWorker
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

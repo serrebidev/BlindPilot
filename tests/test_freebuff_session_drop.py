@@ -16,11 +16,11 @@ for its whole hour. The chat log is the only place the drop is written down.
 
 from __future__ import annotations
 
+from backend_workers.freebuff_worker import FreebuffWorker
 import agent_backends
 import json
 import pytest
 from agent_backends import (
-    FreebuffWorker,
     _freebuff_picker_options,
     _freebuff_run_status,
 )

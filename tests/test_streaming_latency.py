@@ -11,6 +11,7 @@ length. These tests pin the release timing, not just the final text.
 
 from __future__ import annotations
 
+from backend_workers.codex_worker import CodexWorker
 from markdown_rows import SentenceStreamer, release_finished, release_remainder
 from test_claude_stream_resilience import _FakeProc, _drive, _line
 
@@ -51,10 +52,8 @@ def test_the_streamer_releases_what_the_whole_text_rule_releases():
 
 
 def test_codex_deltas_are_said_before_the_item_completes():
-    import agent_backends
-
     events: list[tuple[str, str]] = []
-    worker = agent_backends.CodexWorker(
+    worker = CodexWorker(
         "test",
         None,
         ".",

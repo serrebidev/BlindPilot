@@ -18,7 +18,7 @@ hourly cut-off.
 from __future__ import annotations
 
 import agent_backends
-from agent_backends import FreebuffWorker
+from backend_workers.freebuff_worker import FreebuffWorker
 
 # An already-expanded picker, as 0.0.168 opens on: there is no "See all models"
 # entry to walk through first, so the swap is reached on the first frame that

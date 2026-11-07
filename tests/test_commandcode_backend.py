@@ -24,6 +24,7 @@ from agent_backends import (
     BACKEND_IDS,
     BACKENDS,
 )
+from backend_workers import worker_type
 from commandcode_worker import CommandcodeWorker
 
 WHOAMI_SIGNED_IN = (
@@ -238,7 +239,7 @@ def test_the_registry_knows_command_code():
     assert agent_backends.backend_label("commandcode") == "Command Code"
     for spelling in ("commandcode", "command-code", "Command Code", "cmd"):
         assert agent_backends.normalize_backend(spelling) == BACKEND_COMMANDCODE
-    assert agent_backends.worker_class(BACKEND_COMMANDCODE, object) is CommandcodeWorker
+    assert worker_type(BACKEND_COMMANDCODE) is CommandcodeWorker
 
 
 def test_the_executable_is_command_code_never_cmd():

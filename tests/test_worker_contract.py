@@ -14,6 +14,9 @@ that the Protocol was short.
 
 from __future__ import annotations
 
+from backend_workers.codex_worker import CodexWorker
+from backend_workers.freebuff_worker import FreebuffWorker
+from backend_workers.opencode_worker import OpencodeWorker
 import agent_backends
 from commandcode_worker import CommandcodeWorker
 from claude_worker import ClaudeWorker
@@ -25,9 +28,9 @@ from museai_worker import MuseAiWorker
 
 WORKERS = [
     ClaudeWorker,
-    agent_backends.CodexWorker,
-    agent_backends.FreebuffWorker,
-    agent_backends.OpencodeWorker,
+    CodexWorker,
+    FreebuffWorker,
+    OpencodeWorker,
     HermesWorker,
     MuseWorker,
     MuseAiWorker,

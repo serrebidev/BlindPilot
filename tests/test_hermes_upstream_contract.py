@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 
+from backend_workers.codex_worker import CodexWorker
 import agent_backends
 import session_history
 from agent_backends import (
@@ -27,6 +28,7 @@ from agent_backends import (
     BACKENDS,
     normalize_backend,
 )
+from backend_workers import worker_type
 from hermes_worker import HermesWorker
 
 
@@ -77,7 +79,7 @@ def test_every_worker_accepts_the_same_window_callbacks() -> None:
     knowledge: if upstream adds another callback to its own workers, the
     difference shows up as a named parameter Hermes is missing.
     """
-    reference = agent_backends.CodexWorker
+    reference = CodexWorker
     expected = {
         name for name in inspect.signature(reference.__init__).parameters if name.startswith("on_")
     }
@@ -99,7 +101,7 @@ def test_hermes_is_registered_everywhere_a_backend_has_to_be() -> None:
     assert BACKEND_HERMES in session_history._LISTERS
     assert BACKEND_HERMES in session_history._READERS
     assert agent_backends.compaction_request(BACKEND_HERMES) is not None
-    assert agent_backends.worker_class(BACKEND_HERMES, object) is HermesWorker
+    assert worker_type(BACKEND_HERMES) is HermesWorker
     # And the aliases the settings file may still hold from an older version.
     for spelling in ("hermes", "Hermes", "hermes-agent", "Hermes Agent", "nous"):
         assert normalize_backend(spelling) == BACKEND_HERMES

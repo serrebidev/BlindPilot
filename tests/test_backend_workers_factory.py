@@ -41,22 +41,26 @@ def callbacks():
     )
 
 
-@pytest.mark.parametrize(
-    ("backend", "options", "class_name"),
-    [
-        ("claude", ClaudeOptions(), "ClaudeWorker"),
-        ("codex", CodexOptions(), "CodexWorker"),
-        ("freebuff", FreebuffOptions(), "FreebuffWorker"),
-        ("opencode", OpencodeOptions(), "OpencodeWorker"),
-        ("hermes", HermesOptions(), "HermesWorker"),
-        ("muse", MuseOptions(), "MuseWorker"),
-        ("museai", MuseAiOptions(), "MuseAiWorker"),
-        ("commandcode", CommandcodeOptions(), "CommandcodeWorker"),
-        ("gemini", GeminiOptions(), "GeminiWorker"),
-        ("antigravity", AntigravityOptions(), "AntigravityWorker"),
-        ("copilot", CopilotOptions(), "CopilotWorker"),
-    ],
-)
+WORKER_CASES = [
+    ("claude", ClaudeOptions(), "ClaudeWorker"),
+    ("codex", CodexOptions(), "CodexWorker"),
+    ("freebuff", FreebuffOptions(), "FreebuffWorker"),
+    ("opencode", OpencodeOptions(), "OpencodeWorker"),
+    ("hermes", HermesOptions(), "HermesWorker"),
+    ("muse", MuseOptions(), "MuseWorker"),
+    ("museai", MuseAiOptions(), "MuseAiWorker"),
+    ("commandcode", CommandcodeOptions(), "CommandcodeWorker"),
+    ("gemini", GeminiOptions(), "GeminiWorker"),
+    ("antigravity", AntigravityOptions(), "AntigravityWorker"),
+    ("copilot", CopilotOptions(), "CopilotWorker"),
+]
+
+
+def test_factory_contract_covers_every_backend():
+    assert {backend for backend, _options, _name in WORKER_CASES} == set(BACKENDS)
+
+
+@pytest.mark.parametrize(("backend", "options", "class_name"), WORKER_CASES)
 def test_factory_returns_ready_worker_for_each_backend(backend, options, class_name, callbacks):
     assert backend in BACKENDS
     worker = create_worker(
@@ -82,6 +86,13 @@ def test_factory_rejects_unknown_backend_without_falling_back(callbacks):
     )
     with pytest.raises(KeyError, match="unknown"):
         create_worker("unknown", request)
+
+
+def test_legacy_worker_construction_is_not_exposed_by_backend_accounts():
+    import agent_backends
+
+    for name in ("worker_class", "CodexWorker", "FreebuffWorker", "OpencodeWorker"):
+        assert not hasattr(agent_backends, name)
 
 
 def test_factory_preserves_callbacks_and_provider_options(callbacks):
@@ -132,7 +143,7 @@ def test_protocol_workers_live_behind_the_factory(backend, options, module, call
     )
     assert type(worker).__module__ == module
     assert isinstance(worker, agent_backends._TurnWorker)
-    assert type(worker) is getattr(agent_backends, type(worker).__name__)
+    assert type(worker) is worker_type(backend)
     assert worker._compact is True
 
 

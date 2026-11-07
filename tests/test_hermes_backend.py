@@ -27,8 +27,9 @@ from agent_backends import (
     backend_label,
     compaction_request,
     normalize_backend,
-    worker_class,
 )
+from backend_workers import worker_type
+from claude_worker import ClaudeWorker
 from hermes_worker import HermesWorker
 
 
@@ -132,13 +133,10 @@ def test_hermes_is_registered_and_named():
     assert BACKEND_HERMES in agent_backends.BACKEND_IDS
 
 
-def test_worker_class_selects_the_hermes_adapter():
-    class Claude:
-        pass
-
-    assert worker_class(BACKEND_HERMES, Claude) is HermesWorker
+def test_worker_type_selects_the_hermes_provider():
+    assert worker_type(BACKEND_HERMES) is HermesWorker
     # The other backends must keep resolving as before.
-    assert worker_class(BACKEND_CLAUDE, Claude) is Claude
+    assert worker_type(BACKEND_CLAUDE) is ClaudeWorker
 
 
 def test_declared_capabilities_match_what_the_worker_implements():
