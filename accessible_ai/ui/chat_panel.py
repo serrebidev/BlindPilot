@@ -788,7 +788,7 @@ class ChatPanel(wx.Panel):
                 self,
             )
             return
-        dialog = ConversationsDialog(self, self.db)
+        dialog = ConversationsDialog(self, self.db, speak=self._speak)
         try:
             if dialog.ShowModal() != wx.ID_OK or dialog.chosen is None:
                 return
