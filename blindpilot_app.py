@@ -12234,25 +12234,36 @@ class SetupWizard(wx.Dialog):
             return
         label = backend_label(self.backend)
         self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
-        self._backend_path = self._find_selected_cli()
-        if not self._backend_path:
-            self._show_signin_status(
-                f"{label} is not installed. Go Back and complete the CLI step first."
-            )
-            return
-        if self.backend == BACKEND_CODEX:
-            plan = self._plan_account_for_codex()
-            if plan is not None:
-                self._show_plan_account(plan)
-                return
         self._show_signin_status(f"Checking whether {label} is signed in…")
         backend = self.backend
 
         def work() -> None:
-            # The probe runs a CLI with a timeout of up to 25 seconds. On the
-            # GUI thread that froze the wizard and the screen reader with it.
-            ok = backend_auth_ok(backend)
-            wx.CallAfter(self._on_signin_checked, backend, ok)
+            # Everything slow happens here. Discovery searches PATH and, for
+            # Muse, asks WSL; the Codex plan lookup opens SQLite and reads
+            # Windows credentials; the probe runs a CLI with a timeout of up to
+            # 25 seconds. All three used to run on the GUI thread, which froze
+            # the wizard and the screen reader with it.
+            path = self._find_selected_cli()
+            plan = None
+            if path and backend == BACKEND_CODEX:
+                plan = self._plan_account_for_codex()
+            ok = bool(path) and plan is None and backend_auth_ok(backend)
+
+            def finish() -> None:
+                if not self or backend != self.backend:
+                    return
+                self._backend_path = path
+                if not path:
+                    self._show_signin_status(
+                        f"{label} is not installed. Go Back and complete the CLI step first."
+                    )
+                    return
+                if plan is not None:
+                    self._show_plan_account(plan)
+                    return
+                self._on_signin_checked(backend, ok)
+
+            wx.CallAfter(finish)
 
         threading.Thread(target=work, daemon=True).start()
 

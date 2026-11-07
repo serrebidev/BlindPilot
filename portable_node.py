@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -47,7 +48,11 @@ from agent_backends import (
     subprocess_env,
 )
 from certificates import open_url
-from process_utils import no_window_kwargs
+from process_utils import end_process_group, no_window_kwargs
+
+# An install that has produced no EOF after this long is not going to: a
+# detached child inherited the pipe. Ten minutes is generous for npm.
+_INSTALLER_READ_TIMEOUT_SECONDS = 600.0
 
 
 def _backend_installs_with_npm(backend: str) -> bool:
@@ -340,8 +345,23 @@ def _run_logged_process(
         log(f"The installer could not be started: {exc}")
         return None
     assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line:
-            log(line)
+    output = proc.stdout
+
+    def pump() -> None:
+        for raw in output:
+            text = raw.rstrip()
+            if text:
+                log(text)
+
+    # Streamed on a reader thread so the wait can be bounded: an installer that
+    # spawns a detached child passes it our stdout pipe, EOF then never arrives,
+    # and reading to the end would hang the wizard forever. Every other runner
+    # in this codebase already has a timeout; this one did not.
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    reader.join(_INSTALLER_READ_TIMEOUT_SECONDS)
+    if reader.is_alive():
+        end_process_group(proc)
+        log("Stopped an installer that never finished.")
+        return None
     return proc.wait()
