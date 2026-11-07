@@ -1611,8 +1611,21 @@ def _remote_sessions() -> dict:
 
 
 def _remember_remote(session_id: str, bridge: str, url: str) -> None:
+    """Save where this session's Remote Control bridge is, newest last.
+
+    The newest `_REMOTE_SESSIONS_KEPT` are the ones kept: this session is taken
+    out and put back at the end, and the front, the oldest, is what falls off.
+    A record is written when Remote Control is turned on and only removed when
+    it is turned off, so a session that ended any other way would otherwise be
+    kept for ever while the whole file is read at startup.
+    """
+    if not session_id:
+        return
+    saved = _remote_sessions()
+    ordered = [(sid, row) for sid, row in saved.items() if sid != session_id]
+    ordered.append((session_id, {"bridge": bridge, "url": url}))
     cfg = _load_config()
-    cfg["remote_control"] = {**_remote_sessions(), session_id: {"bridge": bridge, "url": url}}
+    cfg["remote_control"] = dict(ordered[-_REMOTE_SESSIONS_KEPT:])
     _save_config(cfg)
 
 
@@ -1630,6 +1643,10 @@ def _forget_remote(session_id: str) -> None:
 # while the file is read whole at startup, and would otherwise grow with every
 # conversation ever opened.
 _SESSION_RULES_KEPT = 50
+
+# The same bound for Remote Control records, which name a session's bridge and
+# URL and are removed only when Remote Control is turned off.
+_REMOTE_SESSIONS_KEPT = 20
 
 
 def _saved_session_rules() -> dict:
