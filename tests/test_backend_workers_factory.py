@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -24,6 +25,7 @@ from backend_workers import (
     WorkerRequest,
     create_worker,
     worker_capabilities,
+    worker_type,
 )
 
 
@@ -149,9 +151,121 @@ def test_factory_preserves_museai_follow_cursor(callbacks):
     assert worker.follow_after == 42
 
 
-def test_capabilities_are_available_without_starting_a_worker():
-    assert worker_capabilities("claude").subagents_outlive_turn
-    assert not worker_capabilities("hermes").subagents_outlive_turn
+@pytest.mark.parametrize(
+    ("backend", "options", "constructor_hooks"),
+    [
+        ("claude", ClaudeOptions(remote_control={"enabled": True}), ("on_tasks", "on_remote")),
+        ("copilot", CopilotOptions(additional_dirs=("/extra",)), ("on_tasks",)),
+        ("museai", MuseAiOptions(follow_after=42), ("follow_after",)),
+    ],
+)
+def test_factory_finishes_provider_hooks_during_construction(
+    monkeypatch, callbacks, backend, options, constructor_hooks
+):
+    worker_class = worker_type(backend)
+    original_init = worker_class.__init__
+    original_setattr = worker_class.__setattr__
+
+    def init_and_mark(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._constructor_finished = True
+
+    def reject_late_hook(self, name, value):
+        if self.__dict__.get("_constructor_finished") and name in constructor_hooks:
+            raise AssertionError(f"{name} was attached after construction")
+        original_setattr(self, name, value)
+
+    monkeypatch.setattr(worker_class, "__init__", init_and_mark)
+    monkeypatch.setattr(worker_class, "__setattr__", reject_late_hook)
+
+    def task(*_args):
+        return None
+
+    def remote(_data):
+        return None
+
+    def permission(_tool, _input, _rules):
+        return {"behavior": "allow"}
+
+    def unsolicited():
+        return None
+
+    configured = replace(
+        callbacks,
+        on_tasks=task,
+        on_remote=remote,
+        on_permission=permission,
+        on_unsolicited=unsolicited,
+    )
+    worker = create_worker(
+        backend,
+        WorkerRequest("hello", None, ".", "default", callbacks=configured, options=options),
+    )
+    if "on_tasks" in constructor_hooks:
+        assert worker.on_tasks is task
+    if "on_remote" in constructor_hooks:
+        assert worker.on_remote is remote
+    if backend == "claude":
+        assert worker._on_permission is permission
+        assert worker._on_unsolicited is unsolicited
+    if "follow_after" in constructor_hooks:
+        assert worker.follow_after == 42
+
+
+@pytest.mark.parametrize(
+    ("backend", "outlives_turn"),
+    [
+        ("claude", True),
+        ("codex", False),
+        ("freebuff", False),
+        ("opencode", False),
+        ("hermes", False),
+        ("muse", False),
+        ("museai", False),
+        ("commandcode", False),
+        ("gemini", False),
+        ("antigravity", False),
+        ("copilot", False),
+    ],
+)
+def test_capabilities_are_available_without_starting_a_worker(backend, outlives_turn):
+    assert worker_capabilities(backend).subagents_outlive_turn is outlives_turn
+
+
+@pytest.mark.parametrize(
+    ("backend", "options_name", "module"),
+    [
+        ("claude", "ClaudeOptions", "claude_worker"),
+        ("hermes", "HermesOptions", "hermes_worker"),
+        ("muse", "MuseOptions", "muse_worker"),
+        ("museai", "MuseAiOptions", "museai_worker"),
+        ("commandcode", "CommandcodeOptions", "commandcode_worker"),
+        ("gemini", "GeminiOptions", "google_worker"),
+        ("antigravity", "AntigravityOptions", "google_worker"),
+        ("copilot", "CopilotOptions", "copilot_backend"),
+    ],
+)
+def test_remaining_factory_providers_import_only_the_selected_module(backend, options_name, module):
+    code = """
+import sys
+import backend_workers as bw
+callbacks = bw.WorkerCallbacks(lambda _: None, lambda: None, lambda *_: None,
+                               lambda _: None, lambda _: None, lambda: None)
+bw.create_worker(sys.argv[1], bw.WorkerRequest(
+    'hello', None, '.', 'default', callbacks=callbacks,
+    options=getattr(bw, sys.argv[2])()))
+for name in ('claude_worker', 'hermes_worker', 'muse_worker', 'museai_worker',
+             'commandcode_worker', 'google_worker', 'copilot_backend'):
+    if name in sys.modules:
+        print(name)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, backend, options_name],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines() == [module]
 
 
 def test_factory_only_imports_the_selected_provider():

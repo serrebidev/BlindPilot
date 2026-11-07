@@ -201,6 +201,8 @@ class ClaudeWorker(threading.Thread):
         on_unsolicited: Optional[Callable[[], None]] = None,
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         remote_control: Optional[dict] = None,
+        on_tasks: Optional[Callable[..., None]] = None,
+        on_remote: Optional[Callable[[dict], None]] = None,
     ):
         super().__init__(daemon=True)
         # {"enabled", "name", "reattach"}: Remote Control as the tab wants it.
@@ -226,6 +228,8 @@ class ClaudeWorker(threading.Thread):
         # CLI speaks with no turn attached.
         self._held_for = held_for
         self._on_unsolicited = on_unsolicited
+        self.on_tasks = on_tasks
+        self.on_remote = on_remote
         self._session: Optional[claude_session.ClaudeSession] = None
         # The queue this turn is reading, kept so Stop can wake a reader that
         # is parked on it.
@@ -662,7 +666,7 @@ class ClaudeWorker(threading.Thread):
     def _apply_remote_control(self, session: claude_session.ClaudeSession) -> None:
         """Turn Remote Control on or off for this process, when the tab changed it.
 
-        Reported through ``on_remote`` (set by the tab): Claude Code's answer,
+        Reported through ``on_remote``: Claude Code's answer,
         with ``bridge_session_id`` and ``session_url``, or ``{"error": ...}``.
         """
         wanted = self._remote_control
@@ -676,7 +680,7 @@ class ClaudeWorker(threading.Thread):
                 enabled, str(wanted.get("name") or ""), str(wanted.get("reattach") or "")
             ),
         )
-        report = getattr(self, "on_remote", None)
+        report = self.on_remote
         if response is None or response.get("subtype") == "error":
             error = "Claude Code did not answer" if response is None else response.get("error")
             if report:
@@ -903,7 +907,7 @@ class ClaudeWorker(threading.Thread):
                     if block.get("type") == "tool_result":
                         result = _tool_result_text(block.get("content"))
                         task_call = task_calls.pop(str(block.get("tool_use_id") or ""), None)
-                        report_tasks = getattr(self, "on_tasks", None)
+                        report_tasks = self.on_tasks
                         if task_call and report_tasks and not block.get("is_error"):
                             report_tasks("claude", task_call[0], task_call[1], result)
                         if not result:

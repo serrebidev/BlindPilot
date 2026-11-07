@@ -82,8 +82,6 @@ def create_worker(backend: str, request: WorkerRequest) -> Worker:
     }
     if backend == "codex" and options["plan_account"] is _UNSET:
         del options["plan_account"]
-    if backend == "museai":
-        follow_after = options.pop("follow_after")
     callbacks = request.callbacks
     kwargs = {
         "model": request.model,
@@ -101,6 +99,10 @@ def create_worker(backend: str, request: WorkerRequest) -> Worker:
     }
     if backend == "claude":
         kwargs["on_unsolicited"] = callbacks.on_unsolicited
+        kwargs["on_tasks"] = callbacks.on_tasks
+        kwargs["on_remote"] = callbacks.on_remote
+    elif backend == "copilot":
+        kwargs["on_tasks"] = callbacks.on_tasks
     worker = worker_type(backend)(
         request.prompt,
         request.session_id,
@@ -108,10 +110,9 @@ def create_worker(backend: str, request: WorkerRequest) -> Worker:
         request.permission_mode,
         **kwargs,
     )
-    if callbacks.on_tasks is not None:
-        worker.on_tasks = callbacks.on_tasks
-    if callbacks.on_remote is not None:
-        worker.on_remote = callbacks.on_remote
-    if backend == "museai":
-        worker.follow_after = follow_after
+    if backend in ("codex", "freebuff", "opencode"):
+        if callbacks.on_tasks is not None:
+            worker.on_tasks = callbacks.on_tasks
+        if callbacks.on_remote is not None:
+            worker.on_remote = callbacks.on_remote
     return cast(Worker, worker)
