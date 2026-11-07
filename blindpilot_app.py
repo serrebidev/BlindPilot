@@ -2644,8 +2644,18 @@ def _record_setup_complete(cfg: dict) -> bool:
     return False
 
 
+def _note_damaged_config(path) -> None:
+    """Say that the settings could not be read, once, naming the kept copy."""
+    announce(
+        f"Your settings file could not be read. It was kept as {path.name}, "
+        "and BlindPilot has started from the defaults."
+    )
+
+
 def _load_config() -> dict:
-    return preferences.load_config((_config_path(), _legacy_config_path()))
+    return preferences.load_config(
+        (_config_path(), _legacy_config_path()), on_damaged=_note_damaged_config
+    )
 
 
 def _save_config(cfg: dict) -> bool:
