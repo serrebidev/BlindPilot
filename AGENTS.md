@@ -17,6 +17,9 @@ python -m ruff format --check .
 python -m pytest -q -W error
 ```
 
+While working, run the tests the change touches. The pre-push hook runs the
+whole suite; running it here as well pays for it twice.
+
 ## Gate
 
 Before a commit or PR, every command above must exit 0. `-W error` is

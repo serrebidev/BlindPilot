@@ -3,9 +3,12 @@ name: Tests
 # The release workflow runs these same checks, but only on a `v*` tag. That
 # finds a broken commit on release day, with the build half made. This runs
 # them on the commit instead.
+# A pull request tests its own ref below; testing the branch push as well
+# ran the same matrix twice per commit, and only one of the two counted
+# towards the branch rule.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
