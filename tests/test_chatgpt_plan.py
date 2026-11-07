@@ -681,10 +681,12 @@ def test_the_account_dialog_offers_a_labelled_choice_of_the_codex_account(frame,
         assert dialog.codex_account.IsEnabled() and dialog.codex_account.AcceptsFocus()
         # Codex's own login is still offered, still selectable, and is what an
         # install that has chosen nothing runs on.
-        assert dialog.codex_account.GetString(0) == "Codex's own login"
+        assert dialog.codex_account.GetString(0) == "Use Codex's own login (fallback)"
         assert dialog.codex_account.GetSelection() == 0
         # Only a ChatGPT-plan Account can pay for a Codex turn on a plan.
-        assert _codex_items(dialog) == ["Codex's own login", "Personal", "Work"]
+        assert _codex_items(dialog) == ["Use Codex's own login (fallback)", "Personal", "Work"]
+        # The fallback is said in text as well as in the tooltip.
+        assert "fallback" in dialog.codex_note.GetLabel()
         # It keeps the dialog's own Tab order: after the checkbox, before the buttons.
         siblings = dialog.codex_account.GetParent().GetChildren()
         assert siblings.index(dialog.default_check) < siblings.index(dialog.codex_account)
@@ -878,7 +880,7 @@ def test_deleting_the_chosen_account_leaves_the_saved_value_and_control_agreeing
         assert agent_backends.codex_plan_account() is None, (
             "the deleted Account stayed stored as the Codex backend's Account"
         )
-        assert dialog.codex_account.GetStringSelection() == "Codex's own login", (
+        assert dialog.codex_account.GetStringSelection() == "Use Codex's own login (fallback)", (
             "the saved value and the control disagree about which Account Codex uses"
         )
         _soon(lambda: work.closed, "the deleted Account's Held process was never dropped")
@@ -924,7 +926,7 @@ def test_signing_out_of_the_chosen_account_leaves_the_saved_value_and_control_ag
 
         # The dialog that offers the choice says the same thing as the file.
         listing.reload()
-        assert listing.codex_account.GetStringSelection() == "Codex's own login"
+        assert listing.codex_account.GetStringSelection() == "Use Codex's own login (fallback)"
 
         work.borrowers = 0
         backend_pool.pool().drop_pending()

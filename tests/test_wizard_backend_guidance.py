@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 import blindpilot_app as app
+import installers
+import portable_node
 from agent_backends import (
     BACKEND_CODEX,
     BACKEND_COMMANDCODE,
@@ -83,6 +85,9 @@ class _Wizard:
         self._already_btn = _Widget()
         self._open_page_btn = _Widget()
         self._signin_status = _Widget()
+        # The check now says it is checking before it dispatches the work, so
+        # this path is reached even when a plan Account exists.
+        self._show_signin_status = lambda text: app.SetupWizard._show_signin_status(self, text)
         self._signin_intro = _Widget()
         self._welcome_text = _Widget()
         self._done_text = _Widget()
@@ -121,7 +126,7 @@ def test_an_npm_backend_without_node_promises_node_not_npm(monkeypatch, wx_app):
     """Regression pin for an npm backend on a clean machine: the guidance is
     about Node.js, and the npm lie never appears anywhere."""
     wizard = _Wizard(BACKEND_CODEX)
-    monkeypatch.setattr(app, "_find_npm", lambda: None)
+    monkeypatch.setattr(portable_node, "_find_npm", lambda: None)
 
     app.SetupWizard._check_npm_backend_cli(wizard)
 
@@ -134,8 +139,10 @@ def test_hermes_is_offered_an_install_of_its_own(monkeypatch, wx_app):
     """Hermes installs through its official installer now, so the wizard
     offers it — with Hermes' instructions, not npm's."""
     wizard = _Wizard(BACKEND_HERMES)
-    monkeypatch.setattr(app, "_find_npm", lambda: "C:/npm/npm.cmd")
-    monkeypatch.setattr(app, "_hermes_install_argv", lambda: ["powershell.exe", "-Command", "x"])
+    monkeypatch.setattr(portable_node, "_find_npm", lambda: "C:/npm/npm.cmd")
+    monkeypatch.setattr(
+        installers, "_hermes_install_argv", lambda: ["powershell.exe", "-Command", "x"]
+    )
 
     app.SetupWizard._check_npm_backend_cli(wizard)
 
@@ -150,8 +157,8 @@ def test_hermes_without_prerequisites_still_gets_its_own_guidance(monkeypatch, w
     """No PowerShell (or no curl): the message names what is missing and the
     manual instructions, never npm."""
     wizard = _Wizard(BACKEND_HERMES)
-    monkeypatch.setattr(app, "_find_npm", lambda: "C:/npm/npm.cmd")
-    monkeypatch.setattr(app, "_hermes_install_argv", lambda: None)
+    monkeypatch.setattr(portable_node, "_find_npm", lambda: "C:/npm/npm.cmd")
+    monkeypatch.setattr(installers, "_hermes_install_argv", lambda: None)
 
     app.SetupWizard._check_npm_backend_cli(wizard)
 
@@ -165,12 +172,12 @@ def test_hermes_install_backend_goes_through_its_own_installer(monkeypatch):
     """install_backend routes Hermes to install_hermes — never npm."""
     lines: list[str] = []
     monkeypatch.setattr(
-        app,
+        installers,
         "install_hermes",
         lambda log: log("installing through the official installer") or "hermes.exe",
     )
 
-    assert app.install_backend(BACKEND_HERMES, lines.append) == "hermes.exe"
+    assert installers.install_backend(BACKEND_HERMES, lines.append) == "hermes.exe"
     assert any("official installer" in line for line in lines)
 
 
@@ -180,7 +187,7 @@ def test_the_failed_install_message_is_a_sentence_for_every_backend():
     The failure message must carry the command without splicing it into a
     sentence, for every backend the registry holds."""
     for backend in app.BACKENDS:
-        message = app._install_failure_message(backend)
+        message = installers._install_failure_message(backend)
         command = app.BACKENDS[backend].install_command
         assert f"using {command}" not in message
         assert command in message
@@ -191,7 +198,7 @@ def test_installing_hermes_promises_nothing_until_it_is_running(monkeypatch, wx_
     promise now belongs to the install that is actually going to run."""
     spoken = _said(monkeypatch)
     wizard = _Wizard(BACKEND_HERMES)
-    monkeypatch.setattr(app, "_hermes_install_argv", lambda: None)
+    monkeypatch.setattr(installers, "_hermes_install_argv", lambda: None)
 
     app.SetupWizard._install_cli(wizard)
 
@@ -268,3 +275,62 @@ def test_hermes_sign_in_copy_still_names_its_provider_picker(monkeypatch, wx_app
     app.SetupWizard._refresh_backend_copy(wizard)
     assert "provider and model" in wizard._signin_intro.text
     assert "terminal window" in wizard._signin_intro.text
+
+
+def test_codex_setup_uses_the_plan_account_instead_of_asking_for_another_login(monkeypatch):
+    """One sign-in: a connected ChatGPT plan Account means no Codex login step.
+
+    The plan Account is also saved as the backend's choice, so the default
+    survives the wizard closing rather than evaporating with it.
+    """
+    import agent_backends
+
+    plan = agent_backends.PlanAccount(7, "Work plan")
+    wizard = _Wizard(BACKEND_CODEX)
+    wizard._find_selected_cli = lambda: "codex"
+    wizard._plan_account_for_codex = lambda: plan
+    wizard._show_plan_account = lambda chosen: app.SetupWizard._show_plan_account(wizard, chosen)
+    spoken = _said(monkeypatch)
+    checked: list[str] = []
+    monkeypatch.setattr(
+        app, "backend_auth_ok", lambda backend, **kwargs: checked.append(backend) or False
+    )
+
+    # The lookup now runs on a worker so it cannot freeze the wizard, so the
+    # test runs that worker inline and joins it here.
+    class _Thread:
+        def __init__(self, target, daemon=False, name=""):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(app.threading, "Thread", _Thread)
+    monkeypatch.setattr(app.wx, "CallAfter", lambda fn, *a: fn(*a))
+
+    app.SetupWizard._check_signin(wizard)
+
+    assert checked == [], "setup asked Codex for a separate sign-in"
+    assert agent_backends.codex_plan_account() == plan, "setup did not make it the default"
+    assert "Work plan" in wizard._signin_status.text
+    assert not wizard._signin_btn.enabled
+    assert not wizard._already_btn.enabled
+    assert not wizard._open_page_btn.shown, "a sign-in page was still offered"
+    assert wizard._signin_status.text in spoken, "the reason was not announced"
+
+
+def test_codex_setup_asks_for_its_own_login_when_no_plan_account_is_connected():
+    """No plan Account: the wizard still offers Codex's own login as before."""
+    wizard = _Wizard(BACKEND_CODEX)
+
+    assert app.SetupWizard._plan_account_for_codex(wizard) is None
+
+
+def test_a_plan_account_that_no_longer_exists_is_not_offered(monkeypatch):
+    """A saved choice nothing can run on must not hide the sign-in step."""
+    import agent_backends
+
+    assert agent_backends.save_codex_plan_account(agent_backends.PlanAccount(7, "Gone"))
+    wizard = _Wizard(BACKEND_CODEX)
+
+    assert app.SetupWizard._plan_account_for_codex(wizard) is None

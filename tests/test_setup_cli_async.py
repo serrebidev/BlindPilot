@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
+import portable_node
 
 wx = pytest.importorskip("wx")
 
@@ -33,7 +34,7 @@ def test_cli_check_runs_discovery_on_worker_and_fills_result(wx_app, monkeypatch
         "_selected_install_argv_for_backend",
         lambda _backend: ["installer"],
     )
-    monkeypatch.setattr(app, "_find_npm", lambda: None)
+    monkeypatch.setattr(portable_node, "_find_npm", lambda: None)
     wizard = app.SetupWizard(None)
     try:
         wizard._step = 1

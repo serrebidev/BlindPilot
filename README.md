@@ -55,11 +55,11 @@ Get the latest build from the [Releases page](https://github.com/serrebidev/Blin
 
 **macOS**
 
-Download `BlindPilot-macOS-arm64.zip`. It's Apple Silicon Macs only. The app isn't notarized by Apple, so the first time you open it you may have to allow it in System Settings, Privacy & Security.
+Download `BlindPilot-macOS-universal2.zip`. It runs on Apple Silicon and Intel Macs, and needs macOS 11 or later. The app isn't notarized by Apple, so the first time you open it you may have to allow it in System Settings, Privacy & Security.
 
 **Linux**
 
-There's no ready-made build. Run it from source; see the developer section at the bottom.
+Download `BlindPilot-Linux-x64.tar.gz`, extract it, and run `BlindPilot`. It needs GTK 3 and its AT-SPI bridge, which most desktop distributions already have; Orca announces from the same tree. If GTK is missing, install the distribution's `libgtk-3-0` (and `at-spi2-core` for announcements). There is no system package yet; run it from the extracted folder.
 
 Only one copy runs at a time. Start it again on Windows and it brings the open one to the front.
 
@@ -333,7 +333,7 @@ python -m PyInstaller --noconfirm --clean BlindPilot.spec
 
 `BlindPilot.spec` reads the version from `APP_VERSION` in `blindpilot_app.py` and carries the bundle identifier, minimum macOS version, and icon (`tools/make_icon.py` generates the icon files into `packaging/`). The one-directory layout is what lets the updater replace the app after it exits. The Windows installer is `installer/BlindPilot.iss` (Inno Setup).
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. It runs the tests and the packaged startup checks (`--startup-smoke`, `--startup-gui-smoke`), then publishes the Windows installer, the Windows zip, the Apple Silicon macOS zip, and a SHA-256 file for each. The updater verifies that SHA-256 before installing. macOS builds are ad-hoc signed, not notarized.
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It runs the tests and the packaged startup checks (`--startup-smoke`, `--startup-gui-smoke`), then publishes the Windows installer, the Windows zip, the universal2 macOS zip, the Linux x64 tarball, and a SHA-256 file for each. The updater verifies that SHA-256 before installing. macOS builds are ad-hoc signed, not notarized.
 
 ### How each backend is driven
 

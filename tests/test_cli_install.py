@@ -27,43 +27,64 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import blindpilot_app  # noqa: E402
+import install_path  # noqa: E402
+import installers  # noqa: E402
+import portable_node  # noqa: E402
 from blindpilot_app import (  # noqa: E402
     BACKEND_FREEBUFF,
-    PATH_STANZA_MARKER,
     _first_login_url,
-    _fallback_claude_paths,
+)
+from installers import (  # noqa: E402
     _install_argv,
+    install_backend,
+    install_claude,
+)
+from claude_session import _fallback_claude_paths, _native_bin_dir  # noqa: E402
+from install_path import (  # noqa: E402
+    PATH_STANZA_MARKER,
     _is_on_persistent_path,
-    _node_archive_spec,
-    _native_bin_dir,
     _path_export_line,
     _path_with_entry,
     _same_dir,
     _shell_profile_file,
     ensure_on_posix_path,
-    install_backend,
-    install_claude,
 )
+from portable_node import _node_archive_spec  # noqa: E402
 
 WINDOWS = platform.system() == "Windows"
 
 
 class _Patch:
-    """Swap module attributes for the duration of a with-block."""
+    """Swap module attributes for the duration of a with-block.
+
+    The PATH helpers live in ``install_path`` and the npm / portable-Node
+    helpers in ``portable_node``, and the window reaches them as
+    ``install_path.<name>`` and ``portable_node.<name>``, so a patch has to land
+    on the module that reads the name. ``platform`` is read by all three, so a
+    patch on it lands on all three.
+    """
 
     def __init__(self, **kwargs):
         self._new = kwargs
-        self._old = {}
+        self._old = []
 
     def __enter__(self):
         for name, value in self._new.items():
-            self._old[name] = getattr(blindpilot_app, name)
-            setattr(blindpilot_app, name, value)
+            owners = [
+                module
+                for module in (blindpilot_app, install_path, portable_node, installers)
+                if name in vars(module)
+            ]
+            if not owners:
+                raise AttributeError(name)
+            for module in owners:
+                self._old.append((module, name, getattr(module, name)))
+                setattr(module, name, value)
         return self
 
     def __exit__(self, *exc):
-        for name, value in self._old.items():
-            setattr(blindpilot_app, name, value)
+        for module, name, value in reversed(self._old):
+            setattr(module, name, value)
         return False
 
 
@@ -77,13 +98,13 @@ class _FakePlatform:
         return self._system
 
 
-class _FakeShutil:
-    """Stands in for `shutil`, with only the tools we say are installed."""
+class _FakeTools:
+    """Stands in for the PATH lookup, with only the tools we say are installed."""
 
     def __init__(self, available):
         self._available = available
 
-    def which(self, name):
+    def which_without_cwd(self, name):
         return self._available.get(os.path.basename(name))
 
 
@@ -284,7 +305,7 @@ def test_login_shell_path_split_keeps_entries_containing_spaces():
 
     with _PatchRun(run):
         with _Patch(platform=_FakePlatform("Darwin"), _login_shell=lambda: shell):
-            dirs = blindpilot_app._posix_persistent_path_dirs()
+            dirs = install_path._posix_persistent_path_dirs()
 
     assert spaced in dirs, dirs
     assert not any(d == "/opt/Some" for d in dirs)
@@ -436,14 +457,14 @@ def test_install_command_is_the_official_powershell_one_liner():
 def test_install_command_is_the_official_shell_one_liner_on_macos():
     with _Patch(
         platform=_FakePlatform("Darwin"),
-        shutil=_FakeShutil({"curl": "/usr/bin/curl", "bash": "/bin/bash"}),
+        process_utils=_FakeTools({"curl": "/usr/bin/curl", "bash": "/bin/bash"}),
     ):
         argv = _install_argv()
     assert argv == ["/bin/bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]
 
 
 def test_install_command_absent_without_curl():
-    with _Patch(platform=_FakePlatform("Darwin"), shutil=_FakeShutil({"bash": "/bin/bash"})):
+    with _Patch(platform=_FakePlatform("Darwin"), process_utils=_FakeTools({"bash": "/bin/bash"})):
         assert _install_argv() is None
 
 
@@ -632,6 +653,21 @@ def test_backend_install_rejects_a_cli_that_cannot_start():
         ensure_on_path=lambda _path: None,
     ):
         assert install_backend(BACKEND_FREEBUFF, lambda _line: None) is None
+
+
+def test_every_backend_has_an_installer():
+    """No backend may fall through to npm, and none may be missing a path.
+
+    The chain this replaced ended in the npm installer, so a backend with no
+    branch was sent to npm even when it does not ship there. One table means a
+    new backend has to answer this question, or fail here.
+    """
+    assert set(installers.INSTALLERS) == set(blindpilot_app.BACKENDS)
+
+
+def test_every_backend_has_an_updater():
+    """No backend may fall through to the npm update path."""
+    assert set(installers.UPDATERS) == set(blindpilot_app.BACKENDS)
 
 
 if __name__ == "__main__":

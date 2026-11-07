@@ -50,8 +50,10 @@ LIST_DIALOG_SIZE = wx.Size(650, 480)
 # Which Account the Codex backend runs on is a choice about the backend, like
 # the default Account is about Chat mode: not a setting belonging to any one
 # Account. So it is offered under the list, and the words it is said in live
-# here rather than being spelled out again at each site.
-CODEX_LOGIN_LABEL = "Codex's own login"
+# here rather than being spelled out again at each site. A ChatGPT-plan Account
+# is the preferred way to pay for a Codex turn; Codex's own login is the
+# fallback for anybody who does not use one, so the entry says that it is one.
+CODEX_LOGIN_LABEL = "Use Codex's own login (fallback)"
 # Said when the Account being left still has a Codex turn running on it. The
 # Held process is never closed underneath a live turn -- that turn finishes on
 # the sign-in it started with, which is what switching promises -- so the wait
@@ -150,9 +152,10 @@ BUILTIN_PROVIDER_NOTES = {
 }
 
 # Where CredentialStore keeps the key on this platform, for the two places the
-# dialog names it. Off Windows the store is whatever keyring backend the desktop
-# provides: the macOS Keychain, or the Secret Service on Linux.
-CREDENTIAL_STORE_NAME = "Windows Credential Manager" if os.name == "nt" else "the system keychain"
+# dialog names it. Off Windows the store is whatever backend `keyring` finds --
+# the macOS Keychain, the Secret Service on Linux -- so it is named by the
+# library rather than by one platform's word for it.
+CREDENTIAL_STORE_NAME = "Windows Credential Manager" if os.name == "nt" else "the system keyring"
 
 CUSTOM_PROVIDER_NOTE = (
     "This account type is only for a server that implements an OpenAI-compatible API and is not one "
@@ -751,10 +754,26 @@ class AccountsDialog(wx.Dialog):
         codex_label = wx.StaticText(panel, label="Codex &backend account:")
         self.codex_account = wx.Choice(panel)
         self.codex_account.SetName("Codex backend account")
-        self.codex_account.SetToolTip("The Account the Codex backend runs on")
+        self.codex_account.SetToolTip(
+            "The Account the Codex backend runs on. A ChatGPT plan Account is preferred; "
+            "Codex's own login is the fallback."
+        )
         codex_row.Add(codex_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
         codex_row.Add(self.codex_account, 1, wx.EXPAND)
         outer.Add(codex_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
+
+        # Said in ordinary text rather than only in a tooltip: a screen reader
+        # reads the dialog's text, and a tooltip is not somewhere a keyboard
+        # user can reach to learn which of the two choices is the fallback.
+        self.codex_note = wx.StaticText(
+            panel,
+            label=(
+                "A ChatGPT plan Account is used when one is connected. "
+                "Codex's own login is the fallback for anyone who does not use one."
+            ),
+        )
+        self.codex_note.Wrap(self.FromDIP(NOTE_WRAP))
+        outer.Add(self.codex_note, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad_dialog)
 
         # One row. The actions sit on the left; Close goes through the
         # standard button sizer so it lands where the platform puts it.
@@ -1010,6 +1029,16 @@ class AccountsDialog(wx.Dialog):
         self.db.delete_account(int(account.id))
         logger.info("Deleted account name=%s provider=%s", account.name, account.provider)
         self.reload()
+        # The focused row is gone. Move focus somewhere real and say both what
+        # was deleted and what the list holds now, rather than leaving the
+        # reader on a row the reload silently replaced.
+        self.listbox.SetFocus()
+        remaining = self.selected()
+        self._say(
+            f"Deleted {account.name}."
+            if remaining is None
+            else f"Deleted {account.name}. {remaining.name} is selected."
+        )
         if waited:
             self._say(CODEX_TURN_WAIT.format(label=account.name))
 

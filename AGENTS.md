@@ -4,6 +4,9 @@ Screen-reader-first desktop app that runs AI coding CLIs in normal windows.
 Accessibility is core behavior, not an extra: keyboard-only operation and NVDA,
 JAWS, and VoiceOver speech are part of the product.
 
+The global policy in `~/.codex/AGENTS.md` applies; this file adds only what is
+local to BlindPilot.
+
 ## Inner loop
 
 Fast check after each edit:
@@ -13,6 +16,9 @@ python -m ruff check .
 python -m ruff format --check .
 python -m pytest -q -W error
 ```
+
+While working, run the tests the change touches. The pre-push hook runs the
+whole suite; running it here as well pays for it twice.
 
 ## Gate
 

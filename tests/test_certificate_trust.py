@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 
 import app_updater
-import blindpilot_app
 import certificates
+import portable_node
 
 ROOT = Path(__file__).resolve().parent.parent
 # `urllib.request.urlopen(` and a bare `urlopen(`, but not the one wrapper
@@ -131,20 +131,20 @@ def test_the_node_download_asks_for_that_store_by_default(monkeypatch):
         asked.append(request.full_url)
         raise OSError("no network in a test")
 
-    monkeypatch.setattr(blindpilot_app, "open_url", fake_open_url)
+    monkeypatch.setattr(portable_node, "open_url", fake_open_url)
     with pytest.raises(OSError):
-        blindpilot_app._fetch_url_bytes("https://nodejs.org/dist/index.json")
+        portable_node._fetch_url_bytes("https://nodejs.org/dist/index.json")
     assert asked == ["https://nodejs.org/dist/index.json"]
 
 
 def test_no_internet_call_bypasses_the_verified_opener():
-    """A new `urlopen` in either of these modules is the same outage returning.
+    """A new `urlopen` in any of these modules is the same outage returning.
 
-    Both talk to nodejs.org and GitHub over TLS; the Hermes backend's own
+    All of them talk to nodejs.org and GitHub over TLS; the Hermes backend's own
     `urlopen` is deliberately not swept, because it addresses a gateway on this
     machine over plain HTTP where no certificate is involved.
     """
-    for name in ("blindpilot_app.py", "app_updater.py"):
+    for name in ("blindpilot_app.py", "app_updater.py", "portable_node.py"):
         source = (ROOT / name).read_text(encoding="utf-8")
         offenders = [
             line.strip()

@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # Audit: hermes_worker.py, hermes_backend.py, app_updater.py
 
 Read-only audit, 2026-09-04. Line numbers are as of this date. Hermes' gateway

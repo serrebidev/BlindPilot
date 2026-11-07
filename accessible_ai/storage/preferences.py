@@ -21,8 +21,9 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 
 # One lock around every write, because one file has two writers. Both halves of
@@ -33,18 +34,60 @@ from typing import Iterable, Mapping
 _WRITE_LOCK = threading.RLock()
 
 
-def load_config(paths: Iterable[Path]) -> dict:
+def _set_aside(path: Path) -> Path | None:
+    """Move an unreadable settings file out of the way, keeping its contents.
+
+    The next save writes a whole new file, so leaving the broken one in place
+    would destroy the only copy of whatever it held. The stamp keeps both.
+    """
+    if not path.is_file():
+        return None
+    target = path.with_name(f"{path.name}.broken-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        os.replace(path, target)
+    except OSError:
+        logging.getLogger("blindpilot").exception("could not set aside %s", path)
+        return None
+    logging.getLogger("blindpilot").warning(
+        "settings file could not be read and was kept as %s", target
+    )
+    return target
+
+
+def load_config(
+    paths: Iterable[Path],
+    on_damaged: Callable[[Path, bool], None] | None = None,
+) -> dict:
     """The first of these settings files that can be read, or an empty dict.
 
     The order is the caller's: the current file first, then any older one it
     has not been migrated from yet.
+
+    A file that is there but cannot be read is not the same as one that is
+    absent. It is moved aside as ``<name>.broken-<stamp>`` so the next save
+    cannot overwrite it, and `on_damaged` is told which path and whether it was
+    kept, so the caller can say what happened either way -- including when the
+    move failed and the next save will replace it.
     """
     for path in paths:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
                 return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            continue
+        except ValueError:
+            # The file is there and its contents are not usable, which is what
+            # "damaged" means. Keep it and say so.
+            kept = _set_aside(path)
+            if on_damaged is not None:
+                on_damaged(path if kept is None else kept, kept is not None)
+            continue
+        except OSError:
+            # Could not be opened at all -- a lock, a permission, or a path that
+            # is not a file. That says nothing about its contents, and the save
+            # that follows reports its own failure, so this stays quiet rather
+            # than moving a file it could not even read.
             continue
     return {}
 

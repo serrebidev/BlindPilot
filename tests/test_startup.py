@@ -119,6 +119,7 @@ def test_nothing_started_inherits_a_path_into_the_install_folder(monkeypatch, tm
     are in use — the update that reported nothing but "code 5".
     """
     import blindpilot_app
+    import install_path
 
     bundle = tmp_path / "BlindPilot" / "_internal"
     (bundle / "pywin32_system32").mkdir(parents=True)
@@ -136,13 +137,14 @@ def test_nothing_started_inherits_a_path_into_the_install_folder(monkeypatch, tm
     monkeypatch.setattr(blindpilot_app.sys, "_MEIPASS", str(bundle), raising=False)
     monkeypatch.setenv("PATH", polluted)
 
-    blindpilot_app.keep_bundle_off_child_path()
+    install_path.keep_bundle_off_child_path()
 
     assert os.environ["PATH"] == str(unrelated)
 
 
 def test_a_path_outside_the_install_folder_is_left_alone(monkeypatch, tmp_path):
     import blindpilot_app
+    import install_path
 
     bundle = tmp_path / "BlindPilot" / "_internal"
     bundle.mkdir(parents=True)
@@ -156,18 +158,19 @@ def test_a_path_outside_the_install_folder_is_left_alone(monkeypatch, tmp_path):
     monkeypatch.setattr(blindpilot_app.sys, "_MEIPASS", str(bundle), raising=False)
     monkeypatch.setenv("PATH", kept)
 
-    blindpilot_app.keep_bundle_off_child_path()
+    install_path.keep_bundle_off_child_path()
 
     assert os.environ["PATH"] == kept
 
 
 def test_running_from_source_never_touches_the_path(monkeypatch):
     import blindpilot_app
+    import install_path
 
     monkeypatch.delattr(blindpilot_app.sys, "frozen", raising=False)
     monkeypatch.setenv("PATH", "/one/place")
 
-    blindpilot_app.keep_bundle_off_child_path()
+    install_path.keep_bundle_off_child_path()
 
     assert os.environ["PATH"] == "/one/place"
 

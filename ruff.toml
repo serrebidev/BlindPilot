@@ -1,4 +1,4 @@
-target-version = "py310"
+target-version = "py312"
 line-length = 100
 # The audit reports and the list plan under docs/ quote code as prose. Ruff
 # formats code blocks inside markdown, and a rewritten sample is no longer

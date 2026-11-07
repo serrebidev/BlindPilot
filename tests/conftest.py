@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import queue
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -134,6 +136,13 @@ def the_account_choice_stays_out_of_the_real_settings(request, monkeypatch):
         return
     settings = Path(tempfile.mkdtemp(prefix="blindpilot-test-settings-"))
     monkeypatch.setattr(agent_backends, "blindpilot_config_dir", lambda: settings)
+    # The window imported that name at import time, so patching the module it
+    # came from leaves the window's own `_config_path()` pointing at the real
+    # settings file. Patch the window's copy too, but only when it is already
+    # loaded: importing it here would pull in wx for tests that do not use it.
+    window = sys.modules.get("blindpilot_app")
+    if window is not None:
+        monkeypatch.setattr(window, "blindpilot_config_dir", lambda: settings)
     try:
         yield settings
     finally:
@@ -170,22 +179,54 @@ def no_backend_process_outlives_its_test():
         _forget_every_held_process()
 
 
+def _settle_announcements() -> None:
+    """Leave nothing queued for whatever runs next.
+
+    The screen-reader queue is drained by a daemon thread that reads the
+    process-wide speaker, so a line an earlier test queued was delivered while
+    the next test had its own `_make_speaker` patched in — and that test counted
+    a speaker build it never asked for. Draining at the test boundary gives the
+    queue the test's lifetime instead of the process's.
+    """
+    window = sys.modules.get("blindpilot_app")
+    if window is None:
+        return
+    worker = window._ANNOUNCEMENT_WORKER
+    if worker is not None and worker.is_alive():
+        # A line already dequeued is mid-delivery; wait for it rather than
+        # clearing the queue underneath it.
+        window._ANNOUNCEMENT_QUEUE.join()
+    while True:
+        try:
+            window._ANNOUNCEMENT_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+        window._ANNOUNCEMENT_QUEUE.task_done()
+    window._SPEAKER = None
+    window._SPEAKER_INITIALIZED = False
+    window._speaker_retry_after = 0.0
+
+
+@pytest.fixture(autouse=True)
+def no_announcement_outlives_its_test():
+    _settle_announcements()
+    yield
+    _settle_announcements()
+
+
 @pytest.fixture
 def tmp_path() -> Path:
     """Use ordinary workspace ACLs instead of pytest's restrictive Windows ACL."""
     root = Path.cwd() / ".test-tmp"
-    root.mkdir(exist_ok=True)
     temporary = root / uuid.uuid4().hex
-    temporary.mkdir()
+    # parents=True so a worker that removed the shared root - the cleanup
+    # below used to, and it raced another worker creating its own child -
+    # recreates it instead of failing with FileNotFoundError.
+    temporary.mkdir(parents=True, exist_ok=True)
     try:
         yield temporary
     finally:
-        shutil.rmtree(temporary)
-        try:
-            root.rmdir()
-        except OSError:
-            # Parallel tests may still own another child directory.
-            pass
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

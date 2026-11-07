@@ -20,6 +20,7 @@ import stub_wx
 stub_wx.install()
 
 import blindpilot_app  # noqa: E402
+from earcons import Earcons  # noqa: E402
 
 
 @pytest.fixture
@@ -36,11 +37,11 @@ class _NullThread:
         return None
 
 
-class _Recording(blindpilot_app.Earcons):
+class _Recording(Earcons):
     """Earcons with the audio replaced by a record of what would have played."""
 
     def __init__(self, system: str = "Windows") -> None:
-        super().__init__("/nonexistent")
+        super().__init__("/nonexistent", settings=blindpilot_app.SETTINGS)
         self._system = system
         # Resolved cue paths, so the code under test believes it has sounds.
         self.send = "send.wav"
@@ -125,7 +126,7 @@ def test_off_plays_no_working_cue(config_dir: Path, monkeypatch) -> None:
         # platform's recording. ruff's B023 catches this; the version pinned
         # before this merge did not have the rule enabled.
         monkeypatch.setattr(
-            blindpilot_app.Earcons,
+            Earcons,
             "_start_periodic",
             lambda _self, seconds, started=started: started.append(("periodic", seconds)),
         )
@@ -276,7 +277,7 @@ def test_ending_a_turn_does_not_purge_the_received_cue(config_dir: Path, monkeyp
     calls: list = []
     _purge_watching_winsound(monkeypatch, calls)
 
-    cues = blindpilot_app.Earcons("/nonexistent")
+    cues = Earcons("/nonexistent", settings=blindpilot_app.SETTINGS)
     cues._system = "Windows"
     cues.received, cues.in_progress, cues.send = "received.wav", "in-progress.wav", "send.wav"
 
@@ -309,7 +310,7 @@ def test_a_working_cue_is_still_silenced_when_the_answer_arrives(
     calls: list = []
     _purge_watching_winsound(monkeypatch, calls)
 
-    cues = blindpilot_app.Earcons("/nonexistent")
+    cues = Earcons("/nonexistent", settings=blindpilot_app.SETTINGS)
     cues._system = "Windows"
     cues.received, cues.in_progress, cues.send = "received.wav", "in-progress.wav", "send.wav"
 
@@ -337,7 +338,7 @@ def test_a_periodic_cue_is_silenced_when_the_answer_arrives(config_dir: Path, mo
     _purge_watching_winsound(monkeypatch, calls)
     monkeypatch.setattr(blindpilot_app.threading, "Thread", lambda *a, **k: _NullThread())
 
-    cues = blindpilot_app.Earcons("/nonexistent")
+    cues = Earcons("/nonexistent", settings=blindpilot_app.SETTINGS)
     cues._system = "Windows"
     cues.received, cues.in_progress, cues.send = "received.wav", "in-progress.wav", "send.wav"
 

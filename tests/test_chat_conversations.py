@@ -330,3 +330,67 @@ def test_an_empty_dialog_says_there_is_nothing_rather_than_nothing(tmp_path):
     finally:
         dialog.Destroy()
         app.ProcessPendingEvents()
+
+
+def test_deleting_a_conversation_is_spoken_and_names_the_new_selection(tmp_path, monkeypatch):
+    """The row vanished and focus landed elsewhere without a word being said."""
+    app = _app()
+    db, first, _other = _seeded(tmp_path)
+    frame = wx.Frame(None)
+    try:
+        panel = _panel(frame, db)
+        _started(panel, first, "a/one", "first one")
+        # A second send continues the open conversation, so close it first:
+        # this test needs a row that survives the delete.
+        panel.current_conversation_id = None
+        _started(panel, first, "a/one", "second one")
+        assert len(db.list_conversations()) == 2
+    finally:
+        frame.Destroy()
+        app.ProcessPendingEvents()
+
+    spoken: list[str] = []
+    dialog = ConversationsDialog(None, db, speak=spoken.append)
+    try:
+        monkeypatch.setattr(wx, "MessageBox", lambda *args, **kwargs: wx.YES)
+        dialog.listbox.SetSelection(0)
+        going = dialog.selected()
+        assert going is not None
+        dialog.on_delete(wx.CommandEvent())
+
+        assert going.title not in [each.title for each in db.list_conversations()]
+        # Taken from the database, not from the dialog being tested: the point
+        # is which row is named, not that the dialog agrees with itself.
+        remaining = [each.title for each in db.list_conversations()]
+        assert spoken == [f"Deleted {going.title}. {remaining[0]} is selected."]
+    finally:
+        dialog.Destroy()
+        app.ProcessPendingEvents()
+
+
+def test_deleting_the_last_conversation_does_not_promise_a_selection(tmp_path, monkeypatch):
+    """With nothing left in the list there is no next row to name."""
+    app = _app()
+    db, first, _other = _seeded(tmp_path)
+    frame = wx.Frame(None)
+    try:
+        panel = _panel(frame, db)
+        _started(panel, first, "a/one", "only one")
+    finally:
+        frame.Destroy()
+        app.ProcessPendingEvents()
+
+    spoken: list[str] = []
+    dialog = ConversationsDialog(None, db, speak=spoken.append)
+    try:
+        monkeypatch.setattr(wx, "MessageBox", lambda *args, **kwargs: wx.YES)
+        dialog.listbox.SetSelection(0)
+        going = dialog.selected()
+        assert going is not None
+        dialog.on_delete(wx.CommandEvent())
+
+        assert db.list_conversations() == []
+        assert spoken == [f"Deleted {going.title}."]
+    finally:
+        dialog.Destroy()
+        app.ProcessPendingEvents()

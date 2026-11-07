@@ -30,8 +30,6 @@ terminal sessions in different project folders.
 from __future__ import annotations
 
 import bisect
-import functools
-import hashlib
 import importlib.util
 import json
 import logging
@@ -44,7 +42,6 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -52,10 +49,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-import wave
 import weakref
 import webbrowser
-import zipfile
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -70,15 +65,28 @@ from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
 from backend_updates import BackendUpdateResult, BackendUpdateService, BackendUpdateState
-import claude_session
+from claude_session import _find_claude
+import claude_worker
 import diagnostics
+import earcons
+import install_path
+import installers
+import portable_node
+from earcons import (
+    CUE_LOOP,
+    CUE_OFF,
+    CUE_PERIODIC,
+    CUE_SECONDS_DEFAULT,
+    CUE_SECONDS_MAX,
+    CUE_SECONDS_MIN,
+    _valid_progress_cue,
+)
 from dialog_tasks import TaskSlot
 from question_dialog import QuestionDialog
-from certificates import open_url
 from conversation_list import make_conversation_list
 from conversation_items import ConversationItem, ConversationItemsDialog, collect_items
 import remote_sessions
-from task_list import CLAUDE_TASK_TOOLS, TaskList
+from task_list import TaskList
 from app_updater import (
     GITHUB_REPOSITORY,
     ReleaseInfo,
@@ -90,8 +98,6 @@ from app_updater import (
     version_tuple,
 )
 from agent_backends import (
-    _tool_use_label,
-    claude_limit_warning,
     BACKEND_ANTIGRAVITY,
     BACKEND_CLAUDE,
     BACKEND_CODEX,
@@ -105,16 +111,12 @@ from agent_backends import (
     BACKEND_MUSE,
     BACKEND_MUSEAI,
     BACKEND_OPENCODE,
-    BACKEND_PITCH_ORDER,
     BACKENDS,
-    FREEBUFF_PREFERRED_MODEL,
-    SUBAGENT_COMPLETED,
-    SUBAGENT_FAILED,
     SUBAGENT_RUNNING,
     SUBAGENT_STOPPED,
     UNBOUND,
     AgentWorker,
-    SubagentReport,
+    PlanAccount,
     backend_auth_ok,
     backend_label,
     backend_status,
@@ -123,14 +125,12 @@ from agent_backends import (
     migrate_macos_legacy_dirs,
     codex_model_options,
     codex_plan_account,
+    save_codex_plan_account,
     compaction_request,
     discard_freebuff_prewarm,
     end_hidden_terminal,
     find_backend_cli,
     freebuff_model_options,
-    ignore_subagents,
-    subagent_line,
-    subagent_status,
     invalidate_backend_cache,
     normalize_backend,
     opencode_auth_methods,
@@ -143,20 +143,15 @@ from agent_backends import (
     opencode_providers,
     settings_files,
     prewarm_freebuff,
-    set_freebuff_model,
     spawn_hidden_terminal,
-    stop_opencode_server,
     subprocess_env,
     worker_class,
 )
 from questions import (
-    AskQuestions,
     Question,
-    _questions,
     is_an_offer_to_carry_on,
     questions_written_in_the_answer,
     trailing_question,
-    question_summary,
 )
 from process_utils import (
     no_window_kwargs,
@@ -171,17 +166,12 @@ from hermes_backend import (
     wsl_path_to_windows,
 )
 from muse_backend import (
-    muse_cli_path,
     muse_command,
-    muse_installed,
     muse_skills,
-    wsl_exe as muse_wsl_exe,
-    reset_discovery as reset_muse_discovery,
 )
 
 from markdown_rows import (
     Row,
-    SentenceStreamer,
     _MD,
     _strip_noise,
     parse_response,
@@ -537,119 +527,14 @@ def about_description() -> str:
     )
 
 
-CLAUDE_BIN = "claude"
-
-
-# Common install locations to check when `claude` isn't on PATH.
-# macOS GUI apps launched from Finder/Dock inherit a minimal PATH
-# (/usr/bin:/bin:/usr/sbin:/sbin) and miss Homebrew, nvm, the official
-# ~/.claude/local installer, etc. Windows GUI apps usually inherit the
-# user PATH, but installs to non-default npm prefixes can still miss it.
-def _native_bin_dir() -> Path:
-    """Where the official native installer puts the launcher, every platform."""
-    return Path.home() / ".local" / "bin"
-
-
-def _fallback_claude_paths() -> tuple[Path, ...]:
-    home = Path.home()
-    if platform.system() == "Windows":
-        appdata = os.environ.get("APPDATA", str(home / "AppData" / "Roaming"))
-        local_appdata = os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local"))
-        candidates: list[Path] = []
-        for name in ("claude.exe", "claude.cmd", "claude.ps1"):
-            candidates.extend(
-                [
-                    # Native installer (install.ps1 / install.cmd) — the default.
-                    _native_bin_dir() / name,
-                    # WinGet's shim directory.
-                    Path(local_appdata) / "Microsoft" / "WinGet" / "Links" / name,
-                    Path(appdata) / "npm" / name,
-                    home / ".claude" / "local" / name,
-                    home / ".volta" / "bin" / name,
-                    Path(local_appdata) / "Programs" / "claude" / name,
-                ]
-            )
-        return tuple(candidates)
-    return (
-        _native_bin_dir() / "claude",
-        home / ".claude" / "local" / "claude",
-        Path("/opt/homebrew/bin/claude"),
-        Path("/usr/local/bin/claude"),
-        home / ".npm-global" / "bin" / "claude",
-        home / ".volta" / "bin" / "claude",
-    )
-
-
-def _login_shell() -> Optional[str]:
-    """The user's real login shell, if there is one (POSIX only)."""
-    if platform.system() == "Windows":
-        return None
-    shell = os.environ.get("SHELL")
-    return shell if shell and os.path.isfile(shell) else None
-
-
-def _login_shell_which(name: str) -> Optional[str]:
-    """Resolve *name* the way a login shell would.
-
-    A GUI app launched from Finder or the Dock inherits a minimal PATH, so this
-    is how a CLI the user can run is found. It runs `$SHELL -l -c`, a login
-    shell that is not interactive, so for zsh it reads .zprofile and not
-    .zshrc. `command -v` is POSIX and also works in fish.
-    """
-    shell = _login_shell()
-    if shell is None:
-        return None
-    try:
-        result = subprocess.run(
-            [shell, "-l", "-c", f"command -v {name}"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    path = result.stdout.strip().splitlines()[-1].strip()
-    if path and os.path.isfile(path) and os.access(path, os.X_OK):
-        return path
-    return None
-
-
-def _find_claude() -> Optional[str]:
-    """Locate the `claude` binary even when launched from a GUI app.
-
-    Order: PATH, well-known install locations, then (POSIX only) the user's
-    login shell so any custom PATH from .zprofile / .bash_profile is honored.
-    """
-    binary = shutil.which(CLAUDE_BIN)
-    if binary:
-        return binary
-
-    for candidate in _fallback_claude_paths():
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-
-    return _login_shell_which(CLAUDE_BIN)
-
-
 # ---------------------------------------------------------------------------
 # Installing Claude Code, and making it visible to every shell.
 #
 # Both official native installers are documented at code.claude.com/docs/en/setup.
 # Neither needs administrator rights or Node.js: they drop a real binary in
-# ~/.local/bin and self-update from then on.
+# ~/.local/bin and self-update from then on. The addresses themselves live in
+# `installers`, which is the module that runs them.
 # ---------------------------------------------------------------------------
-
-WINDOWS_INSTALL_PS1_URL = "https://claude.ai/install.ps1"
-POSIX_INSTALL_SH_URL = "https://claude.ai/install.sh"
-
-# Hermes ships per-platform script installers of the same shape — a PowerShell
-# one-liner on native Windows, curl through bash on macOS, Linux and WSL2 —
-# and is not on npm. It drops a launcher under the user's home directory and
-# self-updates from then on; no administrator rights, no Node.js.
-HERMES_INSTALL_PS1_URL = "https://hermes-agent.nousresearch.com/install.ps1"
-HERMES_INSTALL_SH_URL = "https://hermes-agent.nousresearch.com/install.sh"
 
 
 def _open_web_page(url: str) -> bool:
@@ -727,811 +612,6 @@ def _reach_settings_file(entry) -> str:
     return f"{entry.path.name} does not exist yet. It would be at {entry.path}."
 
 
-def _same_dir(a: str, b: str) -> bool:
-    """Compare two directory strings the way the platform resolves them.
-
-    ``normcase`` folds case and slashes on Windows and is a no-op on POSIX,
-    which is what we want: PATH is case-insensitive on one and not the other.
-    ``$HOME`` / ``%USERPROFILE%`` style references are expanded, since PATH
-    entries are routinely written that way and comparing them literally would
-    append a duplicate entry on every launch.
-    """
-
-    def norm(p: str) -> str:
-        p = os.path.expandvars(os.path.expanduser(p.strip().strip('"')))
-        return os.path.normcase(os.path.normpath(p))
-
-    return bool(a.strip()) and norm(a) == norm(b)
-
-
-def _bundle_dir() -> Optional[str]:
-    """The folder a packaged build keeps its own libraries in, if this is one."""
-    if not getattr(sys, "frozen", False):
-        return None
-    return getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(sys.executable))
-
-
-def path_without_bundle_entries(current: str, bundle: str) -> str:
-    """*current* PATH with every entry inside the packaged folder removed."""
-
-    def inside(entry: str) -> bool:
-        try:
-            candidate = os.path.normcase(
-                os.path.normpath(os.path.abspath(entry.strip().strip('"')))
-            )
-        except (OSError, ValueError):
-            return False
-        root = os.path.normcase(os.path.normpath(os.path.abspath(bundle)))
-        return candidate == root or candidate.startswith(root + os.sep)
-
-    kept = [entry for entry in current.split(os.pathsep) if entry.strip() and not inside(entry)]
-    return os.pathsep.join(kept)
-
-
-def keep_bundle_off_child_path() -> None:
-    """Stop BlindPilot's private DLL folder from reaching child processes.
-
-    PyInstaller's pywin32 hook puts ``_internal\\pywin32_system32`` on this
-    process's PATH. It registers the same folder with ``os.add_dll_directory``,
-    which is what actually makes pywin32 load; the PATH entry is only a
-    fallback for Anaconda builds where that call does nothing. Unlike the DLL
-    directory, PATH is inherited — by the agent CLI, by the terminal, and by
-    everything those start in turn, for as long as any of them live.
-
-    Those processes then resolve ordinary libraries (the Visual C++ runtime,
-    pythoncom) out of BlindPilot's install folder and hold them open. The next
-    update finds its own files in use by programs it has no business closing,
-    and the installer gives up rather than replace them — the silent "installer
-    exited with code 5" this used to end in.
-    """
-    bundle = _bundle_dir()
-    if not bundle:
-        return
-    current = os.environ.get("PATH", "")
-    cleaned = path_without_bundle_entries(current, bundle)
-    if cleaned != current:
-        os.environ["PATH"] = cleaned
-
-
-def _windows_persistent_path_dirs() -> List[str]:
-    """Every directory on the *persistent* PATH — user PATH plus system PATH.
-
-    This is what a freshly opened cmd, PowerShell 5, pwsh or Windows Terminal
-    tab composes its PATH from, which is not necessarily what this process
-    inherited. Checking the registry rather than ``os.environ`` is the only way
-    to know whether `claude` will actually resolve in a new terminal.
-    """
-    import winreg
-
-    dirs: List[str] = []
-    for root, subkey in (
-        (winreg.HKEY_CURRENT_USER, r"Environment"),
-        (
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        ),
-    ):
-        try:
-            with winreg.OpenKey(root, subkey) as key:
-                value, _type = winreg.QueryValueEx(key, "Path")
-        except OSError:
-            continue
-        if isinstance(value, str):
-            dirs.extend(p for p in value.split(os.pathsep) if p.strip())
-    return dirs
-
-
-def _posix_persistent_path_dirs() -> List[str]:
-    """The PATH a fresh Terminal window would have.
-
-    Asks the user's own login shell, so whatever their .zprofile / .zshrc /
-    .bash_profile / fish config builds up is what we see — the same PATH they
-    would get by opening Terminal or iTerm and typing `claude`. Printed one per
-    line because in fish ``$PATH`` is a list, not a colon-joined string.
-    """
-    shell = _login_shell()
-    if shell is None:
-        return []
-    if os.path.basename(shell) == "fish":
-        # fish's $PATH is a real list, so this is already space-safe.
-        script = "for p in $PATH; echo $p; end"
-    else:
-        # Split on the colon with tr rather than by word-splitting: PATH
-        # entries containing spaces are normal on macOS (/Applications/...)
-        # and word-splitting would shred them into fragments.
-        script = 'printf \'%s\\n\' "$PATH" | tr ":" "\\n"'
-    try:
-        result = subprocess.run(
-            [shell, "-l", "-c", script],
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return [p for p in os.environ.get("PATH", "").split(":") if p.strip()]
-    if result.returncode != 0:
-        # A configured shell can be temporarily unusable (for example a stale
-        # WSL launcher on Windows while exercising the macOS code path).  The
-        # inherited POSIX PATH is still better evidence than an empty list.
-        return [p for p in os.environ.get("PATH", "").split(":") if p.strip()]
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
-
-
-def _is_on_persistent_path(directory: Path) -> bool:
-    """Would a newly opened terminal find things in *directory*?
-
-    Deliberately not a check of ``os.environ``: this process may have inherited
-    a PATH that a fresh terminal will not have, or vice versa.
-    """
-    try:
-        if platform.system() == "Windows":
-            dirs = _windows_persistent_path_dirs()
-        else:
-            dirs = _posix_persistent_path_dirs()
-            if not dirs:
-                return True  # No usable login shell to ask — don't cry wolf.
-        return any(_same_dir(p, str(directory)) for p in dirs)
-    except Exception:
-        return True  # Never block the user on a check we couldn't run.
-
-
-def _broadcast_environment_change() -> None:
-    """Tell Explorer (and everything else) that the environment changed.
-
-    Without this broadcast a newly opened terminal still inherits Explorer's
-    stale copy of the environment, so a PATH edit appears to do nothing until
-    the user signs out and back in.
-    """
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        HWND_BROADCAST = 0xFFFF
-        WM_SETTINGCHANGE = 0x001A
-        SMTO_ABORTIFHUNG = 0x0002
-
-        send = ctypes.windll.user32.SendMessageTimeoutW
-        send.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            ctypes.c_wchar_p,
-            wintypes.UINT,
-            wintypes.UINT,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        send.restype = wintypes.LPARAM
-        result = wintypes.DWORD()
-        send(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            "Environment",
-            SMTO_ABORTIFHUNG,
-            5000,
-            ctypes.byref(result),
-        )
-    except Exception:
-        pass
-
-
-def _add_to_process_path(directory: Path) -> None:
-    """Make the directory usable in *this* process without a restart."""
-    entry = str(directory)
-    current = os.environ.get("PATH", "")
-    if not any(_same_dir(p, entry) for p in current.split(os.pathsep) if p.strip()):
-        os.environ["PATH"] = entry + os.pathsep + current
-
-
-def _path_with_entry(current: str, directory: str) -> Optional[str]:
-    """The PATH string *current* with *directory* appended, or None if present.
-
-    Kept separate from the registry write so the string surgery — the part that
-    can wreck someone's PATH — is testable on its own.
-    """
-    entries = [p for p in current.split(os.pathsep) if p.strip()]
-    if any(_same_dir(p, directory) for p in entries):
-        return None
-    entries.append(directory)
-    return os.pathsep.join(entries)
-
-
-def _shell_profile_file() -> Path:
-    """The startup file to extend for the user's login shell.
-
-    zsh is the default on macOS since Catalina; ``.zshrc`` is read by both
-    interactive login and non-login shells, so it is the one place that covers
-    Terminal, iTerm and a shell opened inside an editor. Bash on macOS reads
-    ``.bash_profile`` for login shells (which is what Terminal opens) while
-    Linux desktops open non-login shells that read ``.bashrc``.
-    """
-    home = Path.home()
-    shell = os.path.basename(_login_shell() or "")
-    if shell == "zsh":
-        return home / ".zshrc"
-    if shell == "fish":
-        return home / ".config" / "fish" / "config.fish"
-    if shell == "bash":
-        if platform.system() == "Darwin":
-            return home / ".bash_profile"
-        return home / ".bashrc"
-    return home / ".profile"
-
-
-PATH_STANZA_MARKER = "# Added by BlindPilot"
-
-
-def _path_export_line(directory: Path, shell: str) -> str:
-    """The one line that puts *directory* on PATH for the given shell.
-
-    Separators are forced to POSIX form — the line we are composing is shell
-    script, not a host path, so it must read the same whatever built it.
-    """
-    # Written against $HOME rather than the expanded path, so the profile stays
-    # portable and reads the way a person would have written it by hand.
-    home = Path.home().as_posix()
-    text = directory.as_posix()
-    if text == home or text.startswith(home + "/"):
-        text = "$HOME" + text[len(home) :]
-    if shell == "fish":
-        return f'fish_add_path "{text}"'
-    return f'export PATH="{text}:$PATH"'
-
-
-def ensure_on_posix_path(directory: Path) -> Optional[str]:
-    """Add *directory* to PATH for future terminal sessions on macOS / Linux.
-
-    Appends an export line to the login shell's startup file — the equivalent
-    of the registry write on Windows, and the only way to affect terminals the
-    user opens later. Returns the file that was changed, or None if nothing
-    needed changing. Raises OSError if the write fails.
-    """
-    if _is_on_persistent_path(directory):
-        return None
-
-    profile = _shell_profile_file()
-    line = _path_export_line(directory, os.path.basename(_login_shell() or ""))
-    try:
-        existing = profile.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        existing = ""
-    # Appending twice would leave a duplicate stanza in a file the user owns.
-    if line in existing:
-        return None
-
-    profile.parent.mkdir(parents=True, exist_ok=True)
-    with open(profile, "a", encoding="utf-8") as fh:
-        # Lead with a newline: the file may not end with one, and appending to
-        # a half-finished last line would corrupt it.
-        fh.write(f"\n{PATH_STANZA_MARKER}\n{line}\n")
-    return str(profile)
-
-
-def ensure_on_path(directory: Path) -> Optional[str]:
-    """Make *directory* reachable from a terminal, persistently.
-
-    Returns a description of what was changed, or None if nothing needed
-    changing. Raises OSError if the change could not be written.
-    """
-    _add_to_process_path(directory)
-    if platform.system() == "Windows":
-        return "your user PATH" if ensure_on_windows_path(directory) else None
-    return ensure_on_posix_path(directory)
-
-
-def ensure_on_windows_path(directory: Path) -> bool:
-    """Append *directory* to the user's persistent PATH if it isn't there.
-
-    Writes ``HKCU\\Environment``, which cmd, PowerShell 5.1, pwsh 7 and Windows
-    Terminal all read when they start, so one entry covers every shell. `setx`
-    is deliberately not used — it silently truncates PATH at 1024 characters.
-
-    Returns True when an entry was added, False when it was already present.
-    Raises OSError if the registry write fails.
-    """
-    if platform.system() != "Windows":
-        return False
-
-    import winreg  # after the platform check — the module is Windows-only
-
-    with winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER,
-        r"Environment",
-        0,
-        winreg.KEY_READ | winreg.KEY_WRITE,
-    ) as key:
-        try:
-            current, regtype = winreg.QueryValueEx(key, "Path")
-        except OSError:
-            current, regtype = "", winreg.REG_EXPAND_SZ
-        if not isinstance(current, str):
-            current, regtype = "", winreg.REG_EXPAND_SZ
-        updated = _path_with_entry(current, str(directory))
-        if updated is None:
-            return False
-        # Preserve REG_EXPAND_SZ when that's what's there: existing entries may
-        # contain %USERPROFILE% and rewriting the value as REG_SZ would leave
-        # those literal, breaking the rest of the user's PATH.
-        if regtype not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
-            regtype = winreg.REG_EXPAND_SZ
-        winreg.SetValueEx(key, "Path", 0, regtype, updated)
-
-    _broadcast_environment_change()
-    return True
-
-
-def _powershell_exe() -> Optional[str]:
-    """Windows PowerShell first — it ships with Windows 11, pwsh may not."""
-    for name in ("powershell.exe", "powershell", "pwsh.exe", "pwsh"):
-        found = shutil.which(name)
-        if found:
-            return found
-    return None
-
-
-def _script_installer_argv(powershell_command: str, posix_url: str) -> Optional[List[str]]:
-    """The command that runs an official script installer on this platform.
-
-    None when the prerequisites are missing: no PowerShell on Windows, no curl
-    or shell on macOS and Linux. macOS ships both curl and bash; a Linux box
-    without curl is possible.
-    """
-    if platform.system() == "Windows":
-        shell = _powershell_exe()
-        if shell is None:
-            return None
-        return [
-            shell,
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            powershell_command,
-        ]
-    if shutil.which("curl") is None:
-        return None
-    shell = shutil.which("bash") or shutil.which("sh")
-    if shell is None:
-        return None
-    return [shell, "-c", f"curl -fsSL {posix_url} | bash"]
-
-
-def _install_argv() -> Optional[List[str]]:
-    """Claude Code's official native installer for this platform."""
-    return _script_installer_argv(f"irm {WINDOWS_INSTALL_PS1_URL} | iex", POSIX_INSTALL_SH_URL)
-
-
-def _hermes_install_argv() -> Optional[List[str]]:
-    """Hermes' official installer for this platform."""
-    return _script_installer_argv(f"iex (irm {HERMES_INSTALL_PS1_URL})", HERMES_INSTALL_SH_URL)
-
-
-def _missing_prereq_message(installer: str = "the installer") -> str:
-    missing = "PowerShell" if platform.system() == "Windows" else "curl and bash"
-    return f"Could not find {missing} on this computer, so {installer} cannot be run automatically."
-
-
-def _hermes_missing_prereq_message() -> str:
-    return _missing_prereq_message("Hermes' installer")
-
-
-# Where uv -- the tool Hermes' installer bootstraps a Python with -- keeps the
-# interpreters it downloads. Measured with ``uv python dir`` on a healthy
-# machine: %APPDATA%\\uv\\python, the ROAMING folder. Roaming is also the one
-# folder a roaming profile or a cloud-sync client takes over, and Windows
-# refuses to walk through a folder it does not trust when an executable is
-# about to live under it. uv then dies at "Downloading Python" with
-# "Failed to create Python minor version link directory ... (os error 448)" --
-# ERROR_TRUSTING_PATH -- while the installer around it still exits 0.
-UV_PYTHON_DIR_ENV = "UV_PYTHON_INSTALL_DIR"
-
-
-def _uv_roaming_python_dir() -> Path:
-    """Where uv would put its managed Pythons if nothing were configured."""
-    roaming = os.environ.get("APPDATA", "").strip()
-    base = Path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
-    return base / "uv" / "python"
-
-
-def _uv_local_python_dir() -> Path:
-    """The same folder under local app data, where uv keeps its cache."""
-    local = os.environ.get("LOCALAPPDATA", "").strip()
-    base = Path(local) if local else Path.home() / "AppData" / "Local"
-    return base / "uv" / "python"
-
-
-def _windows_file_attributes(directory: Path) -> Optional[int]:
-    """The Windows ``st_file_attributes`` of a folder, or None when it cannot be asked."""
-    try:
-        return getattr(os.stat(directory), "st_file_attributes", 0)
-    except OSError:
-        return None
-
-
-def _folder_is_behind_reparse_point(directory: Path) -> bool:
-    """Whether a step on the way to *directory* is a reparse point.
-
-    That is what a cloud-sync placeholder or a roaming redirect looks like to
-    Windows, and it is what makes it refuse to place a program underneath.
-    Only folders that already exist can be asked, so the walk stops at the
-    first one that does not -- a path uv has not created yet is judged by the
-    deepest part of it that exists.
-    """
-    current = directory
-    while True:
-        attributes = _windows_file_attributes(current)
-        if attributes is None:
-            return False
-        if attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
-            return True
-        parent = current.parent
-        if parent == current:
-            return False
-        current = parent
-
-
-def _folder_is_cloud_synced(directory: Path) -> bool:
-    """Whether *directory* sits inside a folder a sync client owns.
-
-    Two signals, because each alone misses a machine: the reparse attribute
-    Windows puts on the synced folder, and OneDrive's own recorded roots, which
-    name the tree even where nothing has been turned into a placeholder yet.
-    """
-    if _folder_is_behind_reparse_point(directory):
-        return True
-    try:
-        candidate = os.path.normcase(os.path.abspath(str(directory)))
-    except OSError:
-        return False
-    for name in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-        root = os.environ.get(name, "").strip()
-        if not root:
-            continue
-        try:
-            prefix = os.path.normcase(os.path.abspath(root)) + os.sep
-        except OSError:
-            continue
-        if candidate.startswith(prefix):
-            return True
-    return False
-
-
-def _remember_windows_env_var(name: str, value: str) -> None:
-    """Set one user environment variable for every program started later.
-
-    ``HKCU\\Environment`` is the registry twin of ``setx``, read by cmd,
-    PowerShell and Windows Terminal when they start. Raises OSError when the
-    write fails.
-    """
-    import winreg  # after the platform check -- the module is Windows-only
-
-    os.environ[name] = value
-    with winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER,
-        r"Environment",
-        0,
-        winreg.KEY_READ | winreg.KEY_WRITE,
-    ) as key:
-        try:
-            current, regtype = winreg.QueryValueEx(key, name)
-        except OSError:
-            current, regtype = None, winreg.REG_EXPAND_SZ
-        if current == value:
-            return
-        if regtype not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
-            regtype = winreg.REG_EXPAND_SZ
-        winreg.SetValueEx(key, name, 0, regtype, value)
-    _broadcast_environment_change()
-
-
-def _hermes_installer_env(log: Callable[[str], None]) -> Optional[dict[str, str]]:
-    """The environment Hermes' installer runs in, or None to change nothing.
-
-    Its Python bootstrap is uv's, and uv's default home for interpreters is the
-    roaming folder (see ``UV_PYTHON_DIR_ENV``). On the machines that report
-    ``os error 448`` that folder sits behind a cloud-sync placeholder, so the
-    interpreters are sent to local app data instead -- where uv already keeps
-    its cache, and which no sync client owns. Asked for on every Windows
-    install rather than only when the check below agrees, because a synced
-    folder is not always recognisable from here and a wrong guess costs a
-    folder, while a missed one costs the install.
-
-    A location the user configured themselves is left exactly as it is.
-    """
-    if platform.system() != "Windows":
-        return None
-    if os.environ.get(UV_PYTHON_DIR_ENV, "").strip():
-        return None
-    local = _uv_local_python_dir()
-    if _folder_is_cloud_synced(local):
-        log(
-            "Both of the usual folders for Hermes' Python sit inside a folder that a "
-            "cloud-sync program owns, and Windows will not put a program there. Set "
-            "UV_PYTHON_INSTALL_DIR to a folder outside every synced folder, then try again."
-        )
-        return None
-    if _folder_is_cloud_synced(_uv_roaming_python_dir()):
-        # Remembered, not just handed to this one installer run: the same
-        # bootstrap runs again whenever Hermes is updated from a terminal, and
-        # an environment variable BlindPilot set for one child process does not
-        # reach that one.
-        try:
-            _remember_windows_env_var(UV_PYTHON_DIR_ENV, str(local))
-            log(
-                "Your roaming AppData is inside a synced folder, which Windows will not "
-                f"put Hermes' Python in. It will go in {local} instead, and Windows has "
-                "been told so that Hermes' own updater finds it again."
-            )
-        except OSError as exc:
-            log(
-                "Hermes' Python will go in the local app-data folder for this install, "
-                f"but Windows could not be told to keep doing so: {exc}"
-            )
-    return {UV_PYTHON_DIR_ENV: str(local)}
-
-
-def _hermes_bootstrap_failure(lines: Sequence[str]) -> str:
-    """What to hear when Hermes' installer left no Python and no clear reason.
-
-    uv's own sentence for a folder it is not allowed through is localised -- on
-    a Polish machine it begins "Nie można przejść do tej ścieżki" -- and the
-    installer exits 0 regardless, so the only stable text in the whole log is
-    the error number and the name of the step that failed. Both are looked for
-    here, because "exit code 0 but hermes was not found" describes nothing a
-    user can act on.
-    """
-    text = "\n".join(lines).lower()
-    if "os error 448" not in text and "minor version link" not in text:
-        return ""
-    return (
-        "Windows refused to put the Python Hermes needs inside a folder owned by a "
-        "cloud-sync program. BlindPilot uses the local app-data folder for it instead; if "
-        "this still fails, set UV_PYTHON_INSTALL_DIR to a folder outside every synced "
-        "folder and try again."
-    )
-
-
-def _hermes_binary_after_install() -> Optional[str]:
-    """The Hermes launcher after an install, with its install dirs on PATH.
-
-    The installers drop the launcher under the user's home, ``~/.local/bin``
-    on POSIX and ``LOCALAPPDATA\\hermes\\bin`` on Windows, so that directory
-    is put on this process' PATH before the search.
-    """
-    from hermes_backend import find_hermes_cli
-
-    local_bin = Path.home() / ".local" / "bin"
-    if local_bin.is_dir():
-        _add_to_process_path(local_bin)
-    if platform.system() == "Windows":
-        # Measured on the machine the installer ran on: the launcher lands in
-        # %LOCALAPPDATA%\hermes\bin, beside the managed uv, and the
-        # installer's own "PATH already configured" only helps shells started
-        # afterwards -- not this process, which was running during the
-        # install.
-        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        hermes_bin = local / "hermes" / "bin"
-        if hermes_bin.is_dir():
-            _add_to_process_path(hermes_bin)
-    return find_hermes_cli()
-
-
-def install_hermes(log: Callable[[str], None]) -> Optional[str]:
-    """Run Hermes' official installer for this platform and report the result.
-
-    The same discipline as install_claude: the installer's exit code is
-    advisory, and a working `hermes` afterwards is the fact that counts.
-    """
-    argv = _hermes_install_argv()
-    if argv is None:
-        log(_hermes_missing_prereq_message())
-        return None
-
-    log(
-        "Downloading and running the official Hermes installer. This usually takes a minute or two."
-    )
-    heard: List[str] = []
-
-    def logged(line: str) -> None:
-        heard.append(line)
-        log(line)
-
-    rc = _run_logged_process(argv, logged, env=_hermes_installer_env(log))
-    if rc is None:
-        return None
-
-    binary = _hermes_binary_after_install()
-    if binary is None:
-        log(f"The installer finished with exit code {rc} but `hermes` was not found afterwards.")
-        problem = _hermes_bootstrap_failure(heard)
-        if problem:
-            log(problem)
-        return None
-
-    log(f"Installed: {binary}")
-    folder = Path(binary).parent
-    try:
-        changed = ensure_on_path(folder)
-        if changed:
-            log(f"Added {folder} to {changed}.")
-    except OSError as exc:
-        log(f"Installed, but adding it to PATH failed: {exc}")
-    return binary
-
-
-MUSE_INSTALL_SH_URL = "https://dev.meta.ai/install.sh"
-
-# uv's official installers. BlindPilot installs uv itself when a backend's
-# Python tooling is needed on a computer that has neither uv nor a Python:
-# a fresh computer has neither, and without a bootstrap the muse.ai install
-# could only tell the user to go and fetch the tooling by hand.
-UV_INSTALL_PS1_URL = "https://astral.sh/uv/install.ps1"
-UV_INSTALL_SH_URL = "https://astral.sh/uv/install.sh"
-
-# Antigravity CLI ships Google's own per-platform script installers (not npm):
-# a native agy binary in ~/.local/bin, or %LOCALAPPDATA%\agy\bin on Windows,
-# that updates itself from then on.
-ANTIGRAVITY_INSTALL_PS1_URL = "https://antigravity.google/cli/install.ps1"
-ANTIGRAVITY_INSTALL_SH_URL = "https://antigravity.google/cli/install.sh"
-
-
-def install_antigravity(log: Callable[[str], None]) -> Optional[str]:
-    """Run Google's Antigravity CLI installer and report the result.
-
-    As with the other script installers, a working `agy` afterwards is the
-    fact that counts, not the installer's exit code.
-    """
-    argv = _script_installer_argv(
-        f"irm {ANTIGRAVITY_INSTALL_PS1_URL} | iex", ANTIGRAVITY_INSTALL_SH_URL
-    )
-    if argv is None:
-        log(_missing_prereq_message("Antigravity's installer"))
-        return None
-    log(
-        "Downloading and running the official Antigravity CLI installer. This usually takes under a minute."
-    )
-    rc = _run_logged_process(argv, log)
-    if rc is None:
-        return None
-    binary = find_backend_cli(BACKEND_ANTIGRAVITY)
-    if binary is None:
-        log(f"The installer finished with exit code {rc} but `agy` was not found afterwards.")
-        return None
-    log(f"Installed: {binary}")
-    try:
-        changed = ensure_on_path(Path(binary).parent)
-        if changed:
-            log(f"Added {Path(binary).parent} to {changed}.")
-    except OSError as exc:
-        log(f"Installed, but adding it to PATH failed: {exc}")
-    return binary
-
-
-def _muse_install_argv() -> Optional[List[str]]:
-    """Muse's official installer, run wherever Muse can actually live.
-
-    Muse's CLI ships for macOS and Linux only, so on Windows there is no
-    PowerShell one-liner to run natively: the install happens inside WSL, if
-    WSL is here, and cannot happen at all if it is not.
-    """
-    if platform.system() == "Windows":
-        # The only prerequisite is WSL itself. This used to also require
-        # Muse to be installed already, which made a first install on a
-        # fresh computer impossible: the installer was refused exactly
-        # when there was nothing installed yet.
-        launcher = muse_wsl_exe()
-        if launcher is None:
-            return None
-        # curl inside the distribution, bash inside it: the script is
-        # POSIX-only, so running it from Windows is not an option to fall
-        # back to.
-        return [launcher, "-e", "bash", "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]
-    if shutil.which("curl") is None:
-        return None
-    shell = shutil.which("bash") or shutil.which("sh")
-    if shell is None:
-        return None
-    return [shell, "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]
-
-
-def _muse_missing_prereq_message() -> str:
-    if platform.system() == "Windows":
-        return (
-            "Muse Code runs on macOS and Linux, so on Windows it is installed "
-            "inside WSL -- and WSL with a working distribution was not found on "
-            "this computer. Install WSL first, then try again."
-        )
-    return _missing_prereq_message("Muse's installer")
-
-
-def install_muse(log: Callable[[str], None]) -> Optional[str]:
-    """Run Muse's official installer for this platform and report the result.
-
-    Same discipline as install_hermes: the installer's exit code is advisory,
-    and a working `muse` afterwards is the fact that counts. On Windows that
-    launcher lives inside WSL, so discovery is reset before the check -- the
-    first probe's answer predates the install and must not outlive it.
-    """
-    argv = _muse_install_argv()
-    if argv is None:
-        log(_muse_missing_prereq_message())
-        return None
-
-    log(
-        "Downloading and running the official Muse Code installer. "
-        "This usually takes under a minute."
-    )
-    rc = _run_logged_process(argv, log)
-    if rc is None:
-        return None
-
-    reset_muse_discovery()
-    if not muse_installed():
-        log(f"The installer finished with exit code {rc} but `muse` was not found afterwards.")
-        return None
-    path = muse_cli_path()
-    log(f"Installed: {path}")
-    return path
-
-
-def _path_shells() -> str:
-    """The shells worth naming when telling the user to open a new terminal."""
-    if platform.system() == "Windows":
-        return "cmd, PowerShell, pwsh and Windows Terminal"
-    return "Terminal and iTerm"
-
-
-def install_claude(log: Callable[[str], None]) -> Optional[str]:
-    """Run the official native installer for this platform and put it on PATH.
-
-    Streams installer output line by line to *log* (so the caller can show and
-    speak progress) and returns the path to the installed binary, or None if
-    the install did not produce a working `claude`.
-    """
-    argv = _install_argv()
-    if argv is None:
-        log(_missing_prereq_message())
-        return None
-
-    log("Downloading and running the Claude Code installer. This usually takes under a minute.")
-    rc = _run_logged_process(argv, log)
-    if rc is None:
-        return None
-
-    # The installer's own exit code is advisory. What matters is whether a
-    # working binary exists afterwards, so look before reporting failure.
-    _add_to_process_path(_native_bin_dir())
-    binary = _find_claude()
-    if binary is None:
-        log(f"The installer finished with exit code {rc} but `claude` was not found afterwards.")
-        return None
-
-    log(f"Installed: {binary}")
-    folder = Path(binary).parent
-    try:
-        changed = ensure_on_path(folder)
-        if changed:
-            log(
-                f"Added {folder} to {changed}. Open a new terminal window for "
-                f"{_path_shells()} to see it."
-            )
-        else:
-            log(f"Already on your PATH. `claude` will work in {_path_shells()}.")
-    except OSError as exc:
-        log(f"Installed, but adding it to PATH failed: {exc}")
-    return binary
-
-
-_NPM_BACKEND_PACKAGES = {
-    BACKEND_CODEX: "@openai/codex",
-    BACKEND_FREEBUFF: "freebuff",
-    BACKEND_OPENCODE: "opencode-ai",
-    BACKEND_COMMANDCODE: "command-code",
-    BACKEND_GEMINI: "@google/gemini-cli",
-    BACKEND_COPILOT: "@github/copilot",
-}
-
 # Backends whose turn is one process per message. A message typed while one
 # runs cannot join it, so it is queued and sent when the turn ends, and Steer
 # stops the turn and resumes with the instruction.
@@ -1545,639 +625,6 @@ _QUEUEING_BACKENDS = frozenset(
         BACKEND_COPILOT,
     }
 )
-
-
-def _backend_installs_with_npm(backend: str) -> bool:
-    """Whether this backend is one BlindPilot can install for the user.
-
-    Not every backend ships on npm: Hermes installs itself from its own
-    installer, so telling the user that npm is required would send them after
-    the wrong thing entirely.
-    """
-    return normalize_backend(backend) in _NPM_BACKEND_PACKAGES
-
-
-NODE_RELEASE_INDEX_URL = "https://nodejs.org/dist/index.json"
-NODE_RELEASE_BASE_URL = "https://nodejs.org/dist"
-_NODE_MINIMUM_MAJOR = 18
-
-
-def _managed_npm_prefix() -> Path:
-    """A writable per-user prefix owned by BlindPilot, never a system folder."""
-    return blindpilot_data_dir() / "npm"
-
-
-def _managed_npm_bin_dir() -> Path:
-    prefix = _managed_npm_prefix()
-    return prefix if platform.system() == "Windows" else prefix / "bin"
-
-
-def _node_runtime_root() -> Path:
-    return blindpilot_data_dir() / "runtimes" / "node"
-
-
-def _node_archive_spec(
-    version: str, system: Optional[str] = None, machine: Optional[str] = None
-) -> Optional[tuple[str, str]]:
-    """Return the official Node archive name and its extracted folder."""
-    system = system or platform.system()
-    machine = (machine or platform.machine()).casefold()
-    os_name = {"Windows": "win", "Darwin": "darwin", "Linux": "linux"}.get(system)
-    arch = {
-        "amd64": "x64",
-        "x86_64": "x64",
-        "arm64": "arm64",
-        "aarch64": "arm64",
-    }.get(machine)
-    if not os_name or not arch:
-        return None
-    stem = f"node-{version}-{os_name}-{arch}"
-    extension = ".zip" if system == "Windows" else ".tar.gz"
-    return stem + extension, stem
-
-
-def _managed_node_dir() -> Optional[Path]:
-    """Newest complete portable Node runtime previously installed by BlindPilot."""
-    spec = _node_archive_spec("v0.0.0")
-    if spec is None:
-        return None
-    marker = "-".join(spec[1].split("-")[-2:])
-    executable = "node.exe" if platform.system() == "Windows" else "bin/node"
-    npm = "npm.cmd" if platform.system() == "Windows" else "bin/npm"
-    candidates: list[tuple[tuple[int, ...], Path]] = []
-    try:
-        folders = _node_runtime_root().glob(f"node-v*-{marker}")
-        for folder in folders:
-            match = re.match(r"node-v(\d+(?:\.\d+)+)-", folder.name)
-            if match and (folder / executable).is_file() and (folder / npm).is_file():
-                candidates.append((tuple(int(part) for part in match.group(1).split(".")), folder))
-    except OSError:
-        return None
-    return max(candidates, default=((), None), key=lambda item: item[0])[1]
-
-
-def _managed_npm() -> Optional[str]:
-    runtime = _managed_node_dir()
-    if runtime is None:
-        return None
-    relative = "npm.cmd" if platform.system() == "Windows" else "bin/npm"
-    return str(runtime / relative)
-
-
-def activate_managed_cli_paths() -> None:
-    """Make BlindPilot-managed Node and backend launchers usable this run."""
-    runtime = _managed_node_dir()
-    if runtime is not None:
-        _add_to_process_path(runtime if platform.system() == "Windows" else runtime / "bin")
-    managed_bin = _managed_npm_bin_dir()
-    if managed_bin.is_dir():
-        _add_to_process_path(managed_bin)
-
-
-def _find_npm() -> Optional[str]:
-    return shutil.which("npm") or _managed_npm()
-
-
-def _automatic_npm_install_available() -> bool:
-    return _find_npm() is not None or _node_archive_spec("v0.0.0") is not None
-
-
-def _fetch_url_bytes(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": f"BlindPilot/{APP_VERSION}"})
-    with open_url(request, timeout=30) as response:
-        return response.read()
-
-
-def _safe_extract_node_archive(archive_path: Path, destination: Path) -> None:
-    """Extract one verified Node archive without permitting path traversal."""
-    destination.mkdir(parents=True, exist_ok=True)
-    root = destination.resolve()
-    if archive_path.suffix.casefold() == ".zip":
-        with zipfile.ZipFile(archive_path) as archive:
-            for member in archive.infolist():
-                target = (destination / member.filename).resolve()
-                if os.path.commonpath((str(root), str(target))) != str(root):
-                    raise OSError("The Node.js archive contains an unsafe path.")
-            archive.extractall(destination)
-        return
-    with tarfile.open(archive_path, mode="r:gz") as archive:
-        archive.extractall(destination, filter="data")
-
-
-def install_portable_node(log: Callable[[str], None]) -> Optional[str]:
-    """Install the latest Node LTS and npm for this user, with no elevation."""
-    existing = _managed_npm()
-    if existing:
-        node_bin = Path(existing).parent
-        try:
-            changed = ensure_on_path(node_bin)
-            if changed:
-                log(f"Added {node_bin} to {changed}.")
-        except OSError as exc:
-            log(f"Node.js is installed, but adding it to PATH failed: {exc}")
-        return existing
-    if _node_archive_spec("v0.0.0") is None:
-        log(
-            f"Automatic Node.js installation is not available for "
-            f"{platform.system()} {platform.machine()}."
-        )
-        return None
-
-    log("Node.js and npm were not found. Installing the latest Node.js LTS for this user.")
-    try:
-        releases = json.loads(_fetch_url_bytes(NODE_RELEASE_INDEX_URL).decode("utf-8"))
-        release = next(
-            item
-            for item in releases
-            if isinstance(item, dict)
-            and item.get("lts")
-            and isinstance(item.get("version"), str)
-            and int(item["version"].lstrip("v").split(".", 1)[0]) >= _NODE_MINIMUM_MAJOR
-        )
-        version = release["version"]
-        archive_name, extracted_name = _node_archive_spec(version) or ("", "")
-        if not archive_name:
-            raise OSError("No official Node.js archive is available for this computer.")
-        release_url = f"{NODE_RELEASE_BASE_URL}/{version}"
-        checksums = _fetch_url_bytes(f"{release_url}/SHASUMS256.txt").decode("utf-8")
-        checksum = next(
-            line.split()[0] for line in checksums.splitlines() if line.split()[1:] == [archive_name]
-        )
-    except (OSError, ValueError, StopIteration, urllib.error.URLError) as exc:
-        log(f"Could not discover the current Node.js LTS release: {exc}")
-        return None
-
-    runtime_root = _node_runtime_root()
-    destination = runtime_root / extracted_name
-    if destination.is_dir():
-        npm = destination / ("npm.cmd" if platform.system() == "Windows" else "bin/npm")
-        return str(npm) if npm.is_file() else None
-
-    try:
-        runtime_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="install-", dir=runtime_root) as temporary:
-            temporary_path = Path(temporary)
-            archive_path = temporary_path / archive_name
-            log(f"Downloading Node.js {version} from nodejs.org...")
-            request = urllib.request.Request(
-                f"{release_url}/{archive_name}",
-                headers={"User-Agent": f"BlindPilot/{APP_VERSION}"},
-            )
-            digest = hashlib.sha256()
-            with (
-                open_url(request, timeout=60) as response,
-                open(archive_path, "wb") as output,
-            ):
-                while chunk := response.read(1024 * 1024):
-                    output.write(chunk)
-                    digest.update(chunk)
-            if digest.hexdigest().casefold() != checksum.casefold():
-                raise OSError("The downloaded Node.js archive failed SHA-256 verification.")
-            extract_root = temporary_path / "extracted"
-            _safe_extract_node_archive(archive_path, extract_root)
-            extracted = extract_root / extracted_name
-            if not extracted.is_dir():
-                raise OSError("The Node.js archive did not contain its expected folder.")
-            try:
-                os.replace(extracted, destination)
-            except FileExistsError:
-                pass  # Another install thread completed the same release first.
-    except (OSError, tarfile.TarError, zipfile.BadZipFile, urllib.error.URLError) as exc:
-        log(f"Node.js installation failed: {exc}")
-        return None
-
-    npm_path = destination / ("npm.cmd" if platform.system() == "Windows" else "bin/npm")
-    node_bin = destination if platform.system() == "Windows" else destination / "bin"
-    if not npm_path.is_file():
-        log("Node.js was extracted, but npm was missing from the installed runtime.")
-        return None
-    try:
-        changed = ensure_on_path(node_bin)
-        if changed:
-            log(f"Added {node_bin} to {changed}.")
-    except OSError as exc:
-        log(f"Node.js was installed, but adding it to PATH failed: {exc}")
-    log(f"Installed Node.js and npm: {npm_path}")
-    return str(npm_path)
-
-
-def _npm_environment(npm: str) -> dict[str, str]:
-    """npm's own directory first, then everything a terminal would have.
-
-    npm is itself a shim that has to find `node`, so it fails from the macOS
-    Dock for exactly the reason the provider CLIs do.
-    """
-    env = subprocess_env(npm)
-    env.update(
-        {
-            "CI": "1",
-            "npm_config_yes": "true",
-            "npm_config_progress": "false",
-            "npm_config_fund": "false",
-            "npm_config_audit": "false",
-        }
-    )
-    return env
-
-
-def _npm_install_argv(backend: str, latest: bool = False) -> Optional[List[str]]:
-    """The npm command that installs a backend, or None if npm is unavailable.
-
-    `latest` pins the package's latest tag, which is what an update wants.
-    """
-    package = _NPM_BACKEND_PACKAGES.get(normalize_backend(backend))
-    npm = _find_npm()
-    if not package or not npm:
-        return None
-    return [
-        npm,
-        "install",
-        "--global",
-        "--prefix",
-        str(_managed_npm_prefix()),
-        f"{package}@latest" if latest else package,
-    ]
-
-
-def _npm_update_argv(backend: str) -> Optional[List[str]]:
-    return _npm_install_argv(backend, latest=True)
-
-
-def _managed_backend_binary(backend: str) -> Optional[str]:
-    executable = BACKENDS[normalize_backend(backend)].executable
-    suffixes = (".exe", ".cmd", ".ps1", "") if platform.system() == "Windows" else ("",)
-    return next(
-        (
-            str(candidate)
-            for suffix in suffixes
-            if (candidate := _managed_npm_bin_dir() / f"{executable}{suffix}").is_file()
-        ),
-        None,
-    )
-
-
-def _run_logged_process(
-    argv: List[str], log: Callable[[str], None], env: Optional[dict[str, str]] = None
-) -> Optional[int]:
-    try:
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env if env is not None else subprocess_env(argv[0]),
-            **no_window_kwargs(),
-        )
-    except OSError as exc:
-        log(f"The installer could not be started: {exc}")
-        return None
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line:
-            log(line)
-    return proc.wait()
-
-
-def _install_failure_message(backend: str) -> str:
-    """What to hear when an install did not complete: the command, unspliced."""
-    info = BACKENDS[normalize_backend(backend)]
-    return (
-        "The install did not complete. Read the installer output, or install "
-        f"{info.label} yourself. {info.install_command} Then click Check Again."
-    )
-
-
-def _install_uv(log: Callable[[str], None]) -> bool:
-    """Install uv with its official installer. True when uv exists afterwards.
-
-    The installer's exit code is advisory, like the other script
-    installers: a `uv` that discovery can find afterwards is the fact
-    that counts.
-    """
-    from museai_backend import find_uv
-
-    argv = _script_installer_argv(f"irm {UV_INSTALL_PS1_URL} | iex", UV_INSTALL_SH_URL)
-    if argv is None:
-        return False
-    log("Installing uv, the tool manager muse-cli is installed with...")
-    if _run_logged_process(argv, log) is None:
-        return False
-    return find_uv() is not None
-
-
-def install_museai(log: Callable[[str], None], upgrade: bool = False) -> Optional[str]:
-    """Install or upgrade muse-cli, the client muse.ai is driven through.
-
-    It is a Python package, so uv installs it as a tool (its own environment,
-    a launcher on PATH) and pip for this user is the fallback.
-    """
-    from museai_backend import MUSEAI_MISSING_PREREQ, museai_install_argv
-
-    label = backend_label(BACKEND_MUSEAI)
-    argv = museai_install_argv(upgrade=upgrade)
-    if argv is None:
-        # Neither uv nor a usable Python: a fresh computer. Install uv with
-        # its official installer -- the same script-installer pattern the
-        # other backends use -- then ask again.
-        if _install_uv(log):
-            argv = museai_install_argv(upgrade=upgrade)
-    if argv is None:
-        log(MUSEAI_MISSING_PREREQ)
-        return None
-    log(f"{'Updating' if upgrade else 'Installing'} {label}'s command line, muse-cli...")
-    rc = _run_logged_process(argv, log)
-    binary = find_backend_cli(BACKEND_MUSEAI)
-    if binary is None:
-        log(f"muse-cli was not found afterwards (exit code {rc}).")
-        return None
-    log(f"muse-cli is ready at {binary}. Sign in with muse-cli auth export.")
-    return binary
-
-
-def install_backend(backend: str, log: Callable[[str], None]) -> Optional[str]:
-    """Install one selected backend and return its discovered executable."""
-    backend = normalize_backend(backend)
-    if backend == BACKEND_CLAUDE:
-        return install_claude(log)
-    if backend == BACKEND_HERMES:
-        # Hermes is not on npm. Its official per-platform script installer is
-        # the install path, the same shape as Claude's.
-        return install_hermes(log)
-    if backend == BACKEND_MUSE:
-        return install_muse(log)
-    if backend == BACKEND_MUSEAI:
-        return install_museai(log)
-    if backend == BACKEND_ANTIGRAVITY:
-        return install_antigravity(log)
-    label = backend_label(backend)
-    npm = _find_npm()
-    if npm is None:
-        npm = install_portable_node(log)
-    if npm is None:
-        log(f"npm could not be installed, so BlindPilot cannot install {label} automatically.")
-        return None
-    argv = _npm_install_argv(backend)
-    if argv is None:
-        log(f"npm could not be installed, so BlindPilot cannot install {label} automatically.")
-        return None
-    if backend == BACKEND_CODEX:
-        _drop_codex_server(log)
-    if backend == BACKEND_OPENCODE:
-        # Same reason as an update: npm cannot replace a running executable.
-        stop_opencode_server()
-    log(f"Installing {label} with npm. This can take a minute.")
-    rc = _run_logged_process(argv, log, env=_npm_environment(npm))
-    if rc is None:
-        return None
-    _add_to_process_path(_managed_npm_bin_dir())
-    binary = _managed_backend_binary(backend) or find_backend_cli(backend)
-    if binary is None:
-        log(f"npm finished with exit code {rc}, but {label} was not found afterwards.")
-        return None
-    try:
-        changed = ensure_on_path(Path(binary).parent)
-        if changed:
-            log(f"Added {Path(binary).parent} to {changed}.")
-    except OSError as exc:
-        log(f"Installed, but adding it to PATH failed: {exc}")
-
-    # Freebuff's npm package is only a launcher. Asking every backend for its
-    # version both verifies it can start and makes Freebuff download and verify
-    # the native binary before the setup wizard advances to sign-in.
-    log(f"Verifying the {label} installation...")
-    verify_rc = _run_logged_process([binary, "--version"], log, env=_npm_environment(npm))
-    if verify_rc is None:
-        return None
-    if verify_rc != 0:
-        log(f"{label} was installed but failed its startup check (exit code {verify_rc}).")
-        return None
-    log(f"Installed and verified: {binary}")
-    return binary
-
-
-def _executable_version(binary: str) -> str:
-    """Return one provider executable's own version text."""
-    try:
-        result = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            stdin=subprocess.DEVNULL,
-            env=subprocess_env(binary),
-            **no_window_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return ((result.stdout or "") + (result.stderr or "")).strip()
-
-
-def _repair_claude_native_update(binary: str, log: Callable[[str], None]) -> bool:
-    """Make the Windows launcher use the newest downloaded Claude version."""
-    if platform.system() != "Windows" or Path(binary).suffix.lower() != ".exe":
-        # An npm `claude.cmd` shim is not the native launcher; a PE image
-        # copied over it would break it.
-        return True
-    versions = Path.home() / ".local" / "share" / "claude" / "versions"
-    try:
-        candidates = [
-            path for path in versions.iterdir() if path.is_file() and version_tuple(path.name)
-        ]
-    except OSError:
-        return True
-    if not candidates:
-        return True
-    newest = max(candidates, key=lambda path: version_tuple(path.name))
-    current_version = version_tuple(_executable_version(binary))
-    newest_version = version_tuple(newest.name)
-    if not newest_version or newest_version <= current_version:
-        return True
-    try:
-        shutil.copy2(newest, binary)
-    except OSError as exc:
-        log(f"Claude downloaded {newest.name}, but its launcher could not be updated: {exc}")
-        return False
-    verified = version_tuple(_executable_version(binary))
-    if verified < newest_version:
-        log("Claude's launcher still reports an older version after updating.")
-        return False
-    log(f"Activated Claude Code {newest.name} in the launcher.")
-    return True
-
-
-def _drop_codex_server(log: Callable[[str], None]) -> None:
-    """Let go of every held Codex app-server before npm replaces its executable.
-
-    Windows will not overwrite an executable that is running. Codex may be held
-    per ChatGPT-plan Account, so this reaches every Account's process: leaving
-    one behind fails the update exactly as one left behind used to.
-    """
-    log("Stopping Codex's app-server so its executable can be replaced...")
-    backend_pool.pool().drop_backend(BACKEND_CODEX)
-
-
-def update_backend(backend: str, log: Callable[[str], None]) -> bool:
-    """Update an installed provider CLI and stream accessible progress."""
-    backend = normalize_backend(backend)
-    label = backend_label(backend)
-    binary = _find_claude() if backend == BACKEND_CLAUDE else find_backend_cli(backend)
-    if binary is None:
-        log(f"{label} is not installed yet.")
-        return False
-    if backend == BACKEND_MUSEAI:
-        return install_museai(log, upgrade=True) is not None
-    previous_freebuff_model = ""
-    if backend == BACKEND_FREEBUFF:
-        _models, previous_freebuff_model, _error = freebuff_model_options()
-    if backend == BACKEND_CLAUDE:
-        argv = [binary, "update"]
-    elif backend == BACKEND_HERMES:
-        # Not on npm: its official installer is the update path too. It
-        # upgrades in place, and success is measured by the launcher
-        # afterwards, not the exit code.
-        hermes_argv = _hermes_install_argv()
-        if hermes_argv is None:
-            log(_hermes_missing_prereq_message())
-            return False
-        # The iex'd PowerShell installer never exits on its own -- install.ps1
-        # says so deliberately, so it cannot close the user's window -- so the
-        # process exit code is whatever the last native command inside the
-        # installer returned, and a negative one arrives unsigned: a friend's
-        # "exited with code 4294901760" is plain -65536, measured against this
-        # machine's PowerShell. The installer's own failure guard (assigning
-        # $global:LASTEXITCODE, not exiting) does not reach the process code
-        # either. The exit code says nothing about the update; the version the
-        # launcher reports afterwards is the only fact that does.
-        before = version_tuple(_executable_version(binary))
-        log(f"Running the official {label} installer to update...")
-        rc = _run_logged_process(hermes_argv, log, env=_hermes_installer_env(log))
-        if rc is None:
-            return False
-        found = _hermes_binary_after_install()
-        if found is None:
-            if rc != 0:
-                log(f"{label} update exited with code {rc}.")
-            log(f"{label} update finished, but `hermes` was not found afterwards.")
-            return False
-        text = _executable_version(found)
-        if version_tuple(text) > before:
-            log(f"{label} updated. It now reports {text}.")
-        elif rc != 0:
-            log(
-                f"{label} is still at its current version and the installer did not "
-                "finish cleanly, so the update may not have completed. Read the "
-                "installer output above, or try the update again -- running it "
-                "again is safe."
-            )
-            return False
-        log(f"{label} is up to date.")
-        return True
-    elif backend == BACKEND_MUSE:
-        # Same shape as Hermes: the official script installer upgrades in
-        # place, and success is a working launcher afterwards -- inside WSL
-        # on Windows.
-        muse_argv = _muse_install_argv()
-        if muse_argv is None:
-            log(_muse_missing_prereq_message())
-            return False
-        log(f"Running the official {label} installer to update...")
-        rc = _run_logged_process(muse_argv, log)
-        if rc is None:
-            return False
-        if not muse_installed():
-            log(f"{label} update finished, but `muse` was not found afterwards.")
-            return False
-        log(f"{label} is up to date.")
-        return True
-    else:
-        if _find_npm() is None and install_portable_node(log) is None:
-            log(f"npm could not be installed, so BlindPilot cannot update {label} automatically.")
-            return False
-        updating = _npm_update_argv(backend)
-        if updating is None:
-            log(f"npm could not be found, so BlindPilot cannot update {label} automatically.")
-            return False
-        argv = updating
-    if backend == BACKEND_CODEX:
-        _drop_codex_server(log)
-    if backend == BACKEND_OPENCODE:
-        # The server BlindPilot has been talking to *is* the executable npm is
-        # about to replace, and Windows will not overwrite one that is running.
-        # It is started again by the next thing that needs it.
-        log("Stopping opencode's server so its executable can be replaced...")
-        stop_opencode_server()
-    log(f"Checking for {label} updates...")
-    npm = _find_npm() if backend != BACKEND_CLAUDE else None
-    rc = _run_logged_process(argv, log, env=_npm_environment(npm) if npm else None)
-    if rc != 0:
-        log(f"{label} update exited with code {rc}.")
-        return False
-    if backend == BACKEND_CLAUDE and not _repair_claude_native_update(binary, log):
-        return False
-    if backend != BACKEND_CLAUDE:
-        _add_to_process_path(_managed_npm_bin_dir())
-        managed_binary = _managed_backend_binary(backend)
-        if managed_binary is None:
-            log(f"{label} updated, but its executable was not found afterwards.")
-            return False
-        try:
-            changed = ensure_on_path(Path(managed_binary).parent)
-            if changed:
-                log(f"Added {Path(managed_binary).parent} to {changed}.")
-        except OSError as exc:
-            log(f"{label} updated, but adding it to PATH failed: {exc}")
-        verify_rc = _run_logged_process(
-            [managed_binary, "--version"], log, env=_npm_environment(npm or "")
-        )
-        if verify_rc is None:
-            return False
-        if verify_rc != 0:
-            log(f"{label} updated but failed its startup check (exit code {verify_rc}).")
-            return False
-    if backend == BACKEND_FREEBUFF:
-        invalidate_backend_cache(BACKEND_FREEBUFF)
-        models, _current, _error = freebuff_model_options()
-        selected = (
-            previous_freebuff_model
-            if previous_freebuff_model in models
-            else FREEBUFF_PREFERRED_MODEL
-            if FREEBUFF_PREFERRED_MODEL in models
-            else models[0]
-            if models
-            else FREEBUFF_PREFERRED_MODEL
-        )
-        try:
-            set_freebuff_model(selected)
-        except OSError as exc:
-            log(f"{label} updated, but its model selection could not be restored: {exc}")
-            return False
-    log(f"{label} is up to date.")
-    return True
-
-
-AUTH_ERROR_MARKERS = (
-    "not logged in",
-    "not authenticated",
-    "please log in",
-    "please login",
-    "run /login",
-    "run `claude /login`",
-    "invalid api key",
-    "unauthorized",
-    "401",
-    "no credentials",
-    "missing credentials",
-    "authentication required",
-    "auth required",
-    "oauth token",
-)
-AUTH_HINT = "Not signed in. Run `claude auth login` in a terminal, then try again."
 
 
 # ----- /model: what the CLI currently offers -----
@@ -2383,6 +830,185 @@ def cached_model_options(
     return replace(options, from_cache=True)
 
 
+# Each backend's model catalog, asked in the way that backend can answer.
+# `probe_model_options` owns what is common -- the missing CLI, the cache, the
+# one backend that names no model -- and these own only what differs. The table
+# is complete: a backend with no entry is a KeyError the test suite catches,
+# where the old chain silently treated it as Claude Code.
+
+ModelProbe = Callable[[Optional[str], Optional[str]], ModelOptions]
+
+
+def _probe_claude_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    if binary is None:
+        return ModelOptions([], [], error="Claude Code was not found.")
+    # The two probes are independent, so the help text is fetched while the
+    # slower `/model` status call is still running.
+    help_text: List[str] = []
+    help_thread = threading.Thread(
+        target=lambda: help_text.append(_run_claude(binary, ["--help"], None, 30)),
+        daemon=True,
+    )
+    help_thread.start()
+    # `/model` with no argument only prints status — it does not start a turn.
+    status = _run_claude(binary, ["-p", "/model", "--output-format", "text"], cwd, 45)
+    models = _parse_model_aliases(status)
+    current_model, current_effort = _parse_current_model(status)
+    labels = _resolve_claude_aliases(binary, models, cwd) if models else {}
+    help_thread.join(30)
+    efforts = _parse_effort_levels(help_text[0] if help_text else "")
+
+    problems = []
+    if not models:
+        models = list(_FALLBACK_MODELS)
+        problems.append("model list")
+    if not efforts:
+        efforts = list(_FALLBACK_EFFORTS)
+        problems.append("effort levels")
+    error = ""
+    if problems:
+        error = f"Could not read the {' and '.join(problems)} from Claude Code; showing the built-in list."
+    options = ModelOptions(models, efforts, current_model, current_effort, error, labels=labels)
+    if not problems:
+        # Only a clean answer is worth reusing; a failed probe should be retried.
+        _remember_model_options(BACKEND_CLAUDE, cwd, binary, options)
+    return options
+
+
+def _probe_codex_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    models, efforts, current_model, current_effort, error = codex_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_CODEX, cwd, binary, options)
+    return options
+
+
+def _probe_freebuff_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    models, current_model, error = freebuff_model_options()
+    options = ModelOptions(models, [], current_model, "", error)
+    if models and binary is not None:
+        # Cached like every other catalogue: reopening the picker reuses a
+        # recent answer instead of re-reading the CLI's files.
+        _remember_model_options(BACKEND_FREEBUFF, cwd, binary, options)
+    return options
+
+
+def _probe_opencode_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_OPENCODE, cwd, binary, options)
+    return options
+
+
+def _probe_muse_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # The catalog comes from Muse's own `model/list` on a live `muse serve`
+    # host, which is the same request a model switch is served by. On Windows
+    # that host runs inside WSL, so the probe is asked of the translated
+    # directory rather than this one.
+    from muse_backend import muse_model_options
+
+    models, efforts, current_model, current_effort, error = muse_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_MUSE, cwd, binary, options)
+    return options
+
+
+def _probe_gemini_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # Gemini CLI has no model-list command, so its aliases are offered with
+    # whatever the Gemini API lists for the key.
+    from google_backend import gemini_model_options
+
+    models, efforts, current_model, current_effort, error = gemini_model_options()
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_GEMINI, cwd, binary, options)
+    return options
+
+
+def _probe_antigravity_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # agy answers `agy models` itself, signed in or on a key.
+    from google_backend import antigravity_model_options
+
+    models, efforts, current_model, current_effort, error = antigravity_model_options()
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_ANTIGRAVITY, cwd, binary, options)
+    return options
+
+
+def _probe_copilot_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # No model-list command: "auto" and the configured model, and any id typed
+    # into the picker.
+    from copilot_backend import copilot_model_options
+
+    models, efforts, current_model, current_effort, error = copilot_model_options()
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        # Cached like every other catalogue: reopening the picker reuses a
+        # recent answer instead of re-reading the CLI's config.
+        _remember_model_options(BACKEND_COPILOT, cwd, binary, options)
+    return options
+
+
+def _probe_commandcode_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # The catalog comes from `command-code --list-models`, and the model and
+    # effort in use are read out of its stored config rather than asked for, so
+    # the picker opens on what is actually selected.
+    from commandcode_backend import commandcode_model_options
+
+    models, efforts, current_model, current_effort, error = commandcode_model_options(cwd)
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        _remember_model_options(BACKEND_COMMANDCODE, cwd, binary, options)
+    return options
+
+
+def _probe_hermes_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
+    # A Hermes reached over the network answers the same model request as one
+    # on this machine: `hermes serve` dispatches its WebSocket through the
+    # identical JSON-RPC handlers. This used to return an error telling the
+    # user to pick the model "on the machine it runs on", which for a headless
+    # server (the whole point of the remote mode) meant there was nowhere to
+    # pick it at all.
+    remote_url = REMOTE_HERMES.url()
+    models, efforts, current_model, current_effort, error = hermes_model_options(
+        cwd,
+        remote_url=remote_url,
+        remote_token=REMOTE_HERMES.key if remote_url else "",
+        remote_credential=(REMOTE_HERMES.credential if remote_url else "token"),
+        remote_username=REMOTE_HERMES.username if remote_url else "",
+    )
+    options = ModelOptions(models, efforts, current_model, current_effort, error)
+    if models and binary is not None:
+        # Only the local path has a binary to stamp the cache against; a remote
+        # catalog is re-read instead of being keyed on a file that does not
+        # exist here.
+        _remember_model_options(BACKEND_HERMES, cwd, binary, options)
+    return options
+
+
+def _probe_museai_models(_cwd: Optional[str], _binary: Optional[str]) -> ModelOptions:
+    # muse.ai picks its own model on its own machine; there is no list to offer.
+    return ModelOptions([], [])
+
+
+MODEL_PROBES: dict[str, ModelProbe] = {
+    BACKEND_CLAUDE: _probe_claude_models,
+    BACKEND_CODEX: _probe_codex_models,
+    BACKEND_FREEBUFF: _probe_freebuff_models,
+    BACKEND_OPENCODE: _probe_opencode_models,
+    BACKEND_HERMES: _probe_hermes_models,
+    BACKEND_MUSE: _probe_muse_models,
+    BACKEND_MUSEAI: _probe_museai_models,
+    BACKEND_COMMANDCODE: _probe_commandcode_models,
+    BACKEND_GEMINI: _probe_gemini_models,
+    BACKEND_ANTIGRAVITY: _probe_antigravity_models,
+    BACKEND_COPILOT: _probe_copilot_models,
+}
+
+
 def probe_model_options(
     cwd: Optional[str] = None,
     max_age: float = 0,
@@ -2418,128 +1044,10 @@ def probe_model_options(
     if fresh is not None:
         return fresh
 
-    if backend == BACKEND_HERMES:
-        # A Hermes reached over the network answers the same model request as
-        # one on this machine: `hermes serve` dispatches its WebSocket through
-        # the identical JSON-RPC handlers. This used to return an error telling
-        # the user to pick the model "on the machine it runs on", which for a
-        # headless server (the whole point of the remote mode) meant there was
-        # nowhere to pick it at all.
-        models, efforts, current_model, current_effort, error = hermes_model_options(
-            cwd,
-            remote_url=remote_hermes_url,
-            remote_token=REMOTE_HERMES.key if remote_hermes_url else "",
-            remote_credential=(REMOTE_HERMES.credential if remote_hermes_url else "token"),
-            remote_username=REMOTE_HERMES.username if remote_hermes_url else "",
-        )
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            # Only the local path has a binary to stamp the cache against; a
-            # remote catalog is re-read instead of being keyed on a file that
-            # does not exist here.
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if binary is None:
-        # Only the remote-Hermes path above is allowed to get this far without
-        # a local CLI, and it has already returned.
-        return ModelOptions([], [], error=f"{backend_label(backend)} was not found.")
-
-    if backend == BACKEND_CODEX:
-        models, efforts, current_model, current_effort, error = codex_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend == BACKEND_FREEBUFF:
-        models, current_model, error = freebuff_model_options()
-        return ModelOptions(models, [], current_model, "", error)
-
-    if backend == BACKEND_OPENCODE:
-        models, efforts, current_model, current_effort, error = opencode_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend == BACKEND_MUSE:
-        # The catalog comes from Muse's own `model/list` on a live `muse
-        # serve` host, which is the same request a model switch is served
-        # by. On Windows that host runs inside WSL, so the probe is asked
-        # of the translated directory rather than this one.
-        from muse_backend import muse_model_options
-
-        models, efforts, current_model, current_effort, error = muse_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend in (BACKEND_GEMINI, BACKEND_ANTIGRAVITY):
-        # Gemini CLI has no model-list command, so its aliases are offered
-        # with whatever the Gemini API lists for the key; agy answers
-        # `agy models` itself, signed in or on a key.
-        from google_backend import antigravity_model_options, gemini_model_options
-
-        probe = gemini_model_options if backend == BACKEND_GEMINI else antigravity_model_options
-        models, efforts, current_model, current_effort, error = probe()
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    if backend == BACKEND_COPILOT:
-        # No model-list command: "auto" and the configured model, and any id
-        # typed into the picker.
-        from copilot_backend import copilot_model_options
-
-        models, efforts, current_model, current_effort, error = copilot_model_options()
-        return ModelOptions(models, efforts, current_model, current_effort, error)
-
-    if backend == BACKEND_COMMANDCODE:
-        # The catalog comes from `command-code --list-models`, and the model
-        # and effort in use are read out of its stored config rather than
-        # asked for, so the picker opens on what is actually selected.
-        from commandcode_backend import commandcode_model_options
-
-        models, efforts, current_model, current_effort, error = commandcode_model_options(cwd)
-        options = ModelOptions(models, efforts, current_model, current_effort, error)
-        if models and binary is not None:
-            _remember_model_options(backend, cwd, binary, options)
-        return options
-
-    # The two probes are independent, so the help text is fetched while the
-    # slower `/model` status call is still running.
-    help_text: List[str] = []
-    help_thread = threading.Thread(
-        target=lambda: help_text.append(_run_claude(binary, ["--help"], None, 30)),
-        daemon=True,
-    )
-    help_thread.start()
-    # `/model` with no argument only prints status — it does not start a turn.
-    status = _run_claude(binary, ["-p", "/model", "--output-format", "text"], cwd, 45)
-    models = _parse_model_aliases(status)
-    current_model, current_effort = _parse_current_model(status)
-    labels = _resolve_claude_aliases(binary, models, cwd) if models else {}
-    help_thread.join(30)
-    efforts = _parse_effort_levels(help_text[0] if help_text else "")
-
-    problems = []
-    if not models:
-        models = list(_FALLBACK_MODELS)
-        problems.append("model list")
-    if not efforts:
-        efforts = list(_FALLBACK_EFFORTS)
-        problems.append("effort levels")
-    error = ""
-    if problems:
-        error = f"Could not read the {' and '.join(problems)} from Claude Code; showing the built-in list."
-    options = ModelOptions(models, efforts, current_model, current_effort, error, labels=labels)
-    if not problems:
-        # Only a clean answer is worth reusing; a failed probe should be retried.
-        _remember_model_options(backend, cwd, binary, options)
-    return options
+    probe = MODEL_PROBES.get(backend)
+    if probe is None:
+        raise KeyError(f"no model probe for {backend}")
+    return probe(cwd, binary)
 
 
 # BlindPilot's provider-neutral permission choices. Adapters translate these
@@ -2901,11 +1409,15 @@ def adopt_full_auto_default(config: dict) -> bool:
 
     Returns whether ``config`` was changed. Only a mode saved by an older
     BlindPilot is moved: once this has run, a mode chosen in the picker is
-    the user's and is left exactly where they put it.
+    the user's and is left exactly where they put it. The previous default is
+    the only value that means "never moved", so the migration test is the saved
+    mode itself and no marker key of its own is written - a config still
+    carrying the old ``permission_default`` marker has it dropped here.
     """
-    if config.get("permission_default") == DEFAULT_PERMISSION_MODE:
+    mode = config.get("permission_mode")
+    if "permission_default" not in config and mode not in (None, "default"):
         return False
-    config["permission_default"] = DEFAULT_PERMISSION_MODE
+    config.pop("permission_default", None)
     config["permission_mode"] = DEFAULT_PERMISSION_MODE
     return True
 
@@ -2919,13 +1431,6 @@ def _remember_permission_mode(value: str) -> None:
         return
     cfg["permission_mode"] = value
     _save_or_announce(cfg)
-
-
-def _looks_like_auth_error(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    return any(marker in lowered for marker in AUTH_ERROR_MARKERS)
 
 
 def _short_label(path: str) -> str:
@@ -3106,8 +1611,21 @@ def _remote_sessions() -> dict:
 
 
 def _remember_remote(session_id: str, bridge: str, url: str) -> None:
+    """Save where this session's Remote Control bridge is, newest last.
+
+    The newest `_REMOTE_SESSIONS_KEPT` are the ones kept: this session is taken
+    out and put back at the end, and the front, the oldest, is what falls off.
+    A record is written when Remote Control is turned on and only removed when
+    it is turned off, so a session that ended any other way would otherwise be
+    kept for ever while the whole file is read at startup.
+    """
+    if not session_id:
+        return
+    saved = _remote_sessions()
+    ordered = [(sid, row) for sid, row in saved.items() if sid != session_id]
+    ordered.append((session_id, {"bridge": bridge, "url": url}))
     cfg = _load_config()
-    cfg["remote_control"] = {**_remote_sessions(), session_id: {"bridge": bridge, "url": url}}
+    cfg["remote_control"] = dict(ordered[-_REMOTE_SESSIONS_KEPT:])
     _save_config(cfg)
 
 
@@ -3117,6 +1635,18 @@ def _forget_remote(session_id: str) -> None:
     if saved.pop(session_id, None) is not None:
         cfg["remote_control"] = saved
         _save_config(cfg)
+
+
+# How many conversations keep a record of what they were allowed for their
+# session. The record is only ever read back to list it in Chat Permissions, so
+# a conversation older than every one opened since has nothing left to say -
+# while the file is read whole at startup, and would otherwise grow with every
+# conversation ever opened.
+_SESSION_RULES_KEPT = 50
+
+# The same bound for Remote Control records, which name a session's bridge and
+# URL and are removed only when Remote Control is turned off.
+_REMOTE_SESSIONS_KEPT = 20
 
 
 def _saved_session_rules() -> dict:
@@ -3131,6 +1661,11 @@ def _remember_session_rules(session_id: str, new_lines: list[str]) -> None:
     The grants themselves live in the backend's own session and are never
     written to a settings file; this record is only so Chat Permissions can
     say what was allowed, including after the conversation is reopened.
+
+    The newest `_SESSION_RULES_KEPT` conversations are the ones kept. The saved
+    keys are in the order they were written, so this conversation is taken out
+    and put back at the end - written again, it counts as the newest - and the
+    front, the oldest, is what falls off.
     """
     if not session_id or not new_lines:
         return
@@ -3139,8 +1674,10 @@ def _remember_session_rules(session_id: str, new_lines: list[str]) -> None:
     for line in new_lines:
         if line not in lines:
             lines.append(line)
+    ordered = [(sid, rows) for sid, rows in saved.items() if sid != session_id]
+    ordered.append((session_id, lines[-200:]))
     cfg = _load_config()
-    cfg["session_permissions"] = {**saved, session_id: lines[-200:]}
+    cfg["session_permissions"] = dict(ordered[-_SESSION_RULES_KEPT:])
     _save_config(cfg)
 
 
@@ -3946,32 +2483,6 @@ def _tab_label(title: str, cwd: str) -> str:
     return _tab_title(title) or (_short_label(cwd) if cwd else "New session")
 
 
-# The tools Claude Code starts an agent with: Agent now, Task before it.
-_CLAUDE_AGENT_TOOLS = ("Agent", "Task")
-
-
-def _tool_result_text(content: object) -> str:
-    """Plain text of a tool's result, whatever shape the CLI delivers it in.
-
-    ``tool_result`` content is sometimes a bare string (most tools) and sometimes
-    a list of typed blocks (``{"type": "text", "text": …}`` plus images). We keep
-    the text and note any image so the actual *output* of the tool can be shown.
-    """
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "text":
-                parts.append(str(block.get("text") or ""))
-            elif block.get("type") == "image":
-                parts.append("[image]")
-        return "\n".join(p for p in parts if p).strip()
-    return ""
-
-
 def create_desktop_shortcut() -> str:
     """Put a BlindPilot shortcut on the desktop. Returns where it was written.
 
@@ -4109,38 +2620,6 @@ def _search_key(row: Row) -> tuple[str, str]:
     return lowered[0], lowered[1]
 
 
-# How a refused tool call reads, as against one that simply failed. Claude Code
-# flags both with ``is_error`` on the tool result and says nothing else about
-# which it was, so the wording is what tells them apart: a permission rule, a
-# disabled tool and a PreToolUse hook all refuse, and all three refuse in
-# bypassPermissions exactly as they do in any other mode (measured against
-# Claude Code on 2026-09-15). A tool that looked for a file and did not find one
-# is a different thing and is not called a refusal.
-_CLAUDE_REFUSAL_MARKERS = (
-    "permission to use",
-    "has been denied",
-    "permission denied",
-    "is disabled for this session",
-    "no such tool available",
-    "hook error",
-    "blocked by",
-    "requested permissions",
-    "haven't granted it yet",
-)
-
-# Said once a turn, when a bypass turn has a tool refused anyway. Somebody who
-# chose "bypass permissions" has every reason to read a refusal as a bug.
-_CLAUDE_BYPASS_GAP_NOTE = (
-    "Bypass does not cover this. Claude Code still applies a permissions.deny rule, a "
-    "disabled tool and a PreToolUse hook in bypass, the same way it does in every other mode."
-)
-
-
-def _looks_like_refusal(text: str) -> bool:
-    lowered = text.casefold()
-    return any(marker in lowered for marker in _CLAUDE_REFUSAL_MARKERS)
-
-
 def _result_label(text: str) -> str:
     """Short, screen-reader-friendly preview line for a result row."""
     first = next((ln for ln in text.splitlines() if ln.strip()), "")
@@ -4182,8 +2661,26 @@ def _record_setup_complete(cfg: dict) -> bool:
     return False
 
 
+def _note_damaged_config(path, kept: bool) -> None:
+    """Say that the settings could not be read, and whether a copy was kept."""
+    if kept:
+        announce(
+            f"Your settings file could not be read. It was kept as {path.name}, "
+            "and BlindPilot has started from the defaults."
+        )
+        return
+    # Nothing mirrors this: at startup there is no status bar to mirror to, and
+    # the late callers do not add one. F6 repeats the last announcement.
+    announce(
+        "Your settings file could not be read and could not be kept. BlindPilot has "
+        "started from the defaults, and the next save will replace it."
+    )
+
+
 def _load_config() -> dict:
-    return preferences.load_config((_config_path(), _legacy_config_path()))
+    return preferences.load_config(
+        (_config_path(), _legacy_config_path()), on_damaged=_note_damaged_config
+    )
 
 
 def _save_config(cfg: dict) -> bool:
@@ -4247,28 +2744,8 @@ SOUND_CUES: tuple[tuple[str, str, str], ...] = (
 )
 
 
-CUE_LOOP = "loop"
-CUE_PERIODIC = "periodic"
-CUE_OFF = "off"
-PROGRESS_CUES = (CUE_LOOP, CUE_PERIODIC, CUE_OFF)
-
-# How often the periodic working cue plays, and the range the setting allows. A
-# cue every couple of seconds is barely different from the loop; one every few
-# minutes stops answering "is it still working".
-CUE_SECONDS_DEFAULT = 10
-CUE_SECONDS_MIN = 2
-CUE_SECONDS_MAX = 120
-
-
-def _valid_progress_cue(value: object) -> str:
-    """One of the three cue behaviours, whatever the config file holds.
-
-    A config written by a newer version, or edited by hand, must not stop the
-    app from starting, so anything unrecognised falls back to the default.
-    """
-    text = str(value or "").strip().lower()
-    return text if text in PROGRESS_CUES else CUE_PERIODIC
-
+# How the cue settings are read, and the cue behaviour itself, live in
+# `earcons`: the window imports them from there rather than defining them.
 
 # How the windows are drawn. "system" follows the operating system's light or
 # dark setting; the other two force one. wxWidgets applies this once, before
@@ -4600,337 +3077,6 @@ class WrappedText(wx.StaticText):
             self._wrapping = False
 
 
-def _faster_wav(path: str, factor: float) -> str:
-    """A copy of a WAV that plays ``factor`` times faster, so higher.
-
-    Only the header's sample rate changes; the player does the resampling.
-    Written once to the temp folder and reused.
-    """
-    source_key = hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:12]
-    out = os.path.join(
-        tempfile.gettempdir(), f"blindpilot-{Path(path).stem}-{source_key}-{factor:.3f}.wav"
-    )
-    if os.path.isfile(out):
-        return out
-    with wave.open(path, "rb") as src:
-        params = src.getparams()
-        frames = src.readframes(params.nframes)
-    with wave.open(out, "wb") as dst:
-        dst.setparams(params._replace(framerate=round(params.framerate * factor)))
-        dst.writeframes(frames)
-    return out
-
-
-class Earcons:
-    """Non-speech audio cues.
-
-    Four cues: a one-shot when a prompt is sent, a looping or periodic cue
-    while a request is in flight, a one-shot when the response arrives, and
-    the system sound when something goes wrong. Uses only players the platform
-    has, so there is no third-party audio dependency: ``winsound`` on Windows,
-    ``afplay`` on macOS, and paplay, aplay or ffplay on Linux, looped by
-    re-spawning in a daemon thread. Missing files are silently ignored.
-    """
-
-    def __init__(self, folder: str, enabled: bool = True, cues: Optional[dict] = None):
-        self._folder = folder
-        self._system = platform.system()
-        self.enabled = bool(enabled)
-        # Which cues the master switch turns on. Absent means on, so an
-        # Earcons built without them behaves exactly as it did before.
-        self.cues = dict(cues or {})
-        self.send = self._resolve("send")
-        self.received = self._resolve("received", "Recieved")
-        self.in_progress = self._resolve("in-progress", "in_progress")
-        self._loop_stop = threading.Event()
-        self._loop_thread: Optional[threading.Thread] = None
-        self._loop_proc: Optional[subprocess.Popen] = None
-        # Whether a progress cue of ours has been started and not yet stopped.
-        # It matters because the Windows sound API is stopped by purging every
-        # sound this process started, which would also cut a one-shot that had
-        # just begun. So the purge only runs while there is a cue to stop.
-        self._cue_sounding = False
-        # One-shot players still running. They stay referenced until reaped so
-        # the garbage collector never runs `Popen.__del__` on a live process -
-        # that raises an unraisable exception, which CI's `-W error` turns
-        # into a failed build.
-        self._reaping: list[subprocess.Popen] = []
-        self.per_backend_send = False
-        self._send_variants: dict[str, Optional[str]] = {}
-
-    def _resolve(self, *basenames: str) -> Optional[str]:
-        for name in basenames:
-            for ext in (".wav", ".ogg", ".aiff", ".aif", ".mp3"):
-                path = os.path.join(self._folder, name + ext)
-                if os.path.isfile(path):
-                    return path
-        return None
-
-    def _unix_player(self) -> Optional[list]:
-        if self._system == "Darwin":
-            return ["afplay"]
-        for player in ("paplay", "aplay", "ffplay"):
-            found = shutil.which(player)
-            if found:
-                return [found] + (["-nodisp", "-autoexit"] if player == "ffplay" else [])
-        return None
-
-    def _play_once(self, path: Optional[str]) -> None:
-        if not self.enabled or not path:
-            return
-        try:
-            if self._system == "Windows":
-                import winsound
-
-                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            else:
-                player = self._unix_player()
-                if player:
-                    self._spawn(player + [path])
-        except Exception:
-            pass
-
-    def _wanted(self, cue: str) -> bool:
-        """Whether this cue sounds: the master switch, and then its own."""
-        return self.enabled and self.cues.get(cue, True)
-
-    def _spawn(self, argv: list) -> None:
-        """Start a one-shot player and reap it in a daemon thread.
-
-        The process stays reachable through `self._reaping` until it has been
-        waited on. Dropping the Popen straight away lets `__del__` run while
-        `afplay` is still playing, which becomes an unraisable exception under
-        pytest's `-W error`.
-        """
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        self._reaping.append(proc)
-
-        def _reap() -> None:
-            try:
-                proc.wait()
-            except Exception:
-                pass
-            finally:
-                try:
-                    self._reaping.remove(proc)
-                except ValueError:
-                    pass
-
-        threading.Thread(target=_reap, daemon=True).start()
-
-    def play_send(self, backend: str = "") -> None:
-        """The send cue, pitched per backend while tabs use more than one.
-
-        The frame turns ``per_backend_send`` on when the open tabs do not all
-        use the same backend, so a message sent to the wrong one sounds wrong
-        before anything is spoken. With one backend the cue stays the one the
-        person already knows.
-        """
-        if self._wanted("send"):
-            path = self.send
-            if self.per_backend_send and backend:
-                path = self._send_for(backend)
-            self._play_once(path)
-
-    def _send_for(self, backend: str) -> Optional[str]:
-        if backend not in self._send_variants:
-            # Keyed on the fixed order backends were added in, not the
-            # alphabetical menu order, so each backend keeps its pitch.
-            index = BACKEND_PITCH_ORDER.index(backend) if backend in BACKEND_PITCH_ORDER else 0
-            path = self.send
-            if index and path and path.lower().endswith(".wav"):
-                try:
-                    # Two semitones higher per backend, from Claude's own pitch.
-                    path = _faster_wav(path, 2 ** (index * 2 / 12))
-                except Exception:
-                    path = self.send
-            self._send_variants[backend] = path
-        return self._send_variants[backend]
-
-    def _play_system_error(self) -> None:
-        """The platform's own error sound, rather than an asset of our own.
-
-        `EarCons/` ships three files and authoring a fourth is not something to
-        fake. This is also the sound the person already associates with
-        something having gone wrong on this machine, which is worth more than
-        one that matches the other three.
-        """
-        if self._system == "Windows":
-            import winsound
-
-            winsound.MessageBeep(winsound.MB_ICONHAND)
-            return
-        if self._system == "Darwin":
-            self._spawn(["afplay", "/System/Library/Sounds/Basso.aiff"])
-            return
-        # Linux has no single answer here, and a wrong guess is worse than
-        # nothing: the error is spoken either way.
-
-    def play_error(self) -> None:
-        """Say a turn failed before saying why.
-
-        An error was spoken at the back of a queue a fan-out can make minutes
-        deep, and there was no failure cue at all. Interrupting was the other
-        option and was rejected - it purges the reader's whole queue, including
-        other applications' speech. A sound costs nobody else anything.
-        """
-        if not self._wanted("error"):
-            return
-        try:
-            self._play_system_error()
-        except Exception:
-            # A missing cue is never worth losing the error message over.
-            pass
-
-    def play_received(self) -> None:
-        # Stopping the loop stays unconditional: it has to end when the turn
-        # does, whatever any of these are set to.
-        self.stop_progress()
-        if self._wanted("received"):
-            self._play_once(self.received)
-
-    def start_progress(self) -> None:
-        """Signal that a turn is running, in whichever way Options asks for.
-
-        Looping a cue under a second long means dozens of repeats per turn, on
-        top of the answer being spoken, so the periodic mode plays it once and
-        then only every few seconds. ``off`` plays nothing: send and received
-        still mark the boundaries of the turn.
-        """
-        self.stop_progress()
-        if not self._wanted("working") or not self.in_progress:
-            return
-        mode = SETTINGS.progress_cue
-        if mode == CUE_OFF:
-            return
-        if mode == CUE_PERIODIC:
-            self._cue_sounding = True
-            self._start_periodic(max(CUE_SECONDS_MIN, SETTINGS.progress_cue_seconds))
-            return
-        if self._system == "Windows":
-            try:
-                import winsound
-
-                winsound.PlaySound(
-                    self.in_progress,
-                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP,
-                )
-                self._cue_sounding = True
-            except Exception:
-                pass
-            return
-        # A fresh event per run, never the previous one reset: the thread this
-        # replaces may still be inside `wait()`, and clearing the event it is
-        # watching would set it looping again alongside the new one. Turn by
-        # turn that is how one progress cue becomes several playing at once.
-        self._cue_sounding = True
-        stop = threading.Event()
-        self._loop_stop = stop
-        self._loop_thread = threading.Thread(target=self._loop_unix, args=(stop,), daemon=True)
-        self._loop_thread.start()
-
-    def _start_periodic(self, every_seconds: int) -> None:
-        """Play the working cue now, then again every ``every_seconds``.
-
-        One timer thread, woken by the stop event rather than by sleeping in
-        fixed steps, so ``stop_progress`` ends it immediately instead of after
-        the current interval. The event is created fresh here for the same
-        reason as in the looping path above.
-        """
-        stop = threading.Event()
-        self._loop_stop = stop
-        self._loop_thread = threading.Thread(
-            target=self._periodic, args=(every_seconds, stop), daemon=True
-        )
-        self._loop_thread.start()
-
-    def _periodic(self, every_seconds: int, stop: threading.Event) -> None:
-        while not stop.is_set():
-            self._play_once(self.in_progress)
-            # Returns True the moment the turn ends, so the wait is not a
-            # fixed sleep the stop has to outlast.
-            if stop.wait(every_seconds):
-                return
-
-    def _loop_unix(self, stop: threading.Event) -> None:
-        player = self._unix_player()
-        if not player:
-            return
-        while not stop.is_set():
-            started = time.monotonic()
-            try:
-                proc = subprocess.Popen(
-                    player + [self.in_progress],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                if stop.is_set():
-                    proc.kill()
-                    return
-                self._loop_proc = proc
-                proc.wait()
-            except Exception:
-                return
-            # A player that cannot play the file returns at once, and looping
-            # on that spawns processes as fast as the machine allows. One cue
-            # that never sounds is a bug; a fork bomb behind it is a hang.
-            if not stop.is_set() and time.monotonic() - started < 0.05:
-                return
-
-    def stop_progress(self) -> None:
-        # The periodic thread exists on every platform, so its stop is set
-        # first: on Windows the looping cue is stopped by the sound API, but a
-        # periodic cue is a thread of ours and would otherwise keep playing
-        # after the answer arrived.
-        self._loop_stop.set()
-        sounding = self._cue_sounding
-        self._cue_sounding = False
-        if self._system == "Windows":
-            # Purging is per process, not per sound: it silences whatever this
-            # application is playing, including a one-shot that started a
-            # moment ago. So it runs only when a cue of ours is actually
-            # playing. Without this guard, ending a turn purged the 'received'
-            # cue it had just started -- and the faster the turn ended, the
-            # less of that cue was left to hear.
-            if not sounding:
-                return
-            try:
-                import winsound
-
-                winsound.PlaySound(None, winsound.SND_PURGE)
-            except Exception:
-                pass
-            return
-        proc = self._loop_proc
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        self._loop_proc = None
-        self._loop_thread = None
-
-    def set_enabled(self, enabled: bool) -> None:
-        """Enable or mute cues, stopping the progress loop when muted."""
-        self.enabled = bool(enabled)
-        if not self.enabled:
-            self.stop_progress()
-
-    def set_cues(self, cues: dict) -> None:
-        """Switch individual cues on or off.
-
-        The progress loop stops the moment its own cue goes, rather than at
-        the end of the turn: somebody reaching for that switch means now.
-        """
-        self.cues.update({key: bool(value) for key, value in cues.items()})
-        if not self._wanted("working"):
-            self.stop_progress()
-
-
 def _copy_to_clipboard(text: str) -> bool:
     if wx.TheClipboard.Open():
         try:
@@ -4971,886 +3117,6 @@ def question_left_in_the_answer(text: str, *, asked_properly: bool, replaying: b
 class Turn:
     prompt: str
     response: str = ""
-
-
-# The tool Claude Code stops a turn to ask a multiple-choice question with.
-ASK_USER_QUESTION_TOOL = "AskUserQuestion"
-
-# What to pass to `--permission-prompt-tool`. "stdio" means "this host answers
-# permission prompts on the JSON stream it is already reading", which is what
-# makes AskUserQuestion available at all in headless mode. Cleared for the rest
-# of the session if the installed Claude Code turns out not to know the flag,
-# so an older CLI keeps working exactly as it did — without questions.
-_CLAUDE_PERMISSION_PROMPT_TOOL = "stdio"
-
-
-def _claude_questions(raw: list) -> tuple[Question, ...]:
-    """Read AskUserQuestion's input into BlindPilot's own question shape.
-
-    Claude Code always offers an "Other" answer of its own, whatever the
-    question says, so `allow_custom` is not read from the payload.
-    """
-    return _questions(raw, multi_key="multiSelect")
-
-
-# How long a stopped turn waits for the CLI's result before the tab's process
-# is dropped. A confirmed interrupt is answered with the interrupted turn's
-# result straight away, so a process that stays silent this long is one that
-# cannot be trusted to carry the next turn.
-_CANCEL_DRAIN_SECONDS = 5.0
-
-# Put on a stopped turn's queue by cancel(), so a reader parked on a queue with
-# no timeout wakes up and asks again with the drain's clock running. It carries
-# nothing and means nothing else.
-_CANCEL_WAKE = {"type": "cancel_wake"}
-
-
-class ClaudeWorker(threading.Thread):
-    """Runs one Claude turn on the tab's held process and reports it back.
-
-    All callbacks are invoked from this worker thread; the caller is
-    responsible for marshalling them back to the GUI thread (wx.CallAfter).
-    """
-
-    # Stop may wait for the CLI to confirm the interrupt and then for the
-    # interrupted turn's result, so the panel must wait longer than both
-    # before it says the stop did not land.
-    stop_seconds = 12.0
-    # Background agents keep working after the turn that started them
-    # ends, and report their end in whichever turn reads it.
-    subagents_outlive_turn = True
-
-    def __init__(
-        self,
-        prompt: Optional[str],
-        session_id: Optional[str],
-        cwd: str,
-        permission_mode: str,
-        *,
-        model: str = "",
-        effort: str = "",
-        on_session: Callable[[str], None],
-        on_started: Callable[[], None],
-        on_activity: Callable[[str, str], None],
-        on_complete: Callable[[str], None],
-        on_failed: Callable[[str], None],
-        on_done: Callable[[], None],
-        on_question: Optional[AskQuestions] = None,
-        on_subagent: Optional[SubagentReport] = None,
-        held_for: object = None,
-        on_unsolicited: Optional[Callable[[], None]] = None,
-        on_permission: Optional[Callable[[str, dict, list], dict]] = None,
-        remote_control: Optional[dict] = None,
-    ):
-        super().__init__(daemon=True)
-        # {"enabled", "name", "reattach"}: Remote Control as the tab wants it.
-        self._remote_control = remote_control
-        # Asked about a tool the permission mode leaves to a person; returns
-        # the control response's own body (allow or deny).
-        self._on_permission = on_permission
-        self._prompt = prompt
-        self._session_id = session_id
-        self._cwd = cwd
-        self._permission_mode = permission_mode
-        self._model = model
-        self._effort = effort
-        self._on_session = on_session
-        self._on_started = on_started
-        self._on_activity = on_activity
-        self._on_complete = on_complete
-        self._on_failed = on_failed
-        self._on_done = on_done
-        self._on_question = on_question
-        self._on_subagent = on_subagent or ignore_subagents
-        # Which tab's held process this turn borrows, and who to tell when the
-        # CLI speaks with no turn attached.
-        self._held_for = held_for
-        self._on_unsolicited = on_unsolicited
-        self._session: Optional[claude_session.ClaudeSession] = None
-        # The queue this turn is reading, kept so Stop can wake a reader that
-        # is parked on it.
-        self._events: Optional[queue.Queue] = None
-        self._cancelled = False
-        # When the drain that follows Stop runs out. Set by `cancel`, so the
-        # budget is counted from Stop rather than from the last event.
-        self._cancel_deadline: Optional[float] = None
-        # Set once the session is up and the opening prompt has gone in, cleared
-        # when the turn ends. Guards `steer()` against writing to a session that
-        # is not there yet (or is already gone).
-        self._accepting_input = threading.Event()
-        # A failure is reported once, so a crash late in the turn cannot talk
-        # over the explanation the turn already gave.
-        self._failed = False
-
-    def _fail(self, message: str) -> None:
-        """Report why the turn ended, once."""
-        if self._failed:
-            return
-        self._failed = True
-        self._on_failed(message)
-
-    def _ending_note(self, rc: object, detail: str) -> str:
-        """How the run ended, with its exit code when there is one.
-
-        A process whose stream has ended has not always been reaped, so there
-        is not always a code to give. "Claude Code exited with code None" read
-        as a bug in BlindPilot; saying there was no code says what happened.
-        """
-        if rc is None:
-            return f"Claude Code exited without a code{detail}"
-        return f"Claude Code exited with code {rc}{detail}"
-
-    @staticmethod
-    def _count(value: object) -> int:
-        """A count, or zero. `True` is an `int` in Python and is not a count:
-        `started_in_background: true` would otherwise mean one agent forever."""
-        return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-    @staticmethod
-    def _diagnostic_path() -> Path:
-        """Where a turn that ended badly leaves its account of itself."""
-        return diagnostics.log_path()
-
-    def _log_unfinished_turn(self, rc: object, complete: bool, stderr_text: str) -> None:
-        """Record a turn the CLI did not finish.
-
-        The window is gone by the time anyone looks, and an exit code says
-        nothing about what the run was doing. This is what is left behind.
-        """
-        diagnostics.log_unfinished_turn(
-            "claude",
-            exit_code=rc,
-            completed=complete,
-            session_id=self._session_id or "(new)",
-            permission_mode=self._permission_mode,
-            model=self._model or "(default)",
-            cancelled=self._cancelled,
-            detail=stderr_text or "(nothing on stderr)",
-        )
-
-    def accepting_input(self) -> bool:
-        """Whether the active Claude turn can accept a steering message."""
-        return self._accepting_input.is_set() and not self._cancelled
-
-    def _write_json(self, payload: dict) -> bool:
-        session = self._session
-        return session is not None and session.write_json(payload)
-
-    def steer(self, text: str) -> bool:
-        """Send a follow-up message into the turn that is already running.
-
-        Returns False if the run is no longer listening, so the caller can put
-        the text back in the prompt box rather than silently dropping it.
-        """
-        if not self.accepting_input():
-            return False
-        return self._session is not None and self._session.send_user(text)
-
-    def cancel(self) -> None:
-        """Stop the turn, and only the turn when the CLI lets us.
-
-        An interrupt the CLI confirms ends this turn with a result and leaves
-        the process, and every agent it holds, running. One it does not
-        confirm means the process cannot be trusted with the next turn, so
-        it is dropped from the pool, which stops it.
-        """
-        # Before `_cancelled`, because that is what the reader watches: it
-        # must never find the turn cancelled with no deadline to drain to.
-        self._cancel_deadline = time.monotonic() + _CANCEL_DRAIN_SECONDS
-        self._accepting_input.clear()
-        self._cancelled = True
-        session = self._session
-        if session is None:
-            return
-        session.stop_agents()
-        if not session.interrupt(claude_session._INTERRUPT_SECONDS):
-            self._drop_process()
-        # The reader may have been parked on the queue with no timeout since
-        # before Stop was pressed, and the drain's clock only starts when it
-        # asks for the next event. This is what makes it ask.
-        events = self._events
-        if events is not None:
-            events.put(_CANCEL_WAKE)
-
-    def _track_subagents(self, event: dict, session: claude_session.ClaudeSession) -> None:
-        """Tell the window about the agents this turn's process is running.
-
-        Claude Code reports each agent through three system events keyed by
-        task id -- task_started, task_progress, task_notification -- and marks
-        every message an agent sends with the id of the Agent tool call that
-        started it (`parent_tool_use_id`). Background shell tasks share the
-        system events; they are not agents, and are left out by `task_type`.
-        """
-        report = self._on_subagent
-        etype = event.get("type")
-        if etype == "system":
-            subtype = event.get("subtype")
-            task_id = str(event.get("task_id") or "")
-            if not task_id:
-                return
-            if subtype == "task_started":
-                if event.get("task_type") not in (None, "local_agent", "remote_agent"):
-                    return
-                agent_id = str(event.get("tool_use_id") or task_id)
-                session.agent_tasks[task_id] = agent_id
-                session.agent_calls.add(agent_id)
-                background = bool(event.get("is_backgrounded"))
-                if background:
-                    session.background_agents.add(agent_id)
-                report(
-                    agent_id,
-                    subagent_line(event.get("description"), 80),
-                    SUBAGENT_RUNNING,
-                    "Started in the background" if background else "Started",
-                )
-            elif subtype == "task_progress":
-                agent_id = session.agent_tasks.get(task_id, "")
-                if not agent_id:
-                    return
-                summary = subagent_line(event.get("summary"))
-                tool = str(event.get("last_tool_name") or "")
-                report(agent_id, "", "", summary or (f"Using {tool}" if tool else ""))
-            elif subtype == "task_notification":
-                agent_id = session.agent_tasks.pop(task_id, "")
-                if not agent_id:
-                    return
-                status = subagent_status(event.get("status")) or SUBAGENT_COMPLETED
-                report(
-                    agent_id,
-                    "",
-                    status,
-                    subagent_line(event.get("summary")) or f"Finished: {status}",
-                )
-            return
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-        parent = str(event.get("parent_tool_use_id") or "")
-        if etype == "assistant":
-            for block in blocks:
-                btype = block.get("type")
-                raw_input = block.get("input")
-                params = raw_input if isinstance(raw_input, dict) else {}
-                name = str(block.get("name") or "tool")
-                if btype == "tool_use" and name in _CLAUDE_AGENT_TOOLS:
-                    call_id = str(block.get("id") or "")
-                    if not call_id:
-                        continue
-                    session.agent_calls.add(call_id)
-                    title = params.get("description") or params.get("subagent_type") or "Subagent"
-                    prompt = subagent_line(params.get("prompt"))
-                    report(
-                        call_id,
-                        subagent_line(title, 80),
-                        SUBAGENT_RUNNING,
-                        f"Task: {prompt}" if prompt else "",
-                    )
-                elif parent and btype == "text":
-                    report(parent, "", "", subagent_line(block.get("text")))
-                elif parent and btype == "tool_use":
-                    report(parent, "", "", _tool_use_label(name, params))
-        elif etype == "user":
-            for block in blocks:
-                if block.get("type") != "tool_result":
-                    continue
-                result = _tool_result_text(block.get("content"))
-                call_id = str(block.get("tool_use_id") or "")
-                if parent:
-                    if result:
-                        report(parent, "", "", f"Result: {subagent_line(result, 200)}")
-                    continue
-                if call_id not in session.agent_calls:
-                    continue
-                if call_id in session.background_agents or result.lstrip().casefold().startswith(
-                    "async agent"
-                ):
-                    # The launch of a background agent, not its answer.
-                    session.background_agents.add(call_id)
-                    continue
-                status = SUBAGENT_FAILED if block.get("is_error") else SUBAGENT_COMPLETED
-                report(call_id, "", status, subagent_line(result) or f"Finished: {status}")
-
-    def _drop_process(self) -> None:
-        """Stop the process this turn borrowed and take it out of the pool.
-
-        The pool holds it under the tab's key, but a process already dropped
-        by somebody else is still this turn's to stop, so both are done.
-        """
-        backend_pool.pool().drop(backend_pool.pool_key(BACKEND_CLAUDE, self._held_for))
-        session = self._session
-        if session is not None:
-            session.stop()
-
-    def run(self) -> None:
-        try:
-            self._do_run()
-        except Exception as exc:
-            # Anything thrown here used to end the turn without a word, leaving
-            # the exit code as the whole explanation. Say what actually
-            # happened instead.
-            self._fail(f"BlindPilot stopped reading Claude Code: {exc}")
-        finally:
-            self._on_done()
-
-    @staticmethod
-    def _retry_without_prompt_tool(stderr_text: str) -> bool:
-        """Whether this failure was `--permission-prompt-tool` and is now off."""
-        global _CLAUDE_PERMISSION_PROMPT_TOOL
-        if not _CLAUDE_PERMISSION_PROMPT_TOOL:
-            return False
-        if "permission-prompt-tool" not in stderr_text:
-            return False
-        _CLAUDE_PERMISSION_PROMPT_TOOL = ""
-        return True
-
-    @staticmethod
-    def _retry_without_partial_messages(stderr_text: str) -> bool:
-        """Whether this failure was `--include-partial-messages`, now off."""
-        if not claude_session.include_partial_messages:
-            return False
-        if "include-partial-messages" not in stderr_text:
-            return False
-        claude_session.include_partial_messages = False
-        return True
-
-    def _handle_control_request(self, event: dict) -> None:
-        """Answer one control request from the CLI.
-
-        Only `can_use_tool` reaches us, because that is the only kind
-        `--permission-prompt-tool stdio` turns on. AskUserQuestion arrives that
-        way too: the CLI asks permission to run it and takes the answers back in
-        the tool's own input, so the dialog is opened here and what the person
-        chose is written into `answers` before the tool is allowed to run.
-
-        Every request has to be answered. One left hanging holds the turn open
-        for good, which sounds exactly like a model that has stopped thinking.
-        """
-        request = event.get("request") or {}
-        request_id = event.get("request_id")
-        if not isinstance(request, dict) or not isinstance(request_id, str):
-            return
-        if request.get("subtype") != "can_use_tool":
-            # Nothing else is switched on for this session. Say so rather than
-            # stay silent, so an unexpected request cannot stall the turn.
-            self._write_json(
-                {
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "error",
-                        "request_id": request_id,
-                        "error": "BlindPilot does not handle this request",
-                    },
-                }
-            )
-            return
-
-        tool = str(request.get("tool_name") or "")
-        payload = request.get("input")
-        payload = payload if isinstance(payload, dict) else {}
-        if tool == ASK_USER_QUESTION_TOOL and self._on_question is not None:
-            self._answer_ask_user_question(request_id, payload)
-            return
-        # Any other tool is one the permission mode leaves to a person: put it
-        # in front of them, as the interactive CLI would. With nobody to ask,
-        # it is denied, which is what headless Claude Code did on its own.
-        if self._on_permission is not None:
-            suggestions = request.get("permission_suggestions")
-            suggestions = suggestions if isinstance(suggestions, list) else []
-            reason = str(request.get("decision_reason") or "")
-            answer = self._on_permission(tool, {**payload, "_reason": reason}, suggestions)
-            if answer.get("behavior") == "allow":
-                answer = {**answer, "updatedInput": payload}
-            self._write_json(
-                {
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": request_id,
-                        "response": answer,
-                    },
-                }
-            )
-            return
-        self._deny(request_id, tool)
-
-    def _deny(self, request_id: str, tool: str = "") -> None:
-        """Refuse one tool call, in the words the permission mode gives it."""
-        self._write_json(
-            {
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": request_id,
-                    "response": {
-                        "behavior": "deny",
-                        "message": (
-                            f"{tool or 'That tool'} needs approval, which the "
-                            f"{self._permission_mode or 'current'} permission mode does not give."
-                        ),
-                    },
-                },
-            }
-        )
-
-    def _answer_ask_user_question(self, request_id: str, payload: dict) -> None:
-        """Put AskUserQuestion in front of the person and send back their answers.
-
-        Claude Code takes the answers as part of the tool's input: a map from
-        each question's own text to the chosen labels, joined by commas when the
-        question allowed more than one. Allowing the call with that map filled in
-        is what makes the tool report the answers to the model.
-        """
-        raw = payload.get("questions")
-        questions = _claude_questions(raw if isinstance(raw, list) else [])
-        answers = self._on_question(questions) if (questions and self._on_question) else None
-        self._on_activity("notice", question_summary(questions, answers))
-        if answers is None:
-            self._write_json(
-                {
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": request_id,
-                        "response": {
-                            "behavior": "deny",
-                            "message": "The user closed the question without answering it.",
-                        },
-                    },
-                }
-            )
-            return
-        updated = dict(payload)
-        updated["answers"] = {
-            question.question: ", ".join(answers[index]) if index < len(answers) else ""
-            for index, question in enumerate(questions)
-        }
-        self._write_json(
-            {
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": request_id,
-                    "response": {"behavior": "allow", "updatedInput": updated},
-                },
-            }
-        )
-
-    def _do_run(self) -> None:
-        binary = _find_claude()
-        if binary is None:
-            self._on_failed("Claude Code not installed. Install from claude.com/claude-code")
-            return
-
-        wants = claude_session.Wants(
-            cwd=self._cwd,
-            permission_mode=self._permission_mode,
-            model=self._model,
-            effort=self._effort,
-            session_id=self._session_id,
-        )
-        session = self._take(wants, binary)
-        if session is None:
-            return
-        if session is self._session:
-            # This turn is being retried after that same process died, and
-            # its exit has not reached the pool yet. Reading its stream again
-            # only reaches the end of it again.
-            self._drop_process()
-            session = self._take(wants, binary)
-            if session is None:
-                return
-        self._session = session
-        events = session.attach()
-        self._events = events
-        try:
-            mark = session.stderr_mark()
-            self._read_turn(session, events, mark)
-        finally:
-            session.detach()
-            self._accepting_input.clear()
-
-    def _take(
-        self, wants: "claude_session.Wants", binary: str
-    ) -> Optional["claude_session.ClaudeSession"]:
-        """The tab's process for this turn, or None once it has been accounted for."""
-        try:
-            session = claude_session.take_or_start(
-                self._held_for,
-                wants,
-                binary,
-                _CLAUDE_PERMISSION_PROMPT_TOOL,
-                idle_sink=self._on_unsolicited,
-                popen_kwargs=no_window_kwargs(),
-                # A turn with no prompt is a late one: it reads the process it
-                # was woken for or it reads nothing. A replacement has no turn
-                # running and would never send the result it waits for.
-                late=self._prompt is None,
-            )
-        except Exception as exc:
-            # OSError is the launch failing. Anything else is the pool or the
-            # session objecting, and a turn that ends without a word over it
-            # leaves Send disabled with nothing said.
-            self._fail(f"Failed to launch Claude Code: {exc}")
-            return None
-        if session is None:
-            # Late, and the process that woke this tab is already gone. There
-            # is nothing to read and nothing went wrong, so the turn ends the
-            # way any turn that reached its end in silence ends.
-            self._on_activity("notice", "Claude Code finished the turn without saying anything.")
-        return session
-
-    def _apply_remote_control(self, session: claude_session.ClaudeSession) -> None:
-        """Turn Remote Control on or off for this process, when the tab changed it.
-
-        Reported through ``on_remote`` (set by the tab): Claude Code's answer,
-        with ``bridge_session_id`` and ``session_url``, or ``{"error": ...}``.
-        """
-        wanted = self._remote_control
-        if not wanted or bool(wanted.get("enabled")) == session.remote_control_on:
-            return
-        enabled = bool(wanted.get("enabled"))
-        response = session.send_control(
-            "remote_control",
-            timeout=15,
-            **remote_sessions.remote_control_fields(
-                enabled, str(wanted.get("name") or ""), str(wanted.get("reattach") or "")
-            ),
-        )
-        report = getattr(self, "on_remote", None)
-        if response is None or response.get("subtype") == "error":
-            error = "Claude Code did not answer" if response is None else response.get("error")
-            if report:
-                report({"error": str(error or "it was refused")})
-            return
-        session.remote_control_on = enabled
-        body = response.get("response")
-        if report and enabled:
-            report(body if isinstance(body, dict) else {})
-
-    def _read_turn(
-        self, session: claude_session.ClaudeSession, events: "queue.Queue", mark: int
-    ) -> None:
-        if self._cancelled:
-            # Stop landed before there was a process to stop. Sending the
-            # prompt now would start the very turn that was called off.
-            return
-        self._apply_remote_control(session)
-        if self._prompt is not None and not session.send_user(self._prompt):
-            self._fail("Could not send the prompt to Claude Code")
-            return
-        self._accepting_input.set()
-
-        text_parts: list[str] = []
-        first_assistant_seen = False
-        complete = False
-        died = False
-        # tool_use id -> name. A tool_result carries the id and not the name,
-        # and a refusal that cannot say which tool was refused is not much of a
-        # report.
-        tool_names: dict[str, str] = {}
-        # tool_use id -> (name, input) for the task-list tools, applied only
-        # once their result says they worked.
-        task_calls: dict[str, tuple[str, dict]] = {}
-        gap_note_said = False
-        # Partial-message stream, by speaker (the parent tool call for a
-        # subagent): the sentences a text block has already said live, so
-        # its whole-message form says only what is left. The CLI sends that
-        # block's assistant event right after its last delta, one block per
-        # event, so the stream's block index (which counts thinking and tool
-        # blocks) is not needed and would not match the event's own.
-        partial_live: dict[str, SentenceStreamer] = {}
-
-        while True:
-            timeout: Optional[float] = None
-            if self._cancelled:
-                # After Stop, the CLI's result for the interrupted turn is due
-                # at once; a process that keeps it is not trusted with the
-                # next. The budget runs from Stop, so a CLI that keeps talking
-                # cannot put the deadline back for ever.
-                deadline = self._cancel_deadline
-                timeout = _CANCEL_DRAIN_SECONDS if deadline is None else deadline - time.monotonic()
-                if timeout <= 0:
-                    self._drop_process()
-                    return
-            try:
-                event = events.get(timeout=timeout)
-            except queue.Empty:
-                self._drop_process()
-                return
-            if event is _CANCEL_WAKE:
-                # Stop put this here to be woken by. Ask again, now with the
-                # drain's clock running.
-                continue
-            if event is claude_session.EOF:
-                died = True
-                break
-            # Before the stopped-turn branch: an agent's end reported during
-            # the drain is exactly what Stop is waiting to hear.
-            self._track_subagents(event, session)
-            if self._cancelled:
-                if event.get("type") == "control_request":
-                    # A request left unanswered holds the CLI for ever, and a
-                    # stopped turn is still the only one listening.
-                    request_id = event.get("request_id")
-                    if isinstance(request_id, str):
-                        self._deny(request_id)
-                    continue
-                # Read to the result so it is not left for a late turn to find.
-                if event.get("type") == "result":
-                    if not event.get("is_error") and self._count(event.get("queued_turn_count")):
-                        # Somebody else's result, as on the live path. Ours is
-                        # the one that leaves nothing queued behind it.
-                        continue
-                    return
-                continue
-
-            etype = event.get("type")
-
-            if etype == "control_request":
-                # Answered on this thread, so a question blocks reading the
-                # stream for as long as the dialog is open — which is what a
-                # turn waiting on an answer is supposed to do.
-                self._handle_control_request(event)
-
-            elif etype == "system" and event.get("subtype") == "init":
-                sid = event.get("session_id")
-                if sid:
-                    self._on_session(sid)
-
-            elif etype == "stream_event":
-                # Token-level partials (--include-partial-messages): the same
-                # stream a terminal renders as it arrives. Text goes out as
-                # finished sentences; thinking partials wait for the complete
-                # block in the assistant message, as before.
-                inner = event.get("event")
-                if isinstance(inner, dict):
-                    if inner.get("type") == "message_start" and not first_assistant_seen:
-                        first_assistant_seen = True
-                        self._on_started()
-                    elif inner.get("type") == "content_block_delta":
-                        delta = inner.get("delta")
-                        if isinstance(delta, dict) and delta.get("type") == "text_delta":
-                            piece = str(delta.get("text") or "")
-                            if piece:
-                                if not first_assistant_seen:
-                                    first_assistant_seen = True
-                                    self._on_started()
-                                kind = (
-                                    "subagent" if event.get("parent_tool_use_id") else "assistant"
-                                )
-                                key = str(event.get("parent_tool_use_id") or "")
-                                live = partial_live.get(key)
-                                if live is None:
-                                    live = partial_live[key] = SentenceStreamer(
-                                        functools.partial(self._on_activity, kind)
-                                    )
-                                live.feed(piece)
-
-            elif etype == "rate_limit_event":
-                warning = claude_limit_warning(event.get("rate_limit_info"))
-                if warning:
-                    self._on_activity("notice", warning)
-
-            elif etype == "assistant":
-                if not first_assistant_seen:
-                    first_assistant_seen = True
-                    self._on_started()
-                # Work done by a subagent carries the id of the tool call that
-                # started it. It is shown live like everything else, but it is
-                # somebody else's running commentary rather than the answer to
-                # this turn — five agents' worth of it would otherwise be
-                # collected up and read out as the reply.
-                from_subagent = bool(event.get("parent_tool_use_id"))
-                message = event.get("message") or {}
-                if not from_subagent:
-                    # Everything the model was sent for this reply, which is
-                    # how full the conversation's context now is.
-                    usage = message.get("usage")
-                    if isinstance(usage, dict):
-                        used = sum(
-                            int(usage.get(key) or 0)
-                            for key in (
-                                "input_tokens",
-                                "cache_creation_input_tokens",
-                                "cache_read_input_tokens",
-                                "output_tokens",
-                            )
-                        )
-                        if used:
-                            window = getattr(self, "context_tokens", (0, 0))[1]
-                            self.context_tokens = (used, window)
-                            # The window is this model's, not a subagent's.
-                            self._context_model = str(message.get("model") or "")
-                for block in message.get("content") or []:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type")
-                    if btype == "text":
-                        # Claude's own words, as it writes them — streamed live to
-                        # the list so the user reads the narration as it happens.
-                        text = (block.get("text") or "").strip()
-                        if text:
-                            if not from_subagent:
-                                text_parts.append(text)
-                            kind = "subagent" if from_subagent else "assistant"
-                            live = partial_live.pop(
-                                str(event.get("parent_tool_use_id") or ""), None
-                            )
-                            if live is not None:
-                                # Already said live as partials: only the
-                                # unfinished tail is still unheard.
-                                live.flush()
-                            else:
-                                # Somebody else's running commentary, not this
-                                # turn's reply. Shown as a row either way; in
-                                # Keep up it is what a fan-out would drown in.
-                                self._on_activity(kind, text)
-                    elif btype == "thinking":
-                        # Extended-thinking blocks: Claude reasoning about what to
-                        # do next. Surfaced live so the user hears the plan while
-                        # the work happens, but kept out of `text_parts` — it is
-                        # not part of the answer.
-                        thought = (block.get("thinking") or "").strip()
-                        if thought:
-                            self._on_activity("thinking", thought)
-                    elif btype == "redacted_thinking":
-                        self._on_activity("thinking", "[redacted thinking]")
-                    elif btype == "tool_use":
-                        # The live "what is it doing" signal: announced when the
-                        # tool is called, with its result following separately.
-                        params = block.get("input")
-                        name = str(block.get("name") or "tool")
-                        call_id = block.get("id")
-                        if isinstance(call_id, str):
-                            tool_names[call_id] = name
-                            if name in CLAUDE_TASK_TOOLS and isinstance(params, dict):
-                                task_calls[call_id] = (name, params)
-                        self._on_activity(
-                            "tool",
-                            _tool_use_label(
-                                name,
-                                params if isinstance(params, dict) else {},
-                            ),
-                        )
-
-            elif etype == "user":
-                # Tool results come back as user-role messages. Surface the actual
-                # output (file contents, command output, …) as its own live row.
-                message = event.get("message") or {}
-                for block in message.get("content") or []:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "tool_result":
-                        result = _tool_result_text(block.get("content"))
-                        task_call = task_calls.pop(str(block.get("tool_use_id") or ""), None)
-                        report_tasks = getattr(self, "on_tasks", None)
-                        if task_call and report_tasks and not block.get("is_error"):
-                            report_tasks("claude", task_call[0], task_call[1], result)
-                        if not result:
-                            continue
-                        if not block.get("is_error"):
-                            self._on_activity("result", result)
-                            continue
-                        # A refused or failed call. Announced as an action
-                        # rather than as output: read out as an ordinary
-                        # "Result:" row, a refusal sounded exactly like the
-                        # command output it never produced.
-                        call_id = block.get("tool_use_id")
-                        name = (
-                            tool_names.get(call_id, "tool") if isinstance(call_id, str) else "tool"
-                        )
-                        refused = _looks_like_refusal(result)
-                        first = " ".join(result.split())[:200]
-                        verb = "Refused" if refused else "Failed"
-                        self._on_activity("tool", f"{verb}: {name}: {first}")
-                        # The full text still deserves a row of its own; the
-                        # line above is the part that gets spoken.
-                        self._on_activity("result", result)
-                        if (
-                            refused
-                            and not gap_note_said
-                            and self._permission_mode == "bypassPermissions"
-                        ):
-                            gap_note_said = True
-                            self._on_activity("tool", _CLAUDE_BYPASS_GAP_NOTE)
-
-            elif etype == "result":
-                complete = True
-                usage_by_model = event.get("modelUsage") or {}
-                main = usage_by_model.get(getattr(self, "_context_model", ""))
-                if isinstance(main, dict) and getattr(self, "context_tokens", None):
-                    window = int(main.get("contextWindow") or 0)
-                    if window:
-                        self.context_tokens = (self.context_tokens[0], window)
-                queued = self._count(event.get("queued_turn_count"))
-                if not event.get("is_error") and queued:
-                    # A resumed CLI can have a turn of its own to run first.
-                    # That turn's result arrives before ours and says nothing.
-                    logging.getLogger("blindpilot.claude").info(
-                        "result for another turn: %d still queued, reading on", queued
-                    )
-                    continue
-                if event.get("is_error"):
-                    detail = (event.get("result") or "").strip()
-                    if _looks_like_auth_error(detail):
-                        self._fail(AUTH_HINT)
-                        return
-                    note = detail or "Claude Code returned an error"
-                    if text_parts:
-                        # The turn answered before it ended badly. Saying how it
-                        # ended instead of the answer threw away work.
-                        self._on_activity("notice", note)
-                        break
-                    self._fail(note)
-                    return
-                # The turn is over. The process is not: it belongs to the tab,
-                # and whatever it left running keeps running.
-                break
-
-        # A turn that ended on its result without a final whole message for
-        # a block still owes the listener that block's unfinished tail.
-        for live in partial_live.values():
-            live.flush()
-        partial_live.clear()
-
-        if self._cancelled:
-            return
-
-        if died:
-            # The stream ends before the process is reaped, so the code is
-            # waited for rather than asked for once.
-            rc = session.wait()
-            session.wait_stderr()
-            stderr_text = session.stderr_since(mark)
-            if _looks_like_auth_error(stderr_text):
-                self._fail(AUTH_HINT)
-                return
-            if self._retry_without_prompt_tool(stderr_text):
-                # The installed Claude Code is older than the flag. Turn it off
-                # for the rest of the session and send the message again.
-                self._do_run()
-                return
-            if self._retry_without_partial_messages(stderr_text):
-                self._do_run()
-                return
-            self._log_unfinished_turn(rc, complete, stderr_text)
-            detail = f": {stderr_text}" if stderr_text else ""
-            if not detail:
-                detail = (
-                    " without finishing the turn, and without saying why. "
-                    f"BlindPilot kept a note of it in {self._diagnostic_path()}."
-                )
-            note = self._ending_note(rc, detail)
-            if not text_parts:
-                self._fail(note)
-                return
-            self._on_activity("notice", note)
-            self._on_complete("\n\n".join(text_parts).strip())
-            return
-
-        if not text_parts:
-            self._on_activity("notice", "Claude Code finished the turn without saying anything.")
-        self._on_complete("\n\n".join(text_parts).strip())
 
 
 class SettingsFilesDialog(wx.Dialog):
@@ -7748,6 +5014,9 @@ class NewSessionDialog(wx.Dialog):
         self._remote_label = remote_label.strip()
         self.path = ""
         self.title_text = ""
+        # (folder, branch) when a worktree was asked for. Made after the dialog
+        # closes: a git checkout can take long enough to Stall the window.
+        self.worktree: Optional[tuple[str, str]] = None
         self.worktree_box: Optional[wx.CheckBox] = None
         self.branch_box: Optional[wx.TextCtrl] = None
         self._github_serial = 0
@@ -8101,11 +5370,10 @@ class NewSessionDialog(wx.Dialog):
             if not branch:
                 self._reject("Type a branch name for the worktree.")
                 return
-            with wx.BusyCursor():
-                path, why = create_worktree(path, branch)
-            if why:
-                self._reject(why)
-                return
+            # Kept for the caller, which makes it away from this thread: doing
+            # it here Stalled the dialog for as long as git took, with the
+            # window saying nothing about whether it was working.
+            self.worktree = (path, branch)
         self.path = path
         self._stop_github()
         event.Skip()
@@ -9226,7 +6494,7 @@ class SessionPanel(wx.Panel):
         cwd: str,
         on_status: Callable[["SessionPanel", str], None],
         on_title: Callable[["SessionPanel", str], None],
-        earcons: "Earcons",
+        earcons: "earcons.Earcons",
         on_side_chat: Callable[[str, str], None],
         get_backend: Callable[[], str],
         focus_before: Callable[[], None],
@@ -11962,7 +9230,7 @@ class SessionPanel(wx.Panel):
         self._turn_started_at: Optional[float] = time.monotonic()
         self._turn_attached = False
         self._last_step = ""
-        worker_type = worker_class(selected_backend, ClaudeWorker)
+        worker_type = worker_class(selected_backend, claude_worker.ClaudeWorker)
         # Agents that finished in an earlier turn have been read or ignored by
         # now; the ones still running stay, however old the turn that began
         # them.
@@ -12589,7 +9857,7 @@ class SessionPanel(wx.Panel):
         self._announce("Attaching" if attaching else "Reopening")
         self._earcons.start_progress()
         self._show_working()
-        self._worker = worker_class(BACKEND_HERMES, ClaudeWorker)(
+        self._worker = worker_class(BACKEND_HERMES, claude_worker.ClaudeWorker)(
             "",
             self._session_id,
             self.cwd,
@@ -14202,6 +11470,10 @@ class SetupWizard(wx.Dialog):
         info = BACKENDS[self.backend]
         label = info.label
         login = " ".join((info.executable, *info.login_args))
+        # A backend is chosen afresh here, so a plan Account that left the
+        # sign-in buttons disabled on the previous one must not carry over.
+        self._signin_btn.Enable(True)
+        self._already_btn.Enable(True)
         self._signin_btn.SetLabel(
             "Connect a Provider" if self.backend == BACKEND_OPENCODE else "Sign In"
         )
@@ -14337,17 +11609,17 @@ class SetupWizard(wx.Dialog):
     @staticmethod
     def _selected_install_argv_for_backend(backend: str) -> Optional[List[str]]:
         if backend == BACKEND_CLAUDE:
-            return _install_argv()
+            return installers._install_argv()
         if backend == BACKEND_HERMES:
-            return _hermes_install_argv()
+            return installers._hermes_install_argv()
         if backend == BACKEND_MUSE:
-            return _muse_install_argv()
-        argv = _npm_install_argv(backend)
+            return installers._muse_install_argv()
+        argv = portable_node._npm_install_argv(backend)
         if argv is not None:
             return argv
         # The actual Node.js command is discovered at install time. A sentinel
         # keeps the accessible Install button available on a clean computer.
-        return ["managed-node-lts"] if _automatic_npm_install_available() else None
+        return ["managed-node-lts"] if portable_node._automatic_npm_install_available() else None
 
     # ---- navigation ----
 
@@ -14479,11 +11751,13 @@ class SetupWizard(wx.Dialog):
             def work() -> None:
                 try:
                     path = SetupWizard._find_selected_cli_for_backend(backend)
-                    on_path = _is_on_persistent_path(Path(path).parent) if path else False
+                    on_path = (
+                        install_path._is_on_persistent_path(Path(path).parent) if path else False
+                    )
                     install_available = (
                         SetupWizard._selected_install_argv_for_backend(backend) is not None
                     )
-                    npm_available = _find_npm() is not None
+                    npm_available = portable_node._find_npm() is not None
                     facts = path, on_path, install_available, npm_available
                     error = ""
                 except Exception as exc:  # noqa: BLE001 - report check failures accessibly
@@ -14537,7 +11811,7 @@ class SetupWizard(wx.Dialog):
                 self._cli_detail.SetLabel(
                     f"{self._backend_path}\n\n"
                     f"{folder} is not on your PATH, so typing 'claude' in "
-                    f"{_path_shells()} will not work. "
+                    f"{installers._path_shells()} will not work. "
                     "Click Add to PATH to fix that."
                 )
                 self._cli_path_btn.Show()
@@ -14568,13 +11842,13 @@ class SetupWizard(wx.Dialog):
         else:
             # No PowerShell, or no curl. Nothing to drive an install with.
             command = (
-                f"irm {WINDOWS_INSTALL_PS1_URL} | iex"
+                f"irm {installers.WINDOWS_INSTALL_PS1_URL} | iex"
                 if windows
-                else f"curl -fsSL {POSIX_INSTALL_SH_URL} | bash"
+                else f"curl -fsSL {installers.POSIX_INSTALL_SH_URL} | bash"
             )
             self._cli_status.SetLabel("Claude Code CLI was not found on this computer.")
             self._cli_detail.SetLabel(
-                f"{_missing_prereq_message()}\n\n"
+                f"{installers._missing_prereq_message()}\n\n"
                 f"Install Claude Code by running this in a terminal:\n\n"
                 f"{command}\n\n"
                 "Then choose Check Again. To use another backend, go Back and pick one."
@@ -14637,7 +11911,7 @@ class SetupWizard(wx.Dialog):
         if self._backend_path:
             folder = Path(self._backend_path).parent
             if on_path is None:
-                on_path = _is_on_persistent_path(folder)
+                on_path = install_path._is_on_persistent_path(folder)
             self._cli_status.SetLabel(f"{info.label} found:")
             self._cli_detail.SetLabel(self._backend_path)
             self._cli_install_btn.Hide()
@@ -14649,13 +11923,13 @@ class SetupWizard(wx.Dialog):
                 self._cli_detail.SetLabel(
                     f"{self._backend_path}\n\n{folder} is not on your persistent "
                     f"PATH. Choose Add to PATH so '{info.executable}' also works "
-                    f"in {_path_shells()}."
+                    f"in {installers._path_shells()}."
                 )
                 self._cli_path_btn.Show()
                 hint = "Tab to Add to PATH to make the CLI available in new terminals."
             self._next_btn.Enable(True)
             self._check_backend_updates(self._backend_path, force_update_check)
-        elif not _backend_installs_with_npm(self.backend):
+        elif not portable_node._backend_installs_with_npm(self.backend):
             # This backend does not come from npm: it has an installer of its
             # own. Offer it when the prerequisites are here, and name what is
             # missing when they are not. npm is never named, since saying it
@@ -14682,7 +11956,7 @@ class SetupWizard(wx.Dialog):
             else:
                 self._cli_status.SetLabel(f"{info.label} was not found.")
                 self._cli_detail.SetLabel(
-                    f"{_muse_missing_prereq_message() if self.backend == BACKEND_MUSE else _hermes_missing_prereq_message()}\n\n"
+                    f"{installers._muse_missing_prereq_message() if self.backend == BACKEND_MUSE else installers._hermes_missing_prereq_message()}\n\n"
                     f"Install {info.label} by running this in a terminal:\n\n"
                     f"{info.install_command}\n\n"
                     "Then choose Check Again, or go Back and select another backend."
@@ -14699,7 +11973,11 @@ class SetupWizard(wx.Dialog):
             else self._selected_install_argv() is not None
         ):
             self._cli_status.SetLabel(f"{info.label} is not installed.")
-            has_npm = npm_available if npm_available is not None else _find_npm() is not None
+            has_npm = (
+                npm_available
+                if npm_available is not None
+                else portable_node._find_npm() is not None
+            )
             if not has_npm:
                 self._cli_detail.SetLabel(
                     f"Choose Install {info.label}. BlindPilot will first install the "
@@ -14794,7 +12072,7 @@ class SetupWizard(wx.Dialog):
             return
         folder = Path(self._backend_path).parent
         try:
-            changed = ensure_on_path(folder)
+            changed = install_path.ensure_on_path(folder)
         except OSError as exc:
             self._cli_log_line(f"Could not update your PATH: {exc}")
             return
@@ -14818,12 +12096,12 @@ class SetupWizard(wx.Dialog):
             # minute" for an install that could not happen, then report npm —
             # whether or not npm existed — three milliseconds later. Promise
             # nothing; say what is missing in the backend's own terms.
-            if _backend_installs_with_npm(self.backend):
-                announce(_missing_prereq_message())
+            if portable_node._backend_installs_with_npm(self.backend):
+                announce(installers._missing_prereq_message())
             elif self.backend == BACKEND_MUSE:
-                announce(_muse_missing_prereq_message())
+                announce(installers._muse_missing_prereq_message())
             else:
-                announce(_hermes_missing_prereq_message())
+                announce(installers._hermes_missing_prereq_message())
             return
         self._cli_install_btn.Disable()
         self._cli_update_btn.Disable()
@@ -14843,7 +12121,7 @@ class SetupWizard(wx.Dialog):
             wx.CallAfter(self._cli_log_line, text)
 
         try:
-            binary = install_backend(self.backend, log)
+            binary = installers.install_backend(self.backend, log)
         except Exception as exc:  # never leave the wizard wedged on a crash
             log(f"The install failed: {exc}")
             binary = None
@@ -14866,7 +12144,7 @@ class SetupWizard(wx.Dialog):
             announce(f"{label} installed.")
         else:
             self._cli_status.SetLabel("The install did not complete.")
-            announce(_install_failure_message(self.backend))
+            announce(installers._install_failure_message(self.backend))
         self._check_cli()
 
     def _update_cli(self) -> None:
@@ -14890,7 +12168,7 @@ class SetupWizard(wx.Dialog):
             wx.CallAfter(self._cli_log_line, text)
 
         try:
-            updated = update_backend(self.backend, log)
+            updated = installers.update_backend(self.backend, log)
         except Exception as exc:  # never leave the wizard wedged on a crash
             log(f"The update failed: {exc}")
             updated = False
@@ -14919,6 +12197,73 @@ class SetupWizard(wx.Dialog):
 
     # ---- Sign-in step ----
 
+    def _plan_account_for_codex(self) -> Optional[PlanAccount]:
+        """The ChatGPT-plan Account setup can run Codex on, or None.
+
+        A choice already saved is taken when it is still usable. Otherwise
+        Chat mode's default Account is preferred, then the first signed-in
+        ChatGPT-plan Account by name. One that is not signed in cannot pay for
+        a turn, so it is not offered: an Account that exists but is signed out
+        must not become a second sign-in to complete.
+        """
+        from accessible_ai.models import PROVIDER_CHATGPT
+        from accessible_ai.providers import chatgpt
+        from accessible_ai.storage.credentials import CredentialStore
+        from accessible_ai.storage.database import Database
+        from accessible_ai.storage.paths import database_path
+
+        database = Database(database_path())
+        credentials = CredentialStore()
+
+        def signed_in(account_id: int) -> bool:
+            try:
+                return chatgpt.is_signed_in(chatgpt.load_session(credentials, account_id))
+            except Exception:  # noqa: BLE001 - a store that cannot be read is "not signed in"
+                return False
+
+        chosen = codex_plan_account()
+        if chosen is not None:
+            account = database.get_account(int(chosen.account_id))
+            if account is not None and account.provider == PROVIDER_CHATGPT:
+                chosen_id = account.id
+                if chosen_id is not None and signed_in(int(chosen_id)):
+                    return chosen
+
+        candidates = [
+            account for account in database.list_accounts() if account.provider == PROVIDER_CHATGPT
+        ]
+        preferred = database.default_account()
+        if preferred is not None:
+            candidates.sort(key=lambda account: account.id != preferred.id)
+        for account in candidates:
+            account_id = account.id
+            if account_id is not None and signed_in(int(account_id)):
+                return PlanAccount(int(account_id), account.name)
+        return None
+
+    def _show_plan_account(self, plan: PlanAccount) -> None:
+        """Say Codex will use the plan Account and save that as the choice.
+
+        Saving is what makes the same Account the backend's default after
+        setup, rather than only while the wizard is open.
+        """
+        if codex_plan_account() != plan:
+            save_codex_plan_account(plan)
+        self._signin_intro.SetLabel(
+            f"Codex will use your ChatGPT plan Account {plan.label}.\n\n"
+            "There is no separate Codex sign-in to complete here. "
+            "Codex's own login stays available in Accounts if you need it."
+        )
+        self._signin_status.SetLabel(f"Using your ChatGPT plan Account {plan.label}.")
+        # Nothing on this page signs anything in, and leaving the buttons in
+        # the Tab order would offer actions that undo the choice.
+        self._signin_btn.Disable()
+        self._already_btn.Disable()
+        self._open_page_btn.Hide()
+        for page in self._pages:
+            page.Layout()
+        announce(self._signin_status.GetLabel())
+
     def _check_signin(self) -> None:
         if not self:
             # `_show_step` queues these, so one can land an event-loop
@@ -14926,20 +12271,36 @@ class SetupWizard(wx.Dialog):
             return
         label = backend_label(self.backend)
         self._open_page_btn.Enable(self._login is not None and bool(self._login.url))
-        self._backend_path = self._find_selected_cli()
-        if not self._backend_path:
-            self._show_signin_status(
-                f"{label} is not installed. Go Back and complete the CLI step first."
-            )
-            return
         self._show_signin_status(f"Checking whether {label} is signed in…")
         backend = self.backend
 
         def work() -> None:
-            # The probe runs a CLI with a timeout of up to 25 seconds. On the
-            # GUI thread that froze the wizard and the screen reader with it.
-            ok = backend_auth_ok(backend)
-            wx.CallAfter(self._on_signin_checked, backend, ok)
+            # Everything slow happens here. Discovery searches PATH and, for
+            # Muse, asks WSL; the Codex plan lookup opens SQLite and reads
+            # Windows credentials; the probe runs a CLI with a timeout of up to
+            # 25 seconds. All three used to run on the GUI thread, which froze
+            # the wizard and the screen reader with it.
+            path = self._find_selected_cli()
+            plan = None
+            if path and backend == BACKEND_CODEX:
+                plan = self._plan_account_for_codex()
+            ok = bool(path) and plan is None and backend_auth_ok(backend)
+
+            def finish() -> None:
+                if not self or backend != self.backend:
+                    return
+                self._backend_path = path
+                if not path:
+                    self._show_signin_status(
+                        f"{label} is not installed. Go Back and complete the CLI step first."
+                    )
+                    return
+                if plan is not None:
+                    self._show_plan_account(plan)
+                    return
+                self._on_signin_checked(backend, ok)
+
+            wx.CallAfter(finish)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -15740,6 +13101,22 @@ class PreferencesDialog(wx.Dialog):
         return APPEARANCES[self._appearance_box.GetSelection()][0]
 
 
+def _start_legacy_chat_import() -> None:
+    """Copy an older AccessibleAI database now, off the window's thread.
+
+    Imported inside the thread: chat_integration pulls in the whole Chat panel.
+    The reader runs on every launch either way, so this moves that cost off the
+    window's thread rather than avoiding it.
+    """
+
+    def work() -> None:
+        from chat_integration import ensure_legacy_import
+
+        ensure_legacy_import()
+
+    threading.Thread(target=work, daemon=True).start()
+
+
 class MainFrame(wx.Frame):
     def __init__(self, initial_cwd: str):
         super().__init__(None, title=APP_NAME)
@@ -15753,12 +13130,16 @@ class MainFrame(wx.Frame):
             self.SetIcons(wx.IconBundle(str(icon_path)))
 
         # Shared audio cues (send / in-progress loop / received).
-        self.earcons = Earcons(
+        self.earcons = earcons.Earcons(
             os.path.join(_resource_dir(), "EarCons"),
             enabled=SETTINGS.sounds_enabled,
             cues=SETTINGS.sound_cues,
+            settings=SETTINGS,
         )
         self._update_checking = False
+        # Started now, so the one-time copy of an older AccessibleAI database
+        # is already done by the time anyone switches to Chat mode.
+        _start_legacy_chat_import()
 
         # Remembered "Projects folder" — the parent folder that holds the
         # user's project directories. New Session browses from there.
@@ -18141,11 +15522,15 @@ class MainFrame(wx.Frame):
                 return
             cwd = dlg.path
             title = dlg.title_text
+            worktree = dlg.worktree
         finally:
             dlg.Destroy()
         if not cwd and not remote_label:
             # Locally a folder is required; remotely an empty one is normal and
             # means "wherever that Hermes runs".
+            return
+        if worktree is not None:
+            self._open_worktree_session(worktree[0], worktree[1], title)
             return
         if not remote_label:
             _remember_folder(cwd)
@@ -18157,6 +15542,30 @@ class MainFrame(wx.Frame):
         else:
             spoken = f"New session on {remote_label}"
         wx.CallAfter(announce, spoken)
+
+    def _open_worktree_session(self, folder: str, branch: str, title: str) -> None:
+        """Make the worktree off the window's thread, then open its session."""
+        announce(f"Creating a worktree for {branch}.")
+
+        def work() -> None:
+            path, why = create_worktree(folder, branch)
+            wx.CallAfter(self._worktree_ready, path, why, branch, title)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _worktree_ready(self, path: str, why: str, branch: str, title: str) -> None:
+        """Open the session git just made, or say why it could not."""
+        if why:
+            self._set_status_text(why)
+            announce(why)
+            return
+        _remember_folder(path)
+        self._add_session(path, session_title=title)
+        spoken = f"New session: {title}" if title else f"New session: {_short_label(path)}"
+        # Mirrored so the review cursor can reach words nobody heard, which is
+        # what every other announcement in this window does.
+        self._set_status_text(spoken)
+        announce(spoken)
 
     def _history_cwd(self) -> str:
         """The directory the history picker starts out scoped to."""
@@ -19324,8 +16733,8 @@ def main() -> int:
     # Before anything is started: nothing BlindPilot launches may inherit a
     # PATH that points back into its own install folder, or the files there
     # stay open long after BlindPilot has closed and cannot be updated.
-    keep_bundle_off_child_path()
-    activate_managed_cli_paths()
+    install_path.keep_bundle_off_child_path()
+    portable_node.activate_managed_cli_paths()
     app = wx.App(False)
     # The application menu on macOS reads the display name; without this it
     # says "Python" when BlindPilot is run from source.
@@ -19358,8 +16767,8 @@ def main() -> int:
     appearance = _valid_appearance(cfg.get("appearance"))
     set_appearance = getattr(app, "SetAppearance", None)
     if set_appearance is None:
-        # wxPython before 4.3 has no appearance API. requirements.txt allows
-        # 4.2, so the setting is simply not applied there.
+        # wxPython before 4.3 has no appearance API. requirements.txt requires
+        # 4.3.2 or later, so this only covers a source checkout on an older one.
         logging.getLogger("blindpilot").info(
             "appearance %s was not applied, this wxPython cannot set it", appearance
         )

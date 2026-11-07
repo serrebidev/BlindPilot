@@ -16,6 +16,7 @@ wx = pytest.importorskip("wx")
 
 import blindpilot_app  # noqa: E402
 from blindpilot_app import NewSessionDialog, _tab_label  # noqa: E402
+from earcons import Earcons  # noqa: E402
 
 REMOTE = "ws://garfield:9119/api/ws"
 
@@ -279,7 +280,7 @@ def test_the_status_report_explains_a_missing_folder(frame, tmp_path) -> None:
         "",
         on_status=lambda *_a: None,
         on_title=lambda *_a: None,
-        earcons=blindpilot_app.Earcons(str(tmp_path), enabled=False),
+        earcons=Earcons(str(tmp_path), enabled=False),
         on_side_chat=lambda *_a: None,
         get_backend=lambda: blindpilot_app.BACKEND_HERMES,
         focus_before=lambda: None,

@@ -125,6 +125,11 @@ else:
     version_info = None
     manifest = None
 
+# A universal2 bundle: one artifact for Apple Silicon and Intel. PyInstaller
+# needs a universal2 Python to take both slices from, so the release workflow
+# checks the interpreter before building.
+target_arch = "universal2" if sys.platform == "darwin" else None
+
 a = Analysis(
     [str(spec_dir / "blind_pilot.py")],
     pathex=[str(spec_dir)],
@@ -153,6 +158,7 @@ exe = EXE(
     icon=app_icon,
     version=version_info,
     manifest=manifest,
+    target_arch=target_arch,
 )
 coll = COLLECT(
     exe,
@@ -178,7 +184,9 @@ if sys.platform == "darwin":
             "CFBundleVersion": APP_VERSION,
             "CFBundleHelpBookName": "BlindPilot",
             "CFBundleSignature": "????",
-            "LSMinimumSystemVersion": "10.15",
+            # Apple silicon cannot run below 11.0, and the universal2 wxPython
+            # wheel this builds against is macOS 11+.
+            "LSMinimumSystemVersion": "11.0",
             "LSApplicationCategoryType": "public.app-category.developer-tools",
             "NSHighResolutionCapable": True,
             "NSSupportsAutomaticGraphicsSwitching": True,

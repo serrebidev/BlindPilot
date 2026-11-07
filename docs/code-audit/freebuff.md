@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # Audit: the FreeBuff backend
 
 ## Live recheck for 0.43.7, 2026-10-12

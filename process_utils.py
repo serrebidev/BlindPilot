@@ -12,7 +12,9 @@ import os
 import platform
 import signal
 import subprocess
-from typing import Optional
+from contextlib import AbstractContextManager
+from pathlib import Path
+from typing import Iterable, Optional
 
 
 # A windowed app owns no console, so every child process Windows considers a
@@ -95,6 +97,39 @@ def end_process_group(proc: object, timeout: float = 0.0) -> None:
             pass
 
 
+def which_without_cwd(name: str) -> Optional[str]:
+    """Find ``name`` on PATH, never in the current directory.
+
+    ``shutil.which`` prepends the current directory on Windows, so starting
+    BlindPilot from a folder that happens to contain ``codex.cmd`` made that
+    file the agent for every turn. An empty PATH entry means the current
+    directory on POSIX too, so both are skipped here.
+
+    A name that already carries an extension is tried first, then PATHEXT, so
+    ``powershell.exe`` and ``codex`` are both found the way ``which`` finds them.
+    """
+    on_windows = platform.system() == "Windows"
+    extensions = [""]
+    if on_windows:
+        listed = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep)
+        extensions += [each.strip().lower() for each in listed if each.strip()]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip()
+        # Relative entries resolve from the working directory too, so a PATH
+        # of "bin" is the same hole as "." with one more step in it. On Windows
+        # a rooted path without a drive ("\bin") is still relative to whatever
+        # drive the process happens to be on.
+        if not entry or not os.path.isabs(entry):
+            continue
+        if on_windows and not os.path.splitdrive(entry)[0]:
+            continue
+        for extension in extensions:
+            candidate = Path(entry) / f"{name}{extension}"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
 def _close_process_pipes(proc: object) -> None:
     """Close a child's pipe handles, whatever state the child is in.
 
@@ -113,6 +148,41 @@ def _close_process_pipes(proc: object) -> None:
             close()
         except (OSError, ValueError, AttributeError):
             pass
+
+
+def read_stderr_lines(
+    stream: Optional[Iterable[str]],
+    lines: list[str],
+    keep: int,
+    lock: Optional[AbstractContextManager[object]] = None,
+) -> None:
+    """Read a child's stderr to its end, keeping the last ``keep`` lines.
+
+    The workers that capture stderr all keep the same thing: stripped,
+    non-empty lines, oldest dropped past a cap, appended under the worker's
+    own lock. Codex keeps its own reader because its cursor counts every line,
+    and a shared cap would make ``stderr_since`` skip the lines it dropped.
+
+    The pipe closing under the reader, or a cancelled turn taking it away, is
+    ordinary: the lines already read are kept, and a failure to finish reading
+    stderr must not become a second failure of its own.
+    """
+    if stream is None:
+        return
+    try:
+        for raw in stream:
+            text = raw.strip()
+            if not text:
+                continue
+            if lock is None:
+                lines.append(text)
+                del lines[:-keep]
+                continue
+            with lock:
+                lines.append(text)
+                del lines[:-keep]
+    except (OSError, ValueError):
+        return
 
 
 _CONSOLE_WINDOW_CLASSES = ("ConsoleWindowClass", "PseudoConsoleWindow")

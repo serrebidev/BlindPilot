@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # Audit: blindpilot_app.py lines 5135-8735
 
 Scope: SessionPanel, BackendLogin (falls inside the line range), SetupWizard,

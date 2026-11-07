@@ -1124,15 +1124,13 @@ def cooling_down(now: Optional[datetime] = None) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Model feedback / leaderboard
+# Model feedback
 #
 # Per-model outcome tracking over rolling weeks, the Python twin of the
 # terminal router's route-feedback log. A model that fails on provider
 # infrastructure twice inside a week is penalised (withheld from selection)
 # until one success on it clears the record, so a flaky upstream never keeps
-# being picked. The same record feeds a week-by-week leaderboard of which
-# models are actually succeeding, so a developer (or a future release check)
-# can see which models are on it and route accordingly.
+# being picked.
 # --------------------------------------------------------------------------
 
 _MODEL_FEEDBACK_ENV = "COMMANDCODE_MODEL_FEEDBACK_JSON"
@@ -1289,7 +1287,8 @@ def record_model_outcome(
 
     Returns False when the record could not be written. A success clears the
     model's accumulated infra failures in the penalty tally (see
-    ``model_penalties``); the raw record is always kept for the leaderboard.
+    ``model_penalties``); the raw record stays in the log, which is what the
+    tally reads.
     """
     if not model or not str(model).strip():
         return False
@@ -1351,75 +1350,6 @@ def model_penalties(now: Optional[datetime] = None) -> set:
         elif entry.get("infraFailure"):
             failures[key] = failures.get(key, 0) + 1
     return {model for model, count in failures.items() if count >= _MODEL_FEEDBACK_FAILURE_LIMIT}
-
-
-def penalized_models(now: Optional[datetime] = None) -> set:
-    """Alias for ``model_penalties``."""
-    return model_penalties(now)
-
-
-def model_leaderboard(*, weeks: int = 4, now: Optional[datetime] = None) -> dict:
-    """Week-by-week leaderboard of model outcomes.
-
-    Returns a mapping of ISO-week key (``YYYY-Www``) to a list of rows sorted
-    by score descending. Each row carries the model id, success/failure/infra
-    counts, attempt count and a simple success-rate score. Weeks with no data
-    are omitted; the keys are ordered most-recent first in the returned dict.
-    """
-    moment = now or datetime.now(timezone.utc)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    if weeks < 1:
-        weeks = 1
-    cutoff = moment - timedelta(weeks=weeks)
-    buckets: dict = {}
-    for when, entry in _sorted_feedback(now):
-        if when < cutoff:
-            continue
-        model = entry.get("model")
-        if not model:
-            continue
-        iso = when.isocalendar()
-        key = f"{iso.year}-W{iso.week:02d}"
-        bucket = buckets.setdefault(key, {})
-        stats = bucket.setdefault(
-            str(model),
-            {"successes": 0, "failures": 0, "infra_failures": 0, "attempts": 0},
-        )
-        stats["attempts"] += 1
-        if entry.get("success"):
-            stats["successes"] += 1
-        else:
-            stats["failures"] += 1
-        if entry.get("infraFailure"):
-            stats["infra_failures"] += 1
-
-    result: dict = {}
-    # Order weeks most-recent first.
-    for key in sorted(buckets.keys(), reverse=True):
-        rows = []
-        for model, stats in buckets[key].items():
-            attempts = stats["attempts"] or 1
-            score = (stats["successes"] + 0.5 * (stats["attempts"] - stats["successes"])) / attempts
-            score -= 0.1 * stats["infra_failures"]
-            rows.append(
-                {
-                    "model": model,
-                    "successes": stats["successes"],
-                    "failures": stats["failures"],
-                    "infra_failures": stats["infra_failures"],
-                    "attempts": stats["attempts"],
-                    "score": round(score, 4),
-                }
-            )
-        rows.sort(key=lambda row: (-row["score"], -row["successes"], row["model"]))
-        result[key] = rows
-    return result
-
-
-def leaderboard(*, weeks: int = 4, now: Optional[datetime] = None) -> dict:
-    """Alias for ``model_leaderboard``: which models are on the board, week by week."""
-    return model_leaderboard(weeks=weeks, now=now)
 
 
 def capacity_cooling_down(model: str, now: Optional[datetime] = None) -> bool:
@@ -1563,16 +1493,6 @@ def commandcode_leaderboard(*, force: bool = False) -> list:
     return list(rows)
 
 
-def fetch_commandcode_leaderboard(*, force: bool = False) -> list:
-    """Alias for :func:`commandcode_leaderboard`."""
-    return commandcode_leaderboard(force=force)
-
-
 def commandcode_leaderboard_models(*, force: bool = False) -> list:
     """Just the OpenRouter model slugs from :func:`commandcode_leaderboard`."""
     return [row["model"] for row in commandcode_leaderboard(force=force)]
-
-
-# Aliases matching the module's existing naming habits.
-openrouter_commandcode_leaderboard = commandcode_leaderboard
-external_leaderboard = commandcode_leaderboard

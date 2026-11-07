@@ -137,9 +137,17 @@ def test_two_lookups_at_once_start_one_acp_server(monkeypatch):
             return 0
 
     def popen(*_args, **_kwargs):
-        spawns.append(1)
-        inside.set()
-        release.wait(5)
+        # Count only this test's folder. A background lookup leaked by an
+        # earlier test -- blindpilot_app:1326 asks without waiting, on purpose,
+        # so a menu build fills the cache without blocking on a CLI start-up --
+        # runs its own `Popen` with a different cwd. Counting that as a second
+        # server is the false positive this test kept failing on, and draining
+        # the in-flight dicts cannot catch it: an earlier test replaces the dict
+        # object, so the leak's marker sits somewhere the module no longer reads.
+        if _kwargs.get("cwd") == "/project":
+            spawns.append(1)
+            inside.set()
+            release.wait(5)
         return Process()
 
     monkeypatch.setattr(agent_backends, "find_backend_cli", lambda _backend: "command-code")

@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # blindpilot_app.py lines 1-5134: bug and bloat audit
 
 Scope: module setup, config, CLI discovery and install, model probe, slash

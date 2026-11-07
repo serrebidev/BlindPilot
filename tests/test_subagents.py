@@ -110,9 +110,9 @@ def test_agents_that_outlive_their_turn_stay_running_when_it_ends():
 
 
 def _claude(reports):
-    import blindpilot_app as app
+    import claude_worker
 
-    worker = app.ClaudeWorker("hi", None, ".", "default", **_callbacks(reports))
+    worker = claude_worker.ClaudeWorker("hi", None, ".", "default", **_callbacks(reports))
     session = SimpleNamespace(agent_tasks={}, agent_calls=set(), background_agents=set())
     return worker, session
 

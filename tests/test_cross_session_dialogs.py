@@ -76,7 +76,7 @@ def test_a_worktree_needs_a_branch_name(frame, tmp_path, monkeypatch, refusals):
         dlg.Destroy()
 
 
-def test_a_worktree_session_opens_in_the_new_worktree(frame, tmp_path, monkeypatch, refusals):
+def test_a_worktree_is_left_for_the_caller_to_make(frame, tmp_path, monkeypatch, refusals):
     monkeypatch.setattr(blindpilot_app, "_recent_folders", list)
     made: list[tuple[str, str]] = []
 
@@ -92,11 +92,78 @@ def test_a_worktree_session_opens_in_the_new_worktree(frame, tmp_path, monkeypat
         dlg.branch_box.SetValue("fix")
 
         assert _ok(dlg)
-        assert made == [(str(tmp_path), "fix")]
-        assert dlg.path == str(tmp_path / "proj-fix")
+        # The dialog closes without waiting for git; the caller does that work.
+        assert made == []
+        assert dlg.worktree == (str(tmp_path), "fix")
+        assert dlg.path == str(tmp_path)
         assert refusals == []
     finally:
         dlg.Destroy()
+
+
+def test_a_finished_worktree_opens_the_session_and_says_so(monkeypatch):
+    added: list = []
+    spoken: list[str] = []
+    status: list[str] = []
+    stub = type("FrameStub", (), {})()
+    stub._add_session = lambda cwd, session_title="": added.append((cwd, session_title))
+    stub._set_status_text = status.append
+    monkeypatch.setattr(blindpilot_app, "announce", lambda text, *a, **k: spoken.append(text))
+    monkeypatch.setattr(blindpilot_app, "_remember_folder", lambda path: None)
+
+    blindpilot_app.MainFrame._worktree_ready(stub, "C:/proj-fix", "", "fix", "Fix it")
+
+    assert added == [("C:/proj-fix", "Fix it")]
+    assert spoken == ["New session: Fix it"]
+    # Reachable again with the review cursor, the same as any other announcement.
+    assert status == spoken
+
+
+def test_a_worktree_that_failed_says_why_and_opens_nothing(monkeypatch):
+    added: list = []
+    spoken: list[str] = []
+    status: list[str] = []
+    stub = type("FrameStub", (), {})()
+    stub._add_session = lambda cwd, session_title="": added.append(cwd)
+    stub._set_status_text = status.append
+    monkeypatch.setattr(blindpilot_app, "announce", lambda text, *a, **k: spoken.append(text))
+
+    blindpilot_app.MainFrame._worktree_ready(
+        stub, "", "git could not make the worktree: boom", "fix", ""
+    )
+
+    assert added == []
+    assert spoken == ["git could not make the worktree: boom"]
+    assert status == spoken
+
+
+def test_creating_a_worktree_speaks_first_and_off_the_window_thread(frame, monkeypatch):
+    """The stall this fixed was git running where the window could not paint."""
+    import threading
+
+    events: list = []
+    workers: list = []
+    finished = threading.Event()
+
+    def fake_worktree(folder, branch):
+        events.append("checkout")
+        workers.append(threading.current_thread())
+        finished.set()
+        return "C:/proj-fix", ""
+
+    monkeypatch.setattr(blindpilot_app, "create_worktree", fake_worktree)
+    monkeypatch.setattr(blindpilot_app, "announce", lambda text, *a, **k: events.append(text))
+
+    stub = type("FrameStub", (), {})()
+    stub._worktree_ready = lambda *a: None
+    blindpilot_app.MainFrame._open_worktree_session(stub, "C:/proj", "fix", "Fix it")
+
+    assert finished.wait(timeout=5)
+
+    # The sentence is spoken before the thread starts, so it always comes first.
+    assert events[0] == "Creating a worktree for fix."
+    assert events[1:] == ["checkout"]
+    assert workers[0] is not threading.current_thread()
 
 
 def test_the_send_dialog_offers_the_other_sessions_and_an_editable_message(frame):

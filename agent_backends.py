@@ -235,6 +235,11 @@ class BackendInfo:
     # which keeps running afterwards, so the wizard watches for the CLI to
     # report itself signed in rather than for the terminal to close.
     login_watch_until_signed_in: bool = False
+    # The npm package BlindPilot installs and updates this backend from. Empty
+    # for a backend that ships its own installer, which is what says npm is not
+    # the tool to send the user after. One field, so the installer, the update
+    # check and the wizard cannot disagree about the package name.
+    npm_package: str = ""
 
 
 BACKENDS = {
@@ -269,6 +274,7 @@ BACKENDS = {
         # the hidden process BlindPilot starts; its page is opened here instead
         # (see the login_opens_browser comment above).
         login_opens_browser=False,
+        npm_package="@openai/codex",
     ),
     BACKEND_FREEBUFF: BackendInfo(
         BACKEND_FREEBUFF,
@@ -280,6 +286,7 @@ BACKENDS = {
         False,
         False,
         supports_compaction=False,
+        npm_package="freebuff",
     ),
     BACKEND_OPENCODE: BackendInfo(
         BACKEND_OPENCODE,
@@ -294,6 +301,7 @@ BACKENDS = {
         # Pictures and text files travel as file parts the model reads, so
         # the worker takes the files themselves rather than their paths.
         uploads_attachments=True,
+        npm_package="opencode-ai",
     ),
     BACKEND_HERMES: BackendInfo(
         BACKEND_HERMES,
@@ -365,6 +373,7 @@ BACKENDS = {
         login_needs_terminal=True,
         login_terminal_hidden=True,
         login_reset_args=("logout",),
+        npm_package="command-code",
     ),
     BACKEND_GEMINI: BackendInfo(
         BACKEND_GEMINI,
@@ -383,6 +392,7 @@ BACKENDS = {
         supports_compaction=False,
         login_needs_terminal=True,
         login_watch_until_signed_in=True,
+        npm_package="@google/gemini-cli",
     ),
     BACKEND_ANTIGRAVITY: BackendInfo(
         BACKEND_ANTIGRAVITY,
@@ -434,6 +444,7 @@ BACKENDS = {
         # Its /compact is interactive-only; a headless turn cannot ask for it.
         supports_compaction=False,
         login_needs_terminal=True,
+        npm_package="@github/copilot",
     ),
 }
 
@@ -584,7 +595,7 @@ def find_backend_cli(backend: str) -> Optional[str]:
         candidate = managed_bin / f"{info.executable}{suffix}"
         if candidate.is_file():
             return str(candidate)
-    found = shutil.which(info.executable)
+    found = process_utils.which_without_cwd(info.executable)
     if found:
         return found
     for candidate in _fallback_cli_paths(info.executable):
@@ -633,71 +644,16 @@ def _muse_signed_in_checked() -> bool:
 
 
 def backend_auth_ok(backend: str, timeout: int = 12) -> bool:
-    """Best-effort non-interactive authentication check."""
-    backend = normalize_backend(backend)
-    if backend == BACKEND_HERMES:
-        from hermes_backend import hermes_auth_ok
+    """Best-effort non-interactive authentication check.
 
-        return hermes_auth_ok(timeout=max(timeout, 25))
-    if backend == BACKEND_MUSE:
-        return _muse_signed_in_checked()
-    if backend == BACKEND_MUSEAI:
-        from museai_backend import museai_auth_ok
-
-        return museai_auth_ok(timeout=max(timeout, 20))
-    if backend == BACKEND_COMMANDCODE:
-        # `command-code status` is a Node start-up plus a request; the default
-        # twelve seconds has been enough, but give it room like Hermes.
-        from commandcode_backend import commandcode_auth_ok
-
-        return commandcode_auth_ok(timeout=max(timeout, 25))
-    if backend == BACKEND_GEMINI:
-        from google_backend import gemini_auth_ok
-
-        return gemini_auth_ok()
-    if backend == BACKEND_ANTIGRAVITY:
-        from google_backend import antigravity_auth_ok
-
-        return antigravity_auth_ok(timeout=max(timeout, 30))
-    if backend == BACKEND_COPILOT:
-        from copilot_backend import copilot_auth_ok
-
-        return copilot_auth_ok(timeout=max(timeout, 20))
-    binary = find_backend_cli(backend)
-    if not binary:
-        return False
+    Each backend answers it in the way it can -- a CLI subcommand, a stored
+    credential, a gateway handshake -- and its adapter holds that answer in one
+    place rather than in a chain of comparisons here.
+    """
     try:
-        if backend == BACKEND_CLAUDE:
-            proc = subprocess.run(
-                [binary, "auth", "status"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                env=subprocess_env(binary),
-                **process_utils.no_window_kwargs(),
-            )
-            return proc.returncode == 0
-        if backend == BACKEND_CODEX:
-            proc = subprocess.run(
-                [binary, "login", "status"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout,
-                env=subprocess_env(binary),
-                **process_utils.no_window_kwargs(),
-            )
-            return proc.returncode == 0
-        if backend == BACKEND_FREEBUFF:
-            return _freebuff_signed_in(_freebuff_account())
-        if backend == BACKEND_OPENCODE:
-            return bool(_opencode_providers())
+        return _adapter(backend).auth_ok(timeout)
     except (OSError, subprocess.TimeoutExpired):
         return False
-    # A backend with no branch above was never checked, and an
-    # unchecked backend must not be reported as signed in.
-    return False
 
 
 def _freebuff_account() -> Optional[dict]:
@@ -1609,20 +1565,7 @@ def backend_usage_lines(backend: str, binary: str, timeout: int = 20) -> list[st
     about a limit the backend has not named, and a line saying so would be one
     more thing to arrow past on every other account.
     """
-    backend = normalize_backend(backend)
-    if backend == BACKEND_CLAUDE:
-        windows = _claude_usage_windows(_claude_usage_payload(binary, timeout))
-    elif backend == BACKEND_CODEX:
-        windows = _codex_usage_windows(_codex_usage_result(binary, timeout))
-    elif backend == BACKEND_FREEBUFF:
-        windows = _freebuff_usage_windows(_freebuff_usage_payload(timeout))
-    elif backend == BACKEND_HERMES:
-        windows = _hermes_usage_windows(_hermes_pool_payload())
-    elif backend == BACKEND_MUSE:
-        windows = _muse_usage_windows(_muse_usage_payload())
-    else:
-        return []
-    return [line for line in map(_usage_window_line, _ordered_windows(windows)) if line]
+    return _adapter(backend).usage_lines(binary, timeout)
 
 
 def _hermes_account_lines() -> list[str]:
@@ -1730,38 +1673,7 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         _code, version = _probe_backend(binary, ["--version"], min(timeout, 20))
         if version:
             lines.append(f"Version: {version.splitlines()[0].strip()}")
-    if backend == BACKEND_CLAUDE:
-        lines.extend(_claude_account_lines(*_probe_backend(binary, ["auth", "status"], timeout)))
-    elif backend == BACKEND_CODEX:
-        lines.extend(_codex_account_lines(*_probe_backend(binary, ["login", "status"], timeout)))
-    elif backend == BACKEND_FREEBUFF:
-        lines.extend(_freebuff_account_lines())
-    elif backend == BACKEND_HERMES:
-        lines.extend(_hermes_account_lines())
-    elif backend == BACKEND_MUSE:
-        lines.extend(_muse_account_lines())
-    elif backend == BACKEND_MUSEAI:
-        from museai_backend import museai_account_lines
-
-        lines.extend(museai_account_lines())
-    elif backend == BACKEND_COMMANDCODE:
-        from commandcode_backend import commandcode_account_lines
-
-        lines.extend(commandcode_account_lines())
-    elif backend == BACKEND_GEMINI:
-        from google_backend import gemini_account_lines
-
-        lines.extend(gemini_account_lines())
-    elif backend == BACKEND_ANTIGRAVITY:
-        from google_backend import antigravity_account_lines
-
-        lines.extend(antigravity_account_lines())
-    elif backend == BACKEND_COPILOT:
-        from copilot_backend import copilot_account_lines
-
-        lines.extend(copilot_account_lines())
-    else:
-        lines.extend(_opencode_account_lines())
+    lines.extend(_adapter(backend).account_lines(binary, timeout))
     lines.extend(backend_usage_lines(backend, binary, timeout))
     return "\n".join(lines)
 
@@ -3491,6 +3403,9 @@ class CodexServer:
         self._close("")
 
     def _read_stderr(self) -> None:
+        # Its own reader, not `process_utils.read_stderr_lines`: the cursor a
+        # turn uses to read only its own stderr counts every line, so capping
+        # the list would make that cursor skip the lines the cap dropped.
         stderr = getattr(self.proc, "stderr", None)
         if stderr is None:
             return
@@ -6411,6 +6326,15 @@ class _HiddenConsoleProcess:
             pass
 
 
+def _start_owned(*args, **kwargs):
+    """Start a hidden console as an owned process.
+
+    A seam of its own so the ownership rule can be tested without patching a
+    name this module imported by value, which proves nothing about the call.
+    """
+    return owned_popen(*args, **kwargs)
+
+
 def _spawn_hidden_console(args: list[str], cwd: str) -> object:
     """Start a command with a console of its own that is never shown.
 
@@ -6424,7 +6348,10 @@ def _spawn_hidden_console(args: list[str], cwd: str) -> object:
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = subprocess.SW_HIDE
-    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+    # Owned, so terminating it can end the tree rather than the wrapper: a
+    # .cmd launcher's node child otherwise outlives it and keeps the sign-in
+    # state nobody can see or release.
+    proc = _start_owned(
         args,
         cwd=cwd,
         env=subprocess_env(args[0]),
@@ -9133,49 +9060,265 @@ class AgentWorker(Protocol):
 AgentWorkerFactory = Callable[..., AgentWorker]
 
 
-def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorkerFactory:
+# ----- What every backend must answer -----
+#
+# The app asks the same four questions of every backend: is it signed in, what
+# can it say about the account, how much allowance is left, and which worker
+# runs its turns. These were four hand-written if/elif chains, so a new backend
+# that missed one answered "not signed in" or ran Claude's worker without
+# saying so. One adapter per backend makes a missing answer a KeyError in a
+# test instead of a quiet wrong answer in the window.
+
+
+@dataclass(frozen=True)
+class BackendAdapter:
+    """How one backend answers the questions asked of every backend."""
+
+    auth_ok: Callable[[int], bool]
+    account_lines: Callable[[str, int], list[str]]
+    usage_lines: Callable[[str, int], list[str]]
+    worker: Callable[[AgentWorkerFactory], AgentWorkerFactory]
+
+
+def _cli_signed_in(backend: str, args: tuple[str, ...]) -> Callable[[int], bool]:
+    """Signed in when this CLI subcommand exits successfully."""
+
+    def check(timeout: int) -> bool:
+        binary = find_backend_cli(backend)
+        if not binary:
+            return False
+        proc = subprocess.run(
+            [binary, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            env=subprocess_env(binary),
+            **process_utils.no_window_kwargs(),
+        )
+        return proc.returncode == 0
+
+    return check
+
+
+def _stored_signed_in(backend: str, read: Callable[[], bool]) -> Callable[[int], bool]:
+    """Signed in when the CLI is installed and its stored credential says so."""
+
+    def check(_timeout: int) -> bool:
+        return bool(find_backend_cli(backend)) and read()
+
+    return check
+
+
+def _usage_lines(windows: Sequence[UsageWindow]) -> list[str]:
+    return [line for line in map(_usage_window_line, _ordered_windows(windows)) if line]
+
+
+def _hermes_auth_ok(timeout: int) -> bool:
+    from hermes_backend import hermes_auth_ok
+
+    return hermes_auth_ok(timeout=max(timeout, 25))
+
+
+def _museai_auth_ok(timeout: int) -> bool:
+    from museai_backend import museai_auth_ok
+
+    return museai_auth_ok(timeout=max(timeout, 20))
+
+
+def _commandcode_auth_ok(timeout: int) -> bool:
+    # `command-code status` is a Node start-up plus a request; the default
+    # twelve seconds has been enough, but give it room like Hermes.
+    from commandcode_backend import commandcode_auth_ok
+
+    return commandcode_auth_ok(timeout=max(timeout, 25))
+
+
+def _gemini_auth_ok(_timeout: int) -> bool:
+    from google_backend import gemini_auth_ok
+
+    return gemini_auth_ok()
+
+
+def _antigravity_auth_ok(timeout: int) -> bool:
+    from google_backend import antigravity_auth_ok
+
+    return antigravity_auth_ok(timeout=max(timeout, 30))
+
+
+def _copilot_auth_ok(timeout: int) -> bool:
+    from copilot_backend import copilot_auth_ok
+
+    return copilot_auth_ok(timeout=max(timeout, 20))
+
+
+def _museai_account_lines() -> list[str]:
+    from museai_backend import museai_account_lines
+
+    return museai_account_lines()
+
+
+def _commandcode_account_lines() -> list[str]:
+    from commandcode_backend import commandcode_account_lines
+
+    return commandcode_account_lines()
+
+
+def _gemini_account_lines() -> list[str]:
+    from google_backend import gemini_account_lines
+
+    return gemini_account_lines()
+
+
+def _antigravity_account_lines() -> list[str]:
+    from google_backend import antigravity_account_lines
+
+    return antigravity_account_lines()
+
+
+def _copilot_account_lines() -> list[str]:
+    from copilot_backend import copilot_account_lines
+
+    return copilot_account_lines()
+
+
+def _hermes_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
+    from hermes_worker import HermesWorker
+
+    return HermesWorker
+
+
+def _muse_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
+    from muse_worker import MuseWorker
+
+    return MuseWorker
+
+
+def _museai_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
+    from museai_worker import MuseAiWorker
+
+    return MuseAiWorker
+
+
+def _commandcode_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
+    from commandcode_worker import CommandcodeWorker
+
+    return CommandcodeWorker
+
+
+def _gemini_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
+    from google_worker import GeminiWorker
+
+    return GeminiWorker
+
+
+def _antigravity_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
+    from google_worker import AntigravityWorker
+
+    return AntigravityWorker
+
+
+def _copilot_worker(_claude: AgentWorkerFactory) -> AgentWorkerFactory:
+    from copilot_backend import CopilotWorker
+
+    return CopilotWorker
+
+
+ADAPTERS: dict[str, BackendAdapter] = {
+    BACKEND_CLAUDE: BackendAdapter(
+        auth_ok=_cli_signed_in(BACKEND_CLAUDE, ("auth", "status")),
+        account_lines=lambda binary, timeout: _claude_account_lines(
+            *_probe_backend(binary, ["auth", "status"], timeout)
+        ),
+        usage_lines=lambda binary, timeout: _usage_lines(
+            _claude_usage_windows(_claude_usage_payload(binary, timeout))
+        ),
+        worker=lambda claude_worker: claude_worker,
+    ),
+    BACKEND_CODEX: BackendAdapter(
+        auth_ok=_cli_signed_in(BACKEND_CODEX, ("login", "status")),
+        account_lines=lambda binary, timeout: _codex_account_lines(
+            *_probe_backend(binary, ["login", "status"], timeout)
+        ),
+        usage_lines=lambda binary, timeout: _usage_lines(
+            _codex_usage_windows(_codex_usage_result(binary, timeout))
+        ),
+        worker=lambda _claude: CodexWorker,
+    ),
+    BACKEND_FREEBUFF: BackendAdapter(
+        auth_ok=_stored_signed_in(
+            BACKEND_FREEBUFF, lambda: _freebuff_signed_in(_freebuff_account())
+        ),
+        account_lines=lambda _binary, _timeout: _freebuff_account_lines(),
+        usage_lines=lambda _binary, timeout: _usage_lines(
+            _freebuff_usage_windows(_freebuff_usage_payload(timeout))
+        ),
+        worker=lambda _claude: FreebuffWorker,
+    ),
+    BACKEND_OPENCODE: BackendAdapter(
+        auth_ok=_stored_signed_in(BACKEND_OPENCODE, lambda: bool(_opencode_providers())),
+        account_lines=lambda _binary, _timeout: _opencode_account_lines(),
+        usage_lines=lambda _binary, _timeout: [],
+        worker=lambda _claude: OpencodeWorker,
+    ),
+    BACKEND_HERMES: BackendAdapter(
+        auth_ok=_hermes_auth_ok,
+        account_lines=lambda _binary, _timeout: _hermes_account_lines(),
+        usage_lines=lambda _binary, _timeout: _usage_lines(
+            _hermes_usage_windows(_hermes_pool_payload())
+        ),
+        worker=_hermes_worker,
+    ),
+    BACKEND_MUSE: BackendAdapter(
+        auth_ok=lambda _timeout: _muse_signed_in_checked(),
+        account_lines=lambda _binary, _timeout: _muse_account_lines(),
+        usage_lines=lambda _binary, _timeout: _usage_lines(
+            _muse_usage_windows(_muse_usage_payload())
+        ),
+        worker=_muse_worker,
+    ),
+    BACKEND_MUSEAI: BackendAdapter(
+        auth_ok=_museai_auth_ok,
+        account_lines=lambda _binary, _timeout: _museai_account_lines(),
+        usage_lines=lambda _binary, _timeout: [],
+        worker=_museai_worker,
+    ),
+    BACKEND_COMMANDCODE: BackendAdapter(
+        auth_ok=_commandcode_auth_ok,
+        account_lines=lambda _binary, _timeout: _commandcode_account_lines(),
+        usage_lines=lambda _binary, _timeout: [],
+        worker=_commandcode_worker,
+    ),
+    BACKEND_GEMINI: BackendAdapter(
+        auth_ok=_gemini_auth_ok,
+        account_lines=lambda _binary, _timeout: _gemini_account_lines(),
+        usage_lines=lambda _binary, _timeout: [],
+        worker=_gemini_worker,
+    ),
+    BACKEND_ANTIGRAVITY: BackendAdapter(
+        auth_ok=_antigravity_auth_ok,
+        account_lines=lambda _binary, _timeout: _antigravity_account_lines(),
+        usage_lines=lambda _binary, _timeout: [],
+        worker=_antigravity_worker,
+    ),
+    BACKEND_COPILOT: BackendAdapter(
+        auth_ok=_copilot_auth_ok,
+        account_lines=lambda _binary, _timeout: _copilot_account_lines(),
+        usage_lines=lambda _binary, _timeout: [],
+        worker=_copilot_worker,
+    ),
+}
+
+
+def _adapter(backend: str) -> BackendAdapter:
+    """This backend's answers, or a KeyError naming the one that is missing."""
     backend = normalize_backend(backend)
-    if backend == BACKEND_CODEX:
-        return CodexWorker
-    if backend == BACKEND_FREEBUFF:
-        return FreebuffWorker
-    if backend == BACKEND_OPENCODE:
-        return OpencodeWorker
-    if backend == BACKEND_HERMES:
-        # Imported here rather than at module scope so a machine without Hermes
-        # pays nothing for it, and an import error in the adapter cannot stop
-        # the other backends from working.
-        from hermes_worker import HermesWorker
+    adapter = ADAPTERS.get(backend)
+    if adapter is None:
+        raise KeyError(f"no backend adapter for {backend}")
+    return adapter
 
-        return HermesWorker
-    if backend == BACKEND_MUSE:
-        # Same shape as Hermes: imported on demand, so a machine without Muse
-        # (and, on Windows, without WSL) pays nothing for it.
-        from muse_worker import MuseWorker
 
-        return MuseWorker
-    if backend == BACKEND_MUSEAI:
-        from museai_worker import MuseAiWorker
-
-        return MuseAiWorker
-    if backend == BACKEND_COMMANDCODE:
-        # Imported on demand: a machine without Command Code pays nothing, and
-        # an import error here cannot stop the other backends working.
-        from commandcode_worker import CommandcodeWorker
-
-        return CommandcodeWorker
-    if backend == BACKEND_GEMINI:
-        # Imported on demand, like the rest: a machine without Google's CLIs
-        # pays nothing for them.
-        from google_worker import GeminiWorker
-
-        return GeminiWorker
-    if backend == BACKEND_ANTIGRAVITY:
-        from google_worker import AntigravityWorker
-
-        return AntigravityWorker
-    if backend == BACKEND_COPILOT:
-        from copilot_backend import CopilotWorker
-
-        return CopilotWorker
-    return claude_worker
+def worker_class(backend: str, claude_worker: AgentWorkerFactory) -> AgentWorkerFactory:
+    """The worker that runs this backend's turns."""
+    return _adapter(backend).worker(claude_worker)

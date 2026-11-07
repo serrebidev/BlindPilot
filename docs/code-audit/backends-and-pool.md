@@ -1,3 +1,6 @@
+> Historical snapshot. Applied findings are listed in `applied-*.md`; re-check
+> anything here against the current tree. See [README.md](README.md).
+
 # Audit: agent_backends.py and backend_pool.py
 
 Scope: `agent_backends.py` (6314 lines), `backend_pool.py` (411 lines), the

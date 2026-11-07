@@ -68,6 +68,7 @@ from process_utils import (
     end_process_group,
     no_window_kwargs,
     own_group_kwargs,
+    read_stderr_lines,
 )
 from markdown_rows import SentenceStreamer
 
@@ -364,12 +365,7 @@ class CopilotWorker(_TurnWorker):
         self._finish(proc)
 
     def _read_stderr(self, proc: subprocess.Popen) -> None:
-        for line in proc.stderr if proc.stderr is not None else ():
-            text = line.strip()
-            if text:
-                with self._error_lock:
-                    self._error_lines.append(text)
-                    del self._error_lines[:-_STDERR_KEEP]
+        read_stderr_lines(proc.stderr, self._error_lines, _STDERR_KEEP, self._error_lock)
 
     # -- events ---------------------------------------------------------------
 

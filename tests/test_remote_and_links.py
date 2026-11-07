@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 import blindpilot_app as app
+import claude_worker
 import remote_sessions as rs
 
 LISTING = """This session is Laptop [aaaa]
@@ -61,7 +62,7 @@ class _Session:
 
 
 def _worker(remote):
-    worker = app.ClaudeWorker(
+    worker = claude_worker.ClaudeWorker(
         "hi",
         None,
         ".",
@@ -212,3 +213,25 @@ def test_recent_conversations_filters_and_names_groups(frame, monkeypatch):
     finally:
         dialog.Destroy()
         wx_app.SetAssertMode(old)
+
+
+def test_only_the_newest_remote_control_records_are_kept(monkeypatch):
+    """A record is removed only when Remote Control is turned off, so a session
+    that ended any other way used to be kept for ever in a file read whole."""
+    saved: dict = {}
+    monkeypatch.setattr(app, "_load_config", lambda: dict(saved))
+    monkeypatch.setattr(app, "_save_config", lambda cfg: saved.update(cfg) or True)
+
+    newest = app._REMOTE_SESSIONS_KEPT + 4
+    for index in range(newest + 1):
+        app._remember_remote(f"sess-{index}", f"br-{index}", f"https://u/{index}")
+
+    kept = saved["remote_control"]
+    assert len(kept) == app._REMOTE_SESSIONS_KEPT
+    assert f"sess-{newest}" in kept
+    assert "sess-0" not in kept
+
+    # Remembering an existing session again makes it the newest, not a stale
+    # entry that falls off next.
+    app._remember_remote("sess-5", "br-again", "https://again")
+    assert list(saved["remote_control"])[-1] == "sess-5"
