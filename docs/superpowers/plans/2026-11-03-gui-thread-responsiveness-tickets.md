@@ -1,4 +1,4 @@
-﻿# GUI-thread responsiveness ticket plan
+# GUI-thread responsiveness ticket plan
 
 Spec: [GitHub issue #6](https://github.com/thebetterfarhan/BlindPilot/issues/6). Local copy: [spec](../specs/2026-11-03-gui-thread-responsiveness.md).
 

@@ -22,6 +22,14 @@ repos:
         entry: python -m ruff format --check
         language: system
         types: [python]
+      # A BOM is invisible to ruff and mypy and surfaces only when something
+      # parses the file, as a syntax error that names neither the encoding nor
+      # the file. Windows tools write one readily.
+      - id: byte-order-marker
+        name: byte-order marker
+        entry: python tools/check_bom.py
+        language: system
+        types: [text]
       - id: mypy
         name: mypy
         entry: python -m mypy

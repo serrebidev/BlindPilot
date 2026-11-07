@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import shutil
 import sys
 import tempfile
@@ -176,6 +177,41 @@ def no_backend_process_outlives_its_test():
         yield
     finally:
         _forget_every_held_process()
+
+
+def _settle_announcements() -> None:
+    """Leave nothing queued for whatever runs next.
+
+    The screen-reader queue is drained by a daemon thread that reads the
+    process-wide speaker, so a line an earlier test queued was delivered while
+    the next test had its own `_make_speaker` patched in — and that test counted
+    a speaker build it never asked for. Draining at the test boundary gives the
+    queue the test's lifetime instead of the process's.
+    """
+    window = sys.modules.get("blindpilot_app")
+    if window is None:
+        return
+    worker = window._ANNOUNCEMENT_WORKER
+    if worker is not None and worker.is_alive():
+        # A line already dequeued is mid-delivery; wait for it rather than
+        # clearing the queue underneath it.
+        window._ANNOUNCEMENT_QUEUE.join()
+    while True:
+        try:
+            window._ANNOUNCEMENT_QUEUE.get_nowait()
+        except queue.Empty:
+            break
+        window._ANNOUNCEMENT_QUEUE.task_done()
+    window._SPEAKER = None
+    window._SPEAKER_INITIALIZED = False
+    window._speaker_retry_after = 0.0
+
+
+@pytest.fixture(autouse=True)
+def no_announcement_outlives_its_test():
+    _settle_announcements()
+    yield
+    _settle_announcements()
 
 
 @pytest.fixture
