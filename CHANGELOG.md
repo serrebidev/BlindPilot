@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.15 - 2026-11-07
+
+Backend worker construction unified behind a typed interface (Farhan Khan, PR #153): a typed WorkerRequest with callbacks, an exhaustive lazy factory in the new backend_workers package, and the Codex, Freebuff and OpenCode worker implementations relocated into it; agent_backends.py is now the authentication, account and usage adapter only. The legacy selector and construction shims are removed, with contract and factory tests added. No intended user-visible change.
+
 ## v0.55.14 - 2026-11-07
 
 Farhan Khan's restructuring and hardening release (PR #152): the backend integrations and parts of the window code were split into their own modules, and a full code scan's findings were fixed. The user-visible ones: a cancelled sign-in can no longer leave the CLI process running on its own; CLI discovery no longer picks an executable out of the current directory; a damaged settings file is reported instead of being silently replaced by defaults; deleting an account and deleting a conversation are now announced, and deleting a conversation no longer moves focus; the first switch to Chat no longer copies the legacy database on the GUI thread; creating a worktree no longer stalls the New Session dialog; and Remote Control records no longer accumulate in the settings file. CI now runs the suite in parallel and no longer runs the same matrix twice per pull request.

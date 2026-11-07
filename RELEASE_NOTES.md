@@ -1,3 +1,7 @@
+# BlindPilot 0.55.15
+
+- Changed: backend worker construction now goes through one typed interface - the app builds every backend's worker through a single factory with an explicit contract for its lifecycle and capabilities, and the Codex, Freebuff and OpenCode workers live in their own modules. No intended change to provider behaviour or anything on screen. From Farhan Khan, PR #153.
+
 # BlindPilot 0.55.14
 
 - A restructuring and hardening release from Farhan Khan (PR #152). Backend integrations and parts of the window code moved into their own modules, and a full code scan's findings were fixed. The ones you can feel: a cancelled sign-in no longer leaves the CLI process running; deleting an account and deleting a conversation are now announced, and a conversation delete no longer moves focus; a damaged settings file is reported instead of silently replaced by defaults; the first switch to Chat no longer freezes while it copies the legacy database; creating a worktree no longer stalls the New Session dialog; and CLI discovery no longer picks up an executable from the current directory.
