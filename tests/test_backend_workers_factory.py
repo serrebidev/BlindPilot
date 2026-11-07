@@ -117,6 +117,7 @@ def test_factory_preserves_callbacks_and_provider_options(callbacks):
     ("backend", "options", "module"),
     [
         ("codex", CodexOptions(compact=True), "backend_workers.codex_worker"),
+        ("freebuff", FreebuffOptions(compact=True), "backend_workers.freebuff_worker"),
         ("opencode", OpencodeOptions(compact=True), "backend_workers.opencode_worker"),
     ],
 )
