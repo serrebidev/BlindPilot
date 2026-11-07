@@ -135,12 +135,12 @@ def test_a_send_once_the_window_has_caught_up_is_allowed():
         def start(self):
             started.append("started")
 
-    # Substitute the worker class rather than launching a real backend.
-    real = app.worker_class
-    app.worker_class = lambda *_a, **_k: _Worker
+    # Substitute the factory result rather than launching a real backend.
+    real = app.backend_workers.create_worker
+    app.backend_workers.create_worker = lambda *_a, **_k: _Worker()
     try:
         app.SessionPanel._on_send(panel)
     finally:
-        app.worker_class = real
+        app.backend_workers.create_worker = real
 
     assert started == ["built", "started"], f"the next turn never started: {started}"
