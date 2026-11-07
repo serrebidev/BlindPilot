@@ -60,6 +60,23 @@ def test_a_missing_file_is_not_damage(tmp_path: Path) -> None:
     assert seen == []
 
 
+def test_a_path_that_cannot_be_opened_is_not_called_damaged(tmp_path: Path) -> None:
+    """A lock or a permission says nothing about the contents, and the save that
+    follows already speaks for itself."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    seen: list[tuple[Path, bool]] = []
+
+    assert (
+        preferences.load_config(
+            (blocker / "config.json",), on_damaged=lambda p, kept: seen.append((p, kept))
+        )
+        == {}
+    )
+
+    assert seen == []
+
+
 def test_the_next_save_starts_fresh_without_destroying_the_kept_copy(
     tmp_path: Path,
 ) -> None:

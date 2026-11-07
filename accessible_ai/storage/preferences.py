@@ -76,10 +76,18 @@ def load_config(
                 return data if isinstance(data, dict) else {}
         except FileNotFoundError:
             continue
-        except (OSError, ValueError):
+        except ValueError:
+            # The file is there and its contents are not usable, which is what
+            # "damaged" means. Keep it and say so.
             kept = _set_aside(path)
             if on_damaged is not None:
                 on_damaged(path if kept is None else kept, kept is not None)
+            continue
+        except OSError:
+            # Could not be opened at all -- a lock, a permission, or a path that
+            # is not a file. That says nothing about its contents, and the save
+            # that follows reports its own failure, so this stays quiet rather
+            # than moving a file it could not even read.
             continue
     return {}
 
