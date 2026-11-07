@@ -28,9 +28,16 @@ since.
 
 ## Open work
 
-Current work is tracked on the fork (`thebetterfarhan/BlindPilot`):
+Nothing from these reports is open as of the structure pass. Everything the
+reports named was either applied, recorded in an `applied-*.md` file, or closed
+as dead code. The work that finished it is merged on the fork
+(`thebetterfarhan/BlindPilot`):
 
-- spec #32 — backend and app structure
-- #34 — installation, portable Node and PATH extraction
-- #40 — platform and release decision
-- #41 — this record
+- spec #32 — backend and app structure, closed
+- #34 — installation, portable Node and PATH extraction, closed
+- #39 — type checking widened to every production module, closed
+- #40 — platform and release decision, closed
+- #41 — this record, closed
+
+New findings belong in the tracker, not here. This file is a dated snapshot:
+read the date on a report before acting on it.
