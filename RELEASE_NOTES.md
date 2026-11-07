@@ -1,3 +1,8 @@
+# BlindPilot 0.55.14
+
+- A restructuring and hardening release from Farhan Khan (PR #152). Backend integrations and parts of the window code moved into their own modules, and a full code scan's findings were fixed. The ones you can feel: a cancelled sign-in no longer leaves the CLI process running; deleting an account and deleting a conversation are now announced, and a conversation delete no longer moves focus; a damaged settings file is reported instead of silently replaced by defaults; the first switch to Chat no longer freezes while it copies the legacy database; creating a worktree no longer stalls the New Session dialog; and CLI discovery no longer picks up an executable from the current directory.
+- Release shape unchanged after all: macOS stays Apple Silicon only and there is no Linux download in this release. A universal Mac build and a Linux build were tried in v0.55.13, which never published — the universal build cannot package one of the terminal libraries the app bundles, and the Linux build's checks fail under the distribution's older wxPython. Both are withdrawn until they can be built cleanly.
+
 # BlindPilot 0.55.13
 
 - Changed: backend integrations and accessible workflows refactored and hardened - backend and UI modules restructured, installer, process-ownership and GUI-thread fixes, accessibility feedback and scan remediation, CI and test-suite improvements, announcement-queue isolation and a UTF-8 BOM guard. From Farhan Khan, PR #152.

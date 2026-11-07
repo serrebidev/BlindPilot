@@ -63,14 +63,16 @@ def test_the_manifest_declares_per_monitor_dpi_awareness_with_a_fallback():
     assert aware.text.strip().lower().startswith("true")
 
 
-def test_the_macos_bundle_is_universal2_and_claims_macos_11():
-    """One artifact for both Mac architectures, and a minimum that matches it.
+def test_the_macos_bundle_is_arm64_and_claims_macos_11():
+    """Apple Silicon only, and a minimum that matches it.
 
-    Apple silicon cannot run below 11.0, and the universal2 wxPython wheel is
-    built for macOS 11+.
+    Apple silicon cannot run below 11.0, and the arm64 wxPython wheel is
+    built for macOS 11+. A universal2 bundle was tried and withdrawn
+    (2026-11-07): the collect cannot take wcwidth's single-arch C
+    extension, which pyte pulls in.
     """
     text = SPEC.read_text(encoding="utf-8")
-    assert 'target_arch = "universal2"' in text
+    assert 'target_arch = "arm64"' in text
     assert "target_arch=target_arch," in text
     assert '"LSMinimumSystemVersion": "11.0"' in text
 

@@ -50,3 +50,13 @@ build matrix without publishing, because the release job only runs for a `v*`
 tag. The Linux artifact depends on the user's GTK 3 and AT-SPI installation —
 they are not bundled — and the README says so. The macOS bundle is ad-hoc
 signed, not notarized, as before.
+
+## Amendment (2026-11-07, Brandon's decision)
+
+The universal2 macOS build and the Linux x64 artifact introduced above are
+withdrawn. The universal2 collect fails on the single-architecture C
+extension that pyte's wcwidth dependency ships, and the Linux job's test
+step runs under the distribution's wxPython 4.2.1, where the suite is not
+clean; neither platform is primary. macOS ships arm64-only, as it did
+before this ADR, and there is no Linux release artifact until the suite
+passes under the distribution wxPython. The rest of this ADR stands.

@@ -125,10 +125,10 @@ else:
     version_info = None
     manifest = None
 
-# A universal2 bundle: one artifact for Apple Silicon and Intel. PyInstaller
-# needs a universal2 Python to take both slices from, so the release workflow
-# checks the interpreter before building.
-target_arch = "universal2" if sys.platform == "darwin" else None
+# An arm64 bundle: Apple Silicon only (Brandon's call, 2026-11-07 — the
+# universal2 build cannot collect wcwidth's single-arch C extension, which
+# pyte pulls in, and Intel Macs are not a primary platform).
+target_arch = "arm64" if sys.platform == "darwin" else None
 
 a = Analysis(
     [str(spec_dir / "blind_pilot.py")],
@@ -184,7 +184,7 @@ if sys.platform == "darwin":
             "CFBundleVersion": APP_VERSION,
             "CFBundleHelpBookName": "BlindPilot",
             "CFBundleSignature": "????",
-            # Apple silicon cannot run below 11.0, and the universal2 wxPython
+            # Apple silicon cannot run below 11.0, and the arm64 wxPython
             # wheel this builds against is macOS 11+.
             "LSMinimumSystemVersion": "11.0",
             "LSApplicationCategoryType": "public.app-category.developer-tools",

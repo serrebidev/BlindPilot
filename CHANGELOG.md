@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.14 - 2026-11-07
+
+Farhan Khan's restructuring and hardening release (PR #152): the backend integrations and parts of the window code were split into their own modules, and a full code scan's findings were fixed. The user-visible ones: a cancelled sign-in can no longer leave the CLI process running on its own; CLI discovery no longer picks an executable out of the current directory; a damaged settings file is reported instead of being silently replaced by defaults; deleting an account and deleting a conversation are now announced, and deleting a conversation no longer moves focus; the first switch to Chat no longer copies the legacy database on the GUI thread; creating a worktree no longer stalls the New Session dialog; and Remote Control records no longer accumulate in the settings file. CI now runs the suite in parallel and no longer runs the same matrix twice per pull request.
+
+Release shape: v0.55.13 was tagged but never published — its first build run failed on the two new artifacts PR #152's ADR 0004 added. By Brandon's decision the same day, macOS ships arm64-only again (the universal2 build cannot collect the single-architecture C extension that pyte's wcwidth dependency ships) and the Linux x64 artifact is withdrawn until the test suite passes under the distribution's wxPython 4.2.1 (it errors and crashes there; the suite is green against the wxPython 4.3.2 wheel CI uses). ADR 0004 carries an amendment recording this.
+
 ## v0.55.12 - 2026-11-06
 
 Fix for issue #150: on Windows, a plain `npm install -g @openai/codex` left the Codex backend unable to launch at all — every turn failed with "Failed to launch Codex: [WinError 5] Access denied". BlindPilot launches Codex's native executable rather than the npm wrapper, but it only looked for that executable nested inside the @openai/codex package. npm hoists the platform package beside @openai/codex instead, so the search found nothing and fell back to the codex.cmd wrapper, which CreateProcess cannot run. The hoisted location is searched now (a nested copy still wins when one exists), and the model-catalog probe resolves the native executable the same way instead of silently failing against the wrapper.
