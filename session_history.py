@@ -1330,6 +1330,8 @@ def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
         connection.close()
     turns: List[HistoryTurn] = []
     for row in rows:
+        if row["role"] not in ("user", "assistant"):
+            continue
         try:
             parts = json.loads(row["parts_json"] or "[]")
         except ValueError:

@@ -146,6 +146,8 @@ def test_freebuff_desktop_threads_are_listed_and_read(home, monkeypatch):
                     ]
                 ),
             ),
+            (3, "th1", "tool", json.dumps([{"kind": "text", "text": "secret tool output"}])),
+            (4, "th1", "assistant", json.dumps([{"kind": "image", "text": "image payload"}])),
         ],
     )
     db.commit()
