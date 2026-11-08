@@ -35,6 +35,11 @@ def test_import_turn_pages_keep_exclusions_and_keyboard_focus(monkeypatch, tmp_p
                 frame, _entry(str(tmp_path)), turns, "codex", str(tmp_path)
             )
             try:
+                # Where focus actually lands cannot be read back on a headless
+                # runner, so record the request rather than querying the
+                # platform for it.
+                focus_calls: list[str] = []
+                dialog.turns.SetFocus = lambda: focus_calls.append("turns")
                 _wait(lambda: dialog.context.IsEnabled())
                 assert dialog.turns.GetCount() == 100
                 assert "page 1 of 3" in dialog.turns.GetName().lower()
@@ -43,7 +48,7 @@ def test_import_turn_pages_keep_exclusions_and_keyboard_focus(monkeypatch, tmp_p
                 dialog._next_turn_page()
                 assert dialog.turns.GetCount() == 100
                 assert "page 2 of 3" in dialog.turns.GetName().lower()
-                assert dialog.turns.HasFocus()
+                assert focus_calls == ["turns"]
                 dialog.turns.Check(0, False)
                 dialog._selection_changed()
                 dialog._previous_turn_page()
