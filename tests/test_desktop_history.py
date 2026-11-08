@@ -160,3 +160,67 @@ def test_freebuff_desktop_threads_are_listed_and_read(home, monkeypatch):
     monkeypatch.setattr(session_history, "_MAX_TRANSCRIPT_BYTES", 1)
     turns = session_history.load_turns(entries[0])
     assert [(t.prompt, t.response) for t in turns] == [("Tidy the README", "Done.")]
+
+
+@pytest.mark.parametrize("message_count, partial", [(20_000, False), (20_001, True)])
+def test_freebuff_desktop_import_discloses_only_messages_beyond_reader_cap(
+    home, message_count, partial
+):
+    db_path = home / "desktop-v2.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
+        )
+        db.executemany(
+            "INSERT INTO messages VALUES (?,?,?,?)",
+            (
+                (seq, "th1", "user", json.dumps([{"kind": "text", "text": str(seq)}]))
+                for seq in range(1, message_count + 1)
+            ),
+        )
+        # A tool row is not a message the reader can omit, so it must not
+        # tip the count over the cap.
+        db.execute(
+            "INSERT INTO messages VALUES (?,?,?,?)",
+            (
+                message_count + 1,
+                "th1",
+                "tool",
+                json.dumps([{"kind": "text", "text": "tool output"}]),
+            ),
+        )
+    entry = session_history.HistoryEntry("freebuff", "th1", "Desktop", str(db_path), 0)
+
+    turns, is_partial = session_history.load_desktop_import(entry)
+
+    assert len(turns) == 20_000
+    assert turns[0].prompt == "1"
+    assert turns[-1].prompt == "20000"
+    assert is_partial is partial
+
+
+def test_freebuff_desktop_import_cap_counts_only_user_and_assistant_messages(home):
+    cap = session_history._MAX_TRANSCRIPT_PARTS
+    db_path = home / "desktop-v2.db"
+    tool_row = json.dumps([{"kind": "text", "text": "tool output"}])
+    rows = []
+    # A tool row before every importable message, and one more at the end: the
+    # rows outnumber the cap twice over, the messages never exceed it.
+    for index in range(cap):
+        rows.append((2 * index + 1, "th1", "tool", tool_row))
+        request = json.dumps([{"kind": "text", "text": str(index + 1)}])
+        rows.append((2 * index + 2, "th1", "user", request))
+    rows.append((2 * cap + 1, "th1", "tool", tool_row))
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
+        )
+        db.executemany("INSERT INTO messages VALUES (?,?,?,?)", rows)
+    entry = session_history.HistoryEntry("freebuff", "th1", "Desktop", str(db_path), 0)
+
+    turns, is_partial = session_history.load_desktop_import(entry)
+
+    assert len(turns) == cap
+    assert turns[0].prompt == "1"
+    assert turns[-1].prompt == str(cap)
+    assert is_partial is False

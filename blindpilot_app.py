@@ -195,11 +195,13 @@ from markdown_rows import (
     reassemble_all,
 )
 from session_history import (
+    _MAX_TRANSCRIPT_PARTS,
     HistoryEntry,
     HistoryTurn,
     claude_project_slug,
     describe_age,
     list_history,
+    load_desktop_import,
     load_turns,
     make_title,
     restore_tasks,
@@ -5477,6 +5479,8 @@ def _last_exchange(turns: List[HistoryTurn], limit: int = 1200) -> str:
 class DesktopImportDialog(wx.Dialog):
     """Review exactly which Desktop text a fresh conversation may receive."""
 
+    _PAGE_SIZE = 100
+
     def __init__(
         self,
         parent: wx.Window,
@@ -5485,6 +5489,7 @@ class DesktopImportDialog(wx.Dialog):
         backend: str,
         cwd: str,
         fallback: bool = False,
+        partial: bool = False,
     ):
         super().__init__(
             parent,
@@ -5497,6 +5502,8 @@ class DesktopImportDialog(wx.Dialog):
         self.approved_intent = ""
         self._context_serial = 0
         self._first_context = True
+        self._partial = partial
+        self._turn_page = 0
         pad = self.FromDIP(PAD_DIALOG)
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.backend_text = wx.StaticText(self, label=f"Target backend: {backend_label(backend)}")
@@ -5512,6 +5519,16 @@ class DesktopImportDialog(wx.Dialog):
             wx.LEFT | wx.RIGHT | wx.BOTTOM,
             pad,
         )
+        self.partial_text = None
+        self.partial_approval = None
+        if partial:
+            warning = (
+                f"Partial transcript: the reader stopped after {_MAX_TRANSCRIPT_PARTS:,} "
+                "messages. Later messages are unavailable. Review and edit the available "
+                "text before sending."
+            )
+            self.partial_text = wx.StaticText(self, label=warning)
+            sizer.Add(self.partial_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         sizer.Add(
             wx.StaticText(
                 self,
@@ -5521,17 +5538,22 @@ class DesktopImportDialog(wx.Dialog):
             wx.LEFT | wx.RIGHT,
             pad,
         )
-        labels = [
-            f"Turn {index}: {' '.join((turn.prompt or turn.response)[:100].split())}"
-            for index, turn in enumerate(turns, 1)
-        ]
-        self.turns = wx.CheckListBox(self, choices=labels, name="Transcript turns to include")
+        self.turns = wx.CheckListBox(self, name="Transcript turns to include")
         self.turns.SetMinSize(self.FromDIP(wx.Size(650, 120)))
         self._selected_indices = set(range(len(turns)))
-        for index in range(len(turns)):
-            self.turns.Check(index)
         self.turns.Bind(wx.EVT_CHECKLISTBOX, self._turn_checked)
         sizer.Add(self.turns, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        page_buttons = wx.BoxSizer(wx.HORIZONTAL)
+        self.previous_page_button = wx.Button(self, label="&Earlier turns")
+        self.next_page_button = wx.Button(self, label="&Next turns")
+        self.previous_page_button.Bind(wx.EVT_BUTTON, lambda _event: self._previous_turn_page())
+        self.next_page_button.Bind(wx.EVT_BUTTON, lambda _event: self._next_turn_page())
+        self.page_text = wx.StaticText(self)
+        page_buttons.Add(self.previous_page_button, 0, wx.RIGHT, pad)
+        page_buttons.Add(self.page_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, pad)
+        page_buttons.Add(self.next_page_button)
+        sizer.Add(page_buttons, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        self._show_turn_page()
         sizer.Add(
             wx.StaticText(self, label="&Prepared context to send (editable):"),
             0,
@@ -5568,6 +5590,13 @@ class DesktopImportDialog(wx.Dialog):
         )
         self.instruction.SetMinSize(self.FromDIP(wx.Size(650, 70)))
         sizer.Add(self.instruction, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
+        if partial:
+            self.partial_approval = wx.CheckBox(
+                self,
+                label="I understand this transcript is partial and approve sending the available text",
+                name="Approve sending partial Desktop transcript",
+            )
+            sizer.Add(self.partial_approval, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
         self.approve_button = self.FindWindow(wx.ID_OK)
         if buttons is not None:
@@ -5581,18 +5610,53 @@ class DesktopImportDialog(wx.Dialog):
         self.CentreOnParent()
 
     def _turn_checked(self, event: wx.CommandEvent) -> None:
-        index = event.GetInt()
-        if self.turns.IsChecked(index):
+        visible_index = event.GetInt()
+        index = self._turn_page * self._PAGE_SIZE + visible_index
+        if self.turns.IsChecked(visible_index):
             self._selected_indices.add(index)
         else:
             self._selected_indices.discard(index)
         self._selection_changed(self._selected_indices)
 
+    def _show_turn_page(self) -> None:
+        start = self._turn_page * self._PAGE_SIZE
+        stop = min(start + self._PAGE_SIZE, len(self._turns))
+        labels = [
+            f"Turn {index + 1}: {' '.join((self._turns[index].prompt or self._turns[index].response)[:100].split())}"
+            for index in range(start, stop)
+        ]
+        self.turns.Set(labels)
+        for visible_index, index in enumerate(range(start, stop)):
+            self.turns.Check(visible_index, index in self._selected_indices)
+        pages = max(1, (len(self._turns) + self._PAGE_SIZE - 1) // self._PAGE_SIZE)
+        label = f"Page {self._turn_page + 1} of {pages}"
+        self.page_text.SetLabel(label)
+        self.turns.SetName(f"Transcript turns to include, {label.lower()}")
+        self.previous_page_button.Enable(self._turn_page > 0)
+        self.next_page_button.Enable(self._turn_page + 1 < pages)
+
+    def _previous_turn_page(self) -> None:
+        if self._turn_page > 0:
+            self._turn_page -= 1
+            self._show_turn_page()
+            self.turns.SetFocus()
+
+    def _next_turn_page(self) -> None:
+        if self.next_page_button.IsEnabled():
+            self._turn_page += 1
+            self._show_turn_page()
+            self.turns.SetFocus()
+
     def _selection_changed(self, indices: Optional[set[int]] = None) -> None:
         if indices is None:
-            indices = {index for index in range(len(self._turns)) if self.turns.IsChecked(index)}
-            self._selected_indices = indices
-        selected = [self._turns[index] for index in sorted(indices)]
+            for visible_index in range(self.turns.GetCount()):
+                index = self._turn_page * self._PAGE_SIZE + visible_index
+                if self.turns.IsChecked(visible_index):
+                    self._selected_indices.add(index)
+                else:
+                    self._selected_indices.discard(index)
+            indices = self._selected_indices
+        selected_indices = sorted(indices)
         self._context_serial += 1
         serial = self._context_serial
         self.context.ChangeValue("Preparing selected context…")
@@ -5602,7 +5666,8 @@ class DesktopImportDialog(wx.Dialog):
 
         def work() -> None:
             parts = []
-            for turn in selected:
+            for index in selected_indices:
+                turn = self._turns[index]
                 if turn.prompt.strip():
                     parts.append(f"You: {turn.prompt}")
                 if turn.response.strip():
@@ -5621,12 +5686,22 @@ class DesktopImportDialog(wx.Dialog):
         if self._first_context:
             self._first_context = False
             self.context.SetFocus()
+            if self._partial:
+                announce(
+                    "Partial Desktop transcript: the reader stopped after "
+                    f"{_MAX_TRANSCRIPT_PARTS:,} messages. "
+                    "Review the available text and approve it before sending."
+                )
         else:
             announce("Prepared context updated; review it before approving")
 
     def _approve(self) -> None:
         if not self.context.IsEnabled():
             announce("Preparing selected context; wait before approving")
+            return
+        if self._partial and self.partial_approval and not self.partial_approval.GetValue():
+            announce("Partial transcript: approve sending the available text before continuing")
+            self.partial_approval.SetFocus()
             return
         context = self.context.GetValue().strip()
         instruction = self.instruction.GetValue().strip()
@@ -15897,10 +15972,13 @@ class MainFrame(wx.Frame):
 
         def work() -> None:
             try:
-                turns = load_turns(entry)
+                if import_desktop and not entry.resumable:
+                    turns, partial = load_desktop_import(entry)
+                else:
+                    turns, partial = load_turns(entry), False
                 error = ""
             except Exception as exc:
-                turns, error = [], str(exc)
+                turns, partial, error = [], False, str(exc)
             _call_after_alive(
                 self._history_open_loaded,
                 serial,
@@ -15910,6 +15988,7 @@ class MainFrame(wx.Frame):
                 error,
                 on_open,
                 import_desktop,
+                partial,
             )
 
         threading.Thread(target=work, daemon=True).start()
@@ -15967,7 +16046,7 @@ class MainFrame(wx.Frame):
             self._history_open_cancel_button.Disable()
 
     def _history_open_loaded(
-        self, serial, cancel, entry, turns, error, on_open, import_desktop=False
+        self, serial, cancel, entry, turns, error, on_open, import_desktop=False, partial=False
     ) -> None:
         if not self or serial != self._history_open_serial:
             return
@@ -15989,7 +16068,7 @@ class MainFrame(wx.Frame):
             announce(f"Error: {entry.title} could not be read back")
             return
         if import_desktop and not entry.resumable:
-            self._import_desktop_history(entry, turns)
+            self._import_desktop_history(entry, turns, partial=partial)
             return
         if not entry.resumable:
             text = "\n\n".join(
@@ -16028,16 +16107,23 @@ class MainFrame(wx.Frame):
         if on_open:
             on_open(panel)
 
-    def _import_desktop_history(self, entry: HistoryEntry, turns: List[HistoryTurn]) -> None:
+    def _import_desktop_history(
+        self, entry: HistoryEntry, turns: List[HistoryTurn], *, partial: bool = False
+    ) -> None:
         """Ask for approval, then send reviewed context to a new session."""
         target_backend = self.current_backend()
         current_cwd = self._history_cwd()
         saved_cwd = entry.cwd
-        fallback = bool(saved_cwd and not os.path.isdir(saved_cwd))
+        fallback = not saved_cwd or not os.path.isdir(saved_cwd)
         cwd = saved_cwd if saved_cwd and not fallback else current_cwd
         if fallback:
-            announce(f"Saved project folder unavailable: {saved_cwd}. Using current folder: {cwd}")
-        dialog = DesktopImportDialog(self, entry, turns, target_backend, cwd, fallback)
+            reason = (
+                f"Saved project folder unavailable: {saved_cwd}"
+                if saved_cwd
+                else "No project folder recorded"
+            )
+            announce(f"{reason}. Using current folder: {cwd}")
+        dialog = DesktopImportDialog(self, entry, turns, target_backend, cwd, fallback, partial)
         try:
             if dialog.ShowModal() != wx.ID_OK:
                 announce("Desktop import cancelled; nothing was sent")

@@ -1315,23 +1315,30 @@ def _freebuff_desktop_entries(cwd: Optional[str]) -> List[HistoryEntry]:
     return entries
 
 
-def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+def load_desktop_import(entry: HistoryEntry) -> tuple[List[HistoryTurn], bool]:
+    """Read Desktop messages and report whether the cap omitted a spoken one.
+
+    The cap counts user and assistant messages only: tool rows are the store's
+    bookkeeping for work the conversation did, and a thread cannot lose a turn
+    to them.
+    """
     connection = _hermes_connect(Path(entry.path))
     if connection is None:
-        return []
+        return [], False
     try:
         rows = connection.execute(
-            "SELECT role, parts_json FROM messages WHERE thread_id = ? ORDER BY seq LIMIT ?",
-            (entry.session_id, _MAX_TRANSCRIPT_PARTS),
+            "SELECT role, parts_json FROM messages"
+            " WHERE thread_id = ? AND role IN ('user', 'assistant')"
+            " ORDER BY seq LIMIT ?",
+            (entry.session_id, _MAX_TRANSCRIPT_PARTS + 1),
         ).fetchall()
     except Exception:  # noqa: BLE001
-        return []
+        return [], False
     finally:
         connection.close()
+    partial = len(rows) > _MAX_TRANSCRIPT_PARTS
     turns: List[HistoryTurn] = []
-    for row in rows:
-        if row["role"] not in ("user", "assistant"):
-            continue
+    for row in rows[:_MAX_TRANSCRIPT_PARTS]:
         try:
             parts = json.loads(row["parts_json"] or "[]")
         except ValueError:
@@ -1351,7 +1358,11 @@ def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
             if not turns:
                 turns.append(HistoryTurn())
             turns[-1].response = (turns[-1].response + "\n\n" + text).strip()
-    return turns
+    return turns, partial
+
+
+def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    return load_desktop_import(entry)[0]
 
 
 def _freebuff_all_entries(cwd: Optional[str]) -> List[HistoryEntry]:
