@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from importlib import import_module
 from typing import Callable, cast
@@ -21,6 +22,7 @@ from .contract import (
     OpencodeOptions,
     Worker,
     WorkerCapabilities,
+    WorkerOptions,
     WorkerRequest,
 )
 
@@ -54,6 +56,15 @@ def worker_capabilities(backend: str) -> WorkerCapabilities:
         return _WORKERS[backend].capabilities
     except KeyError:
         raise KeyError(f"no worker for backend {backend!r}") from None
+
+
+def worker_options(backend: str, values: Mapping[str, object]) -> WorkerOptions:
+    """Construct the selected backend's typed options without loading its worker."""
+    try:
+        options_type = _WORKERS[backend].options
+    except KeyError:
+        raise KeyError(f"no worker for backend {backend!r}") from None
+    return cast(WorkerOptions, options_type(**values))
 
 
 def worker_type(backend: str) -> Callable:

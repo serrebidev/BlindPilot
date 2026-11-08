@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import blindpilot_app as app
-from backend_workers import ClaudeOptions, HermesOptions, WorkerRequest
+from backend_workers import ClaudeOptions, HermesOptions, MuseAiOptions, WorkerRequest
 from doubles import panel_stub
 
 
@@ -19,7 +19,16 @@ class _Worker:
 
 def test_normal_turn_reaches_factory_with_callbacks_and_claude_options(monkeypatch):
     requests = []
+    option_calls = []
     worker = _Worker()
+    real_worker_options = app.backend_workers.worker_options
+
+    def record_options(backend, values):
+        options = real_worker_options(backend, values)
+        option_calls.append((backend, values, options))
+        return options
+
+    monkeypatch.setattr(app.backend_workers, "worker_options", record_options)
     monkeypatch.setattr(
         app.backend_workers,
         "create_worker",
@@ -68,12 +77,50 @@ def test_normal_turn_reaches_factory_with_callbacks_and_claude_options(monkeypat
     assert isinstance(request.options, ClaudeOptions)
     assert request.options.held_for is panel
     assert request.options.remote_control == {"enabled": True}
+    assert option_calls == [
+        (
+            app.BACKEND_CLAUDE,
+            {"held_for": panel, "remote_control": {"enabled": True}},
+            request.options,
+        )
+    ]
+    assert option_calls[0][2] is request.options
     assert request.callbacks.on_unsolicited is wake
     assert request.callbacks.on_permission is permission
     request.callbacks.on_tasks("task")
     request.callbacks.on_remote({"enabled": True})
     assert queued == [("tasks", "task"), ("remote", {"enabled": True})]
     assert worker.started
+
+
+def test_museai_follow_up_routes_cursor_through_worker_options(monkeypatch):
+    option_calls = []
+    real_worker_options = app.backend_workers.worker_options
+
+    def record_options(backend, values):
+        options = real_worker_options(backend, values)
+        option_calls.append((backend, values, options))
+        return options
+
+    monkeypatch.setattr(app.backend_workers, "worker_options", record_options)
+    panel = panel_stub(
+        _session_id="session-1",
+        _museai_follow_after=42,
+        cwd="/work",
+        mode="default",
+        _ask_questions=lambda _questions: None,
+        _queue_worker_event=lambda *_event: None,
+    )
+
+    request = app.SessionPanel._worker_request(
+        panel, app.BACKEND_MUSEAI, None, {}, model="", effort="", normal_turn=False
+    )
+
+    assert isinstance(request, WorkerRequest)
+    assert isinstance(request.options, MuseAiOptions)
+    assert request.options.follow_after == 42
+    assert option_calls == [(app.BACKEND_MUSEAI, {"follow_after": 42}, request.options)]
+    assert option_calls[0][2] is request.options
 
 
 def test_hermes_reopen_reaches_factory_as_resume_only(monkeypatch):
