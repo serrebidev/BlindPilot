@@ -66,17 +66,6 @@ from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 import backend_pool
 import backend_workers
 from backend_workers import (
-    AntigravityOptions,
-    ClaudeOptions,
-    CodexOptions,
-    CommandcodeOptions,
-    CopilotOptions,
-    FreebuffOptions,
-    GeminiOptions,
-    HermesOptions,
-    MuseAiOptions,
-    MuseOptions,
-    OpencodeOptions,
     WorkerCallbacks,
     WorkerRequest,
     worker_capabilities,
@@ -428,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.55.15"
+APP_VERSION = "0.55.16"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -9527,19 +9516,6 @@ class SessionPanel(wx.Panel):
         normal_turn: bool = True,
     ) -> WorkerRequest:
         """Collect every constructor option and callback before creating a worker."""
-        option_types = {
-            BACKEND_CLAUDE: ClaudeOptions,
-            BACKEND_CODEX: CodexOptions,
-            BACKEND_FREEBUFF: FreebuffOptions,
-            BACKEND_OPENCODE: OpencodeOptions,
-            BACKEND_HERMES: HermesOptions,
-            BACKEND_MUSE: MuseOptions,
-            BACKEND_MUSEAI: MuseAiOptions,
-            BACKEND_COMMANDCODE: CommandcodeOptions,
-            BACKEND_GEMINI: GeminiOptions,
-            BACKEND_ANTIGRAVITY: AntigravityOptions,
-            BACKEND_COPILOT: CopilotOptions,
-        }
         option_values = {
             key: value
             for key, value in extra.items()
@@ -9547,7 +9523,7 @@ class SessionPanel(wx.Panel):
         }
         if backend == BACKEND_MUSEAI and prompt is None:
             option_values["follow_after"] = getattr(self, "_museai_follow_after", None)
-        options = option_types[backend](**option_values)
+        options = backend_workers.worker_options(backend, option_values)
         if "on_permission" in extra:
             on_permission = extra["on_permission"]
         elif normal_turn:

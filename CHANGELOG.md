@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.16 - 2026-11-07
+
+Backend worker options routed through the backend registry (Farhan Khan, PR #154): a new worker_options factory helper constructs the selected backend's typed options from the registry, removing the app's duplicate backend-to-options table in SessionPanel._worker_request. A PyInstaller hook bundles all registry-selected worker modules in frozen builds. StdioTransport.close now discards queued Hermes frames, and the stdout reader no longer queues frames after close. Tests cover option routing for every backend, Muse.ai follow-up cursor routing, the build hook, and the transport close regression. No intended user-visible change.
+
 ## v0.55.15 - 2026-11-07
 
 Backend worker construction unified behind a typed interface (Farhan Khan, PR #153): a typed WorkerRequest with callbacks, an exhaustive lazy factory in the new backend_workers package, and the Codex, Freebuff and OpenCode worker implementations relocated into it; agent_backends.py is now the authentication, account and usage adapter only. The legacy selector and construction shims are removed, with contract and factory tests added. No intended user-visible change.

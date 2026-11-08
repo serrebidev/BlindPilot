@@ -18,7 +18,7 @@ from .contract import (
     WorkerOptions,
     WorkerRequest,
 )
-from .factory import create_worker, worker_capabilities, worker_type
+from .factory import create_worker, worker_capabilities, worker_options, worker_type
 
 __all__ = [
     "AntigravityOptions",
@@ -39,5 +39,6 @@ __all__ = [
     "WorkerRequest",
     "create_worker",
     "worker_capabilities",
+    "worker_options",
     "worker_type",
 ]
