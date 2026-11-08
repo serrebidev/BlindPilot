@@ -1215,8 +1215,9 @@ class StdioTransport:
                 self._stderr.append(line[:400])
                 continue
             with self._frames_ready:
-                self._frames.append(frame)
-                self._frames_ready.notify_all()
+                if self._proc is proc:
+                    self._frames.append(frame)
+                    self._frames_ready.notify_all()
         with self._frames_ready:
             self._closed = True
             self._frames_ready.notify_all()
@@ -1292,6 +1293,7 @@ class StdioTransport:
         self._proc = None
         with self._frames_ready:
             self._closed = True
+            self._frames.clear()
             self._frames_ready.notify_all()
 
     def connected(self) -> bool:
