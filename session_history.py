@@ -96,6 +96,13 @@ _MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
 # in it, so it is counted in rows rather than in bytes.
 _MAX_TRANSCRIPT_PARTS = 20_000
 
+# How many rows past the cap are inspected for visible text. A row left behind
+# by the cap only makes a transcript partial if it held words someone would
+# have heard, so the rows just past it are read; beyond this many, whether the
+# rest hold words is unknown, and reporting partial is safer than risking a
+# silent drop.
+_PARTIAL_PROBE = 1_000
+
 # How many conversations one backend contributes to the picker. Comfortably
 # more than :func:`list_history` returns, so the cap that decides what is shown
 # stays that one rather than this.
@@ -1315,41 +1322,76 @@ def _freebuff_desktop_entries(cwd: Optional[str]) -> List[HistoryEntry]:
     return entries
 
 
-def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+def _desktop_row_text(role: str, parts_json: Optional[str]) -> str:
+    """The words a Desktop message was written to be read for.
+
+    Only text parts count: reasoning and tool parts are the store's
+    bookkeeping for work the conversation did, and an image part carries
+    nothing a person can read aloud. A user row is cleaned like every other
+    backend's prompt, so a wholly injected block leaves no visible text.
+    """
+    try:
+        parts = json.loads(parts_json or "[]")
+    except (TypeError, ValueError):
+        return ""
+    texts = [
+        str(part.get("text") or "").strip()
+        for part in (parts if isinstance(parts, list) else [])
+        if isinstance(part, dict) and part.get("kind") == "text"
+    ]
+    text = "\n\n".join(t for t in texts if t)
+    if role == "user":
+        return clean_user_text(text)
+    return text
+
+
+def load_desktop_import(entry: HistoryEntry) -> tuple[List[HistoryTurn], bool]:
+    """Read Desktop messages and report whether the cap omitted a spoken one.
+
+    The cap counts user and assistant messages only: tool rows are the store's
+    bookkeeping for work the conversation did, and a thread cannot lose a turn
+    to them.
+    """
     connection = _hermes_connect(Path(entry.path))
     if connection is None:
-        return []
+        return [], False
     try:
         rows = connection.execute(
-            "SELECT role, parts_json FROM messages WHERE thread_id = ? ORDER BY seq LIMIT ?",
-            (entry.session_id, _MAX_TRANSCRIPT_PARTS),
+            "SELECT role, parts_json FROM messages"
+            " WHERE thread_id = ? AND role IN ('user', 'assistant')"
+            " ORDER BY seq LIMIT ?",
+            (entry.session_id, _MAX_TRANSCRIPT_PARTS + _PARTIAL_PROBE + 1),
         ).fetchall()
     except Exception:  # noqa: BLE001
-        return []
+        return [], False
     finally:
         connection.close()
+    # A row beyond the cap only makes the transcript partial if it held words a
+    # person would have heard: the cap is on what was said, not on rows. Only a
+    # probe's worth past the cap is inspected; if there are more rows than that,
+    # words may still be past the probe, so report partial rather than drop them
+    # silently.
+    beyond = rows[_MAX_TRANSCRIPT_PARTS:]
+    partial = (
+        any(_desktop_row_text(row["role"], row["parts_json"]) for row in beyond[:_PARTIAL_PROBE])
+        or len(beyond) > _PARTIAL_PROBE
+    )
     turns: List[HistoryTurn] = []
-    for row in rows:
-        try:
-            parts = json.loads(row["parts_json"] or "[]")
-        except ValueError:
-            continue
-        # Only what was written to be read: reasoning and tool parts are not.
-        texts = [
-            str(p.get("text") or "").strip()
-            for p in (parts if isinstance(parts, list) else [])
-            if isinstance(p, dict) and p.get("kind") == "text"
-        ]
-        text = "\n\n".join(t for t in texts if t)
+    for row in rows[:_MAX_TRANSCRIPT_PARTS]:
+        text = _desktop_row_text(row["role"], row["parts_json"])
         if not text:
             continue
         if row["role"] == "user":
-            turns.append(HistoryTurn(prompt=clean_user_text(text)))
+            turns.append(HistoryTurn(prompt=text))
         else:
             if not turns:
                 turns.append(HistoryTurn())
             turns[-1].response = (turns[-1].response + "\n\n" + text).strip()
-    return turns
+    return [turn for turn in turns if turn.prompt.strip() or turn.response.strip()], partial
+
+
+def _freebuff_desktop_turns(entry: HistoryEntry) -> List[HistoryTurn]:
+    return load_desktop_import(entry)[0]
 
 
 def _freebuff_all_entries(cwd: Optional[str]) -> List[HistoryEntry]:
