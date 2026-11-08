@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 
 from agent_backends import BACKENDS
+import backend_workers
 from backend_workers import (
     AntigravityOptions,
     ClaudeOptions,
@@ -58,6 +59,40 @@ WORKER_CASES = [
 
 def test_factory_contract_covers_every_backend():
     assert {backend for backend, _options, _name in WORKER_CASES} == set(BACKENDS)
+
+
+@pytest.mark.parametrize(("backend", "expected", "_class_name"), WORKER_CASES)
+def test_worker_options_uses_registered_type_and_defaults(backend, expected, _class_name):
+    options = backend_workers.worker_options(backend, {})
+    assert type(options) is type(expected)
+    assert options == expected
+
+
+@pytest.mark.parametrize(
+    ("backend", "values", "expected"),
+    [
+        (
+            "claude",
+            {"remote_control": {"enabled": True}},
+            ClaudeOptions(remote_control={"enabled": True}),
+        ),
+        (
+            "codex",
+            {"compact": True, "plan_account": None},
+            CodexOptions(compact=True, plan_account=None),
+        ),
+        ("museai", {"follow_after": 42}, MuseAiOptions(follow_after=42)),
+    ],
+)
+def test_worker_options_passes_provider_values(backend, values, expected):
+    assert backend_workers.worker_options(backend, values) == expected
+
+
+def test_worker_options_rejects_unknown_backend_and_invalid_value():
+    with pytest.raises(KeyError, match="no worker for backend 'unknown'"):
+        backend_workers.worker_options("unknown", {})
+    with pytest.raises(TypeError, match="unexpected keyword argument 'invalid'"):
+        backend_workers.worker_options("museai", {"invalid": True})
 
 
 @pytest.mark.parametrize(("backend", "options", "class_name"), WORKER_CASES)

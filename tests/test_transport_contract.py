@@ -223,6 +223,18 @@ def test_a_real_transport_satisfies_the_same_contract(who: str, build, stream_en
     check_transport_contract(build, who, stream_ends=stream_ends)
 
 
+def test_stdio_close_discards_a_buffered_frame() -> None:
+    transport = _OneFrameThenExits(".")
+    transport.start()
+    try:
+        with transport._frames_ready:
+            assert transport._frames_ready.wait_for(lambda: bool(transport._frames), timeout=3)
+        transport.close()
+        assert transport.receive(0.001) is None
+    finally:
+        transport.close()
+
+
 # --------------------------------------------------------------------------
 # The registry cannot go stale
 # --------------------------------------------------------------------------
