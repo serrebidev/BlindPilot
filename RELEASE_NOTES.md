@@ -1,3 +1,7 @@
+# BlindPilot 0.55.16
+
+- Changed: backend worker options now come from the backend registry itself - the app no longer keeps its own duplicate backend-to-options table, so a backend's options are built by the registered options class through the factory. Frozen builds now bundle every registry-selected worker module, and closing the Hermes transport drops any buffered frames instead of delivering them after close. From Farhan Khan, PR #154.
+
 # BlindPilot 0.55.15
 
 - Changed: backend worker construction now goes through one typed interface - the app builds every backend's worker through a single factory with an explicit contract for its lifecycle and capabilities, and the Codex, Freebuff and OpenCode workers live in their own modules. No intended change to provider behaviour or anything on screen. From Farhan Khan, PR #153.
