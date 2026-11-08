@@ -1,3 +1,7 @@
+# BlindPilot 0.55.17
+
+- New: a FreeBuff Desktop conversation can now be imported into a new conversation from Recent Conversations. Open still shows its transcript read only; Import Desktop transcript lets you choose turns, edit the prepared context, say whether the old conversation is background reference or work to continue, and write the fresh instruction the new conversation follows. A transcript past the 20,000-message reader limit is flagged partial and needs your separate approval before anything is sent. The original Desktop conversation is never resumed or changed. From Farhan Khan, PR #155.
+
 # BlindPilot 0.55.16
 
 - Changed: backend worker options now come from the backend registry itself - the app no longer keeps its own duplicate backend-to-options table, so a backend's options are built by the registered options class through the factory. Frozen builds now bundle every registry-selected worker module, and closing the Hermes transport drops any buffered frames instead of delivering them after close. From Farhan Khan, PR #154.

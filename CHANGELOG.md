@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.17 - 2026-11-08
+
+FreeBuff Desktop history import (Farhan Khan, PR #155): Recent Conversations gains Import Desktop transcript beside the unchanged read-only Open for FreeBuff Desktop conversations. It starts a new conversation on the selected backend - the original Desktop conversation is never resumed or modified - with paged turn selection, an editable prepared context, a background/continue intent choice, and a required fresh instruction. load_desktop_import reads only user and assistant rows, stops at the 20,000-message cap, and reports partial only when importable text was omitted, probing 1,000 rows past the cap so later text cannot be dropped silently; a partial transcript needs separate approval before sending.
+
 ## v0.55.16 - 2026-11-07
 
 Backend worker options routed through the backend registry (Farhan Khan, PR #154): a new worker_options factory helper constructs the selected backend's typed options from the registry, removing the app's duplicate backend-to-options table in SessionPanel._worker_request. A PyInstaller hook bundles all registry-selected worker modules in frozen builds. StdioTransport.close now discards queued Hermes frames, and the stdout reader no longer queues frames after close. Tests cover option routing for every backend, Muse.ai follow-up cursor routing, the build hook, and the transport close regression. No intended user-visible change.
