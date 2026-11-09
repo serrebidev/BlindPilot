@@ -1,0 +1,69 @@
+name: macOS release
+
+# The Windows release is built on the release host; this attaches the Apple
+# Silicon build to that existing Forgejo release. It runs on the Forgejo Mac
+# runner and uploads with Forgejo's automatic job token.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build macOS for and attach to
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.release_tag }}
+      ASSET: BlindPilot-macOS-arm64.zip
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip -r requirements-build.txt
+
+      - name: Run regression tests
+        run: python -m pytest -q -W error
+
+      - name: Generate application icons
+        run: python tools/make_icon.py
+
+      - name: Build macOS application
+        run: |
+          set -euo pipefail
+          python -m PyInstaller --noconfirm --clean BlindPilot.spec
+          codesign --force --deep --sign - dist/BlindPilot.app
+          dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-smoke
+          dist/BlindPilot.app/Contents/MacOS/BlindPilot --startup-gui-smoke
+          mkdir -p artifacts
+          ditto -c -k --sequesterRsrc --keepParent dist/BlindPilot.app "artifacts/$ASSET"
+          cd artifacts
+          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+
+      - name: Attach to the Forgejo release
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -euo pipefail
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          h="Authorization: token $FORGEJO_TOKEN"
+          release="$(curl -sf -H "$h" "$api/releases/tags/$TAG")"
+          id="$(echo "$release" | jq -r .id)"
+          for file in artifacts/*; do
+            name="$(basename "$file")"
+            old="$(echo "$release" | jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id')"
+            [ -z "$old" ] || curl -sf -X DELETE -H "$h" "$api/releases/$id/assets/$old"
+            curl -sf -o /dev/null -H "$h" -F "attachment=@$file" "$api/releases/$id/assets?name=$name"
+            echo "Attached $name to $TAG"
+          done
