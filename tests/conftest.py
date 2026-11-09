@@ -45,6 +45,15 @@ def git_commands_use_their_own_repository(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_ambient_github_tokens(monkeypatch):
+    """Copilot counts an exported token as a sign-in. CI runners (Forgejo's
+    exports GITHUB_TOKEN to every job) and developer shells must not change
+    which backends the tests see as signed in."""
+    for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GITEA_TOKEN", "FORGEJO_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def diagnostics_stay_out_of_the_real_log(monkeypatch):
     """Keep everything a test writes down out of the installed app's own log.
 
