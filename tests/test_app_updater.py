@@ -1,4 +1,4 @@
-"""GitHub updater selection, version, and verification regression tests."""
+"""Forgejo updater selection, version, and verification regression tests."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from app_updater import (
 
 
 class _Response(io.BytesIO):
-    def __init__(self, payload: bytes, url: str = "https://github.com/release"):
+    def __init__(self, payload: bytes, url: str = "https://git.serrebiradio.com/release"):
         super().__init__(payload)
         self._url = url
 
@@ -54,21 +54,24 @@ def test_version_and_platform_asset_selection():
         asset_name_for_platform("Darwin", "x86_64")
 
 
-def test_latest_release_is_discovered_from_github_at_runtime():
+def test_latest_release_is_discovered_from_forgejo_at_runtime():
     archive = b"verified archive"
     digest = hashlib.sha256(archive).hexdigest()
     payload = {
         "tag_name": "v0.4.0",
         "name": "BlindPilot 0.4.0",
         "body": "Accessible update",
-        "html_url": "https://github.com/serrebidev/BlindPilot/releases/tag/v0.4.0",
+        "html_url": "https://git.serrebiradio.com/serrebi/BlindPilot/releases/tag/v0.4.0",
         "draft": False,
         "assets": [
             {
                 "name": "BlindPilot-Windows-x64.zip",
                 "size": len(archive),
                 "digest": f"sha256:{digest}",
-                "browser_download_url": "https://github.com/download/update.zip",
+                "browser_download_url": (
+                    "https://git.serrebiradio.com/serrebi/BlindPilot/releases/download/v0.4.0/"
+                    "BlindPilot-Windows-x64.zip"
+                ),
             }
         ],
     }
@@ -86,6 +89,51 @@ def test_latest_release_is_discovered_from_github_at_runtime():
     assert release.sha256 == digest
 
 
+def test_a_forgejo_release_without_a_digest_verifies_through_its_sidecar():
+    """Forgejo attachments carry no digest field, so the hash comes from the
+    .sha256 sidecar asset published beside the archive."""
+    archive = b"verified archive"
+    digest = hashlib.sha256(archive).hexdigest()
+    asset_url = "https://git.serrebiradio.com/download/update.zip"
+    checksum_url = asset_url + ".sha256"
+    payload = {
+        "tag_name": "v0.4.0",
+        "name": "BlindPilot 0.4.0",
+        "body": "Accessible update",
+        "html_url": "https://git.serrebiradio.com/serrebi/BlindPilot/releases/tag/v0.4.0",
+        "draft": False,
+        "assets": [
+            {
+                "name": "BlindPilot-Windows-x64.zip",
+                "size": len(archive),
+                "browser_download_url": asset_url,
+            },
+            {
+                "name": "BlindPilot-Windows-x64.zip.sha256",
+                "size": len(digest) + 2 + len("BlindPilot-Windows-x64.zip"),
+                "browser_download_url": checksum_url,
+            },
+        ],
+    }
+
+    def opener(request, **_kwargs):
+        if request.full_url == checksum_url:
+            return _Response(f"{digest}  BlindPilot-Windows-x64.zip".encode())
+        if request.full_url == asset_url:
+            return _Response(archive)
+        return _Response(json.dumps(payload).encode())
+
+    release = fetch_latest_release("0.3.0", opener=opener, system="Windows", machine="AMD64")
+
+    assert release.sha256 == ""
+    assert release.checksum_url == checksum_url
+    downloaded = download_update(release, "0.3.0", opener=opener)
+    try:
+        assert downloaded.read_bytes() == archive
+    finally:
+        downloaded.unlink(missing_ok=True)
+
+
 def test_download_rejects_a_hash_mismatch():
     archive = b"tampered"
     release = ReleaseInfo(
@@ -93,9 +141,9 @@ def test_download_rejects_a_hash_mismatch():
         tag="v0.4.0",
         title="Update",
         notes="",
-        page_url="https://github.com/release",
+        page_url="https://git.serrebiradio.com/release",
         asset_name="BlindPilot-Windows-x64.zip",
-        asset_url="https://github.com/download/update.zip",
+        asset_url="https://git.serrebiradio.com/download/update.zip",
         asset_size=len(archive),
         sha256="0" * 64,
     )
@@ -115,9 +163,9 @@ def test_download_accepts_the_published_hash():
         tag="v0.4.0",
         title="Update",
         notes="",
-        page_url="https://github.com/release",
+        page_url="https://git.serrebiradio.com/release",
         asset_name="BlindPilot-Windows-x64.zip",
-        asset_url="https://github.com/download/update.zip",
+        asset_url="https://git.serrebiradio.com/download/update.zip",
         asset_size=len(archive),
         sha256=hashlib.sha256(archive).hexdigest(),
     )
@@ -140,9 +188,9 @@ def test_cancelled_download_is_removed_before_any_bytes_are_kept(tmp_path, monke
         tag="v0.4.0",
         title="Update",
         notes="",
-        page_url="https://github.com/release",
+        page_url="https://git.serrebiradio.com/release",
         asset_name="BlindPilot-Windows-x64.zip",
-        asset_url="https://github.com/download/update.zip",
+        asset_url="https://git.serrebiradio.com/download/update.zip",
         asset_size=len(archive),
         sha256=hashlib.sha256(archive).hexdigest(),
     )

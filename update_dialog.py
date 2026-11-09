@@ -38,7 +38,7 @@ _HEADING_MARK = re.compile(r"^#{1,6}[ \t]+")
 def plain_notes(notes: str) -> str:
     """Release notes as plain text.
 
-    GitHub release bodies are markdown, and the first line is usually a
+    Forgejo release bodies are markdown, and the first line is usually a
     heading. A text box shows the hashes as they are, so they come off.
     """
     return "\n".join(_HEADING_MARK.sub("", line) for line in notes.splitlines())

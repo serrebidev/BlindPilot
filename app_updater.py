@@ -1,4 +1,4 @@
-"""Secure GitHub Releases updater for packaged BlindPilot installations.
+"""Secure Forgejo Releases updater for packaged BlindPilot installations.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors.
 Based on the original Claude Code Reader application by doubletaponair:
@@ -29,12 +29,15 @@ from certificates import open_url
 
 
 GITHUB_REPOSITORY = "serrebidev/BlindPilot"
-LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+FORGEJO_REPOSITORY = "serrebi/BlindPilot"
+FORGEJO_HOST = "git.serrebiradio.com"
+LATEST_RELEASE_API = f"https://{FORGEJO_HOST}/api/v1/repos/{FORGEJO_REPOSITORY}/releases/latest"
 MAX_UPDATE_BYTES = 750 * 1024 * 1024
 # Every file the updater leaves in the temp folder starts with this, so
 # sweep_temporary_files can find them.
 TEMPORARY_PREFIX = "BlindPilot-update-"
-_ALLOWED_DOWNLOAD_HOSTS = ("github.com", "githubusercontent.com")
+# Forgejo serves release attachments from the same host as the API.
+_ALLOWED_DOWNLOAD_HOSTS = (FORGEJO_HOST,)
 
 
 class UpdateError(RuntimeError):
@@ -116,9 +119,8 @@ def _request(url: str, current_version: str) -> Request:
     return Request(
         url,
         headers={
-            "Accept": "application/vnd.github+json",
+            "Accept": "application/json",
             "User-Agent": f"BlindPilot/{current_version}",
-            "X-GitHub-Api-Version": "2022-11-28",
         },
     )
 
@@ -143,7 +145,7 @@ Opener = Callable[..., HttpResponse]
 
 
 def _verified_urlopen(request: Request, timeout: Optional[float] = None) -> HttpResponse:
-    """The real opener: GitHub over a trust store a packaged build still has."""
+    """The real opener: Forgejo over a trust store a packaged build still has."""
     return open_url(request, timeout=timeout)
 
 
@@ -168,19 +170,19 @@ def fetch_latest_release(
     machine: Optional[str] = None,
     kind: Optional[str] = None,
 ) -> ReleaseInfo:
-    """Query GitHub at runtime and select the asset for this computer."""
+    """Query Forgejo at runtime and select the asset for this computer."""
     try:
         with opener(_request(LATEST_RELEASE_API, current_version), timeout=20) as response:
             payload = json.loads(_read_limited(response, 4 * 1024 * 1024))
     except UpdateError:
         raise
     except Exception as exc:
-        raise UpdateError(f"Could not contact GitHub: {exc}") from exc
+        raise UpdateError(f"Could not contact Forgejo: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("draft"):
-        raise UpdateError("GitHub returned an invalid latest release.")
+        raise UpdateError("Forgejo returned an invalid latest release.")
     tag = str(payload.get("tag_name") or "").strip()
     if not version_tuple(tag):
-        raise UpdateError("The latest GitHub release has no valid version tag.")
+        raise UpdateError("The latest Forgejo release has no valid version tag.")
     expected_name = asset_name_for_platform(system, machine, kind)
     assets = payload.get("assets")
     if not isinstance(assets, list):
@@ -198,6 +200,8 @@ def fetch_latest_release(
     size = int(asset.get("size") or 0)
     if size <= 0 or size > MAX_UPDATE_BYTES:
         raise UpdateError("The release asset has an invalid size.")
+    # Forgejo attachments carry no digest field, so this stays empty there
+    # and verification falls through to the .sha256 sidecar below.
     digest = str(asset.get("digest") or "")
     sha256 = digest.removeprefix("sha256:").casefold()
     if not re.fullmatch(r"[0-9a-f]{64}", sha256):
@@ -280,7 +284,7 @@ def download_update(
         ):
             final_url = getattr(response, "geturl", lambda: release.asset_url)()
             if not _allowed_download_url(final_url):
-                raise UpdateError("GitHub redirected the update to an untrusted host.")
+                raise UpdateError("Forgejo redirected the update to an untrusted host.")
             while True:
                 if cancel is not None and cancel.is_set():
                     raise UpdateCancelled("The update download was cancelled.")
@@ -298,7 +302,7 @@ def download_update(
             raise UpdateCancelled("The update download was cancelled.")
         if received != release.asset_size:
             raise UpdateError("The update download was incomplete.")
-        # shortcut: this hash arrives on the same channel as the asset (GitHub),
+        # shortcut: this hash arrives on the same channel as the asset (Forgejo),
         # so it catches a corrupted download, not a compromised release host.
         # Upgrade to a detached signature (minisign or GPG with a pinned key)
         # when the release process can sign.

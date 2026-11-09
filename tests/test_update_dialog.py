@@ -19,9 +19,9 @@ def _release() -> ReleaseInfo:
         tag="v9.0.0",
         title="BlindPilot 9",
         notes="A clearly described update.",
-        page_url="https://github.com/serrebidev/BlindPilot/releases/tag/v9.0.0",
+        page_url="https://git.serrebiradio.com/serrebi/BlindPilot/releases/tag/v9.0.0",
         asset_name="BlindPilot-Windows-x64.zip",
-        asset_url="https://github.com/download/update.zip",
+        asset_url="https://git.serrebiradio.com/download/update.zip",
         asset_size=2 * 1024 * 1024,
         sha256="0" * 64,
     )
@@ -123,7 +123,7 @@ def test_a_check_that_finishes_after_the_app_is_gone_stays_quiet(monkeypatch):
     # reads nothing off the object it is handed, so this is the only place the
     # answer can come from. The stub used to carry a `check` that nothing read
     # -- a leftover from the injectable check that went in 0.29.9 -- and every
-    # run of this test asked GitHub for the latest release and got a 403 back.
+    # run of this test asked Forgejo for the latest release and got a 403 back.
     # Under `-W error`, which is what CI runs, the unclosed response body in
     # that HTTPError turned this into a failure on any machine that had spent
     # its anonymous rate limit.

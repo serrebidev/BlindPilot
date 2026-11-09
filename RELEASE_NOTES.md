@@ -1,3 +1,7 @@
+# BlindPilot 0.55.18
+
+- Changed: the in-app updater now checks Forgejo instead of GitHub for new releases. Verification is unchanged — every download is still checked against its published SHA-256, read from the checksum file published beside each download — and Report a Bug still files issues on GitHub.
+
 # BlindPilot 0.55.17
 
 - New: a FreeBuff Desktop conversation can now be imported into a new conversation from Recent Conversations. Open still shows its transcript read only; Import Desktop transcript lets you choose turns, edit the prepared context, say whether the old conversation is background reference or work to continue, and write the fresh instruction the new conversation follows. A transcript past the 20,000-message reader limit is flagged partial and needs your separate approval before anything is sent. The original Desktop conversation is never resumed or changed. From Farhan Khan, PR #155.
