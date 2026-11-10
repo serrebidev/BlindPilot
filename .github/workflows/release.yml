@@ -28,6 +28,8 @@ jobs:
             runner: macos-15
             asset: BlindPilot-macOS-arm64.zip
             kind: macos
+    # Forgejo releases go through the release host and macos-release.yml.
+    if: github.server_url == 'https://github.com'
     runs-on: ${{ matrix.runner }}
     # PyInstaller and Inno Setup make this the slow one; a green build is
     # about fifteen minutes. The default is six hours, which is what a
@@ -124,7 +126,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.server_url == 'https://github.com' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
     # Only here, and only this. This job installs nothing: it downloads the

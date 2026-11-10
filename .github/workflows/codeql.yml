@@ -21,6 +21,8 @@ permissions:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
+    # GitHub code-scanning/dependency APIs; Forgejo answers 404.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
