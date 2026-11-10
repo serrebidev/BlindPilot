@@ -1,8 +1,9 @@
 name: macOS release
 
 # The Windows release is built on the release host; this attaches the Apple
-# Silicon build to that existing Forgejo release. It runs on the Forgejo Mac
-# runner and uploads with Forgejo's automatic job token.
+# Silicon build to that existing Forgejo release. The build runs on the Forgejo
+# Mac runner with a read-only token; only the small attach job at the end,
+# which installs nothing, can write to the release.
 on:
   workflow_dispatch:
     inputs:
@@ -12,15 +13,16 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  TAG: ${{ inputs.release_tag }}
+  ASSET: BlindPilot-macOS-arm64.zip
 
 jobs:
   macos:
     runs-on: macos-15
     timeout-minutes: 60
-    env:
-      TAG: ${{ inputs.release_tag }}
-      ASSET: BlindPilot-macOS-arm64.zip
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,10 +39,17 @@ jobs:
         # Forgejo exports GITHUB_TOKEN to jobs; Copilot would count it as a sign-in.
         run: env -u GITHUB_TOKEN -u GITEA_TOKEN -u FORGEJO_TOKEN -u GH_TOKEN python -m pytest -q -W error
 
+      - name: Run static checks
+        shell: bash
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
       - name: Generate application icons
         run: python tools/make_icon.py
 
       - name: Build macOS application
+        shell: bash
         run: |
           set -euo pipefail
           python -m PyInstaller --noconfirm --clean BlindPilot.spec
@@ -52,11 +61,34 @@ jobs:
           cd artifacts
           shasum -a 256 "$ASSET" > "$ASSET.sha256"
 
+      - name: Upload build output
+        # GitHub's artifact actions v4+ refuse a non-github.com server.
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: macos
+          path: artifacts/*
+          if-no-files-found: error
+
+  attach:
+    needs: macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download build output
+        uses: https://code.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: macos
+          path: artifacts
+
       - name: Attach to the Forgejo release
+        shell: bash
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
           set -euo pipefail
+          (cd artifacts && sha256sum --check "$ASSET.sha256")
           api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
           h="Authorization: token $FORGEJO_TOKEN"
           release="$(curl -sf -H "$h" "$api/releases/tags/$TAG")"

@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 import agent_backends
 import hermes_backend
 from agent_backends import BACKEND_HERMES, BACKENDS
@@ -48,6 +50,13 @@ from hermes_worker import HermesWorker
 
 _QUALIFIED_MODEL = "ri.language-model-service..language-model.gpt-5-4"
 _PROVIDER = "palantir-gpt"
+
+
+@pytest.fixture(autouse=True)
+def no_running_gateway(monkeypatch):
+    """A gateway running on this machine would be attached to, bypassing the
+    stand-in transports these tests install."""
+    monkeypatch.setattr(hermes_backend, "running_gateway_target", lambda: None)
 
 
 def _callbacks() -> dict:

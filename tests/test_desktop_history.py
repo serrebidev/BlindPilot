@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 
 import pytest
@@ -167,7 +168,7 @@ def test_freebuff_desktop_import_discloses_only_messages_beyond_reader_cap(
     home, message_count, partial
 ):
     db_path = home / "desktop-v2.db"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         db.execute(
             "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
         )
@@ -201,7 +202,7 @@ def test_freebuff_desktop_import_discloses_only_messages_beyond_reader_cap(
 
 def test_freebuff_desktop_import_ignores_a_beyond_cap_row_with_no_words(home):
     db_path = home / "desktop-v2.db"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         db.execute(
             "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
         )
@@ -229,7 +230,7 @@ def test_freebuff_desktop_import_ignores_a_beyond_cap_row_with_no_words(home):
 
 def test_freebuff_desktop_import_reads_past_a_silent_beyond_cap_row(home):
     db_path = home / "desktop-v2.db"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         db.execute(
             "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
         )
@@ -261,7 +262,7 @@ def test_freebuff_desktop_import_reads_past_a_silent_beyond_cap_row(home):
 def test_freebuff_desktop_import_reports_partial_past_the_probe(home, monkeypatch):
     db_path = home / "desktop-v2.db"
     image_row = json.dumps([{"kind": "image", "text": "payload"}])
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         db.execute(
             "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
         )
@@ -292,7 +293,7 @@ def test_freebuff_desktop_import_reports_partial_past_the_probe(home, monkeypatc
 
 def test_freebuff_desktop_import_skips_a_user_row_that_reads_as_nothing(home):
     db_path = home / "desktop-v2.db"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         db.execute(
             "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
         )
@@ -315,7 +316,7 @@ def test_freebuff_desktop_import_skips_a_user_row_that_reads_as_nothing(home):
 
 def test_freebuff_desktop_import_skips_a_row_whose_parts_are_unreadable(home):
     db_path = home / "desktop-v2.db"
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         # No type on the column, so SQLite hands back whatever was stored: text
         # that is not JSON, and an integer json.loads refuses outright.
         db.execute("CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json)")
@@ -347,7 +348,7 @@ def test_freebuff_desktop_import_cap_counts_only_user_and_assistant_messages(hom
         request = json.dumps([{"kind": "text", "text": str(index + 1)}])
         rows.append((2 * index + 2, "th1", "user", request))
     rows.append((2 * cap + 1, "th1", "tool", tool_row))
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         db.execute(
             "CREATE TABLE messages (seq INTEGER, thread_id TEXT, role TEXT, parts_json TEXT)"
         )

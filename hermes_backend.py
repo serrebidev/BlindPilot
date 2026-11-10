@@ -1419,6 +1419,11 @@ class WebSocketTransport:
         extra: dict = {"cookie": cookies} if cookies else {}
         if self._subprotocols:
             extra["subprotocols"] = list(self._subprotocols)
+            # The gateway refuses a loopback ticket whenever an Origin header is
+            # present (an Origin means a browser, and browsers get the Webapp's
+            # gate instead), and websocket-client sends one by default. The
+            # result was a bare HTTP 403 that looked exactly like a wrong key.
+            extra["suppress_origin"] = True
         try:
             self._ws = create_connection(
                 url,
@@ -1437,6 +1442,13 @@ class WebSocketTransport:
             status = _handshake_status(exc)
             if not status:
                 raise OSError(_remote_failure_message(self._display_url, exc)) from exc
+            if self._subprotocols:
+                # No key was involved: the attach presents a one-shot ticket the
+                # gateway on this computer minted moments ago.
+                raise OSError(
+                    f"The Hermes gateway running on this computer refused the connection "
+                    f"(HTTP {status}). No key is involved here; restart Hermes, then try again."
+                ) from exc
             # Only a token can be swapped for a password, and only a server that
             # answers the question is worth asking.
             asks = (

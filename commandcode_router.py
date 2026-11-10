@@ -67,7 +67,7 @@ DEEP = "deep"
 # CLI prints and accepts them lowercased.
 _TIER_CANDIDATES: dict[str, tuple[str, ...]] = {
     QUICK: (
-        "poolside/laguna-s-2.1-free",
+        "reflection/beam:free",
         "meta/muse-spark-1.3-contributor",
         "xiaomi/mimo-v2.6-flash",
         "qwen/qwen3.7-flash",
@@ -95,7 +95,7 @@ _TIER_CANDIDATES: dict[str, tuple[str, ...]] = {
 
 # Current coding-focused free offers. The installed CLI's price catalog must
 # still confirm zero cost. Ling's bundled free entry is retired server-side.
-_FREE_FALLBACK_CANDIDATES = ("poolside/laguna-s-2.1-free",)
+_FREE_FALLBACK_CANDIDATES = ("reflection/beam:free",)
 
 # The hand-picked model per tier, used when the price catalog cannot be read.
 # It matches the terminal router's static table so the two never disagree.

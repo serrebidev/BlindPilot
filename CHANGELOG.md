@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.19 - 2026-11-10
+
+Fix for attaching to a Hermes gateway already running on this computer: every attach failed with "refused the connection key (HTTP 403). Check the key in Remote Hermes settings", although the local attach uses no key at all. websocket-client sends an Origin header by default, and the gateway refuses a loopback attach ticket whenever an Origin is present (an Origin means a browser, which gets the web app's gate instead). The local attach now opens its WebSocket with suppress_origin, and a refusal on that path is reported as the local gateway refusing the connection rather than as a wrong key. Diagnosed by Codex; verified live against the running gateway, where the old code got HTTP 403 and the fixed code attaches.
+
+Command Code routing: Poolside's free Laguna S 2.1 is gone from the installed CLI's model catalog, so the quick tier and the free fallback now use Beam 1.0 (reflection/beam:free), the catalog's current free model for coding and agentic work. Test isolation fixes found while releasing: the Hermes model-selection tests no longer attach to a gateway running on the developer's machine, the history tests no longer read a native Muse store under ~/.local/share/muse, and the FreeBuff Desktop import tests close their SQLite connections. The macOS release workflow now builds with a read-only token and attaches from a separate job, runs ruff, and fails on the first failing command.
+
 ## v0.55.18 - 2026-11-09
 
 The in-app updater now checks Forgejo (git.serrebiradio.com/serrebi/BlindPilot) instead of GitHub for new releases. Forgejo attachments carry no digest field, so verification goes through the .sha256 sidecar asset published beside each archive; the SHA-256 verification behavior is otherwise unchanged, and downloads are only trusted from the Forgejo host. Report a Bug still files issues on GitHub.

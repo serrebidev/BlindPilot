@@ -2276,6 +2276,28 @@ def test_attach_dials_with_subprotocols_and_no_query_credential(monkeypatch):
         "hermes-gateway-v1",
         "hermes-gateway-ticket.abc",
     ]
+    # The gateway refuses a loopback ticket that arrives with an Origin header.
+    assert opened["kwargs"]["suppress_origin"] is True
+
+
+def test_a_refused_attach_is_not_reported_as_a_bad_key(monkeypatch):
+    """The local attach carries a gateway-minted ticket, so no key can be wrong."""
+
+    def _refuse(url, timeout=None, **kwargs):
+        raise _Refused(403)
+
+    monkeypatch.setitem(sys.modules, "websocket", types.SimpleNamespace(create_connection=_refuse))
+    transport = hermes_backend.WebSocketTransport(
+        "ws://127.0.0.1:9119/api/ws",
+        "",
+        subprotocols=["hermes-gateway-v1", "hermes-gateway-ticket.abc"],
+    )
+
+    message = _refusal(transport)
+
+    assert "HTTP 403" in message
+    assert "this computer" in message
+    assert "Check the key" not in message
 
 
 def test_attach_refuses_an_unexpected_protocol(monkeypatch):

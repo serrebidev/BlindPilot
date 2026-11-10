@@ -44,6 +44,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import muse_backend
 
     monkeypatch.setattr(muse_backend, "wsl_muse_sqlite_query", lambda _sql, _params=(): [])
+    # A native Muse keeps its store under the real ~/.local/share/muse, which
+    # `_home` does not cover.
+    monkeypatch.setattr(muse_backend, "_muse_data_dirs", list)
+    monkeypatch.setattr(muse_backend, "_muse_home_live", lambda: None)
     # opencode honours these, and a developer machine may well set them.
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("OPENCODE_DATA", raising=False)

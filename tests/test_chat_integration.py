@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 from pathlib import Path
 
@@ -95,7 +96,7 @@ def test_a_sound_accessibleai_database_is_copied(monkeypatch, tmp_path):
     target = tmp_path / "chat.sqlite3"
 
     assert chat_integration.import_existing_accessible_ai_data(target) == source
-    with sqlite3.connect(target) as copied:
+    with closing(sqlite3.connect(target)) as copied, copied:
         assert copied.execute("SELECT title FROM conversations").fetchone() == ("carried over",)
     copied.close()
 

@@ -1,3 +1,8 @@
+# BlindPilot 0.55.19
+
+- Fixed: when a Hermes gateway was already running on this computer, BlindPilot could not attach to it and said Hermes "refused the connection key", telling you to check a key in Remote Hermes settings. No key is used on this path, so there was nothing there to fix. The real cause was a browser-style Origin header the connection library adds by default, which the gateway refuses for a local attach. BlindPilot no longer sends it, so the attach now succeeds, and if the local gateway ever does refuse, the message says so plainly instead of blaming a key.
+- Changed: Command Code's free Laguna S 2.1 model has been retired, so quick requests and the free fallback now go to Beam 1.0, the free coding model Command Code offers today.
+
 # BlindPilot 0.55.18
 
 - Changed: the in-app updater now checks Forgejo instead of GitHub for new releases. Verification is unchanged — every download is still checked against its published SHA-256, read from the checksum file published beside each download — and Report a Bug still files issues on GitHub.

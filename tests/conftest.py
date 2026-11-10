@@ -49,7 +49,13 @@ def no_ambient_github_tokens(monkeypatch):
     """Copilot counts an exported token as a sign-in. CI runners (Forgejo's
     exports GITHUB_TOKEN to every job) and developer shells must not change
     which backends the tests see as signed in."""
-    for name in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GITEA_TOKEN", "FORGEJO_TOKEN"):
+    for name in (
+        "COPILOT_GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITEA_TOKEN",
+        "FORGEJO_TOKEN",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 

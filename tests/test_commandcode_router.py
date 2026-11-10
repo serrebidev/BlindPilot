@@ -21,7 +21,7 @@ CATALOG = """| Id (use EXACTLY this) | Name | Context | Efforts | $/1M in/out ·
 | `deepseek/deepseek-v4-pro` | DeepSeek V4 Pro | 1M | off, high, max | $0.66/$1.98 · cache $0.022 | Go and above | reasoning |
 | `deepseek/deepseek-v4-flash` | DeepSeek V4 Flash | 1M | off, high, max | $0.15/$0.6 · cache $0.003 | Go and above | fast |
 | `inclusionai/ling-3.1-flash:free` | Ling 3.1 Flash | 262K | low, medium, high | $0/$0 · cache $0 | Go and above | cheap |
-| `poolside/laguna-s-2.1-free` | Laguna S 2.1 | 262K | low, medium, high | $0/$0 · cache $0 | Go and above | cheap |
+| `reflection/beam:free` | Beam 1.0 | 262K | low, medium, high | $0/$0 · cache $0 | Go and above | cheap |
 | `moonshotai/kimi-k3` | Kimi K3 | 1M | low, high, max | $3/$15 · cache $0.3 | Go and above | long |
 | `claude-sonnet-5` | Claude Sonnet 5 | 1M | low, medium, high | $2/$10 · cache $0.2 (write $2.5) | Pro and above | smart |
 """
@@ -68,7 +68,7 @@ def test_parse_prices_reads_the_table_shape():
         "deepseek/deepseek-v4-pro",
         "deepseek/deepseek-v4-flash",
         "inclusionai/ling-3.1-flash:free",
-        "poolside/laguna-s-2.1-free",
+        "reflection/beam:free",
         "moonshotai/kimi-k3",
         "claude-sonnet-5",
     }
@@ -121,7 +121,7 @@ def test_select_quick_takes_the_free_model():
     catalog = router.parse_prices(CATALOG)
     chosen = router.select(router.QUICK, catalog)
     assert chosen is not None
-    assert chosen.model == "poolside/laguna-s-2.1-free"
+    assert chosen.model == "reflection/beam:free"
     assert chosen.cost == 0.0
     assert chosen.priced is True
 
@@ -136,7 +136,7 @@ def test_select_no_free_excludes_free_for_quick():
 def test_select_standard_and_deep_never_take_a_free_model():
     catalog = dict(router.parse_prices(CATALOG))
     # A free model eligible on price alone must not be reached by a heavier tier.
-    catalog["poolside/laguna-s-2.1-free"] = {
+    catalog["reflection/beam:free"] = {
         "input": 0.0,
         "output": 0.0,
         "cacheRead": 0.0,
@@ -178,20 +178,20 @@ def test_route_uses_the_catalog_when_present():
     catalog = router.parse_prices(CATALOG)
     chosen = router.route("Explain the media index", catalog=catalog)
     assert chosen.tier == router.QUICK
-    assert chosen.model == "poolside/laguna-s-2.1-free"
+    assert chosen.model == "reflection/beam:free"
 
 
 def test_best_free_model_uses_current_catalog_and_skips_current_model():
     catalog = router.parse_prices(CATALOG)
     chosen = router.best_free_model(catalog=catalog)
-    assert chosen is not None and chosen.model == "poolside/laguna-s-2.1-free"
-    alternate = router.best_free_model(catalog=catalog, exclude_model="poolside/laguna-s-2.1-free")
+    assert chosen is not None and chosen.model == "reflection/beam:free"
+    alternate = router.best_free_model(catalog=catalog, exclude_model="reflection/beam:free")
     assert alternate is None
 
 
 def test_best_free_model_never_guesses_when_price_or_plan_is_unconfirmed():
     catalog = router.parse_prices(CATALOG)
-    catalog["poolside/laguna-s-2.1-free"]["free"] = False
+    catalog["reflection/beam:free"]["free"] = False
     assert router.best_free_model(catalog=catalog) is None
     assert router.best_free_model(catalog={}) is None
 
@@ -244,10 +244,10 @@ def test_retry_routes_recheck_live_list(monkeypatch):
     monkeypatch.setattr(
         commandcode_backend,
         "commandcode_model_options",
-        lambda: (["poolside/laguna-s-2.1-free"], [], "", "", ""),
+        lambda: (["reflection/beam:free"], [], "", "", ""),
     )
     assert router.route("Refactor the authentication flow", include_free=False).model == ""
-    assert router.best_free_model().model == "poolside/laguna-s-2.1-free"
+    assert router.best_free_model().model == "reflection/beam:free"
 
 
 def test_catalog_prefers_the_worker_cli_over_path(monkeypatch, tmp_path):
@@ -309,7 +309,7 @@ def test_select_withholds_paid_models_while_cooling_down():
     catalog = router.parse_prices(CATALOG)
     quick = router.select(router.QUICK, catalog, cooldown=True)
     assert quick is not None
-    assert quick.model == "poolside/laguna-s-2.1-free"
+    assert quick.model == "reflection/beam:free"
     assert quick.cooldown is True
     assert router.select(router.QUICK, catalog, cooldown=True, include_free=False) is None
     assert router.select(router.STANDARD, catalog, cooldown=True) is None
@@ -324,7 +324,7 @@ def test_route_runs_quick_on_free_while_cooling_down(monkeypatch, tmp_path):
     assert router.cooling_down() is True
     catalog = router.parse_prices(CATALOG)
     quick = router.route("Find the setting that controls focus return", catalog=catalog)
-    assert quick.model == "poolside/laguna-s-2.1-free"
+    assert quick.model == "reflection/beam:free"
     assert quick.cooldown is True
     assert "cools down" in quick.describe()
     forced = router.route(
@@ -336,7 +336,7 @@ def test_route_runs_quick_on_free_while_cooling_down(monkeypatch, tmp_path):
         ("Refactor the authentication flow", router.DEEP),
     ):
         chosen = router.route(task, catalog=catalog)
-        assert chosen.model == "poolside/laguna-s-2.1-free"
+        assert chosen.model == "reflection/beam:free"
         assert chosen.tier == tier
         assert chosen.cooldown is True
         assert "free model during cooldown" in chosen.describe()
@@ -345,7 +345,7 @@ def test_route_runs_quick_on_free_while_cooling_down(monkeypatch, tmp_path):
         router.route("Refactor the authentication flow", catalog=catalog, include_free=False).model
         == ""
     )
-    catalog["poolside/laguna-s-2.1-free"]["minPlan"] = "max"
+    catalog["reflection/beam:free"]["minPlan"] = "max"
     unavailable = router.route("Refactor the authentication flow", catalog=catalog)
     assert unavailable.model == ""
     assert unavailable.cooldown is True
@@ -632,7 +632,7 @@ def test_capacity_hit_withholds_only_that_model_and_expires(monkeypatch, tmp_pat
 def test_capacity_stop_withholds_a_free_model_too(monkeypatch, tmp_path):
     monkeypatch.setenv("COMMANDCODE_USAGE_JSON", str(tmp_path / "usage.json"))
     moment = datetime(2026, 10, 14, 2, tzinfo=timezone.utc)
-    free = "poolside/laguna-s-2.1-free"
+    free = "reflection/beam:free"
     catalog = router.parse_prices(CATALOG)
 
     assert router.record_capacity_hit(free, now=moment) is True
@@ -675,7 +675,7 @@ def test_capacity_cooldown_matches_the_model_id_regardless_of_case(monkeypatch, 
     catalog = router.parse_prices(CATALOG)
 
     assert router.record_capacity_hit("DeepSeek/DeepSeek-V4-Pro", now=moment) is True
-    assert router.record_capacity_hit("Poolside/Laguna-S-2.1-Free", now=moment) is True
+    assert router.record_capacity_hit("Reflection/Beam:Free", now=moment) is True
     assert router.record_capacity_hit("InclusionAI/Ling-3.1-Flash:Free", now=moment) is True
     assert router.capacity_cooling_down("deepseek/deepseek-v4-pro", now=moment) is True
     assert router.capacity_cooling_down("DEEPSEEK/DEEPSEEK-V4-PRO", now=moment) is True
@@ -689,7 +689,7 @@ def test_capacity_cooldown_matches_the_model_id_regardless_of_case(monkeypatch, 
     standard = router.select(router.STANDARD, catalog, now=later)
     assert standard is not None and standard.model == "deepseek/deepseek-v4-pro"
     quick = router.best_free_model(catalog=catalog, now=later)
-    assert quick is not None and quick.model == "poolside/laguna-s-2.1-free"
+    assert quick is not None and quick.model == "reflection/beam:free"
 
 
 def test_select_excludes_named_models():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
 import blindpilot_app as app
 import pytest
@@ -187,7 +188,7 @@ def test_history_picker_import_route_reaches_fresh_send_only_after_review(
         monkeypatch.setattr(session_history, "_home", lambda: tmp_path)
         project = tmp_path / ".config" / "freebuff-desktop" / "projects" / "app-1234"
         project.mkdir(parents=True)
-        with sqlite3.connect(project / "desktop-v2.db") as db:
+        with closing(sqlite3.connect(project / "desktop-v2.db")) as db, db:
             db.execute(
                 "CREATE TABLE threads (id TEXT, title TEXT, project_path TEXT, updated_at INTEGER)"
             )
