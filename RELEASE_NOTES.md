@@ -1,3 +1,8 @@
+# BlindPilot 0.55.20
+
+- Fixed: Chat mode could lose an Account's API key, so after restarting BlindPilot you had to enter it again. BlindPilot itself saved the key correctly; running BlindPilot's own test suite on the same computer deleted the key of the first Account you created, because the tests' accounts share its number. Only people who run the tests were affected. The tests can no longer reach the real key store. If your key went missing, enter it once more in Chat mode's Account settings and it will stay.
+- Fixed: the Windows updater could report a failure after the update had actually succeeded, and leave its downloaded archive and log behind, when Windows would not let it delete its temporary folder straight away. Cleaning up is now best effort and never turns a finished update into a failed one.
+
 # BlindPilot 0.55.19
 
 - Fixed: when a Hermes gateway was already running on this computer, BlindPilot could not attach to it and said Hermes "refused the connection key", telling you to check a key in Remote Hermes settings. No key is used on this path, so there was nothing there to fix. The real cause was a browser-style Origin header the connection library adds by default, which the gateway refuses for a local attach. BlindPilot no longer sends it, so the attach now succeeds, and if the local gateway ever does refuse, the message says so plainly instead of blaming a key.

@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.55.20 - 2026-11-10
+
+Fix for Chat mode forgetting an Account's API key: the test suite deleted it. Test databases number their Accounts from 1, the same as the installed app, and a chat key in Windows Credential Manager is named only by that number. Two account-deletion tests went through the real credential store, so every test run, including the one the pre-push hook makes, removed the real Account 1's key - the OpenRouter key, on the machine where this was found. Every test now gets an in-memory credential store; the store's own tests still exercise it against stand-in backends. The app's saving of keys and settings was audited and needed no change. The Windows updater's final cleanup no longer fails a finished update: Windows PowerShell 5.1 lets "Access is denied" from a recursive delete of the staging folder escape -ErrorAction SilentlyContinue, so a successful update exited 1 and left its archive, log and helper script behind. Each leftover is now removed on its own and a failure is ignored.
+
 ## v0.55.19 - 2026-11-10
 
 Fix for attaching to a Hermes gateway already running on this computer: every attach failed with "refused the connection key (HTTP 403). Check the key in Remote Hermes settings", although the local attach uses no key at all. websocket-client sends an Origin header by default, and the gateway refuses a loopback attach ticket whenever an Origin is present (an Origin means a browser, which gets the web app's gate instead). The local attach now opens its WebSocket with suppress_origin, and a refusal on that path is reported as the local gateway refusing the connection rather than as a wrong key. Diagnosed by Codex; verified live against the running gateway, where the old code got HTTP 403 and the fixed code attaches.
