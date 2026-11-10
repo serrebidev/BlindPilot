@@ -531,6 +531,16 @@ _WINDOWS_HELPER = (
 """
     + _WINDOWS_PRELUDE
     + r"""
+# Best-effort cleanup once the update is decided. Windows PowerShell 5.1 lets an
+# "Access is denied" from a recursive delete (a scanner still holding a file
+# just extracted) escape -ErrorAction SilentlyContinue and end the script, so a
+# finished update exited 1 and left the archive, log and helper behind.
+function Remove-Leftovers([string[]]$Paths) {
+    foreach ($path in $Paths) {
+        try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop } catch {}
+    }
+}
+
 $token = [guid]::NewGuid().ToString("N")
 $stage = Join-Path ([IO.Path]::GetTempPath()) ("BlindPilot-stage-" + $token)
 $backup = (Join-Path (Split-Path -Parent $InstallDir) (Split-Path -Leaf $InstallDir)) +
@@ -616,15 +626,10 @@ try {
     }
     if (-not $handedOver) { Start-BlindPilot $InstallDir | Out-Null }
     Save-Failure $message
-    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+    Remove-Leftovers @($stage, $Archive, $PSCommandPath)
     exit 1
 }
-Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $LogFile -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+Remove-Leftovers @($stage, $Archive, $LogFile, $PSCommandPath)
 """
 )
 

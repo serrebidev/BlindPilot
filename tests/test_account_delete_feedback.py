@@ -53,6 +53,22 @@ def test_deleting_an_account_is_spoken_and_names_the_new_selection(
         app.ProcessPendingEvents()
 
 
+def test_deleting_a_test_account_leaves_the_real_credential_store_alone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A test's Account 1 shares its key name with the installed app's Account 1."""
+    touched: list[str] = []
+    for name in ("_windows_delete", "_windows_write", "_fallback_delete", "_fallback_write"):
+        monkeypatch.setattr(
+            CredentialStore, name, staticmethod(lambda *args, _n=name: touched.append(_n))
+        )
+    store = CredentialStore()
+    store.set_api_key(1, "test-key")
+    assert store.get_api_key(1) == "test-key"
+    store.delete_api_key(1)
+    assert touched == []
+
+
 def test_deleting_the_last_account_does_not_promise_a_selection(
     tmp_path: Path, monkeypatch
 ) -> None:

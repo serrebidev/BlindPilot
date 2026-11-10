@@ -60,7 +60,7 @@ def no_ambient_github_tokens(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def diagnostics_stay_out_of_the_real_log(monkeypatch):
+def diagnostics_stay_out_of_the_real_log(request, monkeypatch):
     """Keep everything a test writes down out of the installed app's own log.
 
     A turn that ends without finishing leaves an account of itself, and tests
@@ -76,6 +76,11 @@ def diagnostics_stay_out_of_the_real_log(monkeypatch):
     except Exception:
         # A build without it has nothing to redirect, and this fixture must not
         # be the reason its tests cannot run.
+        yield
+        return
+    # This one only asks where the real log would go and writes nothing, so
+    # the redirect would leave it testing this fixture instead of log_dir.
+    if request.node.name == "test_the_log_does_not_live_in_the_roaming_profile":
         yield
         return
     # Made the same way as `tmp_path` below, for the same reason: pytest's own
@@ -155,6 +160,40 @@ def chat_data_stays_out_of_the_real_folder(monkeypatch):
                 chat_logger.removeHandler(handler)
                 handler.close()
         shutil.rmtree(data, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def chat_keys_stay_out_of_the_real_credential_store(request, monkeypatch):
+    """Give every test a throwaway in-memory store for Chat mode's API keys.
+
+    Test databases number their Accounts from 1, the same as the installed
+    app's, and the key's name is only that number. Left alone, a test that
+    deleted its Account 1 deleted the real Account 1's key from Windows
+    Credential Manager, so the person running the suite (or pushing, which runs
+    it) found their OpenRouter key gone the next time they opened BlindPilot.
+    """
+    # Those tests exercise the store itself against stand-in backends.
+    if request.module.__name__ == "test_chat_credentials":
+        yield
+        return
+    try:
+        from accessible_ai.storage.credentials import CredentialStore
+    except Exception:
+        yield
+        return
+    keys: dict[int, str] = {}
+    monkeypatch.setattr(
+        CredentialStore, "get_api_key", lambda _self, account_id: keys.get(account_id, "")
+    )
+    monkeypatch.setattr(
+        CredentialStore,
+        "set_api_key",
+        lambda _self, account_id, api_key: keys.__setitem__(account_id, api_key),
+    )
+    monkeypatch.setattr(
+        CredentialStore, "delete_api_key", lambda _self, account_id: keys.pop(account_id, None)
+    )
+    yield
 
 
 @pytest.fixture(autouse=True)
