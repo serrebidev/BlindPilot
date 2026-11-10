@@ -2800,6 +2800,9 @@ def test_every_backend_reports_whether_it_is_signed_in(monkeypatch, tmp_path, fa
     (data / "auth.json").write_text(json.dumps({"anthropic": {"type": "api"}}), encoding="utf-8")
     monkeypatch.setattr(agent_backends, "_opencode_data_dir", lambda: data)
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    # Copilot signs in from a token variable or `gh auth`; give it the token so
+    # the answer does not depend on whether gh happens to be installed here.
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "t")
     _hermes_pool(monkeypatch, tmp_path, {"anthropic": [{"id": "1", "label": "claude_code"}]})
     # Muse, like Hermes above, gets an adapter-level answer rather than the
     # machine's real one (this machine has a live WSL Muse and its account).
