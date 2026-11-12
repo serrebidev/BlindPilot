@@ -2,8 +2,7 @@
 
 Muse's host protocol is line-delimited JSON-RPC with server notifications for
 everything that streams, so the whole turn lifecycle can be replayed from a
-script without a Muse install -- and, on Windows, without booting a WSL
-distribution, which is where the real CLI lives.
+script without a Muse install.
 
 The fake transport here is registered in ``test_transport_contract``: a fake
 whose ``receive`` lies about the connection state is precisely the shape that
@@ -204,7 +203,7 @@ def test_only_bypass_starts_muse_without_its_shell_sandbox(monkeypatch):
     """The sandbox is fixed when `muse serve` starts, so bypass has to say so on
     its command line. Left on, a bypass turn's shell had no LAN and no Windows
     interop, and "adb connect" to a TV on the network failed every time."""
-    monkeypatch.setattr(muse_worker, "muse_command", lambda _cwd: ["muse"])
+    monkeypatch.setattr(muse_worker, "muse_command", lambda: ["muse"])
     seen = {}
     monkeypatch.setattr(
         muse_worker,
@@ -1519,14 +1518,8 @@ def test_an_attached_document_is_named_in_the_text(monkeypatch, tmp_path):
     parts = started[0]["params"]["input"]
     assert len(parts) == 1
     assert "summarise" in parts[0]["text"]
-    # On Windows the host runs inside WSL, where the Windows path names
-    # nothing; the translated path is what the host is given.
-    import platform as _platform
-
-    expected = (
-        str(note) if _platform.system() != "Windows" else muse_worker.windows_path_to_wsl(str(note))
-    )
-    assert expected in parts[0]["text"]
+    # The host runs natively and is given the path as it is.
+    assert str(note) in parts[0]["text"]
     assert "notes.txt" in started[0]["params"]["displayText"]
 
 

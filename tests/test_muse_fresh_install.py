@@ -3,7 +3,7 @@
 Three fresh-computer failures, one per layer:
 
 - Windows: Muse installs natively with Meta's install.ps1 (it used to be
-  WSL only, and then refused unless Muse was already inside WSL).
+  WSL only). WSL is no longer used at all.
 - macOS and Linux: the Muse installer drops its launcher in
   ~/.local/bin (or $MUSE_INSTALL_DIR) and only fixes the PATH of shells
   started afterwards, so discovery -- which asked PATH alone -- reported
@@ -51,14 +51,12 @@ def _native_windows_muse(monkeypatch, tmp_path, version="1.4.15-R8339.1"):
     return folder
 
 
-def test_native_windows_muse_wins_over_wsl(monkeypatch, tmp_path):
+def test_native_windows_muse_runs_its_exe(monkeypatch, tmp_path):
     folder = _native_windows_muse(monkeypatch, tmp_path)
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/root/.local/bin/muse")
 
-    assert not muse_backend.muse_runs_in_wsl()
     assert muse_backend.muse_cli_path() == str(folder / "muse.cmd")
-    # The exe itself runs, not muse.cmd's PowerShell chain, and no --cd.
-    assert muse_backend.muse_command("C:/work") == [str(folder / "muse-bin-1.4.15-R8339.1.exe")]
+    # The exe itself runs, not muse.cmd's PowerShell chain.
+    assert muse_backend.muse_command() == [str(folder / "muse-bin-1.4.15-R8339.1.exe")]
 
 
 def test_native_windows_muse_falls_back_to_the_launcher(monkeypatch, tmp_path):
@@ -68,13 +66,14 @@ def test_native_windows_muse_falls_back_to_the_launcher(monkeypatch, tmp_path):
     assert muse_backend.muse_command() == [str(folder / "muse.cmd")]
 
 
-def test_windows_without_native_muse_uses_wsl(monkeypatch, tmp_path):
+def test_windows_without_native_muse_is_not_installed(monkeypatch, tmp_path):
     monkeypatch.setattr(muse_backend.platform, "system", lambda: "Windows")
     monkeypatch.setenv("MUSE_INSTALL_DIR", str(tmp_path / "absent"))
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/root/.local/bin/muse")
+    muse_backend.reset_discovery()
 
-    assert muse_backend.muse_runs_in_wsl()
-    assert muse_backend.muse_cli_path() == "/root/.local/bin/muse"
+    assert muse_backend.muse_cli_path() is None
+    assert muse_backend.muse_command() is None
+    assert not muse_backend.muse_installed()
 
 
 def test_muse_install_argv_posix_uses_the_official_installer(monkeypatch):
@@ -90,7 +89,7 @@ def test_muse_install_argv_posix_uses_the_official_installer(monkeypatch):
 def _posix_muse_backend(monkeypatch, tmp_path):
     """Run muse_backend's POSIX branch with tmp_path as the home folder.
 
-    Forced explicitly: on a Windows runner the real branch is the WSL
+    Forced explicitly: on a Windows runner the real branch is the native
     one, and Path.home() there ignores $HOME, so both are patched.
     """
     monkeypatch.setattr(muse_backend.platform, "system", lambda: "Linux")

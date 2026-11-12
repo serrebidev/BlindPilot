@@ -50,13 +50,12 @@ from questions import (
     Question,
     QuestionOption,
 )
-from hermes_backend import JsonRpcCalls, StdioTransport, windows_path_to_wsl
+from hermes_backend import JsonRpcCalls, StdioTransport
 from markdown_rows import SentenceStreamer
 
 from muse_backend import (
     muse_command,
     muse_image_part,
-    muse_runs_in_wsl,
     muse_session_access_error,
     muse_session_log_text,
     muse_skills,
@@ -144,13 +143,12 @@ def _muse_transport(cwd: str, *, unsandboxed: bool = False) -> StdioTransport:
     it. Raises OSError when Muse is not installed where this process can
     reach it, which is what the caller reports.
     """
-    command = muse_command(cwd)
+    command = muse_command()
     if not command:
         raise OSError("Muse Code is not installed where this process can reach it")
     # The shell sandbox is fixed when the host starts and cannot be changed
     # over the wire. Left on, a bypass turn's shell has proxy-only network
-    # and a read-only filesystem outside the workspace (inside WSL also no
-    # Windows interop and a /tmp that is gone next turn: "adb connect"
+    # and a read-only filesystem outside the workspace ("adb connect"
     # answered "Network is unreachable"). These two flags are what Muse's own
     # --yolo turns off, which is what bypass means.
     flags = ["--disable-sandbox", "--trust-workspace"] if unsandboxed else []
@@ -590,14 +588,9 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         """The workspace root as the host sees it, always absolute.
 
         Measured on 1.0.3: session/start answers invalidParams for a relative
-        workspaceRoot ("expected an absolute path"), the same rule WSL's own
-        --cd has. A Muse inside WSL sees ``D:\\projekty\\x`` as
-        ``/mnt/d/projekty/x``; native Windows Muse and every other platform
-        take the path as it is.
+        workspaceRoot ("expected an absolute path").
         """
-        if not muse_runs_in_wsl():
-            return str(Path(self._cwd).resolve())
-        return windows_path_to_wsl(str(Path(self._cwd).resolve()))
+        return str(Path(self._cwd).resolve())
 
     def _start_turn(self) -> bool:
         text = (self._prompt or "").strip()
@@ -636,8 +629,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
         """The turn/start input parts, plus the transcript display text.
 
         Images travel as base64 parts the model actually sees; anything else
-        attached is named in the text by its path, translated when Muse
-        runs inside WSL. A leading /skill the CLI knows
+        attached is named in the text by its path. A leading /skill the CLI knows
         becomes a skill part -- the wire twin of what the TUI accepts after
         the shortcut token -- with the typed line kept as the display text so
         the transcript still shows what was asked.
@@ -649,7 +641,7 @@ class MuseWorker(JsonRpcCalls, threading.Thread):
             if part is not None:
                 images.append(part)
             elif str(path or "").strip():
-                named.append(_host_path(str(path).strip()))
+                named.append(str(path).strip())
         if text.startswith("/"):
             invocation = _skill_invocation(text, self._cwd)
             if invocation is not None:
@@ -1538,17 +1530,6 @@ def _skill_invocation(text: str, cwd: str) -> Optional[tuple[str, str]]:
     if token not in selectors:
         return None
     return token, rest.strip()
-
-
-def _host_path(path: str) -> str:
-    """An attached file's path as the Muse host sees it.
-
-    A host inside WSL cannot open a Windows path, so it gets the /mnt form;
-    native Windows Muse and every other platform take the path as it is.
-    """
-    if not muse_runs_in_wsl():
-        return path
-    return windows_path_to_wsl(path)
 
 
 def _file_name(path: str) -> str:

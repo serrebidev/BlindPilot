@@ -5,10 +5,8 @@ Muse Code is Meta's terminal coding agent, installed by the one-line
 ``irm https://dev.meta.ai/install.ps1 | iex`` on Windows. The Windows install
 is native (%LOCALAPPDATA%\\Programs\\muse) and keeps the POSIX layout under
 the user's profile: ~/.config/muse for settings and sign-in, ~/.local/share/muse
-for sessions. Only a Windows desktop with no native install falls back to a
-Muse inside WSL, reached with the same bridge Hermes uses: ``wsl.exe -e``
-connects this process's stdin and stdout straight through to the child, and
-only the working directory needs translating on the way over.
+for sessions. A Muse inside WSL is not used: Windows runs the native install
+only.
 
 The adapter drives Muse's own host protocol, MSP ("Muse Session Protocol"):
 JSON-RPC 2.0, one object per line, over the stdio of ``muse serve``. The wire
@@ -45,16 +43,13 @@ from hermes_backend import (
     StdioTransport,
     _no_window_kwargs,
     _text_output_kwargs,
-    wsl_exe,
-    windows_path_to_wsl,
 )
 
 # Where the session index lives when Muse runs on this machine. $XDG_DATA_HOME
 # wins when set, else ~/.local/share -- which third-party indexers confirm is
 # also where macOS keeps its sessions; Application Support holds only
 # ancillary state there, but is still guessed before a live host is asked.
-# A native Windows install uses the same ~/.local/share/muse; only a Muse
-# inside WSL needs the history reader's WSL bridge below.
+# A native Windows install uses the same ~/.local/share/muse.
 _MUSE_MAC_DATA_DIR = ("Library", "Application Support", "muse")
 
 # The launcher is a plain bash script on macOS and Linux. On Windows the
@@ -65,8 +60,8 @@ MUSE_LAUNCHER = "muse"
 # The launcher's own version grammar (.muse-launcher.ps1 $version_pattern).
 _WINDOWS_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?")
 
-# `model/list` needs a live MSP host to ask, and a host costs a WSL process
-# on Windows; the answer is cached per machine for a while instead. This is
+# `model/list` needs a live MSP host to ask, and a host costs a process
+# start; the answer is cached per machine for a while instead. This is
 # a preference cache rather than the truth: the catalog changes with Muse
 # releases, and the picker always re-reads it when the cache has expired.
 MODEL_CACHE_SECONDS = 900.0
@@ -74,12 +69,12 @@ MODEL_CACHE_SECONDS = 900.0
 # How long a live MSP host gets to answer one request of the catalog's. Two
 # of them are asked -- initialize, then model/list -- and a host that has
 # started at all answers both in well under a second; the budget is for a
-# cold distribution, not for thinking.
+# cold first start, not for thinking.
 MODEL_QUERY_TIMEOUT = 20.0
 
 # How long any single CLI probe may take. `muse --version` is instant once
-# the launcher has resolved itself, but its first run under a cold WSL
-# distribution has to boot the distribution first, which is seconds.
+# the launcher has resolved itself, but its first run may check for an
+# update first, which is seconds.
 CLI_PROBE_TIMEOUT = 45
 
 # MSP's ReasoningEffort enum, the closed vocabulary `turn/start` accepts
@@ -89,43 +84,6 @@ _MSP_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "
 # --------------------------------------------------------------------------
 # Locating Muse
 # --------------------------------------------------------------------------
-
-
-def wsl_muse_path(timeout: int = CLI_PROBE_TIMEOUT) -> Optional[str]:
-    """Muse's launcher path inside WSL, or None when there is no Muse there.
-
-    Cached for the life of the process, like the other WSL answers: every
-    backend check would otherwise boot a WSL distribution to ask the same
-    question, and the answer cannot change while the application is running.
-    """
-    global _WSL_MUSE, _WSL_MUSE_CHECKED
-    if _WSL_MUSE_CHECKED:
-        return _WSL_MUSE
-    _WSL_MUSE_CHECKED = True
-    launcher = wsl_exe()
-    if not launcher:
-        return None
-    try:
-        proc = subprocess.run(
-            [launcher, "-e", "sh", "-lc", 'command -v muse || ls "$HOME/.local/bin/muse"'],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            **_text_output_kwargs(),
-            **_no_window_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    found = (proc.stdout or "").strip().splitlines()
-    _WSL_MUSE = found[0].strip() if found and found[0].strip() else None
-    return _WSL_MUSE
-
-
-# Cached answers; see wsl_muse_path for why they are cached.
-_WSL_MUSE: Optional[str] = None
-_WSL_MUSE_CHECKED = False
 
 
 def _windows_install_dir() -> Path:
@@ -166,15 +124,6 @@ def windows_muse_binary() -> Optional[str]:
     return str(binary) if binary.is_file() else None
 
 
-def muse_runs_in_wsl() -> bool:
-    """Whether this Windows desktop reaches Muse inside WSL.
-
-    Native Windows Muse wins whenever it is installed; WSL is the fallback for
-    a desktop set up before Meta shipped install.ps1.
-    """
-    return platform.system() == "Windows" and windows_muse_launcher() is None
-
-
 def _posix_launcher_fallback() -> Optional[str]:
     """The launcher where the official installer puts it, PATH or no PATH.
 
@@ -182,7 +131,7 @@ def _posix_launcher_fallback() -> Optional[str]:
     and adds that folder to the PATH of shells started afterwards. A process
     already running -- or a GUI process whose inherited PATH never held the
     folder -- cannot see the launcher through `which`, so the folder is
-    checked directly. The WSL probe makes the same allowance with its `ls`.
+    checked directly.
     """
     install_dir = os.environ.get("MUSE_INSTALL_DIR")
     folder = Path(install_dir) if install_dir else Path.home() / ".local" / "bin"
@@ -193,13 +142,11 @@ def _posix_launcher_fallback() -> Optional[str]:
 def muse_cli_path() -> Optional[str]:
     """The launcher's path as a report can show it, or None when not installed.
 
-    On Windows this is the native muse.cmd when there is one. A desktop that
-    only has Muse inside WSL gets a path inside the distribution instead -- a
-    path a Windows process could not run -- and the callers that must run it
-    go through ``muse_command``.
+    On Windows this is the native muse.cmd; the callers that run Muse go
+    through ``muse_command``, which prefers the exe behind it.
     """
     if platform.system() == "Windows":
-        return windows_muse_launcher() or wsl_muse_path()
+        return windows_muse_launcher()
     from shutil import which
 
     return which(MUSE_LAUNCHER) or _posix_launcher_fallback()
@@ -209,7 +156,7 @@ def muse_installed() -> bool:
     """Whether Muse can actually be driven from this machine.
 
     On macOS and Linux that is the launcher on PATH; on Windows the native
-    launcher, else one inside WSL.
+    launcher.
     """
     return muse_cli_path() is not None
 
@@ -248,40 +195,21 @@ def reset_discovery() -> None:
     taken before the installer ran -- would be kept for the life of the
     process and a successful install would read as a failed one.
     """
-    global _WSL_MUSE, _WSL_MUSE_CHECKED, _HOME_CACHE, _HOME_CHECKED
-    _WSL_MUSE = None
-    _WSL_MUSE_CHECKED = False
+    global _HOME_CACHE, _HOME_CHECKED
     _HOME_CACHE = None
     _HOME_CHECKED = False
 
 
-def muse_command(cwd: Optional[str] = None) -> Optional[list[str]]:
+def muse_command() -> Optional[list[str]]:
     """The argv that runs `muse serve` (or any muse subcommand) from here.
 
     Returns None when Muse is not installed where this process can reach it.
     Native Windows Muse is its active exe (see ``windows_muse_binary``), with
-    muse.cmd as the fallback, and the caller gives Popen the working
-    directory. For Muse inside WSL the working directory is translated and
-    handed to WSL rather than given to Popen, because Popen only understands
-    Windows paths -- and WSL's own
-    ``--cd`` rejects a relative argument (measured: ``--cd .`` fails with
-    ``Wsl/E_INVALIDARG``, printing its error on stdout, which would poison
-    the protocol stream), so the directory is always made absolute.
+    muse.cmd as the fallback. The caller gives Popen the working directory.
     """
-    if platform.system() == "Windows" and not muse_runs_in_wsl():
+    if platform.system() == "Windows":
         native = windows_muse_binary() or windows_muse_launcher()
         return [native] if native else None
-    if platform.system() == "Windows":
-        path = wsl_muse_path()
-        launcher = wsl_exe()
-        if not path or not launcher:
-            return None
-        command = [launcher]
-        if cwd:
-            absolute = str(Path(cwd).resolve()) if cwd else ""
-            command += ["--cd", windows_path_to_wsl(absolute)]
-        command += ["-e", path]
-        return command
     found = muse_cli_path()
     if not found:
         return None
@@ -293,40 +221,8 @@ def muse_command(cwd: Optional[str] = None) -> Optional[list[str]]:
 # --------------------------------------------------------------------------
 
 
-def _wsl_credential_path() -> Optional[str]:
-    """The credential file's path as WSL sees it, or None without WSL.
-
-    Resolved inside WSL rather than guessed, so a distribution whose home is
-    not /home/<user>, or one with XDG_CONFIG_HOME set, still answers.
-    """
-    launcher = wsl_exe()
-    if not launcher:
-        return None
-    probe = (
-        'd="${XDG_CONFIG_HOME:-$HOME/.config}"; p="$d/muse/auth.json"; '
-        '[ -f "$p" ] && printf %s "$p"'
-    )
-    try:
-        proc = subprocess.run(
-            [launcher, "-e", "sh", "-lc", probe],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=25,
-            **_text_output_kwargs(),
-            **_no_window_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    found = (proc.stdout or "").strip()
-    return found or None
-
-
 def _credential_path() -> Optional[str]:
     """Where Muse's credentials live, in this process's own terms."""
-    if muse_runs_in_wsl():
-        return _wsl_credential_path()
     config = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     path = Path(config) / "muse" / "auth.json"
     return str(path) if path.is_file() else None
@@ -337,30 +233,14 @@ def muse_credentials() -> Optional[dict]:
 
     Read off disk rather than asked of the CLI: the checks that need this run
     while the setup wizard is on screen, and starting an MSP host to ask would
-    cost a process -- inside a WSL boot on Windows -- to read one file.
+    cost a process to read one file.
     """
     path = _credential_path()
     if not path:
         return None
     try:
-        if muse_runs_in_wsl():
-            launcher = wsl_exe()
-            if not launcher:
-                return None
-            # The file's bytes are read inside WSL, where the path means what
-            # it meant when Muse wrote it.
-            proc = subprocess.run(
-                [launcher, "-e", "sh", "-lc", f'cat "{path}" 2>/dev/null'],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=25,
-                **_text_output_kwargs(),
-                **_no_window_kwargs(),
-            )
-            payload_text = proc.stdout if proc.returncode == 0 else ""
-        else:
-            payload_text = Path(path).read_text(encoding="utf-8")
-    except (OSError, subprocess.TimeoutExpired):
+        payload_text = Path(path).read_text(encoding="utf-8")
+    except OSError:
         return None
     try:
         payload = json.loads(payload_text or "{}")
@@ -389,27 +269,14 @@ def muse_signed_in() -> bool:
 
 
 def _muse_session_log_tail(path: str, lines: int = 80) -> str:
-    """Read the recent part of one Muse session log, wherever Muse runs."""
+    """Read the recent part of one Muse session log."""
     if not path:
         return ""
     try:
-        if muse_runs_in_wsl():
-            launcher = wsl_exe()
-            if not launcher:
-                return ""
-            proc = subprocess.run(
-                [launcher, "-e", "tail", "-n", str(lines), "--", path],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=10,
-                **_text_output_kwargs(),
-                **_no_window_kwargs(),
-            )
-            return proc.stdout or ""
         return "\n".join(
             Path(path).read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return ""
 
 
@@ -531,7 +398,7 @@ def muse_model_catalog(cwd: Optional[str] = None) -> tuple[list[str], list[str],
     rather than asking a model.
 
     Returns empty lists rather than raising: a Muse that will not start --
-    a cold WSL distribution, a broken install -- is reported by the caller
+    a broken install, a failed update -- is reported by the caller
     as "no catalog", not by this function crashing.
     """
     global _catalog_cache
@@ -540,7 +407,7 @@ def muse_model_catalog(cwd: Optional[str] = None) -> tuple[list[str], list[str],
         if cached is not None and time.monotonic() - cached[0] < MODEL_CACHE_SECONDS:
             return cached[1]
 
-    command = muse_command(cwd)
+    command = muse_command()
     if not command:
         return [], [], "", ""
     transport, _init = _open_host(command, cwd)
@@ -653,8 +520,7 @@ def muse_index_db() -> Optional[Path]:
 
     The guessed directories first; when none of them holds a store, a live
     host is asked where its data lives, which survives a layout nobody has
-    seen. For Muse inside WSL the store lives in the distribution, so this
-    answers None and the history reader queries through the bridge.
+    seen.
     """
     for data in _muse_data_dirs():
         path = data / "session-index.db"
@@ -683,16 +549,11 @@ def _muse_home_live() -> Optional[str]:
 
     The offline guesses cover every layout seen so far; this is the fallback
     that survives one nobody has seen, on any platform Muse runs on. Cached
-    like the other discovery answers. Muse inside WSL is excluded: that host
-    would answer a WSL path this process cannot open, and the history reader
-    goes through the WSL bridge instead.
+    like the other discovery answers.
     """
     global _HOME_CACHE, _HOME_CHECKED
     if _HOME_CHECKED:
         return _HOME_CACHE
-    if muse_runs_in_wsl():
-        _HOME_CHECKED = True
-        return None
     command = muse_command()
     if not command:
         _HOME_CHECKED = True
@@ -712,115 +573,14 @@ def _muse_home_live() -> Optional[str]:
     return _HOME_CACHE
 
 
-def wsl_muse_index_db() -> Optional[str]:
-    """The session index path as WSL sees it, or None without WSL."""
-    launcher = wsl_exe()
-    if not launcher:
-        return None
-    probe = (
-        'd="${XDG_DATA_HOME:-$HOME/.local/share}/muse"; p="$d/session-index.db"; '
-        '[ -f "$p" ] && printf %s "$p"'
-    )
-    try:
-        proc = subprocess.run(
-            [launcher, "-e", "sh", "-lc", probe],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=25,
-            **_text_output_kwargs(),
-            **_no_window_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    found = (proc.stdout or "").strip()
-    return found or None
-
-
-def wsl_muse_sqlite_query(sql: str, params: Sequence = ()) -> list[dict]:
-    """Run one read-only query against Muse's WSL store, from inside WSL.
-
-    The same JSON-over-stdin technique as Hermes' ``wsl_sqlite_query``: the
-    store may be in WAL mode, which SQLite cannot read over the
-    \\\\wsl.localhost share, and no value is ever quoted into shell code.
-    """
-    launcher = wsl_exe()
-    store = wsl_muse_index_db()
-    if not launcher or not store:
-        return []
-    reader = (
-        "import json,sqlite3,sys\n"
-        "req=json.load(sys.stdin)\n"
-        "db=sqlite3.connect('file:'+req['db']+'?mode=ro',uri=True,timeout=5.0)\n"
-        "db.row_factory=sqlite3.Row\n"
-        "try:\n"
-        "    rows=[dict(r) for r in db.execute(req['sql'],tuple(req['params'])).fetchall()]\n"
-        "finally:\n"
-        "    db.close()\n"
-        "json.dump(rows,sys.stdout,default=str)\n"
-    )
-    payload = json.dumps({"db": store, "sql": sql, "params": list(params)})
-    try:
-        proc = subprocess.run(
-            [launcher, "-e", "python3", "-c", reader],
-            input=payload,
-            capture_output=True,
-            timeout=25,
-            **_text_output_kwargs(),
-            **_no_window_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
-    try:
-        rows = json.loads(proc.stdout or "[]")
-    except ValueError:
-        return []
-    return rows if isinstance(rows, list) else []
-
-
-# How much of a WSL-side session log is fetched. A transcript past this is a
-# runaway one, and the parser tolerates the cut: every line stands alone, so a
-# truncated tail only drops the last partial line.
-_WSL_LOG_CAP_BYTES = 32 * 1024 * 1024
-
-
 def muse_session_log_text(path: str) -> str:
-    """The whole of one session.jsonl, from here or through WSL.
-
-    Empty when the log cannot be read. A WSL-side path is fetched with ``head``
-    rather than opened: on Windows the path names a file inside the
-    distribution, which this process cannot open itself. The path is its own
-    argv element, never interpolated into a shell command: it comes from Muse's
-    session index, which a hostile entry could poison with quotes and
-    substitutions.
-    """
+    """The whole of one session.jsonl, or empty when it cannot be read."""
     if not path:
         return ""
     try:
-        if Path(path).is_file():
-            return Path(path).read_text(encoding="utf-8", errors="replace")
+        return Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    launcher = wsl_exe()
-    if not launcher:
-        return ""
-    try:
-        proc = subprocess.run(
-            [launcher, "-e", "head", "-c", str(_WSL_LOG_CAP_BYTES), "--", path],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=25,
-            **_text_output_kwargs(),
-            **_no_window_kwargs(),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    if proc.returncode != 0:
-        return ""
-    return proc.stdout or ""
 
 
 # Bounds for the transcript parser. A conversation past either is not replayed
@@ -980,15 +740,14 @@ def muse_skills(cwd: Optional[str] = None) -> list[tuple[str, str]]:
 
 
 def _muse_skills_live(cwd: Optional[str]) -> list[tuple[str, str]]:
-    command = muse_command(cwd)
+    command = muse_command()
     if not command:
         return []
     try:
         proc = subprocess.run(
             [*command, "skills", "list", "--json"],
-            # Project skills are found from the working directory; WSL got it
-            # through --cd in the argv instead.
-            cwd=None if muse_runs_in_wsl() else (cwd or None),
+            # Project skills are found from the working directory.
+            cwd=cwd or None,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=CLI_PROBE_TIMEOUT,

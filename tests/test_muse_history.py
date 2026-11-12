@@ -2,8 +2,8 @@
 
 Muse keeps both shapes at once: ``session-index.db`` carries one row per
 conversation (title, workspace, recency), and each session's ``session.jsonl``
-carries the run events the replay is folded from. On Windows both live inside
-WSL, so every read has a WSL route that is exercised here with fakes.
+carries the run events the replay is folded from. Windows uses the same
+layout under the user's profile.
 """
 
 from __future__ import annotations
@@ -24,9 +24,6 @@ def muse_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A throwaway home holding a Muse store, and nothing of the real one."""
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    # The WSL route is switched off here: on a machine with a real Muse in
-    # WSL it would answer these tests with its own conversations.
-    monkeypatch.setattr(muse_backend, "wsl_muse_sqlite_query", lambda _sql: [])
     data = tmp_path / ".local" / "share" / "muse"
     data.mkdir(parents=True)
     return tmp_path
@@ -288,55 +285,6 @@ def test_a_missing_or_empty_log_reads_back_nothing(muse_home):
         backend="muse", session_id="abc", title="t", path=str(missing), modified=0.0
     )
     assert load_turns(entry) == []
-
-
-# ----- the WSL route -----
-
-
-def test_on_windows_the_index_is_queried_through_wsl(monkeypatch):
-    monkeypatch.setattr(muse_backend, "muse_index_db", lambda: None)
-    rows = [
-        {
-            "session_id": "wsl-1",
-            "title": "wsl work",
-            "first_user_prompt": "wsl work",
-            "workspace_root": "/mnt/c/work",
-            "updated_at_us": "1800000000000000",
-            "session_log_path": "/root/.local/share/muse/sessions/wsl-1/session.jsonl",
-            "prompt_count": 3,
-        }
-    ]
-    monkeypatch.setattr(muse_backend, "wsl_muse_sqlite_query", lambda _sql: rows)
-
-    entries = list_history("muse")
-
-    assert [entry.session_id for entry in entries] == ["wsl-1"]
-    assert entries[0].title == "wsl work"
-    assert entries[0].modified == 1_800_000_000.0
-
-
-def test_on_windows_the_log_is_fetched_through_wsl(monkeypatch):
-    monkeypatch.setattr(
-        muse_backend,
-        "muse_session_log_text",
-        lambda _path: "\n".join(
-            [
-                json.dumps(_started("from wsl")),
-                json.dumps(_said("answered")),
-            ]
-        ),
-    )
-    entry = HistoryEntry(
-        backend="muse",
-        session_id="wsl-1",
-        title="t",
-        path="/root/.local/share/muse/sessions/wsl-1/session.jsonl",
-        modified=0.0,
-    )
-
-    turns = load_turns(entry)
-
-    assert [(turn.prompt, turn.response) for turn in turns] == [("from wsl", "answered")]
 
 
 def test_a_log_this_user_cannot_stat_is_still_read_by_its_own_reader(monkeypatch):

@@ -451,8 +451,8 @@ def install_muse(log: Callable[[str], None]) -> Optional[str]:
 
     Same discipline as install_hermes: the installer's exit code is advisory,
     and a working `muse` afterwards is the fact that counts. Discovery is
-    reset before the check -- the first probe's answer (on Windows possibly
-    "inside WSL") predates the install and must not outlive it.
+    reset before the check -- the first probe's answer predates the install
+    and must not outlive it.
     """
     argv = _muse_install_argv()
     if argv is None:

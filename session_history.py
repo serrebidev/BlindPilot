@@ -28,8 +28,8 @@ Where each backend keeps its history:
   scanned to build the list.
 * Muse — ``session-index.db`` under its data directory
   (``~/.local/share/muse``), one row per conversation, plus a ``session.jsonl``
-  event log per session under ``sessions/``. On Windows both live inside the
-  WSL distribution Muse runs in, so they are read through WSL.
+  event log per session under ``sessions/``. Windows uses the same layout
+  under the user's profile.
 
 Listing is deliberately cheap: it reads only as far into a transcript as it
 takes to find the first real user message, because the newest conversations
@@ -940,7 +940,7 @@ def _hermes_turns(entry: HistoryEntry) -> List[HistoryTurn]:
 # the listing (title, workspace, recency -- no transcript scan), and a
 # session.jsonl event log per session for the replay. The log's run events
 # carry the conversation; the parser lives in muse_backend next to the store
-# layout and the WSL bridge, so this section only folds rows into entries.
+# layout, so this section only folds rows into entries.
 
 _MUSE_LIST_SQL = """
 SELECT session_id, title, first_user_prompt, workspace_root, updated_at_us,
@@ -955,28 +955,22 @@ LIMIT 500
 def _muse_query() -> List[dict]:
     """Every conversation Muse's index knows, newest first.
 
-    A store on this machine is opened directly, read-only. On Windows the
-    store lives inside WSL, where it may be in WAL mode -- unreadable over
-    the \\\\wsl.localhost share -- so the query runs on WSL's side, the same
-    route Hermes' history takes.
+    The store on this machine is opened directly, read-only.
     """
     from muse_backend import muse_index_db
 
     path = muse_index_db()
-    if path is not None:
-        connection = _hermes_connect(path)
-        if connection is None:
-            return []
-        try:
-            return [dict(row) for row in connection.execute(_MUSE_LIST_SQL).fetchall()]
-        except Exception:  # noqa: BLE001 - an older schema is not a crash
-            return []
-        finally:
-            connection.close()
-
-    from muse_backend import wsl_muse_sqlite_query
-
-    return wsl_muse_sqlite_query(_MUSE_LIST_SQL)
+    if path is None:
+        return []
+    connection = _hermes_connect(path)
+    if connection is None:
+        return []
+    try:
+        return [dict(row) for row in connection.execute(_MUSE_LIST_SQL).fetchall()]
+    except Exception:  # noqa: BLE001 - an older schema is not a crash
+        return []
+    finally:
+        connection.close()
 
 
 def _muse_entries(cwd: Optional[str]) -> List[HistoryEntry]:
@@ -994,8 +988,7 @@ def _muse_entries(cwd: Optional[str]) -> List[HistoryEntry]:
         if not title:
             title = session_id
         try:
-            # Microsecond stamps; a query answered through WSL arrives as
-            # JSON, where the number can come back as text.
+            # Microsecond stamps, possibly stored as text.
             stamp = float(row.get("updated_at_us") or 0) / 1_000_000
         except (TypeError, ValueError):
             stamp = 0.0
@@ -1746,9 +1739,7 @@ def load_turns(entry: HistoryEntry) -> List[HistoryTurn]:
                 return []
         except OSError:
             # A path this process cannot look at is not a conversation too big
-            # to read: Muse's log lives inside WSL, under a /root this user
-            # may not be allowed to stat, and is fetched by its own reader
-            # with its own cap. A reader that cannot open its file says so
+            # to read. A reader that cannot open its file says so
             # below.
             pass
     try:

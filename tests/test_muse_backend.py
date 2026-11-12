@@ -1,16 +1,13 @@
 """The Muse adapter without a Muse install: discovery, credentials, catalog.
 
-Muse's launcher only runs on macOS and Linux, and on this machine that means
-inside WSL. Everything here is answered from fakes so the suite stays hermetic
--- no distribution boot, no network, no Meta account.
+Everything here is answered from fakes so the suite stays hermetic -- no
+real Muse, no network, no Meta account.
 """
 
 from __future__ import annotations
 
 import json
-import platform
 import shutil
-import subprocess
 from pathlib import Path
 
 import agent_backends
@@ -23,72 +20,46 @@ from muse_backend import (
 )
 
 
-def _no_wsl(monkeypatch) -> None:
-    """The machine the protocol was measured on has WSL; these tests may not."""
-    monkeypatch.setattr(muse_backend, "wsl_exe", lambda: None)
+def _no_muse(monkeypatch) -> None:
+    """A pretend Windows with no native install (conftest empties MUSE_INSTALL_DIR)."""
     monkeypatch.setattr(muse_backend.platform, "system", lambda: "Windows")
+    reset_discovery()
 
 
-def _wsl(monkeypatch, launcher: str = "wsl.exe") -> None:
-    monkeypatch.setattr(muse_backend, "wsl_exe", lambda: launcher)
+def _native(monkeypatch, tmp_path, version: str = "1.4.15-R8339.1") -> Path:
+    """A native install.ps1 layout under tmp_path, on a pretend Windows."""
+    folder = tmp_path / "Programs" / "muse"
+    folder.mkdir(parents=True)
+    (folder / "muse.cmd").write_text("@echo off\n")
+    (folder / ".muse-version").write_text(version + "\n")
+    (folder / f"muse-bin-{version}.exe").write_bytes(b"MZ")
     monkeypatch.setattr(muse_backend.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("MUSE_INSTALL_DIR", str(folder))
+    reset_discovery()
+    return folder
 
 
 # --------------------------------------------------------------------------
-# Command building (the WSL bridge)
+# Command building
 # --------------------------------------------------------------------------
 
 
-def test_without_wsl_there_is_no_command(monkeypatch):
-    _no_wsl(monkeypatch)
+def test_windows_without_a_native_install_has_no_command(monkeypatch):
+    _no_muse(monkeypatch)
     assert muse_command() is None
+    assert muse_backend.muse_cli_path() is None
 
 
-def test_the_windows_command_goes_through_wsl_with_the_workspace_translated(monkeypatch):
-    _wsl(monkeypatch)
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/home/u/.local/bin/muse")
-    monkeypatch.setattr(
-        muse_backend, "windows_path_to_wsl", lambda path: "/mnt/c/work", raising=False
-    )
+def test_windows_never_reaches_into_wsl(monkeypatch):
+    """Muse Code runs natively on Windows only; WSL is never asked."""
+    _no_muse(monkeypatch)
 
-    argv = muse_command("C:\\work")
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("no process may be started to find Muse")
 
-    assert argv[:2] == ["wsl.exe", "--cd"]
-    assert argv[2] == "/mnt/c/work"
-    assert argv[-2:] == ["-e", "/home/u/.local/bin/muse"]
-
-
-def test_a_workspace_is_made_absolute_before_it_is_handed_to_wsl(monkeypatch, tmp_path):
-    # Measured: WSL's own --cd rejects a relative argument (Wsl/E_INVALIDARG)
-    # and prints its error on stdout, which would poison the protocol stream.
-    # The fake translator is the real function for a C:\-style drive path; the
-    # assertion is that what reaches it was resolved to an absolute Windows
-    # path (no .. segments), which is what `Path.resolve()` guarantees.
-    _wsl(monkeypatch)
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/home/u/.local/bin/muse")
-    received: list[str] = []
-    real = muse_backend.windows_path_to_wsl
-
-    def _spy(path: str) -> str:
-        received.append(path)
-        return real(path)
-
-    monkeypatch.setattr(muse_backend, "windows_path_to_wsl", _spy, raising=False)
-
-    muse_command(str(tmp_path))
-
-    assert received, "the workspace never reached the translator"
-    resolved = received[0]
-    # Absolute in this process's own terms - whatever drive the suite's temp
-    # directory lands on - with nothing relative left to resolve.
-    assert Path(resolved).is_absolute(), resolved
-    assert ".." not in resolved
-
-
-def test_without_a_launcher_there_is_no_command_even_with_wsl(monkeypatch):
-    _wsl(monkeypatch)
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: None)
-    assert muse_command() is None
+    monkeypatch.setattr(muse_backend.subprocess, "run", _boom)
+    assert muse_backend.muse_installed() is False
+    assert muse_version() == ""
 
 
 def test_on_posix_the_command_is_the_launcher_itself(monkeypatch):
@@ -157,9 +128,8 @@ def test_the_session_log_makes_a_missing_spark_entitlement_actionable(monkeypatc
 # --------------------------------------------------------------------------
 
 
-def test_the_version_is_asked_through_the_bridge(monkeypatch):
-    _wsl(monkeypatch)
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/home/u/.local/bin/muse")
+def test_the_version_is_asked_through_the_native_launcher(monkeypatch, tmp_path):
+    folder = _native(monkeypatch, tmp_path)
 
     class _Result:
         returncode = 0
@@ -171,28 +141,14 @@ def test_the_version_is_asked_through_the_bridge(monkeypatch):
         muse_backend.subprocess, "run", lambda *a, **_k: seen.append(a[0]) or _Result()
     )
     assert muse_version() == "muse 1.0.3"
-    # Bare `muse` starts the interactive agent, which is what the status
-    # report showed until the flag was passed: a trust warning, not a version.
-    assert seen and seen[0][-1] == "--version"
+    # muse.cmd, not the exe: the launcher's hourly update check rides on it.
+    # Bare `muse` starts the interactive agent, so the flag is always passed.
+    assert seen == [[str(folder / "muse.cmd"), "--version"]]
 
 
 def test_a_failed_version_probe_answers_empty_rather_than_crashing(monkeypatch):
-    _wsl(monkeypatch)
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: None)
+    _no_muse(monkeypatch)
     assert muse_version() == ""
-
-
-def test_discovery_reset_makes_the_next_probe_real(monkeypatch):
-    # The install flow runs the installer and then checks whether a launcher
-    # appeared; a cached "no" from before the install would read as failure.
-    _wsl(monkeypatch)
-    muse_backend._WSL_MUSE = "/old/path"
-    muse_backend._WSL_MUSE_CHECKED = True
-
-    reset_discovery()
-
-    assert muse_backend._WSL_MUSE is None
-    assert muse_backend._WSL_MUSE_CHECKED is False
 
 
 # --------------------------------------------------------------------------
@@ -233,32 +189,26 @@ def test_auth_check_asks_the_adapter_not_a_windows_popen(monkeypatch):
     assert asked["adapter"] is True
 
 
-def test_status_reports_the_muse_cli_path_from_the_adapter(monkeypatch):
-    # On Windows the answer lives inside WSL; the fallback path search must
-    # never see it, or it could hand back a Windows-side launcher Popen
-    # cannot run.
-    _wsl(monkeypatch)
-    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/home/u/.local/bin/muse")
+def test_status_reports_the_muse_cli_path_from_the_adapter(monkeypatch, tmp_path):
+    # The adapter knows the native install dir, which the generic path
+    # search would miss.
+    folder = _native(monkeypatch, tmp_path)
     monkeypatch.setattr(muse_backend, "muse_version", lambda: "muse 1.0.3")
     monkeypatch.setattr(
         muse_backend, "muse_account_lines", lambda: ["Signed in: yes"], raising=False
     )
 
     report = agent_backends.backend_status("muse")
-    assert "/home/u/.local/bin/muse" in report
+    assert str(folder / "muse.cmd") in report
     assert "Version: muse 1.0.3" in report
     assert "Signed in: yes" in report
 
 
-def test_status_says_not_installed_when_wsl_has_no_muse(monkeypatch):
-    _no_wsl(monkeypatch)
-    reset_discovery()
+def test_status_says_not_installed_without_a_native_install(monkeypatch):
+    _no_muse(monkeypatch)
     report = agent_backends.backend_status("muse")
     assert "not installed" in report
-    if platform.system() == "Windows":
-        # Only Windows reaches the WSL branch; on the other platforms the
-        # real launcher search runs and must not be lied to.
-        reset_discovery()
+    reset_discovery()
 
 
 # --------------------------------------------------------------------------
@@ -320,7 +270,7 @@ def _skills_result(payload: str, returncode: int = 0):
 def test_skills_come_from_the_cli_offline(monkeypatch):
     import json as _json
 
-    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: ["muse"])
+    monkeypatch.setattr(muse_backend, "muse_command", lambda: ["muse"])
     monkeypatch.setattr(muse_backend, "_skills_cache", {})
     seen: list = []
 
@@ -346,7 +296,7 @@ def test_skills_come_from_the_cli_offline(monkeypatch):
 
 
 def test_skills_are_cached_per_directory(monkeypatch):
-    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: ["muse"])
+    monkeypatch.setattr(muse_backend, "muse_command", lambda: ["muse"])
     monkeypatch.setattr(muse_backend, "_skills_cache", {})
     calls: list = []
     monkeypatch.setattr(
@@ -361,11 +311,11 @@ def test_skills_are_cached_per_directory(monkeypatch):
 
 
 def test_skills_fail_empty_never_loud(monkeypatch):
-    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: None)
+    monkeypatch.setattr(muse_backend, "muse_command", lambda: None)
     monkeypatch.setattr(muse_backend, "_skills_cache", {})
     assert muse_backend.muse_skills("/work") == []
 
-    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd: ["muse"])
+    monkeypatch.setattr(muse_backend, "muse_command", lambda: ["muse"])
     monkeypatch.setattr(muse_backend.subprocess, "run", lambda *_a, **_k: _skills_result("nope", 1))
     assert muse_backend.muse_skills("/elsewhere") == []
 
@@ -470,14 +420,13 @@ def test_a_store_nobody_guessed_is_asked_of_a_live_host(monkeypatch, tmp_path):
             self.closed = True
 
     monkeypatch.setattr(muse_backend, "StdioTransport", _Host)
-    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd=None: ["muse"])
+    monkeypatch.setattr(muse_backend, "muse_command", lambda: ["muse"])
 
     assert muse_backend.muse_index_db() == db
 
 
-def test_the_live_home_is_never_asked_on_windows(monkeypatch, tmp_path):
-    # A Windows-side host would answer a WSL path this process cannot open;
-    # the history reader goes through the WSL bridge instead.
+def test_the_live_home_is_not_asked_without_an_install(monkeypatch, tmp_path):
+    # Windows with no native install has no host to ask.
     monkeypatch.setattr(muse_backend.platform, "system", lambda: "Windows")
     monkeypatch.setattr(muse_backend, "_HOME_CACHE", None)
     monkeypatch.setattr(muse_backend, "_HOME_CHECKED", False)
@@ -530,8 +479,7 @@ def test_discovery_reset_forgets_the_live_home_too(monkeypatch):
     assert muse_backend._HOME_CHECKED is False
 
 
-def test_a_local_log_is_read_and_a_missing_one_is_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(muse_backend, "wsl_exe", lambda: None)
+def test_a_local_log_is_read_and_a_missing_one_is_empty(tmp_path):
     log = tmp_path / "session.jsonl"
     log.write_text('{"a": 1}\n', encoding="utf-8")
     assert muse_backend.muse_session_log_text(str(log)) == '{"a": 1}\n'
@@ -539,44 +487,12 @@ def test_a_local_log_is_read_and_a_missing_one_is_empty(tmp_path, monkeypatch):
     assert muse_backend.muse_session_log_text(str(tmp_path / "missing.jsonl")) == ""
 
 
-def test_a_wsl_log_path_is_an_argument_never_shell_code(monkeypatch):
-    """The path comes from Muse's session index, which a hostile entry can poison.
-
-    It used to be interpolated into ``sh -lc 'head ... "<path>"'``, so a path
-    holding ``"`` and ``$(...)`` ran as the shell's own code inside WSL. It is
-    now one argv element, the way the tail reader already passed it.
-    """
-    _wsl(monkeypatch)
-    seen: list[list] = []
-
-    def _run(argv, **_kwargs):
-        seen.append(argv)
-        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
-
-    monkeypatch.setattr(muse_backend.subprocess, "run", _run)
-    hostile = '/tmp/x"$(touch /tmp/pwned)".jsonl'
-
-    assert muse_backend.muse_session_log_text(hostile) == "{}"
-
-    (argv,) = seen
-    assert argv == [
-        "wsl.exe",
-        "-e",
-        "head",
-        "-c",
-        str(muse_backend._WSL_LOG_CAP_BYTES),
-        "--",
-        hostile,
-    ]
-    assert "sh" not in argv
-
-
 def test_a_failed_live_home_probe_is_retried_not_cached(monkeypatch):
-    """A cold distribution once meant no live host for the rest of the run."""
+    """A failed first start once meant no live host for the rest of the run."""
     monkeypatch.setattr(muse_backend.platform, "system", lambda: "Linux")
     monkeypatch.setattr(muse_backend, "_HOME_CACHE", None)
     monkeypatch.setattr(muse_backend, "_HOME_CHECKED", False)
-    monkeypatch.setattr(muse_backend, "muse_command", lambda _cwd=None: ["muse"])
+    monkeypatch.setattr(muse_backend, "muse_command", lambda: ["muse"])
     opened: list = []
 
     class _Silent:

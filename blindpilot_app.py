@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.55.20"
+APP_VERSION = "0.56.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -909,9 +909,7 @@ def _probe_opencode_models(cwd: Optional[str], binary: Optional[str]) -> ModelOp
 
 def _probe_muse_models(cwd: Optional[str], binary: Optional[str]) -> ModelOptions:
     # The catalog comes from Muse's own `model/list` on a live `muse serve`
-    # host, which is the same request a model switch is served by. On Windows
-    # that host runs inside WSL, so the probe is asked of the translated
-    # directory rather than this one.
+    # host, which is the same request a model switch is served by.
     from muse_backend import muse_model_options
 
     models, efforts, current_model, current_effort, error = muse_model_options(cwd)
@@ -11900,8 +11898,8 @@ class SetupWizard(wx.Dialog):
             return _find_claude()
         if backend == BACKEND_MUSE:
             # The Muse adapter knows where its own CLI is: the native
-            # Windows install dir, or inside WSL, where the ordinary search
-            # would find nothing and offer an install that already happened.
+            # Windows install dir, which the ordinary search would miss
+            # and offer an install that already happened.
             from muse_backend import muse_cli_path
 
             return muse_cli_path()
@@ -12580,7 +12578,7 @@ class SetupWizard(wx.Dialog):
 
         def work() -> None:
             # Everything slow happens here. Discovery searches PATH and, for
-            # Muse, asks WSL; the Codex plan lookup opens SQLite and reads
+            # Muse, reads its install dir; the Codex plan lookup opens SQLite and reads
             # Windows credentials; the probe runs a CLI with a timeout of up to
             # 25 seconds. All three used to run on the GUI thread, which froze
             # the wizard and the screen reader with it.
@@ -12659,8 +12657,8 @@ class SetupWizard(wx.Dialog):
         # terminal only to exist.
         # The login runner builds [binary, *login_args] and hands it to Popen.
         # On Windows the argv is rebuilt from muse_command: the native exe
-        # (one process to own, not muse.cmd's PowerShell chain), or the WSL
-        # bridge for a Muse inside WSL. Elsewhere plain Popen runs it.
+        # (one process to own, not muse.cmd's PowerShell chain). Elsewhere
+        # plain Popen runs it.
         muse_popen: Optional[Callable[..., subprocess.Popen]] = None
         muse_argv = (
             muse_command() or []
@@ -12669,10 +12667,10 @@ class SetupWizard(wx.Dialog):
         )
         if muse_argv:
 
-            def through_wsl(args: list[str], **kwargs: Any) -> subprocess.Popen:
+            def through_native(args: list[str], **kwargs: Any) -> subprocess.Popen:
                 return subprocess.Popen([*muse_argv, *args[1:]], **kwargs)
 
-            muse_popen = through_wsl
+            muse_popen = through_native
         self._login = (
             None
             if BACKENDS[self.backend].login_needs_terminal

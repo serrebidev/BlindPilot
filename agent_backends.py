@@ -577,7 +577,7 @@ def find_backend_cli(backend: str) -> Optional[str]:
         return find_hermes_cli()
     if info.id == BACKEND_MUSE:
         # Muse answers from its own adapter, before any path-based search:
-        # it knows the native Windows install dir and the WSL fallback. The
+        # it knows the native Windows install dir. The
         # ordinary search could find a bash launcher a user copied into
         # ~/.local/bin on the Windows side -- a file Popen cannot run -- and
         # then every turn would die on WinError 193.
@@ -622,8 +622,8 @@ def _muse_version_probe() -> str:
     """Muse's version through its own bridge, patchable like the rest.
 
     Same indirection as `_muse_signed_in_checked`: the tests that loop over
-    every backend patch this rather than booting the real WSL distribution
-    this machine happens to have.
+    every backend patch this rather than starting the real Muse this
+    machine happens to have.
     """
     from muse_backend import muse_version
 
@@ -635,7 +635,7 @@ def _muse_signed_in_checked() -> bool:
 
     Hermes gets the same treatment: a name in this module's own namespace is
     what monkeypatch can reach, and the tests that loop over every backend
-    must never reach into the real WSL distribution on a machine that has one.
+    must never read the real Muse sign-in on a machine that has one.
     """
     from muse_backend import muse_signed_in
 
@@ -1634,8 +1634,7 @@ def _muse_account_lines() -> list[str]:
     """Muse signs in with one Meta account, and what it stored is the answer.
 
     Muse has no auth-status subcommand, so the credential file is read the
-    way FreeBuff's is. The reading itself lives in muse_backend, which knows
-    whether the file is on this side of a WSL boundary or not.
+    way FreeBuff's is. The reading itself lives in muse_backend.
     """
     from muse_backend import muse_account_lines
 
@@ -1663,8 +1662,8 @@ def backend_status(backend: str, timeout: int = 20) -> str:
         return "\n".join(lines)
     lines.append(f"Command line: {binary}")
     if backend == BACKEND_MUSE:
-        # The "binary" is a bash launcher inside WSL on Windows; Popen cannot
-        # run it from here, so the version is asked through Muse's own bridge.
+        # Asked through muse.cmd on Windows so the launcher's hourly update
+        # check keeps running; see muse_backend.muse_version.
         version = _muse_version_probe()
         if version:
             lines.append(f"Version: {version.splitlines()[0].strip()}")
@@ -1811,9 +1810,7 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             BACKEND_MUSE,
             "global",
             home / ".config" / "muse" / "settings.json",
-            "Muse's global settings: MCP servers and workspace trust. A Muse "
-            "that still runs inside WSL reads the copy inside that distribution "
-            "instead.",
+            "Muse's global settings: MCP servers and workspace trust.",
         ),
         SettingsFile(
             BACKEND_MUSEAI,

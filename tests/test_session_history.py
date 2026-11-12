@@ -39,11 +39,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import hermes_backend
 
     monkeypatch.setattr(hermes_backend, "wsl_sqlite_query", lambda _sql, _params=(): [])
-    # Muse answers through WSL the same way, and this machine has a live WSL
-    # Muse with its own conversations.
     import muse_backend
 
-    monkeypatch.setattr(muse_backend, "wsl_muse_sqlite_query", lambda _sql, _params=(): [])
     # A native Muse keeps its store under the real ~/.local/share/muse, which
     # `_home` does not cover.
     monkeypatch.setattr(muse_backend, "_muse_data_dirs", list)

@@ -1,3 +1,8 @@
+# BlindPilot 0.56.0
+
+- Changed: Muse Code now runs as the native Windows program Meta ships, and BlindPilot no longer uses WSL for it at all. Install it with Meta's Windows installer, or from BlindPilot's own setup, which now runs that installer for you; your sign-in, settings, skills and past conversations are read from the Windows install. If you only had Muse Code inside WSL, BlindPilot will now say it is not installed and offer to install the Windows version.
+- Fixed: the Muse Code model list could stay empty for 15 minutes on a computer where Muse Code had not yet run a request. An empty list is no longer remembered, and the message now says to send one message first so Muse Code can fetch its models.
+
 # BlindPilot 0.55.20
 
 - Fixed: Chat mode could lose an Account's API key, so after restarting BlindPilot you had to enter it again. BlindPilot itself saved the key correctly; running BlindPilot's own test suite on the same computer deleted the key of the first Account you created, because the tests' accounts share its number. Only people who run the tests were affected. The tests can no longer reach the real key store. If your key went missing, enter it once more in Chat mode's Account settings and it will stay.
