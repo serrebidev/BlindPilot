@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.56.1 - 2026-11-12
+
+Hermes messages now include the submission identifier required by current Hermes gateways. Sending a message such as "Hello" no longer fails with invalid_params because that identifier was missing. Each worker turn gets its own UUID, and resubmitting that turn keeps the same identifier so Hermes can recognize a retry. JSON-RPC request IDs remain separate. Reported by Brandon; fix based on Codex's diagnosis. This change targets current Hermes gateways; older gateways that reject submission_id must be updated before use.
+
 ## v0.56.0 - 2026-11-11
 
 Muse Code now runs natively on Windows only. Meta ships a native Windows build (irm https://dev.meta.ai/install.ps1 | iex, into %LOCALAPPDATA%\Programs\muse or $MUSE_INSTALL_DIR); BlindPilot runs its active muse-bin-<version>.exe directly, so there is one owned process and no PowerShell start per call, and asks for the version through muse.cmd so the launcher's hourly update check keeps running. Credentials, the session index, session logs and the live museHome probe read the native ~/.config/muse and ~/.local/share/muse. The WSL route is removed completely: no wsl.exe probe for a launcher, credentials, the session index or logs, no --cd translation of the workspace, and no /mnt path translation of attachments. A Windows desktop without the native install now reports Muse Code as not installed and offers install.ps1. The installer and updater run install.ps1 on Windows. The model picker no longer caches an empty catalog for 15 minutes (a fresh host answers an empty bundled catalog until a turn has fetched the provider's), and says to send a turn first.

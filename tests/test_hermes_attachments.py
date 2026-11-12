@@ -535,3 +535,30 @@ def test_a_turn_with_no_files_is_given_no_attachments_argument():
 
     assert "attachments" not in extra
     assert "held" in extra
+
+
+def test_submission_id_is_stable_per_worker_and_unique_per_turn(monkeypatch):
+    """Retries identify one submission; a new turn must never deduplicate it."""
+    from uuid import UUID
+
+    submissions = []
+    for _ in range(2):
+        worker = HermesWorker("Hello", None, ".", "default", **_callbacks())
+        worker._live_session = "live-1"
+        monkeypatch.setattr(worker, "_consume_turn", lambda: None)
+
+        def capture(method, params, *args):
+            assert method == "prompt.submit"
+            assert params["session_id"] == "live-1"
+            assert params["text"] == "Hello"
+            submissions.append(params["submission_id"])
+            return {}
+
+        monkeypatch.setattr(worker, "_call", capture)
+        worker._run_turn()
+        worker._run_turn()
+
+    assert all(str(UUID(value)) == value for value in submissions)
+    assert submissions[0] == submissions[1]
+    assert submissions[2] == submissions[3]
+    assert submissions[0] != submissions[2]

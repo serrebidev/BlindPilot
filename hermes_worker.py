@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from typing import Callable, Optional, Sequence
 
 from agent_backends import (
@@ -545,6 +546,7 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
+        self._submission_id = str(uuid.uuid4())
         self._session_id = session_id
         self._cwd = cwd
         self._permission_mode = permission_mode
@@ -1162,7 +1164,11 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             text = self._prompt_with_attachments(uploaded)
         accepted = self._call(
             "prompt.submit",
-            {"session_id": self._live_session, "text": text},
+            {
+                "session_id": self._live_session,
+                "text": text,
+                "submission_id": self._submission_id,
+            },
             120.0,
             "Hermes did not accept the prompt",
             "Hermes could not start the turn",
