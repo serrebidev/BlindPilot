@@ -329,7 +329,8 @@ BACKENDS = {
         "Muse Code",
         "muse",
         "See https://developer.meta.com/ai/products/muse-code/ -- one-line install: "
-        "curl -fsSL https://dev.meta.ai/install.sh | bash",
+        "irm https://dev.meta.ai/install.ps1 | iex on Windows, "
+        "curl -fsSL https://dev.meta.ai/install.sh | bash elsewhere",
         # `muse login` is the device flow: it prints the sign-in address and
         # waits for the browser approval. It needs no code typed back, so the
         # login runner watches for the URL like Claude's and Codex's.
@@ -575,12 +576,11 @@ def find_backend_cli(backend: str) -> Optional[str]:
 
         return find_hermes_cli()
     if info.id == BACKEND_MUSE:
-        # Muse's launcher is a bash script that only runs on macOS and Linux,
-        # and on this machine that means inside WSL. The ordinary fallback
-        # search would happily find the same-named launcher a user copied into
+        # Muse answers from its own adapter, before any path-based search:
+        # it knows the native Windows install dir and the WSL fallback. The
+        # ordinary search could find a bash launcher a user copied into
         # ~/.local/bin on the Windows side -- a file Popen cannot run -- and
-        # then every turn would die on WinError 193, so Muse answers from its
-        # own adapter, which knows about WSL, before any path-based search.
+        # then every turn would die on WinError 193.
         from muse_backend import muse_cli_path
 
         return muse_cli_path()
@@ -1811,9 +1811,9 @@ def settings_files(cwd: Optional[str] = None) -> list[SettingsFile]:
             BACKEND_MUSE,
             "global",
             home / ".config" / "muse" / "settings.json",
-            "Muse's global settings: MCP servers and workspace trust. On Windows "
-            "this file lives inside the WSL distribution the CLI runs in, not on "
-            "this side.",
+            "Muse's global settings: MCP servers and workspace trust. A Muse "
+            "that still runs inside WSL reads the copy inside that distribution "
+            "instead.",
         ),
         SettingsFile(
             BACKEND_MUSEAI,

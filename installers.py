@@ -61,7 +61,6 @@ from muse_backend import (
     muse_cli_path,
     muse_installed,
     reset_discovery as reset_muse_discovery,
-    wsl_exe as muse_wsl_exe,
 )
 from app_updater import version_tuple
 from process_utils import no_window_kwargs
@@ -386,6 +385,7 @@ def install_hermes(log: Callable[[str], None]) -> Optional[str]:
 
 
 MUSE_INSTALL_SH_URL = "https://dev.meta.ai/install.sh"
+MUSE_INSTALL_PS1_URL = "https://dev.meta.ai/install.ps1"
 
 # uv's official installers. BlindPilot installs uv itself when a backend's
 # Python tooling is needed on a computer that has neither uv nor a Python:
@@ -434,39 +434,15 @@ def install_antigravity(log: Callable[[str], None]) -> Optional[str]:
 
 
 def _muse_install_argv() -> Optional[List[str]]:
-    """Muse's official installer, run wherever Muse can actually live.
+    """Muse's official installer: install.ps1 natively on Windows, install.sh elsewhere.
 
-    Muse's CLI ships for macOS and Linux only, so on Windows there is no
-    PowerShell one-liner to run natively: the install happens inside WSL, if
-    WSL is here, and cannot happen at all if it is not.
+    The Windows installer puts muse.cmd in %LOCALAPPDATA%\\Programs\\muse and
+    needs no WSL; rerunning it is also how an install is updated in place.
     """
-    if platform.system() == "Windows":
-        # The only prerequisite is WSL itself. This used to also require
-        # Muse to be installed already, which made a first install on a
-        # fresh computer impossible: the installer was refused exactly
-        # when there was nothing installed yet.
-        launcher = muse_wsl_exe()
-        if launcher is None:
-            return None
-        # curl inside the distribution, bash inside it: the script is
-        # POSIX-only, so running it from Windows is not an option to fall
-        # back to.
-        return [launcher, "-e", "bash", "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]
-    if process_utils.which_without_cwd("curl") is None:
-        return None
-    shell = process_utils.which_without_cwd("bash") or process_utils.which_without_cwd("sh")
-    if shell is None:
-        return None
-    return [shell, "-c", f"curl -fsSL {MUSE_INSTALL_SH_URL} | bash"]
+    return _script_installer_argv(f"irm {MUSE_INSTALL_PS1_URL} | iex", MUSE_INSTALL_SH_URL)
 
 
 def _muse_missing_prereq_message() -> str:
-    if platform.system() == "Windows":
-        return (
-            "Muse Code runs on macOS and Linux, so on Windows it is installed "
-            "inside WSL -- and WSL with a working distribution was not found on "
-            "this computer. Install WSL first, then try again."
-        )
     return _missing_prereq_message("Muse's installer")
 
 
@@ -474,9 +450,9 @@ def install_muse(log: Callable[[str], None]) -> Optional[str]:
     """Run Muse's official installer for this platform and report the result.
 
     Same discipline as install_hermes: the installer's exit code is advisory,
-    and a working `muse` afterwards is the fact that counts. On Windows that
-    launcher lives inside WSL, so discovery is reset before the check -- the
-    first probe's answer predates the install and must not outlive it.
+    and a working `muse` afterwards is the fact that counts. Discovery is
+    reset before the check -- the first probe's answer (on Windows possibly
+    "inside WSL") predates the install and must not outlive it.
     """
     argv = _muse_install_argv()
     if argv is None:
@@ -889,7 +865,7 @@ def _update_hermes(binary: str, log: Callable[[str], None]) -> bool:
 
 def _update_muse(binary: str, log: Callable[[str], None]) -> bool:
     # Same shape as Hermes: the official script installer upgrades in place,
-    # and success is a working launcher afterwards -- inside WSL on Windows.
+    # and success is a working launcher afterwards.
     label = backend_label(BACKEND_MUSE)
     muse_argv = _muse_install_argv()
     if muse_argv is None:

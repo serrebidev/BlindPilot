@@ -2,8 +2,8 @@
 
 Three fresh-computer failures, one per layer:
 
-- Windows: the Muse install command was refused unless Muse was
-  already installed inside WSL, so a first install could never start.
+- Windows: Muse installs natively with Meta's install.ps1 (it used to be
+  WSL only, and then refused unless Muse was already inside WSL).
 - macOS and Linux: the Muse installer drops its launcher in
   ~/.local/bin (or $MUSE_INSTALL_DIR) and only fixes the PATH of shells
   started afterwards, so discovery -- which asked PATH alone -- reported
@@ -26,24 +26,55 @@ import museai_backend
 import portable_node
 
 
-def test_muse_install_argv_windows_needs_only_wsl(monkeypatch):
-    """A first install inside WSL must be offered when nothing is installed."""
+def test_muse_install_argv_windows_runs_install_ps1_natively(monkeypatch):
+    """Windows installs Muse natively with install.ps1, no WSL needed."""
     monkeypatch.setattr(app.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(installers, "muse_wsl_exe", lambda: "C:/Windows/System32/wsl.exe")
-    monkeypatch.setattr(installers, "muse_installed", lambda: False)
+    monkeypatch.setattr("process_utils.which_without_cwd", lambda name: f"C:/PS/{name}")
 
     argv = installers._muse_install_argv()
 
     assert argv is not None
-    assert argv[0] == "C:/Windows/System32/wsl.exe"
-    assert installers.MUSE_INSTALL_SH_URL in argv[-1]
+    assert argv[0] == "C:/PS/powershell.exe"
+    assert argv[-1] == f"irm {installers.MUSE_INSTALL_PS1_URL} | iex"
 
 
-def test_muse_install_argv_windows_is_none_without_wsl(monkeypatch):
-    monkeypatch.setattr(app.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(installers, "muse_wsl_exe", lambda: None)
+def _native_windows_muse(monkeypatch, tmp_path, version="1.4.15-R8339.1"):
+    """A native install.ps1 layout under tmp_path, on a pretend Windows."""
+    folder = tmp_path / "Programs" / "muse"
+    folder.mkdir(parents=True)
+    (folder / "muse.cmd").write_text("@echo off\n")
+    (folder / ".muse-version").write_text(version + "\n")
+    (folder / f"muse-bin-{version}.exe").write_bytes(b"MZ")
+    monkeypatch.setattr(muse_backend.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("MUSE_INSTALL_DIR", str(folder))
+    muse_backend.reset_discovery()
+    return folder
 
-    assert installers._muse_install_argv() is None
+
+def test_native_windows_muse_wins_over_wsl(monkeypatch, tmp_path):
+    folder = _native_windows_muse(monkeypatch, tmp_path)
+    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/root/.local/bin/muse")
+
+    assert not muse_backend.muse_runs_in_wsl()
+    assert muse_backend.muse_cli_path() == str(folder / "muse.cmd")
+    # The exe itself runs, not muse.cmd's PowerShell chain, and no --cd.
+    assert muse_backend.muse_command("C:/work") == [str(folder / "muse-bin-1.4.15-R8339.1.exe")]
+
+
+def test_native_windows_muse_falls_back_to_the_launcher(monkeypatch, tmp_path):
+    folder = _native_windows_muse(monkeypatch, tmp_path)
+    (folder / ".muse-version").write_text("not a version\n")
+
+    assert muse_backend.muse_command() == [str(folder / "muse.cmd")]
+
+
+def test_windows_without_native_muse_uses_wsl(monkeypatch, tmp_path):
+    monkeypatch.setattr(muse_backend.platform, "system", lambda: "Windows")
+    monkeypatch.setenv("MUSE_INSTALL_DIR", str(tmp_path / "absent"))
+    monkeypatch.setattr(muse_backend, "wsl_muse_path", lambda: "/root/.local/bin/muse")
+
+    assert muse_backend.muse_runs_in_wsl()
+    assert muse_backend.muse_cli_path() == "/root/.local/bin/muse"
 
 
 def test_muse_install_argv_posix_uses_the_official_installer(monkeypatch):

@@ -103,7 +103,6 @@ BASELINE: set[tuple[str, str, str]] = {
     ("test_muse_backend.py", "muse_backend", "windows_path_to_wsl"),
     ("test_muse_backend.py", "muse_backend", "wsl_exe"),
     ("test_muse_fresh_install.py", "installers", "find_backend_cli"),
-    ("test_muse_fresh_install.py", "installers", "muse_installed"),
     ("test_muse_fresh_install.py", "museai_backend", "museai_install_argv"),
     ("test_muse_history.py", "muse_backend", "muse_index_db"),
     ("test_muse_history.py", "muse_backend", "muse_session_log_text"),

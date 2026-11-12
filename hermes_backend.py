@@ -1151,10 +1151,13 @@ class StdioTransport:
         if self._argv is not None:
             # A caller that already knows its command line: Muse, whose
             # launcher muse_backend has located and which wants nothing
-            # changed in its environment. On Windows that argv runs through
-            # wsl.exe and carries its own --cd, so Popen is given no working
-            # directory -- it would only accept a Windows path anyway.
-            cwd = None if platform.system() == "Windows" else self._cwd
+            # changed in its environment. An argv that runs through wsl.exe
+            # carries its own --cd, so Popen is given no working directory --
+            # it would only accept a Windows path anyway.
+            through_wsl = (
+                platform.system() == "Windows" and Path(self._argv[0]).stem.lower() == "wsl"
+            )
+            cwd = None if through_wsl else self._cwd
             return list(self._argv), cwd, None
         python = hermes_python()
         root = hermes_source_root()

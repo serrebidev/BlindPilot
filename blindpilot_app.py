@@ -11899,10 +11899,9 @@ class SetupWizard(wx.Dialog):
         if backend == BACKEND_CLAUDE:
             return _find_claude()
         if backend == BACKEND_MUSE:
-            # The launcher lives inside WSL on Windows, where a Windows
-            # process cannot run it; asking the ordinary search would find
-            # nothing and the wizard would offer an install that already
-            # happened. The Muse adapter knows where its own CLI is.
+            # The Muse adapter knows where its own CLI is: the native
+            # Windows install dir, or inside WSL, where the ordinary search
+            # would find nothing and offer an install that already happened.
             from muse_backend import muse_cli_path
 
             return muse_cli_path()
@@ -12659,9 +12658,9 @@ class SetupWizard(wx.Dialog):
         # a backend the user has to answer, hidden for one that needs the
         # terminal only to exist.
         # The login runner builds [binary, *login_args] and hands it to Popen.
-        # On Windows Muse's binary is a bash script inside WSL, which Popen
-        # cannot execute, so the argv is rebuilt through the same bridge every
-        # other Muse path takes. Elsewhere plain Popen runs it.
+        # On Windows the argv is rebuilt from muse_command: the native exe
+        # (one process to own, not muse.cmd's PowerShell chain), or the WSL
+        # bridge for a Muse inside WSL. Elsewhere plain Popen runs it.
         muse_popen: Optional[Callable[..., subprocess.Popen]] = None
         muse_argv = (
             muse_command() or []

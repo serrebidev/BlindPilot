@@ -1,11 +1,14 @@
 """Muse Code backend for BlindPilot.
 
 Muse Code is Meta's terminal coding agent, installed by the one-line
-``curl -fsSL https://dev.meta.ai/install.sh | bash``. Its installer and its
-binaries ship for macOS and Linux only, so on Windows the CLI is reached
-inside WSL with the same bridge Hermes uses: ``wsl.exe -e`` connects this
-process's stdin and stdout straight through to the child, and only the
-working directory needs translating on the way over.
+``curl -fsSL https://dev.meta.ai/install.sh | bash`` on macOS and Linux and
+``irm https://dev.meta.ai/install.ps1 | iex`` on Windows. The Windows install
+is native (%LOCALAPPDATA%\\Programs\\muse) and keeps the POSIX layout under
+the user's profile: ~/.config/muse for settings and sign-in, ~/.local/share/muse
+for sessions. Only a Windows desktop with no native install falls back to a
+Muse inside WSL, reached with the same bridge Hermes uses: ``wsl.exe -e``
+connects this process's stdin and stdout straight through to the child, and
+only the working directory needs translating on the way over.
 
 The adapter drives Muse's own host protocol, MSP ("Muse Session Protocol"):
 JSON-RPC 2.0, one object per line, over the stdio of ``muse serve``. The wire
@@ -50,14 +53,17 @@ from hermes_backend import (
 # wins when set, else ~/.local/share -- which third-party indexers confirm is
 # also where macOS keeps its sessions; Application Support holds only
 # ancillary state there, but is still guessed before a live host is asked.
-# On Windows Muse runs inside WSL, so none of these exist and the history
-# reader goes through the WSL bridge below instead.
+# A native Windows install uses the same ~/.local/share/muse; only a Muse
+# inside WSL needs the history reader's WSL bridge below.
 _MUSE_MAC_DATA_DIR = ("Library", "Application Support", "muse")
 
-# The launcher is a plain bash script installed by the official installer.
-# Windows cannot run it (its platform check is Darwin/Linux), which is why a
-# Windows desktop reaches Muse inside WSL; macOS and Linux run it directly.
+# The launcher is a plain bash script on macOS and Linux. On Windows the
+# official install.ps1 writes muse.cmd, which runs .muse-launcher.ps1 under
+# Windows PowerShell, which in turn runs muse-bin-<version>.exe.
 MUSE_LAUNCHER = "muse"
+
+# The launcher's own version grammar (.muse-launcher.ps1 $version_pattern).
+_WINDOWS_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?")
 
 # `model/list` needs a live MSP host to ask, and a host costs a WSL process
 # on Windows; the answer is cached per machine for a while instead. This is
@@ -122,6 +128,53 @@ _WSL_MUSE: Optional[str] = None
 _WSL_MUSE_CHECKED = False
 
 
+def _windows_install_dir() -> Path:
+    """Where install.ps1 puts Muse: $MUSE_INSTALL_DIR, else LOCALAPPDATA."""
+    override = os.environ.get("MUSE_INSTALL_DIR", "").strip()
+    if override:
+        return Path(override)
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    base = Path(local) if local else Path.home() / "AppData" / "Local"
+    return base / "Programs" / "muse"
+
+
+def windows_muse_launcher() -> Optional[str]:
+    """The native Windows launcher (muse.cmd), or None when there is none."""
+    candidate = _windows_install_dir() / "muse.cmd"
+    return str(candidate) if candidate.is_file() else None
+
+
+def windows_muse_binary() -> Optional[str]:
+    """The muse-bin exe the native launcher would run, or None.
+
+    Read off the launcher's own .muse-version, the way the launcher picks it.
+    BlindPilot runs the exe itself rather than muse.cmd: that skips a Windows
+    PowerShell start per call and leaves one process to own and stop, not a
+    cmd -> powershell -> exe chain whose leaf could outlive a killed parent.
+    """
+    launcher = windows_muse_launcher()
+    if not launcher:
+        return None
+    folder = Path(launcher).parent
+    try:
+        version = (folder / ".muse-version").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not _WINDOWS_VERSION.fullmatch(version):
+        return None
+    binary = folder / f"muse-bin-{version}.exe"
+    return str(binary) if binary.is_file() else None
+
+
+def muse_runs_in_wsl() -> bool:
+    """Whether this Windows desktop reaches Muse inside WSL.
+
+    Native Windows Muse wins whenever it is installed; WSL is the fallback for
+    a desktop set up before Meta shipped install.ps1.
+    """
+    return platform.system() == "Windows" and windows_muse_launcher() is None
+
+
 def _posix_launcher_fallback() -> Optional[str]:
     """The launcher where the official installer puts it, PATH or no PATH.
 
@@ -140,12 +193,13 @@ def _posix_launcher_fallback() -> Optional[str]:
 def muse_cli_path() -> Optional[str]:
     """The launcher's path as a report can show it, or None when not installed.
 
-    On Windows this is a path inside the WSL distribution, not a Windows one;
-    the report says so by being a path a Windows process could not run, and
-    the callers that must run it go through ``muse_command`` instead.
+    On Windows this is the native muse.cmd when there is one. A desktop that
+    only has Muse inside WSL gets a path inside the distribution instead -- a
+    path a Windows process could not run -- and the callers that must run it
+    go through ``muse_command``.
     """
     if platform.system() == "Windows":
-        return wsl_muse_path()
+        return windows_muse_launcher() or wsl_muse_path()
     from shutil import which
 
     return which(MUSE_LAUNCHER) or _posix_launcher_fallback()
@@ -154,9 +208,8 @@ def muse_cli_path() -> Optional[str]:
 def muse_installed() -> bool:
     """Whether Muse can actually be driven from this machine.
 
-    On macOS and Linux that is the launcher on PATH. On Windows the launcher
-    cannot run, so the question becomes whether WSL has one -- which is the
-    shape the machine this was written against actually has.
+    On macOS and Linux that is the launcher on PATH; on Windows the native
+    launcher, else one inside WSL.
     """
     return muse_cli_path() is not None
 
@@ -164,11 +217,13 @@ def muse_installed() -> bool:
 def muse_version(timeout: int = CLI_PROBE_TIMEOUT) -> str:
     """What `muse --version` prints, asked through Muse's own bridge.
 
-    `backend_status` cannot hand this "binary" to Popen on Windows (it is a
-    bash script inside WSL), so the version is read the same way every other
-    Muse command reaches the CLI.
+    A native Windows install is asked through muse.cmd, not the exe: the
+    launcher's hourly update check rides on this probe, which keeps the exe
+    BlindPilot runs directly current. Elsewhere the version is read the same
+    way every other Muse command reaches the CLI.
     """
-    command = muse_command()
+    launcher = windows_muse_launcher() if platform.system() == "Windows" else None
+    command = [launcher] if launcher else muse_command()
     if not command:
         return ""
     try:
@@ -204,12 +259,18 @@ def muse_command(cwd: Optional[str] = None) -> Optional[list[str]]:
     """The argv that runs `muse serve` (or any muse subcommand) from here.
 
     Returns None when Muse is not installed where this process can reach it.
-    The working directory is translated and handed to WSL rather than given
-    to Popen, because Popen only understands Windows paths -- and WSL's own
+    Native Windows Muse is its active exe (see ``windows_muse_binary``), with
+    muse.cmd as the fallback, and the caller gives Popen the working
+    directory. For Muse inside WSL the working directory is translated and
+    handed to WSL rather than given to Popen, because Popen only understands
+    Windows paths -- and WSL's own
     ``--cd`` rejects a relative argument (measured: ``--cd .`` fails with
     ``Wsl/E_INVALIDARG``, printing its error on stdout, which would poison
     the protocol stream), so the directory is always made absolute.
     """
+    if platform.system() == "Windows" and not muse_runs_in_wsl():
+        native = windows_muse_binary() or windows_muse_launcher()
+        return [native] if native else None
     if platform.system() == "Windows":
         path = wsl_muse_path()
         launcher = wsl_exe()
@@ -264,7 +325,7 @@ def _wsl_credential_path() -> Optional[str]:
 
 def _credential_path() -> Optional[str]:
     """Where Muse's credentials live, in this process's own terms."""
-    if platform.system() == "Windows":
+    if muse_runs_in_wsl():
         return _wsl_credential_path()
     config = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     path = Path(config) / "muse" / "auth.json"
@@ -282,7 +343,7 @@ def muse_credentials() -> Optional[dict]:
     if not path:
         return None
     try:
-        if platform.system() == "Windows":
+        if muse_runs_in_wsl():
             launcher = wsl_exe()
             if not launcher:
                 return None
@@ -332,7 +393,7 @@ def _muse_session_log_tail(path: str, lines: int = 80) -> str:
     if not path:
         return ""
     try:
-        if platform.system() == "Windows":
+        if muse_runs_in_wsl():
             launcher = wsl_exe()
             if not launcher:
                 return ""
@@ -507,8 +568,12 @@ def muse_model_catalog(cwd: Optional[str] = None) -> tuple[list[str], list[str],
                 if row.get("isDefault") and not current:
                     current = label
     efforts = _muse_effort_levels(command)
-    with _catalog_lock:
-        _catalog_cache = (time.monotonic(), (models, efforts, current, ""))
+    # An empty catalog is not cached. Measured 1.4.15 on Windows: until a turn
+    # has fetched and cached the provider catalog, a fresh host answers its
+    # bundled one, which is empty; caching that hid the real list for 15 min.
+    if models:
+        with _catalog_lock:
+            _catalog_cache = (time.monotonic(), (models, efforts, current, ""))
     return models, efforts, current, ""
 
 
@@ -552,7 +617,12 @@ def muse_model_options(
         models, efforts, current, current_effort = muse_model_catalog(cwd)
     except (OSError, ValueError):
         models, efforts, current, current_effort = [], [], "", ""
-    error = "" if models else "Muse did not answer the model catalog request."
+    error = (
+        ""
+        if models
+        else "Muse has no model list yet. It fetches one during a turn: send a "
+        "message, then open the model picker again."
+    )
     return models, efforts, current, current_effort, error
 
 
@@ -583,9 +653,8 @@ def muse_index_db() -> Optional[Path]:
 
     The guessed directories first; when none of them holds a store, a live
     host is asked where its data lives, which survives a layout nobody has
-    seen. On Windows the store lives inside the WSL distribution Muse runs
-    in, so this answers None and the history reader queries through the
-    bridge.
+    seen. For Muse inside WSL the store lives in the distribution, so this
+    answers None and the history reader queries through the bridge.
     """
     for data in _muse_data_dirs():
         path = data / "session-index.db"
@@ -614,14 +683,14 @@ def _muse_home_live() -> Optional[str]:
 
     The offline guesses cover every layout seen so far; this is the fallback
     that survives one nobody has seen, on any platform Muse runs on. Cached
-    like the other discovery answers. Windows is excluded: the host there
+    like the other discovery answers. Muse inside WSL is excluded: that host
     would answer a WSL path this process cannot open, and the history reader
     goes through the WSL bridge instead.
     """
     global _HOME_CACHE, _HOME_CHECKED
     if _HOME_CHECKED:
         return _HOME_CACHE
-    if platform.system() == "Windows":
+    if muse_runs_in_wsl():
         _HOME_CHECKED = True
         return None
     command = muse_command()
@@ -917,6 +986,9 @@ def _muse_skills_live(cwd: Optional[str]) -> list[tuple[str, str]]:
     try:
         proc = subprocess.run(
             [*command, "skills", "list", "--json"],
+            # Project skills are found from the working directory; WSL got it
+            # through --cd in the argv instead.
+            cwd=None if muse_runs_in_wsl() else (cwd or None),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=CLI_PROBE_TIMEOUT,

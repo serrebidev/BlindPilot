@@ -60,6 +60,17 @@ def no_ambient_github_tokens(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_native_muse(monkeypatch, tmp_path_factory):
+    """The developer's own native Windows Muse must not answer for a test.
+
+    Native Muse is found in $MUSE_INSTALL_DIR or %LOCALAPPDATA%\\Programs\\muse;
+    pointing the variable at an empty folder keeps every test on the layout it
+    sets up itself. Tests about the native install set the variable again.
+    """
+    monkeypatch.setenv("MUSE_INSTALL_DIR", str(tmp_path_factory.mktemp("no-native-muse")))
+
+
+@pytest.fixture(autouse=True)
 def diagnostics_stay_out_of_the_real_log(request, monkeypatch):
     """Keep everything a test writes down out of the installed app's own log.
 
