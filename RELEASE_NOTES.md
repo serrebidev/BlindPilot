@@ -1,13 +1,14 @@
-# BlindPilot 0.57.1
+# BlindPilot 0.57.2
 
-This is the first release in the feature comparison with The Chat Place and FastChat: conversation copies, separate questions, bulk exports, and more resilient Chat requests.
+This is the second release in the feature comparison with The Chat Place and FastChat: backups, restores, kept transcript copies, and conversation imports.
 
-Branch from Here keeps the conversation up to a selected message. Retry from Here copies earlier messages and restores the selected question and retained attachments so you can edit and send it again. Original conversations and workspace files stay unchanged. Claude and Codex use native fork protocols when saved boundary IDs are available; other cases explicitly use a text-context copy. Agent copies are created by the backend when you first Send; Chat copies are saved immediately, including stored attachment bytes.
+Under File, Recent Conversations, Back Up BlindPilot saves your Chat database and settings to one archive file with a manifest. You can include kept transcript copies with a checkbox; backups never include API keys, sign-in tokens or cookies, and the archive says so in its manifest.
 
-Ask Aside asks about completed messages in a separate window. You choose the Chat account and model that receives the text copy. All tools are disabled, including account-configured tools and ChatGPT's usual built-in tools. Source history and drafts stay unchanged, and Stop or Close affects only Aside. Find these commands under Conversation, Find and Browse, Conversation Copies. Branch and Retry are also on a message's context menu.
+Restore from Backup reads the archive and previews it first: which accounts, profiles, conversations and messages it holds, and whether it includes kept transcripts. Restoring keeps your current history aside under a timestamped name before installing, so nothing is silently overwritten, and credentials are never touched.
 
-File, Recent Conversations, Export Conversations writes selected saved Agent and Chat conversations as Markdown, HTML or plain text. Filter and select what to keep, choose a format and folder, and export. Existing files are never replaced; duplicate names get numbers. Cancellation keeps completed files and removes unfinished output. Text exports include attachment names, not binary contents. Reopen the dialog if source history changes while it is open.
+Kept Transcripts automatically saves read-only copies of conversations you open or complete, so provider cleanup cannot erase them. The dialog lists the copies and how much storage they use, lets you delete copies with confirmation (deleting a copy never deletes the original), and offers a switch to turn future keeping off. Copies never expire by themselves.
 
-Chat requests retry transient failures up to twice, with cancellable delays. Once text, thinking, tool activity or an accepted batch has begun, requests are not replayed. The Windows updater also fixes an archive-module conflict between PowerShell 7 and Windows PowerShell 5.1. Command Code's free-model shortlist now uses Inkling 2 Small instead of the retired Beam entry.
+Import Conversation takes Basilisk .bskc files and BlindPilot interchange JSON. Imports preserve messages, attachments and supported settings; anything the importer cannot carry over, such as per-message model choices or URL attachments, is reported in plain words rather than dropped silently.
 
-Automatic computer use, backups/imports, provider reports, connected-tool management, and sound/voice customization remain later stages. They are not included in 0.57.1. Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
+Usage and balance reports, Ollama, compaction, agent controls, connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.2.
+Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.

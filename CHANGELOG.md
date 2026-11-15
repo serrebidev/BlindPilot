@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.2 - 2026-11-14
+
+History protection and import, the second stage of the reference-app comparison. File, Recent Conversations gains Back Up BlindPilot, which saves the Chat database and settings to one archive with a manifest and a preview; API keys and tokens live in the credential store and are never included. Restore from Backup validates the archive first, keeps current history aside under a timestamped name, and only then installs, without touching credentials. Kept Transcripts automatically saves read-only copies of conversations you open or complete, lists storage use, lets you delete copies with confirmation (originals are never deleted), and can be switched off. Import Conversation now accepts Basilisk .bskc files and BlindPilot interchange JSON, reporting every field it could not carry over instead of dropping it silently.
+
 ## v0.57.1 - 2026-11-14
 
 Conversation copies and separate questions, informed by The Chat Place and FastChat. Branch from Here keeps a conversation prefix; Retry from Here restores the selected question and retained attachments without sending it or changing the original. Claude and Codex use native forks when saved boundary IDs are available, with a labeled text-context copy otherwise. Chat copies atomically preserve messages and attachment bytes. Ask Aside sends completed conversation text to an explicitly chosen Chat account with all tools disabled, including account-provided tools and ChatGPT's usual built-in tools. It leaves source history and drafts alone.
