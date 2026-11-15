@@ -208,6 +208,8 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
         "_find_active",
         "_task_list_active",
         "_queued_messages_active",
+        "_stop_background_task_active",
+        "_put_files_back_active",
         "_connected_tools_active",
         "_open_sessions_active",
         "_computer_use_browse_active",
@@ -233,6 +235,7 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
         agent_chords = (
             "Ctrl+Shift+J",
             "&Queued Messages…",
+            "Stop Back&ground Task…",
             "&Connected Tools…",
             "&Open Sessions…",
             "Computer &Use…",

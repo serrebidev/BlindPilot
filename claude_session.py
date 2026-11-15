@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -34,6 +35,7 @@ from agent_backends import (
 )
 from process_utils import (
     end_process_group,
+    no_window_kwargs,
     own_group_kwargs,
 )
 
@@ -62,6 +64,61 @@ _PENDING_TRIM = 2000
 # Put on a turn's queue when the process ends, so a reader blocked on the
 # queue learns of the death instead of waiting for a result that never comes.
 EOF = None
+
+# Claude Code saves a copy of each file its edit tools change, per user
+# message, only while this is set; Put Files Back needs it at both ends: on
+# the turns that made the changes and on the rewind (checked with 2.1.325).
+CHECKPOINT_VAR = "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"
+# How long a rewind may take. No turn runs: the CLI restores files and exits.
+_REWIND_SECONDS = 120.0
+_SAFE_ID = re.compile(r"^[0-9A-Za-z][0-9A-Za-z-]{7,63}$")
+
+
+def claude_env(binary: str) -> dict[str, str]:
+    """The environment every Claude process BlindPilot starts runs with."""
+    env = dict(subprocess_env(binary))
+    env[CHECKPOINT_VAR] = "1"
+    return env
+
+
+def rewind_files(binary: str, cwd: str, session_id: str, message_id: str) -> tuple[bool, str]:
+    """Put back the files Claude's edit tools changed since one user message.
+
+    Runs ``claude -p --resume <session> --rewind-files <message>``, which
+    restores from Claude Code's own checkpoints and exits without a turn.
+    Returns whether it worked and a sentence to say. Blocks; call it off the
+    window's thread.
+    """
+    if not (_SAFE_ID.match(session_id or "") and _SAFE_ID.match(message_id or "")):
+        return False, "That message has no saved file checkpoint."
+    try:
+        done = subprocess.run(
+            [binary, "-p", "--resume", session_id, "--rewind-files", message_id],
+            cwd=cwd or None,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=claude_env(binary),
+            timeout=_REWIND_SECONDS,
+            **no_window_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Claude Code did not finish putting the files back in time."
+    except OSError as exc:
+        return False, f"Claude Code could not be started: {exc}"
+    said = [
+        line.strip()
+        for line in f"{done.stderr or ''}\n{done.stdout or ''}".splitlines()
+        if line.strip() and not line.startswith("Warning:")
+    ]
+    if done.returncode == 0 and any("rewound" in line.lower() for line in said):
+        return True, "Files put back to how they were before that message."
+    reason = said[-1] if said else f"Claude Code exited with code {done.returncode}."
+    if "not enabled" in reason.lower():
+        reason = "Claude Code kept no file checkpoints for this conversation."
+    return False, reason.removeprefix("Error: ")
 
 
 @dataclass(frozen=True)
@@ -265,6 +322,10 @@ class ClaudeSession:
         # background, whose tool result is the launch, not the answer.
         self.agent_calls: set[str] = set()
         self.background_agents: set[str] = set()
+        # Every task the CLI reports running, agents and background shells
+        # alike: task id -> what it is doing. Kept by the reader, so it stays
+        # right between turns, when no worker is reading.
+        self._running_tasks: dict[str, str] = {}
         # Called on every event the CLI sends, so the pool's idle clock
         # measures silence from the CLI rather than time since the last prompt.
         self.on_event: Optional[Callable[[], None]] = None
@@ -296,7 +357,7 @@ class ClaudeSession:
             errors="replace",
             # `claude` is often a shim that has to find `node`, and a window
             # started from a Dock or Start menu has a PATH that holds neither.
-            env=subprocess_env(binary),
+            env=claude_env(binary),
             # The shim may have the real agent as its child; stopping has to
             # stop that too.
             **own_group_kwargs(),
@@ -387,6 +448,7 @@ class ClaudeSession:
                         sid = event.get("session_id")
                         if sid:
                             self.session_id = sid
+                    self._note_task(event)
                     self._deliver(event)
         except Exception as exc:
             # A decode error mid-stream is the known case. Whatever it was,
@@ -400,6 +462,31 @@ class ClaudeSession:
             for done, _slot in waiters:
                 done.set()
             self._deliver(EOF)
+
+    def _note_task(self, event: dict) -> None:
+        if event.get("type") != "system":
+            return
+        subtype = event.get("subtype")
+        task_id = str(event.get("task_id") or "")
+        if not task_id:
+            return
+        with self._state:
+            if subtype == "task_started":
+                what = str(event.get("description") or event.get("task_type") or "").strip()
+                self._running_tasks[task_id] = " ".join(what.split())[:120] or "Background task"
+            elif subtype == "task_notification":
+                self._running_tasks.pop(task_id, None)
+
+    def running_tasks(self) -> list[tuple[str, str]]:
+        """(task id, description) for each task the CLI says is still running."""
+        with self._state:
+            return list(self._running_tasks.items())
+
+    def stop_task(self, task_id: str) -> bool:
+        """Stop one task, leaving the turn and every other task running."""
+        return self._confirmed(
+            self.send_control("stop_task", timeout=_STOP_TASK_SECONDS, task_id=task_id)
+        )
 
     def _touch(self) -> None:
         callback = self.on_event
@@ -625,6 +712,12 @@ def _lock_for(panel: object) -> threading.Lock:
             lock = threading.Lock()
             _panel_locks[panel] = lock
         return lock
+
+
+def held_session(panel: object) -> Optional[ClaudeSession]:
+    """The tab's live Claude process, if it has one. Never starts one."""
+    held = backend_pool.pool().take(backend_pool.pool_key(BACKEND_CLAUDE, panel))
+    return cast(Optional[ClaudeSession], held.handle if held is not None else None)
 
 
 def take_or_start(

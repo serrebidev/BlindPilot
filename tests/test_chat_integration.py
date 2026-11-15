@@ -216,7 +216,8 @@ def test_the_import_is_reported_by_the_first_chat_tab_only(monkeypatch, tmp_path
     owns_app = wx.GetApp() is None
     app = wx.GetApp() or wx.App(False)
     monkeypatch.setattr(chat_integration, "database_path", lambda: tmp_path / "chat.sqlite3")
-    monkeypatch.setattr(chat_integration, "ensure_legacy_import", lambda: tmp_path / "old.db")
+    monkeypatch.setattr(chat_integration, "_IMPORT_STARTED", True)
+    monkeypatch.setattr(chat_integration, "_IMPORTED", tmp_path / "old.db")
     monkeypatch.setattr(chat_integration, "_IMPORT_REPORTED", False)
     frame = wx.Frame(None)
     said: list[str] = []

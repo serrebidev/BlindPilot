@@ -17,8 +17,8 @@
 ## Findings against installed backends
 
 - Queue management exists as slash commands (`/queue list|clear|resume`); the gap is a GUI dialog.
-- Task steps are model-tracked (`TaskCreate`/`TodoWrite`), not OS processes; the worker protocol (`start/is_alive/join/cancel/steer`) has no per-task stop. Stop-one-task is unsupported and is not claimed.
-- Installed `claude --help` shows `--resume`/`--fork-session` but no file-checkpoint/restore flag. File-checkpoint restore is not offered.
+- Task steps are model-tracked (`TaskCreate`/`TodoWrite`), not OS processes; the worker protocol (`start/is_alive/join/cancel/steer`) has no per-task stop. Stop-one-task is unsupported and is not claimed. Corrected in 0.59.0: the Claude stream-json control protocol takes stop_task by task id, so Stop Background Task lists and stops one.
+- Installed `claude --help` shows `--resume`/`--fork-session` but no file-checkpoint/restore flag. File-checkpoint restore is not offered. Corrected in 0.59.0: hidden flag --rewind-files <user-message-id> with CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1 restores edit-tool changes (verified live, Claude Code 2.1.325); Put Files Back Before Here uses it.
 - Fallback-model changes update `_auto_route` but are never announced (permission-mode changes and tool steps already are).
 
 ## Task 1: Queued Messages dialog

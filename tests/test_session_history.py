@@ -1142,3 +1142,26 @@ def test_opencode_conversations_are_limited_to_one_directory(home: Path) -> None
 
     assert [entry.title for entry in list_history("opencode", OPENCODE_CWD)] == ["Here"]
     assert sorted(entry.title for entry in list_history("opencode")) == ["Here", "There"]
+
+
+def test_claude_turns_keep_each_prompts_own_id(home: Path) -> None:
+    """Put Files Back rewinds to a user message, so each turn carries its uuid."""
+    _write_claude(
+        home,
+        CLAUDE_CWD,
+        "33333333-3333-3333-3333-333333333333",
+        [
+            _claude_user("Edit the file", cwd=CLAUDE_CWD, uuid="user-0001-aaaa"),
+            _claude_assistant("Edited.", uuid="asst-0001-aaaa"),
+            _claude_user("Edit it again", cwd=CLAUDE_CWD, uuid="user-0002-bbbb"),
+            _claude_assistant("Done.", uuid="asst-0002-bbbb"),
+        ],
+    )
+    (entry,) = [
+        item
+        for item in session_history.list_history(backend="claude", cwd=CLAUDE_CWD)
+        if item.session_id.startswith("3333")
+    ]
+    turns = session_history.load_turns(entry)
+    assert [turn.prompt_id for turn in turns] == ["user-0001-aaaa", "user-0002-bbbb"]
+    assert [turn.message_id for turn in turns] == ["asst-0001-aaaa", "asst-0002-bbbb"]

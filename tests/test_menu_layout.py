@@ -55,6 +55,8 @@ def frame(wx_app):
         "_find_active",
         "_task_list_active",
         "_queued_messages_active",
+        "_stop_background_task_active",
+        "_put_files_back_active",
         "_connected_tools_active",
         "_open_sessions_active",
         "_computer_use_browse_active",

@@ -323,7 +323,7 @@ def test_start_runs_the_command_in_the_working_directory(monkeypatch):
     session = cs.ClaudeSession.start("claude", WANTS, "stdio", {"creationflags": 7})
     assert seen["cmd"][0] == "claude" and "--permission-prompt-tool" in seen["cmd"]
     assert seen["kwargs"]["cwd"] == "C:/work"
-    assert seen["kwargs"]["env"] == {"PATH": "x"}
+    assert seen["kwargs"]["env"] == {"PATH": "x", cs.CHECKPOINT_VAR: "1"}
     assert seen["kwargs"]["creationflags"] == 7
     assert seen["kwargs"]["errors"] == "replace"
     assert session.alive()

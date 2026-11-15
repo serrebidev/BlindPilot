@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.58.0"
+APP_VERSION = "0.59.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -15308,6 +15308,12 @@ class MainFrame(wx.Frame):
         )
         add(
             browse,
+            "Stop Back&ground Task…",
+            "Stop one running Claude agent or background command, leaving the rest running",
+            self._stop_background_task_active,
+        )
+        add(
+            browse,
             "&Connected Tools…",
             "List the MCP servers the known configs define for this session",
             self._connected_tools_active,
@@ -15397,6 +15403,12 @@ class MainFrame(wx.Frame):
                 lambda again=retry: self._recover_active(again),
             )
         browse.AppendSubMenu(recovery, "Conversation &Copies")
+        add(
+            recovery,
+            "Put &Files Back Before Here…",
+            "Undo the file edits Claude made since the selected message; the conversation stays",
+            self._put_files_back_active,
+        )
         self._menu_item(
             recovery,
             "&Ask Aside…",
@@ -15439,6 +15451,122 @@ class MainFrame(wx.Frame):
             announce("Select a message to branch or retry.")
             return
         self._recover_agent_response(page, page._displayed[selected], retry)
+
+    def _claude_page(self, what: str) -> Optional["SessionPanel"]:
+        """The visible session if it runs on Claude Code, else say why not."""
+        page = self.notebook.GetCurrentPage()
+        if self._app_mode != APP_MODE_AGENT or not isinstance(page, SessionPanel):
+            return None
+        if page.selected_backend() != BACKEND_CLAUDE:
+            announce(f"{what} works in Claude Code sessions.")
+            return None
+        return page
+
+    def _stop_background_task_active(self) -> None:
+        """List the tab's running Claude tasks and stop only the one chosen."""
+        import claude_session
+
+        page = self._claude_page("Stopping one background task")
+        if page is None:
+            return
+        session = claude_session.held_session(page)
+        tasks = session.running_tasks() if session is not None else []
+        if session is None or not tasks:
+            announce("No background tasks are running in this session.")
+            return
+        with wx.SingleChoiceDialog(
+            self,
+            "Choose the task to stop. The turn and the other tasks keep running.",
+            "Stop Background Task",
+            [what for _task_id, what in tasks],
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            task_id, what = tasks[dlg.GetSelection()]
+        announce(f"Stopping {what}")
+
+        def work() -> None:
+            stopped = session.stop_task(task_id)
+            wx.CallAfter(done, stopped)
+
+        def done(stopped: bool) -> None:
+            if self:
+                announce(
+                    f"Stopped {what}" if stopped else f"Claude Code did not confirm stopping {what}"
+                )
+
+        threading.Thread(target=work, name="claude-stop-task", daemon=True).start()
+
+    def _put_files_back_active(self) -> None:
+        """Rewind the files Claude's edit tools changed since one message."""
+        import claude_session
+        from conversation_recovery import turn_index_for_response
+
+        page = self._claude_page("Putting files back")
+        if page is None:
+            return
+        if page._run_in_progress():
+            announce("Stop or finish the current turn before putting files back.")
+            return
+        session_id = page._session_id or ""
+        selected = page._selected_row()
+        index = (
+            turn_index_for_response(page._turns, page._displayed[selected].response_number)
+            if session_id and 0 <= selected < len(page._displayed)
+            else None
+        )
+        if index is None:
+            announce("Select one of your messages, or its answer, in a saved conversation.")
+            return
+        turn = page._turns[index]
+        prompts = {turn.prompt, turn.sent_prompt or turn.prompt}
+        shown = " ".join(turn.prompt.split())[:200]
+        answer = wx.MessageBox(
+            "Put back every file Claude changed with its edit tools since this message?\n\n"
+            f"{shown}\n\n"
+            "Changes made by shell commands are not undone, and the conversation "
+            "itself stays as it is.",
+            "Put Files Back",
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+            self,
+        )
+        if answer != wx.YES:
+            return
+        cwd = page.cwd
+        announce("Putting files back.")
+
+        def work() -> None:
+            ok, said = False, ""
+            try:
+                entry = next(
+                    (
+                        item
+                        for item in list_history(backend=BACKEND_CLAUDE, limit=1000)
+                        if item.session_id == session_id
+                    ),
+                    None,
+                )
+                loaded = load_turns(entry) if entry is not None else []
+                if index >= len(loaded) or loaded[index].prompt not in prompts:
+                    said = "The saved conversation no longer matches the one shown."
+                else:
+                    binary = claude_session._find_claude()
+                    if not binary:
+                        said = "Claude Code was not found."
+                    else:
+                        ok, said = claude_session.rewind_files(
+                            binary, cwd, session_id, loaded[index].prompt_id
+                        )
+            except Exception as exc:
+                said = f"Could not put the files back: {exc}"
+            wx.CallAfter(done, ok, said)
+
+        def done(ok: bool, said: str) -> None:
+            if self:
+                self._set_status_text(said)
+                announce(said if ok else f"Files not put back: {said}")
+
+        threading.Thread(target=work, name="claude-rewind-files", daemon=True).start()
 
     def _export_conversations(self) -> None:
         from conversation_export import show_export_dialog

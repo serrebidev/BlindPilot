@@ -34,6 +34,8 @@ def frame(wx_app):
         "_find_active",
         "_task_list_active",
         "_queued_messages_active",
+        "_stop_background_task_active",
+        "_put_files_back_active",
         "_computer_use_browse_active",
         "_find_in_all_conversations",
         "_send_to_tab_active",

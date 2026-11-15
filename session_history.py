@@ -143,6 +143,8 @@ class HistoryTurn:
     turn_id: str = ""
     attachments: tuple[str, ...] = ()
     response_number: int = 0
+    # The user message's own id (Claude), where Put Files Back rewinds to.
+    prompt_id: str = ""
 
 
 # Every CLI stuffs context of its own into the user side of the transcript —
@@ -473,7 +475,9 @@ def _jsonl_turns(fmt: _JsonlFormat, entry: HistoryEntry) -> List[HistoryTurn]:
                 turn_id = str(payload.get("turn_id") or "")
         role, text = fmt.message_of(record)
         if role == "user":
-            turns.append(HistoryTurn(prompt=text, turn_id=turn_id))
+            turns.append(
+                HistoryTurn(prompt=text, turn_id=turn_id, prompt_id=str(record.get("uuid") or ""))
+            )
         elif role == "assistant":
             if not turns:
                 # An answer with nothing asked before it: a transcript that
