@@ -2,7 +2,7 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## v0.57.4 - 2026-11-14
+## v0.57.5 - 2026-11-14
 
 Agent controls, the fourth stage of the reference-app comparison. Conversation, Find and Browse gains Queued Messages, which lists the current session's standby messages with remove, clear, pause and resume; queue state was previously reachable only through slash commands. Fallback-model switches are now announced when the backend switches models mid-route, matching how permission-mode changes already were announced. Per-task stop and file-checkpoint restore are not offered: the installed backends' worker protocol has no per-task stop, and installed Claude exposes no file-checkpoint flag, so claiming them would have been inaccurate.
 

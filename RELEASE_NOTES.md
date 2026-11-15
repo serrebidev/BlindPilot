@@ -1,4 +1,4 @@
-# BlindPilot 0.57.4
+# BlindPilot 0.57.5
 
 This is the fourth release in the feature comparison with The Chat Place and FastChat: queued-message management and honest backend status announcements.
 
@@ -8,5 +8,5 @@ Fallback-model switches are now announced when a backend switches models mid-rou
 
 Two things are deliberately not offered. Stopping one background task does not map to any installed backend's worker protocol, and installed Claude exposes no file-checkpoint flag, so checkpoint restore would not be verifiable. Stopping a whole turn with Stop Task remains the supported path, and conversation branching keeps workspace files untouched.
 
-Connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.4.
+Connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.5.
 Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
