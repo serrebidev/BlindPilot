@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.11 - 2026-11-14
+
+Chat menu reachable Computer Use: the opt-in lived only on the history list's context menu, which is hard to find with a screen reader, so Computer Use… is now also in the Chat menu. No behavior changes.
+
 ## v0.57.10 - 2026-11-14
 
 macOS computer use: the opt-in per-conversation control from 0.57.8 now runs on the Mac too, driving other apps through their accessibility trees (numbered controls, press and set-value actions; peer validation before every action; BlindPilot itself cannot be operated; no coordinates). Automatic actions need Accessibility permission, requested once when starting; without it the app says exactly where to enable it. The global stop key is Windows-only in this release, so on macOS the Ask-before-each-action mode is recommended; in-window Stop always works.
