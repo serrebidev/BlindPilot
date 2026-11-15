@@ -9,7 +9,6 @@ them. Traversal, links and oversize entries are rejected.
 
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
 import zipfile
@@ -76,5 +75,7 @@ def import_sound_pack(zip_path: Path, packs_dir: Path) -> ImportPackResult:
             raise ValueError("The pack has no recognizable cue sounds.")
         if destination.is_dir():
             shutil.rmtree(destination)
-        os.replace(staged, destination)
+        # The temp folder may be on another filesystem (tmpfs /tmp on Linux),
+        # where a rename fails with EXDEV; move falls back to copying.
+        shutil.move(str(staged), str(destination))
     return ImportPackResult(folder=destination, unknown=tuple(sorted(set(unknown))))

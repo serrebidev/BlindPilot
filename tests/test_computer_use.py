@@ -111,6 +111,19 @@ def test_tools_have_definitions():
     assert names == ["list_controls", "press_control", "set_control_text"]
 
 
+def _in_service_session() -> bool:
+    """Session 0 (a service, such as the CI runner) has no desktop to open windows on."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    import os
+
+    session = ctypes.c_ulong()
+    ok = ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session))
+    return bool(ok) and session.value == 0
+
+
+@pytest.mark.skipif(_in_service_session(), reason="needs an interactive desktop")
 @pytest.mark.filterwarnings("ignore:Revert to STA COM threading mode:UserWarning")
 def test_real_notepad_round_trip():
     """Drive a real Notepad through UIA: list, type, verify, stop."""

@@ -104,6 +104,8 @@ class ComputerUseSession:
                     last_title = title
             time.sleep(0.25)
         if app_path:
+            # Do not leave the app we launched running with no window to use.
+            self.close()
             raise ComputerUseError(f"The app did not open a window: {app_path}") from None
         raise ComputerUseError(
             "No matching window was found."

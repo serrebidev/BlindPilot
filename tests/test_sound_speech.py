@@ -27,6 +27,23 @@ def test_pack_import_installs_known_cues(tmp_path):
     assert "bonus.txt" in result.unknown
 
 
+def test_pack_import_works_when_temp_is_another_filesystem(tmp_path, monkeypatch):
+    """Linux /tmp is often tmpfs, so renaming the staged pack into place fails
+    with EXDEV; the import must copy instead."""
+    import errno
+    import os
+
+    def no_cross_device_rename(src, dst, *args, **kwargs):
+        raise OSError(errno.EXDEV, "Invalid cross-device link", str(src))
+
+    monkeypatch.setattr(os, "rename", no_cross_device_rename)
+    monkeypatch.setattr(os, "replace", no_cross_device_rename)
+    pack = tmp_path / "pack.zip"
+    _write_pack(pack, {"send.wav": b"send"})
+    result = soundpacks.import_sound_pack(pack, tmp_path / "packs")
+    assert sorted(p.name for p in result.folder.iterdir()) == ["send.wav"]
+
+
 def test_pack_import_rejects_traversal(tmp_path):
     pack = tmp_path / "evil.zip"
     _write_pack(pack, {"../escape.wav": b"x", "send.wav": b"s"})
