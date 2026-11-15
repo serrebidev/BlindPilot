@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.4 - 2026-11-14
+
+Agent controls, the fourth stage of the reference-app comparison. Conversation, Find and Browse gains Queued Messages, which lists the current session's standby messages with remove, clear, pause and resume; queue state was previously reachable only through slash commands. Fallback-model switches are now announced when the backend switches models mid-route, matching how permission-mode changes already were announced. Per-task stop and file-checkpoint restore are not offered: the installed backends' worker protocol has no per-task stop, and installed Claude exposes no file-checkpoint flag, so claiming them would have been inaccurate.
+
 ## v0.57.3 - 2026-11-14
 
 Provider information and long chats, the third stage of the reference-app comparison. Chat, Usage Report checks an account and reads its usage, limit and balance when the provider publishes them; values a provider does not publish stay unknown rather than estimated. Accounts gain Ollama (local) for models served on this machine, needing no API key, with discovery from Ollama's own catalog. Chat history items gain Compact Conversation, which summarizes older messages on a worker while keeping the newest ones and leaving the original conversation untouched; editing a message now carries a test that attachment bytes survive.

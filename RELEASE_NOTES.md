@@ -1,12 +1,12 @@
-# BlindPilot 0.57.3
+# BlindPilot 0.57.4
 
-This is the third release in the feature comparison with The Chat Place and FastChat: provider usage reports, local Ollama chat, and Chat compaction.
+This is the fourth release in the feature comparison with The Chat Place and FastChat: queued-message management and honest backend status announcements.
 
-Under Chat, Usage Report checks the selected account and reads its usage, limit and balance when the provider publishes them. OpenRouter reports usage and remaining limit from its key endpoint and balance from its credits endpoint. Values a provider does not publish stay unknown in the dialog; nothing is estimated.
+Conversation, Find and Browse gains Queued Messages. It lists the messages waiting for the current session, with Remove selected, Clear all, and Pause/Resume controls. Queue state was previously reachable only through slash commands; now it has the same dialog reach as the other session tools, with announcements for every change.
 
-Accounts gain Ollama (local) for models served on this machine. It needs no API key; the picker lists the models Ollama itself serves.
+Fallback-model switches are now announced when a backend switches models mid-route, matching how permission-mode changes were already announced. Retries, fallback changes, and tool activity all read as short status lines.
 
-A Chat history item's context menu gains Compact Conversation. It summarizes older messages on a worker, keeps the newest ones, and leaves the original conversation untouched so the full history stays reachable as its own conversation.
+Two things are deliberately not offered. Stopping one background task does not map to any installed backend's worker protocol, and installed Claude exposes no file-checkpoint flag, so checkpoint restore would not be verifiable. Stopping a whole turn with Stop Task remains the supported path, and conversation branching keeps workspace files untouched.
 
-Agent controls, connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.3.
+Connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.4.
 Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
