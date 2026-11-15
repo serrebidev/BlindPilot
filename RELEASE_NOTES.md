@@ -1,10 +1,9 @@
-# BlindPilot 0.57.7
+# BlindPilot 0.57.8
 
-This is the sixth release in the feature comparison with The Chat Place and FastChat: sound packs, per-cue custom sounds, and an independent speech voice.
+This is the final release in the feature comparison with The Chat Place and FastChat: automatic computer use on Windows.
 
-Options, Sounds gains Choose Sound Pack and Custom Cue Sounds. Sound packs import from a zip of audio files named after the four cues (send, received, in_progress, error); unknown file names are reported instead of installed, and the pack folder takes precedence over the built-in sounds. Custom Cue Sounds gives each cue its own file, which wins over the pack.
+Computer Use is a new entry in the Chat history context menu. It is opt-in per conversation: choose the app (or just use the window in front), and the model can then act on it through its accessibility tree, as a numbered list of controls with press and set-text actions. There are no coordinates in this design; if the target window disappears, the action fails instead.
 
-Options gains System Speech: an independent SAPI voice with its own voice, rate and volume for speaking complete responses. It speaks independently of screen-reader narration and never changes it. Each conversation can follow the global setting, speak here, or never speak here. Stopping playback interrupts the independent voice.
+Actions run automatically by default. An "Ask before each action" box offers approval per action for those who want it. The stop key is Ctrl+Shift+F12; it is registered before automatic actions start, works with another app in front, and cancels pending work. In-window Stop does the same thing. BlindPilot itself cannot be operated (protection by process id), each action re-validates its target window first, and turns are bounded at 25 actions.
 
-Automatic computer use remains the final stage. It is not included in 0.57.7.
-Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
+macOS computer use is not in this release and follows in a later one. Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.

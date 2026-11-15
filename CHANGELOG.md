@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.8 - 2026-11-14
+
+Automatic computer use on Windows, the final parity stage. A new Computer Use entry in the Chat history menu opts a conversation in: the model acts on another application through its accessibility tree (numbered controls, press and set-text actions), never coordinates. Actions run automatically by default, with an ask-before-acting option. A Ctrl+Shift+F12 stop key works with another app in front, an in-window Stop does the same thing, and stopping cancels pending work until the user explicitly resumes by re-enabling it. BlindPilot itself cannot be operated (checked by process), each action re-validates its target, and turns are bounded at 25 actions. macOS computer use follows in a later release.
+
 ## v0.57.7 - 2026-11-14
 
 Speech and sound customization, the sixth stage of the reference-app comparison. Options, Sounds gains Choose Sound Pack and Custom Cue Sounds: sound packs import from a zip of files named after the cues (unknown names are reported, never installed) and chosen packs take precedence over the built-in sounds, while per-cue files win over the pack. Options gains System Speech, an independent SAPI voice with its own voice, rate and volume for speaking complete responses, separate from screen-reader narration, with a per-conversation inherit/on/off override. Stopping playback interrupts the independent voice.
