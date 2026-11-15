@@ -208,6 +208,8 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
         "_find_active",
         "_task_list_active",
         "_queued_messages_active",
+        "_connected_tools_active",
+        "_open_sessions_active",
         "_find_in_all_conversations",
         "_send_to_tab_active",
         "_pass_on_waiting_reply",
@@ -230,6 +232,8 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
         agent_chords = (
             "Ctrl+Shift+J",
             "&Queued Messages…",
+            "&Connected Tools…",
+            "&Open Sessions…",
             "Ctrl+Shift+X",
             "Ctrl+Shift+Y",
             "Ctrl+Shift+S",

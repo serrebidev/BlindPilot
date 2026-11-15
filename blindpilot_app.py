@@ -15124,6 +15124,18 @@ class MainFrame(wx.Frame):
         )
         add(
             browse,
+            "&Connected Tools…",
+            "List the MCP servers the known configs define for this session",
+            self._connected_tools_active,
+        )
+        add(
+            browse,
+            "&Open Sessions…",
+            "List the sessions open in BlindPilot now",
+            self._open_sessions_active,
+        )
+        add(
+            browse,
             "Co&mmands…\tCtrl+Shift+X",
             "List every command the agent ran, with whether it finished and its output",
             lambda: self._panel_action("open_commands"),
@@ -17112,6 +17124,18 @@ class MainFrame(wx.Frame):
             from queue_dialogs import show_queue_dialog
 
             show_queue_dialog(self, page, announce)
+
+    def _connected_tools_active(self) -> None:
+        from connected_dialogs import show_connected_tools_dialog
+
+        page = self.notebook.GetCurrentPage()
+        cwd = page.cwd if isinstance(page, SessionPanel) else None
+        show_connected_tools_dialog(self, cwd, announce)
+
+    def _open_sessions_active(self) -> None:
+        from connected_dialogs import show_open_sessions_dialog
+
+        show_open_sessions_dialog(self, self, announce)
 
     def _panel_action(self, name: str) -> None:
         """Run one of the current agent tab's list commands by name."""

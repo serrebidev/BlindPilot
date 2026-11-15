@@ -32,6 +32,8 @@ def frame(wx_app):
         "_find_active",
         "_task_list_active",
         "_queued_messages_active",
+        "_connected_tools_active",
+        "_open_sessions_active",
         "_find_in_all_conversations",
         "_send_to_tab_active",
         "_pass_on_waiting_reply",
@@ -53,7 +55,7 @@ def test_find_and_browse_holds_queued_messages(frame):
         if item.GetItemLabelText().startswith("Find and Browse")
     )
     labels = " | ".join(item.GetItemLabelText() for item in browse.GetMenuItems())
-    for wanted in ("Task List", "Queued Messages"):
+    for wanted in ("Task List", "Queued Messages", "Connected Tools", "Open Sessions"):
         assert wanted in labels, f"Find and Browse has no {wanted!r}: {labels}"
 
 

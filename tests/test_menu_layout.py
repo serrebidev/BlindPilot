@@ -53,6 +53,8 @@ def frame(wx_app):
         "_find_active",
         "_task_list_active",
         "_queued_messages_active",
+        "_connected_tools_active",
+        "_open_sessions_active",
         "_find_in_all_conversations",
         "_send_to_tab_active",
         "_pass_on_waiting_reply",
