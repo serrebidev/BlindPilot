@@ -1,9 +1,6 @@
-# BlindPilot 0.57.8
+# BlindPilot 0.57.9
 
-This is the final release in the feature comparison with The Chat Place and FastChat: automatic computer use on Windows.
+Test-only release: the macOS release build exposed a test isolation issue where a queued sound's player thread counted as a worker in the GitHub picker test. The test now isolates unrelated sound spawns the same way the CLI-discovery test already did. No product behavior changes.
 
-Computer Use is a new entry in the Chat history context menu. It is opt-in per conversation: choose the app (or just use the window in front), and the model can then act on it through its accessibility tree, as a numbered list of controls with press and set-text actions. There are no coordinates in this design; if the target window disappears, the action fails instead.
-
-Actions run automatically by default. An "Ask before each action" box offers approval per action for those who want it. The stop key is Ctrl+Shift+F12; it is registered before automatic actions start, works with another app in front, and cancels pending work. In-window Stop does the same thing. BlindPilot itself cannot be operated (protection by process id), each action re-validates its target window first, and turns are bounded at 25 actions.
-
-macOS computer use is not in this release and follows in a later one. Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
+For the features in it, see the 0.57.8 notes: automatic computer use on Windows — opt-in per conversation, accessibility-tree actions only, automatic by default with ask-before-acting available, Ctrl+Shift+F12 stop key, BlindPilot itself cannot be operated, 25-action turn bound. macOS computer use follows in a later release.
+Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.

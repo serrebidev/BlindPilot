@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.9 - 2026-11-14
+
+Test-only fix that the macOS release build exposed: a queued sound's player thread counted as a worker in the GitHub picker test, failing the macOS suite. The test now isolates unrelated sound spawns the same way the CLI-discovery test already did. No product behavior changes.
+
 ## v0.57.8 - 2026-11-14
 
 Automatic computer use on Windows, the final parity stage. A new Computer Use entry in the Chat history menu opts a conversation in: the model acts on another application through its accessibility tree (numbered controls, press and set-text actions), never coordinates. Actions run automatically by default, with an ask-before-acting option. A Ctrl+Shift+F12 stop key works with another app in front, an in-window Stop does the same thing, and stopping cancels pending work until the user explicitly resumes by re-enabling it. BlindPilot itself cannot be operated (checked by process), each action re-validates its target, and turns are bounded at 25 actions. macOS computer use follows in a later release.
