@@ -1,4 +1,4 @@
-# BlindPilot 0.57.0
+# BlindPilot 0.57.1
 
 This is the first release in the feature comparison with The Chat Place and FastChat: conversation copies, separate questions, bulk exports, and more resilient Chat requests.
 
@@ -10,4 +10,4 @@ File, Recent Conversations, Export Conversations writes selected saved Agent and
 
 Chat requests retry transient failures up to twice, with cancellable delays. Once text, thinking, tool activity or an accepted batch has begun, requests are not replayed. The Windows updater also fixes an archive-module conflict between PowerShell 7 and Windows PowerShell 5.1. Command Code's free-model shortlist now uses Inkling 2 Small instead of the retired Beam entry.
 
-Automatic computer use, backups/imports, provider reports, connected-tool management, and sound/voice customization remain later stages. They are not included in 0.57.0. Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
+Automatic computer use, backups/imports, provider reports, connected-tool management, and sound/voice customization remain later stages. They are not included in 0.57.1. Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.

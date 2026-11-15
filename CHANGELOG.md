@@ -2,7 +2,7 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
-## v0.57.0 - 2026-11-14
+## v0.57.1 - 2026-11-14
 
 Conversation copies and separate questions, informed by The Chat Place and FastChat. Branch from Here keeps a conversation prefix; Retry from Here restores the selected question and retained attachments without sending it or changing the original. Claude and Codex use native forks when saved boundary IDs are available, with a labeled text-context copy otherwise. Chat copies atomically preserve messages and attachment bytes. Ask Aside sends completed conversation text to an explicitly chosen Chat account with all tools disabled, including account-provided tools and ChatGPT's usual built-in tools. It leaves source history and drafts alone.
 

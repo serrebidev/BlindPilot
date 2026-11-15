@@ -10,6 +10,12 @@ import portable_node
 wx = pytest.importorskip("wx")
 
 
+@pytest.fixture(autouse=True)
+def unrelated_sounds_do_not_start_threads(monkeypatch):
+    """A queued sound on macOS must not count as this test's discovery worker."""
+    monkeypatch.setattr(app.earcons.Earcons, "_spawn", lambda *_args: None)
+
+
 def test_cli_check_runs_discovery_on_worker_and_fills_result(wx_app, monkeypatch):
     workers = []
     callbacks = []

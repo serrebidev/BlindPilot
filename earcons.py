@@ -340,6 +340,7 @@ class Earcons:
                 )
                 if stop.is_set():
                     proc.kill()
+                    proc.wait()
                     return
                 self._loop_proc = proc
                 proc.wait()

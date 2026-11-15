@@ -1,6 +1,6 @@
 # Reference parity, stage one: verification
 
-Date: 2026-11-14. Release target: 0.57.0.
+Date: 2026-11-14. Release target: 0.57.1.
 
 ## Scope
 
@@ -75,6 +75,12 @@ On Windows, the final source suite passed: **3,096 passed, 15 skipped** with
 mypy passed for all 44 listed production modules. Source and locally built
 Windows executable each passed `--startup-smoke`, `--startup-gui-smoke`, and
 `--startup-chat-gui-smoke`.
+
+The first macOS run found that native Choice selected an account implicitly,
+and that unrelated queued sounds could be counted as a CLI-discovery test's
+worker. Aside now starts on an explicit “Choose an account” placeholder on both
+platforms; the CLI-discovery test isolates unrelated sound processes. The
+unpublished 0.57.0 tag was left unchanged; the release target advanced to 0.57.1.
 
 Ruff, configured mypy, full warnings-as-errors pytest, source startup smokes,
 packaged startup smokes, and artifact checksums must pass before publication.

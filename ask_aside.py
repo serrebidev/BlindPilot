@@ -111,7 +111,8 @@ class AskAsideDialog(wx.Dialog):
             self._status(f"Could not load accounts: {error}")
             return
         self._accounts, self._models, self._service = result
-        self.account.Set([account.name for account in self._accounts])
+        self.account.Set(["Choose an account", *[account.name for account in self._accounts]])
+        self.account.SetSelection(0)
         self._status(
             "Choose an account and model before asking."
             if self._accounts
@@ -120,7 +121,7 @@ class AskAsideDialog(wx.Dialog):
 
     def _select_account(self, event):
         index = self.account.GetSelection()
-        account = self._accounts[index] if index != wx.NOT_FOUND else None
+        account = self._accounts[index - 1] if index > 0 else None
         self.model.Set(self._models.get(account.id, []) if account else [])
         if self.model.GetCount():
             self.model.SetSelection(0)
@@ -134,7 +135,7 @@ class AskAsideDialog(wx.Dialog):
         if self._service is None:
             return
         account_index, model_index = self.account.GetSelection(), self.model.GetSelection()
-        if account_index == wx.NOT_FOUND or model_index == wx.NOT_FOUND:
+        if account_index <= 0 or model_index == wx.NOT_FOUND:
             self._status("Choose an account and model first.")
             return
         try:
@@ -144,7 +145,7 @@ class AskAsideDialog(wx.Dialog):
         except ValueError as exc:
             self._status(str(exc))
             return
-        account = self._accounts[account_index]
+        account = self._accounts[account_index - 1]
         self._cancel = Event()
         cancel = self._cancel
         self._serial += 1

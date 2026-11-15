@@ -44,8 +44,9 @@ def test_stop_and_close_discard_late_aside_output(monkeypatch):
     try:
         jobs.clear()  # No real database, credentials or network in this test.
         dialog._loaded(([Account(id=1, name="Chosen")], {1: ["model"]}, object()), "")
-        assert dialog.account.GetSelection() == wx.NOT_FOUND
-        dialog.account.SetSelection(0)
+        assert dialog.account.GetSelection() == 0
+        assert dialog.account.GetStringSelection() == "Choose an account"
+        dialog.account.SetSelection(1)
         dialog._select_account(None)
         dialog.question.SetValue("question")
         dialog._ask(None)

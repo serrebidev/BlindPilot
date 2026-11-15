@@ -97,6 +97,30 @@ def test_all_three_play_when_nothing_is_switched_off(earcons):
     assert earcons.played == ["send.wav", "received.wav"]
 
 
+def test_stopping_as_the_unix_player_starts_still_reaps_it(earcons, monkeypatch):
+    import threading
+    import earcons as sound
+
+    stop = threading.Event()
+    calls = []
+
+    class Player:
+        def kill(self):
+            calls.append("kill")
+
+        def wait(self):
+            calls.append("wait")
+
+    def start(*args, **kwargs):
+        stop.set()
+        return Player()
+
+    monkeypatch.setattr(earcons, "_unix_player", lambda: ["fake-player"])
+    monkeypatch.setattr(sound.subprocess, "Popen", start)
+    earcons._loop_unix(stop)
+    assert calls == ["kill", "wait"]
+
+
 @pytest.mark.parametrize(("cue", "play"), [("send", "play_send"), ("received", "play_received")])
 def test_a_one_shot_is_silent_when_its_own_cue_is_off(earcons, cue, play):
     earcons.set_cues({cue: False})
