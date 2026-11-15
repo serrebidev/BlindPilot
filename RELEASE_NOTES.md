@@ -1,14 +1,12 @@
-# BlindPilot 0.57.2
+# BlindPilot 0.57.3
 
-This is the second release in the feature comparison with The Chat Place and FastChat: backups, restores, kept transcript copies, and conversation imports.
+This is the third release in the feature comparison with The Chat Place and FastChat: provider usage reports, local Ollama chat, and Chat compaction.
 
-Under File, Recent Conversations, Back Up BlindPilot saves your Chat database and settings to one archive file with a manifest. You can include kept transcript copies with a checkbox; backups never include API keys, sign-in tokens or cookies, and the archive says so in its manifest.
+Under Chat, Usage Report checks the selected account and reads its usage, limit and balance when the provider publishes them. OpenRouter reports usage and remaining limit from its key endpoint and balance from its credits endpoint. Values a provider does not publish stay unknown in the dialog; nothing is estimated.
 
-Restore from Backup reads the archive and previews it first: which accounts, profiles, conversations and messages it holds, and whether it includes kept transcripts. Restoring keeps your current history aside under a timestamped name before installing, so nothing is silently overwritten, and credentials are never touched.
+Accounts gain Ollama (local) for models served on this machine. It needs no API key; the picker lists the models Ollama itself serves.
 
-Kept Transcripts automatically saves read-only copies of conversations you open or complete, so provider cleanup cannot erase them. The dialog lists the copies and how much storage they use, lets you delete copies with confirmation (deleting a copy never deletes the original), and offers a switch to turn future keeping off. Copies never expire by themselves.
+A Chat history item's context menu gains Compact Conversation. It summarizes older messages on a worker, keeps the newest ones, and leaves the original conversation untouched so the full history stays reachable as its own conversation.
 
-Import Conversation takes Basilisk .bskc files and BlindPilot interchange JSON. Imports preserve messages, attachments and supported settings; anything the importer cannot carry over, such as per-message model choices or URL attachments, is reported in plain words rather than dropped silently.
-
-Usage and balance reports, Ollama, compaction, agent controls, connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.2.
+Agent controls, connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.3.
 Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.

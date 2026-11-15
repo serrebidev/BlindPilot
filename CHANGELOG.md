@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.3 - 2026-11-14
+
+Provider information and long chats, the third stage of the reference-app comparison. Chat, Usage Report checks an account and reads its usage, limit and balance when the provider publishes them; values a provider does not publish stay unknown rather than estimated. Accounts gain Ollama (local) for models served on this machine, needing no API key, with discovery from Ollama's own catalog. Chat history items gain Compact Conversation, which summarizes older messages on a worker while keeping the newest ones and leaving the original conversation untouched; editing a message now carries a test that attachment bytes survive.
+
 ## v0.57.2 - 2026-11-14
 
 History protection and import, the second stage of the reference-app comparison. File, Recent Conversations gains Back Up BlindPilot, which saves the Chat database and settings to one archive with a manifest and a preview; API keys and tokens live in the credential store and are never included. Restore from Backup validates the archive first, keeps current history aside under a timestamped name, and only then installs, without touching credentials. Kept Transcripts automatically saves read-only copies of conversations you open or complete, lists storage use, lets you delete copies with confirmation (originals are never deleted), and can be switched off. Import Conversation now accepts Basilisk .bskc files and BlindPilot interchange JSON, reporting every field it could not carry over instead of dropping it silently.
