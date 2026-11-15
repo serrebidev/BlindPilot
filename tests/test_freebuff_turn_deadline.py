@@ -39,8 +39,13 @@ class _Turn:
         return [text for kind, text in self.activity if kind == "notice"]
 
 
-def _run(monkeypatch, screens, seconds=1.0, hold=None):
-    """One whole turn against a fake terminal. `screens(sent)` paints it."""
+def _run(monkeypatch, screens, seconds=2.5, hold=None):
+    """One whole turn against a fake terminal. `screens(sent)` paints it.
+
+    The worker waits for the composer to hold still for a second before it
+    sends, so the deadline must leave room after that: at 1.0 the send landed
+    on the deadline and a slow runner (Linux CI) captured nothing.
+    """
     turn = _Turn()
     worker = FreebuffWorker(
         "do the work",
