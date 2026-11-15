@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import sys
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -470,9 +471,14 @@ class ChatPanel(wx.Panel):
         session = entry.get("session")
         if session is None:
             try:
-                from computer_use import ComputerUseSession
+                if sys.platform == "darwin":
+                    from computer_use_mac import MacAXSession
 
-                session = ComputerUseSession()
+                    session = MacAXSession()
+                else:
+                    from computer_use import ComputerUseSession
+
+                    session = ComputerUseSession()
                 session.open(app_path=str(entry.get("app_path") or ""))
             except Exception as exc:
                 self.SetStatusText(f"Computer use could not start: {exc}")
@@ -482,14 +488,18 @@ class ChatPanel(wx.Panel):
         from computer_dialog import register_stop_key
         from computer_tools import ComputerUseExecutor
 
+        ask_mode = bool(entry.get("ask"))
         if self._stop_key_unregister is None:
             try:
                 self._stop_key_unregister = register_stop_key(lambda: self.generation_cancel.set())
             except Exception as exc:
-                self.SetStatusText(f"Computer use needs the stop key: {exc}")
-                self._speak(f"Computer use needs the stop key: {exc}")
-                return None
-        ask_mode = bool(entry.get("ask"))
+                if not ask_mode:
+                    self.SetStatusText(f"Computer use needs the stop key: {exc}")
+                    self._speak(f"Computer use needs the stop key: {exc}")
+                    return None
+                self.SetStatusText(
+                    "Asking before each action, since the stop key is unavailable here."
+                )
 
         def ask(label: str) -> bool:
             answer: list[bool] = []
@@ -530,6 +540,16 @@ class ChatPanel(wx.Panel):
         if choice is None:
             return
         app_path, ask = choice
+        if sys.platform == "darwin":
+            from computer_trust import request_accessibility_permission
+
+            if not request_accessibility_permission():
+                self._speak(
+                    "This Mac has not granted Accessibility permission to BlindPilot. "
+                    "Open System Settings, Privacy and Security, Accessibility, and enable "
+                    "BlindPilot, then start computer use again."
+                )
+                return
         self._computer_sessions[conversation_id] = {
             "app_path": app_path,
             "ask": ask,
