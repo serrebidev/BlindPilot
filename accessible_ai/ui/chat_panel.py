@@ -98,6 +98,10 @@ class ChatPanel(wx.Panel):
         self.accounts: list[Account] = []
         self.profiles: list[Profile] = []
         self.current_conversation_id: int | None = None
+        # The conversation title BlindPilot names this chat's tab after, and
+        # who to tell when it changes.
+        self.tab_title = ""
+        self.on_title_changed = None
         self.current_system_prompt = ""
         self.current_profile_id: int | None = None
         # The profile as it stood when this conversation was created. The
@@ -143,6 +147,13 @@ class ChatPanel(wx.Panel):
         self.apply_selected_profile()
         self.Bind(wx.EVT_CHAR_HOOK, self.on_char_hook)
         self.message_input.SetFocus()
+
+    def _set_tab_title(self, title: str) -> None:
+        if title == self.tab_title:
+            return
+        self.tab_title = title
+        if self.on_title_changed is not None:
+            self.on_title_changed()
 
     def SetStatusText(self, text: str) -> None:
         self._set_status(text)
@@ -1131,6 +1142,7 @@ class ChatPanel(wx.Panel):
         models: list[str],
     ) -> None:
         self.current_conversation_id = conversation.id
+        self._set_tab_title(conversation.title)
         self.current_system_prompt = conversation.system_prompt_snapshot
         self.current_profile_id = conversation.profile_id
         self.current_profile = profile
@@ -1222,6 +1234,7 @@ class ChatPanel(wx.Panel):
             )
             return
         self.current_conversation_id = None
+        self._set_tab_title("")
         self.current_system_prompt = ""
         self.current_profile_id = None
         self.current_profile = None
@@ -1251,6 +1264,7 @@ class ChatPanel(wx.Panel):
             system_prompt_snapshot=self.current_system_prompt,
         )
         self.current_conversation_id = self.db.create_conversation(conversation)
+        self._set_tab_title(title)
 
     def _generation_settings(
         self,

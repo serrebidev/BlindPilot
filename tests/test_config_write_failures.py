@@ -374,6 +374,12 @@ class _NoopWindow:
     def Layout(self) -> None:
         pass
 
+    def SetName(self, _name: str) -> None:
+        pass
+
+    def SetItemLabel(self, _label: str) -> None:
+        pass
+
 
 def _mode_frame():
     """The surface `_set_app_mode` touches on the way to the save, in Agent
@@ -388,11 +394,15 @@ def _mode_frame():
             "_refresh_hermes_sessions_item": lambda self: None,
             "_refresh_museai_menu": lambda self: None,
             "focus_for_mode": lambda self: None,
+            "_sync_tab_switcher": lambda self: None,
         },
     )()
     stub.announced = []
     stub._app_mode = app.APP_MODE_AGENT
     stub.chat_panel = None
+    stub.chat_book = None
+    stub._new_tab_item = _NoopWindow()
+    stub._close_tab_item = _NoopWindow()
     stub.tab_switcher = _NoopWindow()
     stub.notebook = _NoopWindow()
     stub.mode_combo = _NoopWindow()

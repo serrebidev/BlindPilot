@@ -23,6 +23,8 @@ def frame(wx_app):
         "_set_projects_folder",
         "_create_desktop_shortcut",
         "_close_current_session",
+        "_new_tab_command",
+        "_close_tab_command",
         "_stop_active",
         "_attach_active",
         "_slash_active",

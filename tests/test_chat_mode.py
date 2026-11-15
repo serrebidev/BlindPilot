@@ -174,7 +174,7 @@ def test_agent_only_commands_are_greyed_out_in_chat_mode(monkeypatch, tmp_path):
     frame = _frame(monkeypatch, tmp_path, saved)
     try:
         labels = {item.GetItemLabelText() for item in frame._agent_menu_items}
-        assert {"New Session…", "Find in Responses…", "Backend"} <= labels, labels
+        assert {"Side Chat in This Folder", "Find in Responses…", "Backend"} <= labels, labels
         assert all(item.IsEnabled() for item in frame._agent_menu_items)
 
         frame._set_app_mode(blindpilot_app.APP_MODE_CHAT)
@@ -189,4 +189,55 @@ def test_agent_only_commands_are_greyed_out_in_chat_mode(monkeypatch, tmp_path):
         assert all(item.IsEnabled() for item in frame._agent_menu_items)
         assert frame._compact_item.IsEnabled()
     finally:
+        _destroy(frame, app, owns_app)
+
+
+def test_chat_mode_has_tabs_like_agent_mode(monkeypatch, tmp_path):
+    """Chat mode keeps several conversations open as tabs. The same strip,
+    Ctrl+T, Ctrl+W and Ctrl+Tab that work on Agent sessions work on chats,
+    and switching modes puts each mode's own tabs back on the strip."""
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    saved: dict[str, object] = {"setup_complete": True, "app_mode": "agent"}
+    monkeypatch.setattr(blindpilot_app, "announce", lambda _text: None)
+    frame = _frame(monkeypatch, tmp_path, saved)
+    try:
+        frame._set_app_mode(blindpilot_app.APP_MODE_CHAT, announce_change=False)
+        book = frame.chat_book
+        assert book is not None and book.GetPageCount() == 1
+        assert frame.tab_switcher.IsShown()
+        assert frame.tab_switcher.GetName() == "Chat tabs"
+        assert frame.tab_switcher.GetPageText(0) == "New chat"
+        assert frame._new_tab_item.IsEnabled()
+        assert frame._new_tab_item.GetItemLabelText() == "New Chat"
+        assert frame._close_tab_item.GetItemLabelText() == "Close Chat"
+
+        first = frame.chat_panel
+        frame._new_tab_command()
+        second = frame.chat_panel
+        assert second is not first
+        assert book.GetPageCount() == 2 and book.GetSelection() == 1
+        assert frame.tab_switcher.GetPageCount() == 2
+
+        second._set_tab_title("Rust lifetimes question")
+        assert frame.tab_switcher.GetPageText(1) == "Rust lifetimes question"
+
+        frame._cycle_tab(+1)
+        assert book.GetSelection() == 0 and frame.chat_panel is first
+        frame._jump_to_tab(1)
+        assert frame.chat_panel is second
+
+        frame._close_tab_command()
+        assert book.GetPageCount() == 1 and frame.chat_panel is first
+        frame._close_tab_command()
+        assert book.GetPageCount() == 1
+
+        frame._set_app_mode(blindpilot_app.APP_MODE_AGENT, announce_change=False)
+        assert frame.tab_switcher.GetName() == "Session tabs"
+        assert frame.tab_switcher.GetPageCount() == frame.notebook.GetPageCount()
+        assert frame._new_tab_item.GetItemLabelText() == "New Session…"
+    finally:
+        if frame.chat_book is not None:
+            for index in range(frame.chat_book.GetPageCount()):
+                frame.chat_book.GetPage(index).shutdown()
         _destroy(frame, app, owns_app)

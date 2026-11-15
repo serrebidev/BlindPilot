@@ -207,7 +207,7 @@ If you're not in Bypass permissions and Claude Code wants to do something it nee
 
 Help, Keyboard Shortcuts (F1) shows all of this inside the app.
 
-- Ctrl+L: go to the prompt. Ctrl+T: new session. Ctrl+W: close it.
+- Ctrl+L: go to the prompt. Ctrl+T: new session, or a new chat in Chat mode. Ctrl+W: close it.
 - F6 and Shift+F6: move between the tabs, the answers, and the prompt.
 - Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+Shift+] and Ctrl+Shift+[: next and previous tab. Ctrl+1 to Ctrl+9: jump to a tab.
 - Ctrl+Shift+H: reopen an old conversation. Ctrl+G: Hermes conversations, including ones still running.
@@ -245,6 +245,8 @@ On a Mac, Ctrl is Cmd. Two keys are different so macOS doesn't eat them: Recent 
 - **Codex in Auto:** steps that need to leave the sandbox go to Codex's automatic approval review instead of failing or asking you. Each decision is announced, with its risk level and reason.
 
 ## Chat mode
+
+Chat mode has tabs like Agent mode. Ctrl+T opens a new chat in its own tab, Ctrl+W closes it, Ctrl+Tab and Ctrl+Shift+Tab move between chats, and Ctrl+1 to Ctrl+9 jump to one. Each tab is named after its conversation. The tab strip (Chat tabs) sits above the chat, and switching to Agent mode puts the session tabs back.
 
 ### Conversation copies, separate questions, and export
 

@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.57.12"
+APP_VERSION = "0.58.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -13223,6 +13223,11 @@ def _chord(chord: str) -> str:
     return chord.replace("Ctrl", "Cmd") if platform.system() == "Darwin" else chord
 
 
+def _chat_tab_label(panel) -> str:
+    """A Chat tab's name: its conversation's title, or New chat until it has one."""
+    return _tab_title(getattr(panel, "tab_title", "") or "") or "New chat"
+
+
 def _tab_chord_notes() -> tuple[str, str]:
     """The menu accelerators for Next/Previous Session, per platform.
 
@@ -13542,7 +13547,10 @@ class MainFrame(wx.Frame):
         self._backend = normalize_backend(cfg.get("backend"))
         self._app_mode = APP_MODE_CHAT if cfg.get("app_mode") == APP_MODE_CHAT else APP_MODE_AGENT
         self._chat_model_order = _valid_chat_model_order(cfg.get("chat_model_order"))
-        self.chat_panel = None
+        # Chat mode has tabs like Agent mode: one ChatPanel per page of
+        # chat_book, and chat_panel is always the visible one.
+        self.chat_book: Optional[wx.Simplebook] = None
+        self.chat_panel: Any = None
         pf = cfg.get("projects_folder")
         self._projects_folder: Optional[str] = pf if pf and os.path.isdir(pf) else None
 
@@ -14219,10 +14227,7 @@ class MainFrame(wx.Frame):
             # would otherwise move the strip without moving the page. Handling
             # it here rather than leaving it to the accelerator table keeps the
             # hook from swallowing it as a plain Tab.
-            if self._app_mode == APP_MODE_AGENT:
-                self._cycle_tab(-1 if event.ShiftDown() else +1)
-                return
-            event.Skip()
+            self._cycle_tab(-1 if event.ShiftDown() else +1)
             return
         if self._route_agent_tab(wx.Window.FindFocus(), event.ShiftDown()):
             return
@@ -14244,20 +14249,119 @@ class MainFrame(wx.Frame):
     def _ensure_chat_panel(self):
         if self.chat_panel is not None:
             return self.chat_panel
+        book = self.chat_book
+        if book is None:
+            # Created on first use, so its pages come after the Agent book in
+            # Tab order: mode picker, tab strip, then the visible chat.
+            book = wx.Simplebook(self._root)
+            book.SetName("Chat pages")
+            book.Bind(wx.EVT_BOOKCTRL_PAGE_CHANGED, self._on_chat_tab_changed)
+            self._root_sizer.Add(book, 1, wx.EXPAND | wx.ALL, self.FromDIP(PAD))
+            book.Hide()
+        try:
+            self.chat_book = book
+            return self._add_chat_tab()
+        except Exception:
+            if book.GetPageCount() == 0:
+                self._root_sizer.Detach(book)
+                book.Destroy()
+                self.chat_book = None
+            raise
+
+    def _add_chat_tab(self):
+        """Open one more Chat conversation as a tab and show it."""
         from chat_integration import create_chat_panel
 
-        self.chat_panel = create_chat_panel(
-            self._root,
+        book = self.chat_book
+        assert book is not None
+        panel = create_chat_panel(
+            book,
             self._set_status_text,
             announce,
             model_order=self._chat_model_order,
         )
-        self.chat_panel.refresh_models_item = self._chat_refresh_item
-        self.chat_panel.history_list_view_item = self._chat_history_list_item
-        self.chat_panel.history_text_view_item = self._chat_history_text_item
-        self._root_sizer.Add(self.chat_panel, 1, wx.EXPAND | wx.ALL, self.FromDIP(PAD))
-        self.chat_panel.Hide()
-        return self.chat_panel
+        panel.refresh_models_item = self._chat_refresh_item
+        panel.history_list_view_item = self._chat_history_list_item
+        panel.history_text_view_item = self._chat_history_text_item
+        panel.on_title_changed = lambda p=panel: self._relabel_chat_tab(p)
+        self.chat_panel = panel
+        book.AddPage(panel, _chat_tab_label(panel), select=True)
+        self._sync_tab_switcher()
+        return panel
+
+    def _relabel_chat_tab(self, panel) -> None:
+        book = self.chat_book
+        if book is None or not panel:
+            return
+        index = book.FindPage(panel)
+        if index != wx.NOT_FOUND:
+            book.SetPageText(index, _chat_tab_label(panel))
+            self._sync_tab_switcher()
+
+    def _on_chat_tab_changed(self, event: wx.BookCtrlEvent) -> None:
+        event.Skip()
+        book = self.chat_book
+        if book is None:
+            return
+        self.chat_panel = book.GetCurrentPage()
+        self._sync_tab_switcher()
+        if self.chat_panel is None or self._app_mode != APP_MODE_CHAT:
+            return
+        # Arrowing the strip: the native tab control already said the tab.
+        if self._strip_keeps_focus or self._focus_is_within(
+            wx.Window.FindFocus(), self.tab_switcher
+        ):
+            return
+        sel = book.GetSelection()
+        label = _chat_tab_label(self.chat_panel)
+        wx.CallAfter(announce, f"Chat {sel + 1} of {book.GetPageCount()}: {label}")
+        wx.CallAfter(self.focus_for_mode)
+
+    def _new_chat_tab(self) -> None:
+        try:
+            self._add_chat_tab()
+        except Exception as exc:
+            message = f"A new chat tab could not be opened: {exc}"
+            self._set_status_text(message)
+            announce(message)
+            return
+        wx.CallAfter(announce, f"New chat, tab {self._active_book().GetPageCount()}")
+        wx.CallAfter(self.focus_for_mode)
+
+    def _close_chat_tab(self) -> None:
+        book = self.chat_book
+        if book is None or book.GetPageCount() <= 1:
+            self._set_status_text("Cannot close the last chat")
+            announce("Cannot close the last chat")
+            return
+        sel = book.GetSelection()
+        if sel == wx.NOT_FOUND:
+            return
+        cast(Any, book.GetPage(sel)).shutdown()
+        book.DeletePage(sel)
+        self.chat_panel = book.GetCurrentPage()
+        self._sync_tab_switcher()
+        label = _chat_tab_label(self.chat_panel) if self.chat_panel else ""
+        wx.CallAfter(announce, f"Chat closed. Chat {book.GetSelection() + 1}: {label}")
+        wx.CallAfter(self.focus_for_mode)
+
+    def _active_book(self) -> wx.BookCtrlBase:
+        """The page book the tab strip and tab commands act on in this mode."""
+        if self._app_mode == APP_MODE_CHAT and self.chat_book is not None:
+            return self.chat_book
+        return self.notebook
+
+    def _new_tab_command(self) -> None:
+        if self._app_mode == APP_MODE_CHAT:
+            self._new_chat_tab()
+        else:
+            self._new_session()
+
+    def _close_tab_command(self) -> None:
+        if self._app_mode == APP_MODE_CHAT:
+            self._close_chat_tab()
+        else:
+            self._close_current_session()
 
     def _set_app_mode(self, mode: str, announce_change: bool = True) -> None:
         mode = APP_MODE_CHAT if mode == APP_MODE_CHAT else APP_MODE_AGENT
@@ -14277,10 +14381,18 @@ class MainFrame(wx.Frame):
             self._agent_files_serial += 1
         self._app_mode = mode
         show_agent = mode == APP_MODE_AGENT
-        self.tab_switcher.Show(show_agent)
         self.notebook.Show(show_agent)
-        if chat_panel is not None:
-            chat_panel.Show(not show_agent)
+        if chat_panel is not None and self.chat_book is not None:
+            self.chat_book.Show(not show_agent)
+        self.tab_switcher.SetName("Session tabs" if show_agent else "Chat tabs")
+        self._sync_tab_switcher()
+        new_label, close_label = (
+            ("&New Session…\tCtrl+T", "&Close Session\tCtrl+W")
+            if show_agent
+            else ("&New Chat\tCtrl+T", "&Close Chat\tCtrl+W")
+        )
+        self._new_tab_item.SetItemLabel(new_label)
+        self._close_tab_item.SetItemLabel(close_label)
         for item in self._chat_menu_items:
             item.Enable(not show_agent)
         for item in self._agent_menu_items:
@@ -14760,9 +14872,10 @@ class MainFrame(wx.Frame):
         in the Simplebook below, so a placeholder holds no focusable child and
         Tab traversal walks straight past it into the real page.
         """
+        book = self._active_book()
         self._syncing_tab_switcher = True
         try:
-            count = self.notebook.GetPageCount()
+            count = book.GetPageCount()
             while self.tab_switcher.GetPageCount() > count:
                 self.tab_switcher.DeletePage(self.tab_switcher.GetPageCount() - 1)
             added = False
@@ -14777,10 +14890,10 @@ class MainFrame(wx.Frame):
                 # the (empty) page area straight away.
                 self.tab_switcher.SendSizeEvent()
             for index in range(count):
-                label = self.notebook.GetPageText(index)
+                label = book.GetPageText(index)
                 if self.tab_switcher.GetPageText(index) != label:
                     self.tab_switcher.SetPageText(index, label)
-            sel = self.notebook.GetSelection()
+            sel = book.GetSelection()
             if 0 <= sel < count and self.tab_switcher.GetSelection() != sel:
                 # ChangeSelection, not SetSelection: this is the strip catching
                 # up with the book, and must not be reported back as a request
@@ -15007,11 +15120,13 @@ class MainFrame(wx.Frame):
         # put back as the backend changes.
         self._file_menu = menu
         add = self._agent_item
-        add(
+        # New, Next, Previous and Close work on Chat tabs too, so they stay
+        # enabled in both modes; _set_app_mode relabels New and Close.
+        self._new_tab_item = self._menu_item(
             menu,
             "&New Session…	Ctrl+T",
-            "Type or browse to a folder and open a session in it",
-            self._new_session,
+            "Open a new tab: a session in a folder, or a new chat in Chat mode",
+            self._new_tab_command,
             wx.ID_NEW,
         )
         history_menu = wx.Menu()
@@ -15069,13 +15184,13 @@ class MainFrame(wx.Frame):
         )
         menu.AppendSeparator()
         next_chord, prev_chord = _tab_chord_notes()
-        add(
+        self._menu_item(
             menu,
             f"Ne&xt Session\t{next_chord}",
             "Move to the next conversation tab",
             lambda: self._cycle_tab(+1),
         )
-        add(
+        self._menu_item(
             menu,
             f"Previo&us Session\t{prev_chord}",
             "Move to the previous conversation tab",
@@ -15095,11 +15210,11 @@ class MainFrame(wx.Frame):
             self._create_desktop_shortcut,
         )
         menu.AppendSeparator()
-        add(
+        self._close_tab_item = self._menu_item(
             menu,
             "&Close Session	Ctrl+W",
-            "Close the current session tab",
-            self._close_current_session,
+            "Close the current tab",
+            self._close_tab_command,
             wx.ID_CLOSE,
         )
         self._menu_item(menu, "&Quit	Ctrl+Q", "Leave BlindPilot", self.Close, wx.ID_EXIT)
@@ -16237,15 +16352,16 @@ class MainFrame(wx.Frame):
         user into the prompt and the second never reaches the strip at all,
         which makes a tab strip you can enter and cannot use.
         """
-        if not 0 <= index < self.notebook.GetPageCount():
+        book = self._active_book()
+        if not 0 <= index < book.GetPageCount():
             return
-        if index == self.notebook.GetSelection():
+        if index == book.GetSelection():
             return
         keep = self._focus_is_within(wx.Window.FindFocus(), self.tab_switcher)
         # Read by `_on_tab_changed`, which runs inside SetSelection below and
         # by then can no longer see where focus started out.
         self._strip_keeps_focus = keep
-        page = self.notebook.GetPage(index)
+        page = book.GetPage(index)
         # A disabled window cannot be given focus, which is the only way to
         # decline the book's offer. Windows answers the refused SetFocus with
         # an error wxWidgets would otherwise log, hence LogNull. Enable()
@@ -16255,7 +16371,7 @@ class MainFrame(wx.Frame):
             page.Disable()
         try:
             with wx.LogNull():
-                self.notebook.SetSelection(index)
+                book.SetSelection(index)
         finally:
             if keep:
                 page.Enable()
@@ -16264,10 +16380,11 @@ class MainFrame(wx.Frame):
             self.tab_switcher.SetFocus()
 
     def _cycle_tab(self, direction: int) -> None:
-        count = self.notebook.GetPageCount()
+        book = self._active_book()
+        count = book.GetPageCount()
         if count <= 1:
             return
-        cur = self.notebook.GetSelection()
+        cur = book.GetSelection()
         self._select_session((cur + direction) % count)
 
     def _jump_to_tab(self, idx: int) -> None:
@@ -17357,7 +17474,11 @@ class MainFrame(wx.Frame):
         if timer is not None:
             timer.Stop()
             self._model_timer = None
-        if self.chat_panel is not None:
+        chat_book = getattr(self, "chat_book", None)
+        if chat_book is not None:
+            for index in range(chat_book.GetPageCount()):
+                chat_book.GetPage(index).shutdown()
+        elif self.chat_panel is not None:
             self.chat_panel.shutdown()
         # Forget each tab's held process before the window closes. The waits
         # belong to the shutdown thread, after the UI has returned to wx.
@@ -17479,7 +17600,7 @@ def _raise_running_copy() -> bool:
 KEYBOARD_SHORTCUTS = """Anywhere
 Ctrl+L: focus the prompt.
 F6, Shift+F6: move between the tab strip, the responses and the prompt, and read the status bar.
-Ctrl+T: new session. Ctrl+W: close it. Ctrl+Q: quit.
+Ctrl+T: new session, or new chat in Chat mode. Ctrl+W: close it. Ctrl+Q: quit.
 Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+Shift+], Ctrl+Shift+[: next and previous tab.
 Ctrl+1 to Ctrl+9: go to that tab.
 Ctrl+Shift+H: Recent Conversations. In its list, F2 renames, Delete hides and Ctrl+G sets its groups.
