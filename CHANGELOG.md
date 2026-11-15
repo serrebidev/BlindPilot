@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.58.0 - 2026-11-14
+
+Chat mode has tabs like Agent mode: Ctrl+T (File, New Chat) opens another chat in its own tab, Ctrl+W (Close Chat) closes it, Ctrl+Tab, Ctrl+Shift+Tab and Ctrl+1 to Ctrl+9 move between chats, and the shared tab strip, named Chat tabs in Chat mode, lists them by conversation title. Each tab keeps its own conversation, account, model and generation, and switching back to Agent mode restores the session tabs untouched.
+
 ## v0.57.12 - 2026-11-14
 
 Computer Use moved once more, at the request to keep it out of the Chat menu: it now sits in Conversation, Find and Browse as an agent item, beside Queued Messages and the other session tools. In Chat mode it opens the same opt-in dialog; in Agent mode it explains computer use is Chat-only. The history list's context menu still carries it too.

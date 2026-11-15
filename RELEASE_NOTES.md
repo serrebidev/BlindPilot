@@ -1,18 +1,9 @@
-# BlindPilot 0.57.12
+# BlindPilot 0.58.0
 
-Computer Use now lives in Conversation, Find and Browse as an agent item, beside Queued Messages and the other session tools. In Chat mode it opens the same opt-in dialog; in Agent mode it explains computer use is Chat-only. It is no longer in the Chat menu, and the history list's context menu still carries it.
+Chat mode now has tabs, the same way Agent mode does. Until now Chat mode showed one conversation at a time, so opening another meant leaving the one you were in. Now File, New Chat (Ctrl+T) opens a fresh chat in its own tab, and File, Close Chat (Ctrl+W) closes the current one. Ctrl+Tab and Ctrl+Shift+Tab (Cmd+Shift+] and Cmd+Shift+[ on a Mac) move between chats, and Ctrl+1 to Ctrl+9 jump straight to one.
 
-For the features in it, see the 0.57.8 and 0.57.10 notes: opt-in automatic computer use via accessibility trees on Windows and macOS, Ctrl+Shift+F12 stop on Windows, ask-before-acting option.
-Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
+The tab strip above the chat is the same strip Agent mode uses. In Chat mode the screen reader calls it Chat tabs, and each tab is named after its conversation, or New chat until the first message gives it a title. Arrowing along the strip switches chats without leaving it; Tab moves into the visible chat. Moving to a chat with Ctrl+Tab says which chat of how many it is and puts focus in its message box.
 
-Computer Use moved to the Chat menu. It used to live only on the conversation history list's context menu (Shift+F10), which is hard to find with a screen reader. The same Computer Use… entry now sits in the Chat menu, reachable with the keyboard like every other Chat command. Both entries open the same opt-in dialog.
+Each tab keeps its own conversation, account, profile, model, attachments and running answer, so one chat can keep generating while you read or type in another. Closing a tab stops only that tab's answer, and the last chat cannot be closed. Switching to Agent mode puts the session tabs back exactly as they were, and switching to Chat mode brings the chat tabs back.
 
-For the features in it, see the 0.57.8 and 0.57.10 notes: opt-in automatic computer use via accessibility trees on Windows and macOS, Ctrl+Shift+F12 stop on Windows, ask-before-acting option.
-Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
-
-macOS computer use: the same opt-in per-conversation control offered on Windows in 0.57.8, now driving other apps through their macOS accessibility trees (numbered controls, press and set-value actions, peer validation, no coordinates, BlindPilot itself cannot be operated).
-
-Automatic actions need Accessibility permission. Starting computer use on a Mac requests it once through the system prompt; without it, the app says exactly where to enable it (System Settings, Privacy and Security, Accessibility) instead of failing silently. The stop key is Windows-only in this release, so on macOS the Ask-before-each-action mode is the recommended setting; in-window Stop always works.
-
-For the features in it, see the 0.57.8 notes: automatic and ask-approved actions, Ctrl+Shift+F12 on Windows, 25-action turn bound.
 Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
