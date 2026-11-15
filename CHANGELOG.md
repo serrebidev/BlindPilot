@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.7 - 2026-11-14
+
+Speech and sound customization, the sixth stage of the reference-app comparison. Options, Sounds gains Choose Sound Pack and Custom Cue Sounds: sound packs import from a zip of files named after the cues (unknown names are reported, never installed) and chosen packs take precedence over the built-in sounds, while per-cue files win over the pack. Options gains System Speech, an independent SAPI voice with its own voice, rate and volume for speaking complete responses, separate from screen-reader narration, with a per-conversation inherit/on/off override. Stopping playback interrupts the independent voice.
+
 ## v0.57.6 - 2026-11-14
 
 Connected tools and context, the fifth stage of the reference-app comparison. Conversation, Find and Browse gains Connected Tools, which lists the MCP servers the known configs define (Claude's project .mcp.json, Copilot's mcp-config.json) with each server's transport and source file; enabling, disabling and sign-in stay with the backend that owns the file, and the dialog says so in words. Open Sessions lists the sessions open in BlindPilot now, flagging running ones; a running or open conversation cannot be hidden from there. What every backend keeps about you (instructions, memories, skills, agents, commands) was already browsable under Model, and stays so.
