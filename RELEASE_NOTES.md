@@ -1,9 +1,11 @@
-# BlindPilot 0.58.0
+# BlindPilot 0.59.0
 
-Chat mode now has tabs, the same way Agent mode does. Until now Chat mode showed one conversation at a time, so opening another meant leaving the one you were in. Now File, New Chat (Ctrl+T) opens a fresh chat in its own tab, and File, Close Chat (Ctrl+W) closes the current one. Ctrl+Tab and Ctrl+Shift+Tab (Cmd+Shift+] and Cmd+Shift+[ on a Mac) move between chats, and Ctrl+1 to Ctrl+9 jump straight to one.
+This release finishes the last two agent controls from the comparison with The Chat Place, both for Claude Code sessions.
 
-The tab strip above the chat is the same strip Agent mode uses. In Chat mode the screen reader calls it Chat tabs, and each tab is named after its conversation, or New chat until the first message gives it a title. Arrowing along the strip switches chats without leaving it; Tab moves into the visible chat. Moving to a chat with Ctrl+Tab says which chat of how many it is and puts focus in its message box.
+Stop Background Task, in Conversation, Find and Browse, lists what Claude is running in the background: agents it started and shell commands it left running, each by what it is doing. Choose one and only that one stops. The turn and every other task keep going. Before, Stop ended the turn and all of its agents together, and a background command could only be stopped by stopping everything.
 
-Each tab keeps its own conversation, account, profile, model, attachments and running answer, so one chat can keep generating while you read or type in another. Closing a tab stops only that tab's answer, and the last chat cannot be closed. Switching to Agent mode puts the session tabs back exactly as they were, and switching to Chat mode brings the chat tabs back.
+Put Files Back Before Here, in Conversation, Find and Browse, Conversation Copies, undoes Claude's file edits. Select one of your messages or its answer, confirm, and every file Claude changed with its edit tools since that message goes back to how it was. Changes made by shell commands are not undone, and the conversation itself stays as it is, so you can carry on or branch from there. BlindPilot now asks Claude Code to keep file checkpoints for every session it runs, so this works for turns from this version on; for older turns it says no checkpoints were kept.
+
+Smaller fixes: Chat mode says that AccessibleAI data was imported once, instead of on every new chat tab. Importing a sound pack works when the temporary folder is on a different drive, which is common on Linux. Computer Use no longer leaves an app it launched running when that app never opens a window.
 
 Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
