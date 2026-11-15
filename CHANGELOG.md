@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.6 - 2026-11-14
+
+Connected tools and context, the fifth stage of the reference-app comparison. Conversation, Find and Browse gains Connected Tools, which lists the MCP servers the known configs define (Claude's project .mcp.json, Copilot's mcp-config.json) with each server's transport and source file; enabling, disabling and sign-in stay with the backend that owns the file, and the dialog says so in words. Open Sessions lists the sessions open in BlindPilot now, flagging running ones; a running or open conversation cannot be hidden from there. What every backend keeps about you (instructions, memories, skills, agents, commands) was already browsable under Model, and stays so.
+
 ## v0.57.5 - 2026-11-14
 
 Agent controls, the fourth stage of the reference-app comparison. Conversation, Find and Browse gains Queued Messages, which lists the current session's standby messages with remove, clear, pause and resume; queue state was previously reachable only through slash commands. Fallback-model switches are now announced when the backend switches models mid-route, matching how permission-mode changes already were announced. Per-task stop and file-checkpoint restore are not offered: the installed backends' worker protocol has no per-task stop, and installed Claude exposes no file-checkpoint flag, so claiming them would have been inaccurate.

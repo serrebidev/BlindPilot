@@ -1,12 +1,12 @@
-# BlindPilot 0.57.5
+# BlindPilot 0.57.6
 
-This is the fourth release in the feature comparison with The Chat Place and FastChat: queued-message management and honest backend status announcements.
+This is the fifth release in the feature comparison with The Chat Place and FastChat: browsing the tools and context a backend actually discovers.
 
-Conversation, Find and Browse gains Queued Messages. It lists the messages waiting for the current session, with Remove selected, Clear all, and Pause/Resume controls. Queue state was previously reachable only through slash commands; now it has the same dialog reach as the other session tools, with announcements for every change.
+Conversation, Find and Browse gains Connected Tools. It lists the MCP servers found in the configs BlindPilot already knows: a project's .mcp.json for Claude Code and ~/.copilot/mcp-config.json for Copilot CLI, each with its transport and source file. Malformed configs are reported as unavailable rather than crashing the dialog. Enabling, disabling and signing in stay with the backend that owns the file (for Claude Code, its /mcp command), and the dialog says so in words; this browser only reads.
 
-Fallback-model switches are now announced when a backend switches models mid-route, matching how permission-mode changes were already announced. Retries, fallback changes, and tool activity all read as short status lines.
+Open Sessions lists the sessions open in BlindPilot now, with the session id and a running flag. A running or currently open conversation cannot be hidden from there; hiding lives in Recent Conversations.
 
-Two things are deliberately not offered. Stopping one background task does not map to any installed backend's worker protocol, and installed Claude exposes no file-checkpoint flag, so checkpoint restore would not be verifiable. Stopping a whole turn with Stop Task remains the supported path, and conversation branching keeps workspace files untouched.
+What every backend keeps about you was already browsable under Model: instructions, memories, skills, agents and commands per backend, read from the locations each backend documents. This release adds the connected-tools and open-session views beside it.
 
-Connected-tool management, sound and voice customization, and automatic computer use remain later stages. They are not included in 0.57.5.
+Speech and sound customization, and automatic computer use, remain later stages. They are not included in 0.57.6.
 Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
