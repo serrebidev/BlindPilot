@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.57.10"
+APP_VERSION = "0.57.11"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -13745,6 +13745,11 @@ class MainFrame(wx.Frame):
             "&Usage Report...",
             "Show this account's usage, limit and balance",
         )
+        self._chat_computer_item = chat_menu.Append(
+            wx.ID_ANY,
+            "Computer &Use...",
+            "Let the model operate another app through its accessibility tree for this conversation",
+        )
         self._chat_menu_items = [
             self._chat_accounts_item,
             self._chat_profiles_item,
@@ -13755,6 +13760,7 @@ class MainFrame(wx.Frame):
             self._chat_history_text_item,
             self._chat_diagnostics_item,
             self._chat_usage_item,
+            self._chat_computer_item,
         ]
         for item in self._chat_menu_items:
             item.Enable(False)
@@ -13908,6 +13914,11 @@ class MainFrame(wx.Frame):
             wx.EVT_MENU,
             _gui_work("Show Chat usage", lambda _e: self._show_chat_usage()),
             self._chat_usage_item,
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("Start computer use", lambda _e: self._computer_use_chat()),
+            self._chat_computer_item,
         )
         self.Bind(
             wx.EVT_MENU,
@@ -14376,6 +14387,12 @@ class MainFrame(wx.Frame):
         from accessible_ai.ui.usage import show_usage_dialog
 
         show_usage_dialog(self, account, self.chat_panel.credentials, announce)
+
+    def _computer_use_chat(self) -> None:
+        if self._app_mode != APP_MODE_CHAT or self.chat_panel is None:
+            announce("Computer use is available in Chat mode.")
+            return
+        self.chat_panel.on_computer_use_item(None)
 
     def current_backend(self) -> str:
         return self._backend
