@@ -449,6 +449,56 @@ class Database:
             system_prompt_snapshot=row["system_prompt_snapshot"],
         )
 
+    def branch_conversation(
+        self, conversation_id: int, through_message_id: int | None, title: str
+    ) -> int:
+        """Copy a saved prefix in one transaction; never change the source."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            source = conn.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if source is None:
+                raise ValueError("The source conversation no longer exists.")
+            if (
+                through_message_id is not None
+                and conn.execute(
+                    "SELECT 1 FROM messages WHERE conversation_id = ? AND id = ?",
+                    (conversation_id, through_message_id),
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("That message does not belong to this conversation.")
+            result = conn.execute(
+                "INSERT INTO conversations (title, profile_id, account_id, model, system_prompt_snapshot) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    title,
+                    source["profile_id"],
+                    source["account_id"],
+                    source["model"],
+                    source["system_prompt_snapshot"],
+                ),
+            )
+            new_id = int(result.lastrowid)
+            if through_message_id is not None:
+                messages = conn.execute(
+                    "SELECT id FROM messages WHERE conversation_id = ? AND id <= ? ORDER BY id",
+                    (conversation_id, through_message_id),
+                ).fetchall()
+                for message in messages:
+                    copied = conn.execute(
+                        "INSERT INTO messages (conversation_id, role, content, created_at) "
+                        "SELECT ?, role, content, created_at FROM messages WHERE id = ?",
+                        (new_id, message["id"]),
+                    )
+                    conn.execute(
+                        "INSERT INTO message_attachments (message_id, filename, mime_type, data) "
+                        "SELECT ?, filename, mime_type, data FROM message_attachments WHERE message_id = ?",
+                        (copied.lastrowid, message["id"]),
+                    )
+        return new_id
+
     def delete_conversation(self, conversation_id: int) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))

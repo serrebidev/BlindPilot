@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from threading import Event
@@ -14,7 +17,12 @@ from accessible_ai.storage.credentials import CredentialStore
 
 
 class ProviderError(RuntimeError):
-    pass
+    def __init__(
+        self, message: str, *, status_code: int | None = None, retry_after: float | None = None
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 class BaseProvider(ABC):
@@ -83,7 +91,23 @@ class BaseProvider(ABC):
             except Exception:
                 detail = ""
             detail = detail or response.reason_phrase
-        raise ProviderError(f"HTTP {response.status_code}: {detail}")
+        retry_after = None
+        value = response.headers.get("Retry-After", "")
+        try:
+            retry_after = float(value)
+        except ValueError:
+            try:
+                stamp = parsedate_to_datetime(value)
+                retry_after = (stamp - datetime.now(timezone.utc)).total_seconds()
+            except (ValueError, TypeError, OverflowError):
+                pass
+        if retry_after is not None and (not math.isfinite(retry_after) or retry_after < 0):
+            retry_after = None
+        raise ProviderError(
+            f"HTTP {response.status_code}: {detail}",
+            status_code=response.status_code,
+            retry_after=retry_after,
+        )
 
     @abstractmethod
     def list_models(self) -> list[str]:

@@ -409,7 +409,16 @@ class CodexWorker(_TurnWorker):
         inbox = ab.cast("queue.Queue[object]", self._inbox)
 
         thread_request = self._next_id()
-        if self._session_id:
+        if self._fork_source:
+            if self._session_id or not self._fork_at:
+                self._fail("A conversation fork needs a boundary and no destination session yet")
+                return
+            request = {
+                "method": "thread/fork",
+                "id": thread_request,
+                "params": {"threadId": self._fork_source, "lastTurnId": self._fork_at},
+            }
+        elif self._session_id:
             request = {
                 "method": "thread/resume",
                 "id": thread_request,
@@ -482,6 +491,9 @@ class CodexWorker(_TurnWorker):
                 if not self._thread_id:
                     self._discard_server()
                     self._fail("Codex did not return a session id")
+                    return
+                if self._fork_source and self._thread_id == self._fork_source:
+                    self._fail("Codex returned the source session instead of a conversation copy")
                     return
                 # Anything given up on this conversation is somebody else's
                 # turn, however late it speaks. Read once and cleared: the

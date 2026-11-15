@@ -346,6 +346,7 @@ class GenerationSettings:
     plugins: list[dict[str, Any]] = field(default_factory=list)
     # Answer length, "" for the model's default. Only the ChatGPT plan sends it.
     verbosity: str = ""
+    tools_disabled: bool = False
 
 
 @dataclass(slots=True)

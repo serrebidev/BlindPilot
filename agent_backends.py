@@ -3716,6 +3716,8 @@ class _TurnWorker(threading.Thread):
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         on_subagent: Optional[SubagentReport] = None,
         plan_account: object = UNBOUND,
+        fork_source: str = "",
+        fork_at: str = "",
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -3744,6 +3746,8 @@ class _TurnWorker(threading.Thread):
         # the saved choice. Only Codex reads this; the rest never see one. It
         # is `object` because `None` is itself a binding -- Codex's own login.
         self._plan_account = plan_account
+        self._fork_source = fork_source
+        self._fork_at = fork_at
         self._cancelled = False
         # Set once the turn's ending has been reported, whichever way it
         # ended. The first account of a failure is the one that can be acted

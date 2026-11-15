@@ -2765,3 +2765,51 @@ def test_codex_on_its_own_login_keeps_codex_s_own_words(monkeypatch):
     _worker, _completed, failures, _activity = _turn(proc, monkeypatch)
 
     assert failures == [USAGE_LIMIT_SAID], failures
+
+
+class _ForkProc(_ScriptedProc):
+    def _script(self):
+        fork = self._asked("thread/fork")
+        assert fork["params"] == {"threadId": "source", "lastTurnId": "boundary"}
+        yield json.dumps({"id": fork["id"], "result": {"thread": {"id": "copy"}}})
+        turn = self._asked("turn/start")
+        assert turn["params"]["threadId"] == "copy"
+        yield json.dumps({"id": turn["id"], "result": {"turn": {"id": "turn-copy"}}})
+        yield json.dumps(
+            {
+                "method": "turn/completed",
+                "params": {"threadId": "copy", "turn": {"id": "turn-copy", "status": "completed"}},
+            }
+        )
+
+
+def test_native_fork_starts_the_prompt_only_on_the_copy(monkeypatch):
+    proc = _ForkProc()
+    server = agent_backends.CodexServer(proc)
+    server.start_readers()
+    sessions, failures = [], []
+    worker = CodexWorker(
+        "hello",
+        None,
+        ".",
+        "default",
+        fork_source="source",
+        fork_at="boundary",
+        on_session=sessions.append,
+        on_started=lambda: None,
+        on_activity=lambda *_: None,
+        on_complete=lambda *_: None,
+        on_failed=failures.append,
+        on_done=lambda: None,
+    )
+    inbox = queue.Queue()
+
+    def borrow():
+        worker._server = server
+        worker._inbox = inbox
+        return backend_pool.HeldProcess(server, agent_backends.codex_adapter())
+
+    monkeypatch.setattr(worker, "_borrow_server", borrow)
+    worker._do_run()
+    assert sessions == ["copy"] and not failures
+    assert not any(json.loads(line).get("method") == "thread/resume" for line in proc.stdin.written)

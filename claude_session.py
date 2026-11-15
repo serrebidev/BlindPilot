@@ -73,6 +73,8 @@ class Wants:
     model: str = ""
     effort: str = ""
     session_id: Optional[str] = None
+    fork_source: str = ""
+    fork_at: str = ""
 
 
 ASK_THROUGH_THE_TOOL = ask_through_the_tool("AskUserQuestion")
@@ -220,7 +222,13 @@ def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:
         cmd.extend(["--model", wants.model])
     if wants.effort:
         cmd.extend(["--effort", wants.effort])
-    if wants.session_id:
+    if wants.fork_source:
+        if wants.session_id or not wants.fork_at:
+            raise ValueError("A fork needs a source boundary and no destination session yet.")
+        cmd.extend(
+            ["--resume", wants.fork_source, "--fork-session", "--resume-session-at", wants.fork_at]
+        )
+    elif wants.session_id:
         cmd.extend(["--resume", wants.session_id])
     return cmd
 

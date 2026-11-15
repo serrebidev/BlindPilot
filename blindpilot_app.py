@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.56.1"
+APP_VERSION = "0.57.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -3121,6 +3121,9 @@ def question_left_in_the_answer(text: str, *, asked_properly: bool, replaying: b
 class Turn:
     prompt: str
     response: str = ""
+    attachments: tuple[str, ...] = ()
+    response_number: int = 0
+    sent_prompt: str = ""
 
 
 class SettingsFilesDialog(wx.Dialog):
@@ -9272,7 +9275,7 @@ class SessionPanel(wx.Panel):
         self._earcons.stop_progress()
         self._response_count += 1
         number = self._response_count
-        self._turns.append(Turn(prompt=command, response=text))
+        self._turns.append(Turn(prompt=command, response=text, response_number=number))
         self._rows.append(
             Row(kind="you", label=f"You: {command}", payload=command, response_number=number)
         )
@@ -9300,6 +9303,16 @@ class SessionPanel(wx.Panel):
                 return
             raw = self.prompt.GetValue().strip()
         low = raw.lower() if import_context is None else ""
+        recovery = getattr(self, "_pending_recovery", None)
+        if recovery is not None and not self._session_id:
+            if self.selected_backend() != self._session_backend:
+                self._announce(
+                    "Choose this copy's original backend before sending, or start a new session."
+                )
+                return
+            if recovery.context:
+                import_context = recovery.context
+                low = ""
         if self.selected_backend() == BACKEND_FREEBUFF:
             low = {"/history": "/resume", "/usage": "/status"}.get(low, low)
         if low == "/btw" or low.startswith("/btw "):
@@ -9407,7 +9420,7 @@ class SessionPanel(wx.Panel):
 
         send_text = self._build_send_text(prompt)
         if import_context is not None:
-            send_text = f"{import_context}\n\nFresh instruction (authoritative):\n{prompt}"
+            send_text = f"{import_context}\n\nFresh instruction (authoritative):\n{send_text}"
         # Attachments leave the tab's pending list here, but the turn still
         # needs them: an uploading backend is handed the paths so the worker
         # can send the bytes.
@@ -9417,7 +9430,14 @@ class SessionPanel(wx.Panel):
         if uploading:
             summary = self._attachment_summary()
             row_text = f"{send_text}\n{summary}" if send_text else summary
-        self._turns.append(Turn(prompt=prompt))
+        self._turns.append(
+            Turn(
+                prompt=prompt,
+                attachments=tuple(outgoing_files),
+                response_number=self._response_count + 1,
+                sent_prompt=send_text,
+            )
+        )
         if len(self._turns) == 1 and not str(getattr(self, "_session_title", "") or "").strip():
             # A conversation with no name of its own is named by its first
             # message, the title Recent Conversations lists it under. A name
@@ -9519,6 +9539,9 @@ class SessionPanel(wx.Panel):
             for key, value in extra.items()
             if key not in ("on_permission", "on_unsolicited")
         }
+        recovery = getattr(self, "_pending_recovery", None)
+        if recovery is not None and not self._session_id and recovery.fork_source:
+            option_values.update(fork_source=recovery.fork_source, fork_at=recovery.fork_at)
         if backend == BACKEND_MUSEAI and prompt is None:
             option_values["follow_after"] = getattr(self, "_museai_follow_after", None)
         options = backend_workers.worker_options(backend, option_values)
@@ -9667,7 +9690,7 @@ class SessionPanel(wx.Panel):
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
         self._stopping = False
-        self._turns.append(Turn(prompt=""))
+        self._turns.append(Turn(prompt="", response_number=self._response_count + 1))
         self._announce("A background agent has reported. Receiving response")
         self.send_btn.Disable()
         self._earcons.start_progress()
@@ -9910,6 +9933,7 @@ class SessionPanel(wx.Panel):
             self._announce("Error: Stop the running task before starting a new conversation")
             return
         self._museai_main_serial += 1
+        self._pending_recovery = None
         self._session_id = None
         # A new conversation takes the Account Codex uses when it starts, so a
         # choice made since the last one reaches it.
@@ -9996,7 +10020,16 @@ class SessionPanel(wx.Panel):
         self._session_title = ""
         self._session_backend = normalize_backend(entry.backend)
         self._backend = self._session_backend
-        self._turns = [Turn(prompt=turn.prompt, response=turn.response) for turn in turns]
+        self._pending_recovery = None
+        self._turns = [
+            Turn(
+                prompt=turn.prompt,
+                response=turn.response,
+                attachments=turn.attachments,
+                response_number=index + 1,
+            )
+            for index, turn in enumerate(turns)
+        ]
         # The task list it left, so Task List and Turn Status pick up there.
         self.task_list = restore_tasks(entry)
         remote = (
@@ -10110,7 +10143,7 @@ class SessionPanel(wx.Panel):
         self._assistant_narrated_this_turn = False
         self._streamed_assistant = ""
         self._stopping = False
-        self._turns.append(Turn(prompt=""))
+        self._turns.append(Turn(prompt="", response_number=self._response_count + 1))
         self._announce("muse.ai is still working on this. Following it.")
         self.send_btn.Disable()
         self._earcons.start_progress()
@@ -10224,6 +10257,7 @@ class SessionPanel(wx.Panel):
         if self._session_id and not getattr(self._worker, "session_replaced", False):
             return
         self._session_id = session_id
+        self._pending_recovery = None
 
     def _begin_stream_response(self) -> int:
         """Open a new response (header row) the first time a turn produces output.
@@ -11029,6 +11063,15 @@ class SessionPanel(wx.Panel):
             _gui_work("Copy whole conversation", lambda _e: self._action_copy_conversation()),
             copy_all_item,
         )
+        for retry, label in ((False, "Branch from Here…"), (True, "Retry from Here…")):
+            item = menu.Append(wx.ID_ANY, label)
+            item.Enable(not self._run_in_progress() and row.response_number > 0)
+
+            def recover(_event: wx.CommandEvent, again: bool = retry) -> None:
+                frame = cast(MainFrame, self.GetTopLevelParent())
+                frame._recover_agent_response(self, row, again)
+
+            menu.Bind(wx.EVT_MENU, _gui_work(label, recover), item)
         return menu
 
     def _show_row_menu(self) -> None:
@@ -14871,8 +14914,9 @@ class MainFrame(wx.Frame):
             self._new_session,
             wx.ID_NEW,
         )
+        history_menu = wx.Menu()
         add(
-            menu,
+            history_menu,
             # Deliberately not Ctrl+H: on macOS that chord is the system's
             # Hide BlindPilot, which the application menu wins.
             # Ctrl+Shift+H is free.
@@ -14880,6 +14924,13 @@ class MainFrame(wx.Frame):
             "Reopen a past conversation and carry on with it",
             self._open_history,
         )
+        self._menu_item(
+            history_menu,
+            "&Export Conversations…",
+            "Export selected conversations without replacing existing files",
+            lambda: self._export_conversations(),
+        )
+        menu.AppendSubMenu(history_menu, "&Recent Conversations")
         self._hermes_sessions_item = self._menu_item(
             menu,
             "Hermes &Conversations…	Ctrl+G",
@@ -15074,6 +15125,21 @@ class MainFrame(wx.Frame):
             "List and message your Claude Code sessions on other computers, through Claude",
             lambda: self._panel_action("other_machines"),
         )
+        recovery = wx.Menu()
+        for retry, label in ((False, "&Branch from Here…"), (True, "&Retry from Here…")):
+            self._menu_item(
+                recovery,
+                label,
+                "Copy this conversation up to the selected message; keep the original",
+                lambda again=retry: self._recover_active(again),
+            )
+        browse.AppendSubMenu(recovery, "Conversation &Copies")
+        self._menu_item(
+            recovery,
+            "&Ask Aside…",
+            "Ask a separate, tools-disabled question about completed messages",
+            lambda: self._ask_aside_active(),
+        )
         menu.AppendSubMenu(browse, "Find and &Browse")
         add(
             menu,
@@ -15096,6 +15162,208 @@ class MainFrame(wx.Frame):
             self._export_active,
         )
         return menu
+
+    def _recover_active(self, retry: bool) -> None:
+        if self._app_mode == APP_MODE_CHAT:
+            if self.chat_panel is not None:
+                self.chat_panel._recover_history_item(retry=retry)
+            return
+        page = self.notebook.GetCurrentPage()
+        if not isinstance(page, SessionPanel):
+            return
+        selected = page._selected_row()
+        if not 0 <= selected < len(page._displayed):
+            announce("Select a message to branch or retry.")
+            return
+        self._recover_agent_response(page, page._displayed[selected], retry)
+
+    def _export_conversations(self) -> None:
+        from conversation_export import show_export_dialog
+
+        show_export_dialog(self, announce)
+
+    def _ask_aside_active(self) -> None:
+        from ask_aside import AskAsideDialog
+
+        history = []
+        if self._app_mode == APP_MODE_CHAT:
+            panel = self.chat_panel
+            if panel is not None:
+                entries = panel.history_entries
+                end = max(
+                    (
+                        i + 1
+                        for i, message in enumerate(entries)
+                        if message.role == "assistant" and message.id is not None
+                    ),
+                    default=0,
+                )
+                history = [
+                    {"role": message.role, "content": message.content}
+                    for message in entries[:end]
+                    if message.role in {"user", "assistant"}
+                ]
+        else:
+            page = self.notebook.GetCurrentPage()
+            if isinstance(page, SessionPanel):
+                for turn in page._turns:
+                    if turn.response.strip():
+                        history.extend(
+                            [
+                                {"role": "user", "content": turn.prompt},
+                                {"role": "assistant", "content": turn.response},
+                            ]
+                        )
+        if not history:
+            announce("There is no completed conversation to ask about yet.")
+            return
+        dialog = AskAsideDialog(self, history, announce)
+        try:
+            dialog.ShowModal()
+        finally:
+            dialog.Destroy()
+
+    def _recover_agent_response(self, source: "SessionPanel", row: Row, retry: bool) -> None:
+        from copy import deepcopy
+        from dataclasses import replace
+        from conversation_recovery import (
+            RecoveryRequest,
+            prepare_recovery,
+            source_identity,
+            turn_index_for_response,
+        )
+
+        if source._run_in_progress():
+            announce("Stop or finish the current turn before copying its conversation.")
+            return
+        index = turn_index_for_response(source._turns, row.response_number)
+        if index is None:
+            announce("That row has no saved conversation turn to copy.")
+            return
+        if (
+            row.kind == "you"
+            and sum(
+                item.kind == "you" and item.response_number == row.response_number
+                for item in source._rows
+            )
+            != 1
+        ):
+            announce("Select this turn's answer to branch or retry it.")
+            return
+        captured = [
+            HistoryTurn(
+                turn.prompt,
+                turn.response,
+                attachments=turn.attachments,
+                response_number=turn.response_number,
+            )
+            for turn in source._turns
+        ]
+        expected_prompts = [turn.sent_prompt or turn.prompt for turn in source._turns]
+        request_turns = source._turns
+        request_draft = source.prompt.GetValue()
+        session_id, backend, cwd = source._session_id, source._session_backend, source.cwd
+        mode, model, effort = source.mode, source.model, source.effort
+        title = f"{source.tab_title or 'Conversation'} ({'retry' if retry else 'branch'})"
+        stop = (
+            source._turns[index - 1].response_number
+            if retry and index
+            else (0 if retry else row.response_number)
+        )
+        rows = deepcopy([item for item in source._rows if 0 < item.response_number <= stop])
+        codex_account = getattr(source, "_codex_plan_account", UNBOUND)
+        announce("Preparing a conversation copy. Workspace files will stay as they are.")
+
+        def work():
+            error = ""
+            result = None
+            try:
+                entry = (
+                    next(
+                        (
+                            item
+                            for item in list_history(backend=backend, limit=1000)
+                            if item.session_id == session_id
+                        ),
+                        None,
+                    )
+                    if session_id
+                    else None
+                )
+                turns = captured
+                if entry is not None:
+                    identity = source_identity(entry)
+                    loaded = load_turns(entry)
+                    # Only use native boundaries when they name the exact turns on screen.
+                    if len(loaded) >= len(captured) and all(
+                        a.prompt in {b.prompt, sent} and a.response == b.response
+                        for a, b, sent in zip(
+                            loaded[: len(captured)], captured, expected_prompts, strict=True
+                        )
+                    ):
+                        turns = [
+                            replace(
+                                a,
+                                prompt=b.prompt,
+                                attachments=b.attachments,
+                                response_number=b.response_number,
+                            )
+                            for a, b in zip(loaded[: len(captured)], captured, strict=True)
+                        ]
+                    request = RecoveryRequest(
+                        entry, index, "retry" if retry else "branch", identity
+                    )
+                else:
+                    entry = HistoryEntry(backend, "", title, "", 0, cwd=cwd)
+                    request = RecoveryRequest(entry, index, "retry" if retry else "branch")
+                result = prepare_recovery(request, turns)
+            except Exception as exc:
+                error = str(exc)
+            wx.CallAfter(done, result, error)
+
+        def done(result, error):
+            if not self or not source:
+                return
+            if (
+                self.notebook.GetCurrentPage() is not source
+                or source._turns is not request_turns
+                or len(source._turns) != len(captured)
+                or source._session_id != session_id
+                or source._run_in_progress()
+                or source.prompt.GetValue() != request_draft
+            ):
+                announce("Conversation copy cancelled because the active conversation changed.")
+                return
+            if error:
+                announce(f"Could not copy the conversation: {error}")
+                return
+            panel = self._add_session(cwd, session_title=title, open_main_chat=False)
+            panel._backend = panel._session_backend = backend
+            panel.mode, panel.model, panel.effort = mode, model, effort
+            panel.mode_picker.SetSelection(_MODE_VALUES.index(mode))
+            panel._codex_plan_account = codex_account
+            panel._pending_recovery = result
+            panel._turns = [
+                Turn(
+                    turn.prompt,
+                    turn.response,
+                    attachments=turn.attachments,
+                    response_number=turn.response_number,
+                )
+                for turn in result.turns
+            ]
+            panel._rows = rows
+            panel._response_count = max((item.response_number for item in rows), default=0)
+            panel._refresh_list()
+            panel.backend_changed()
+            panel.prompt.SetValue(result.prompt)
+            panel._attachments = list(result.attachments)
+            panel.focus_prompt()
+            announce(
+                f"{result.label} ready. The copy is created when you Send. Workspace files are unchanged."
+            )
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _side_chat_active(self) -> None:
         """A second conversation in the same folder as the visible tab."""

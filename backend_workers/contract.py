@@ -55,6 +55,8 @@ class WorkerCallbacks:
 class ClaudeOptions:
     held_for: object = None
     remote_control: dict | None = None
+    fork_source: str = ""
+    fork_at: str = ""
 
 
 _UNSET = object()
@@ -67,6 +69,8 @@ class CodexOptions:
     # Omitted means the worker chooses the saved Account. None explicitly
     # chooses Codex login, so those two values cannot be merged.
     plan_account: object = _UNSET
+    fork_source: str = ""
+    fork_at: str = ""
 
 
 @dataclass(frozen=True)

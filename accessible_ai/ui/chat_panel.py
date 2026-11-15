@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import threading
+from copy import deepcopy
 from pathlib import Path
 from threading import Event
 from typing import Any, Sequence
@@ -28,6 +29,7 @@ from accessible_ai.ui.accounts import AccountsDialog
 from accessible_ai.ui.conversations import ConversationsDialog
 from accessible_ai.ui.diagnostics import DiagnosticsDialog
 from accessible_ai.ui.profiles import ProfilesDialog
+from dialog_tasks import TaskSlot
 
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,8 @@ class ChatPanel(wx.Panel):
         self.history_view = "list"
         self.regenerating_message_id: int | None = None
         self.closing = False
+        self._recovery_tasks = TaskSlot(wx.CallAfter)
+        self._recovery_busy = False
 
         self.refresh_models_item = _ActionState()
         self.history_list_view_item = _ActionState()
@@ -142,6 +146,7 @@ class ChatPanel(wx.Panel):
 
     def shutdown(self) -> None:
         self.closing = True
+        self._recovery_tasks.close()
         self._cancel_response_announcement_timer()
         self.assistant_announcement_buffer = ""
         if self.generation_cancel:
@@ -422,14 +427,103 @@ class ChatPanel(wx.Panel):
         menu = wx.Menu()
         copy_item = menu.Append(wx.ID_COPY, "&Copy")
         edit_item = menu.Append(wx.ID_EDIT, "&Edit...")
+        branch_item = menu.Append(wx.ID_ANY, "&Branch from Here")
+        retry_item = menu.Append(wx.ID_ANY, "&Retry from Here")
         _, entry = selected
         edit_item.Enable(entry.id is not None and entry.role != "status" and not self.generating)
+        can_recover = entry.id is not None and not self.generating and not self._recovery_busy
+        branch_item.Enable(can_recover and entry.role in {"user", "assistant"})
+        retry_item.Enable(can_recover and entry.role == "user")
         menu.Bind(wx.EVT_MENU, self.on_copy_history_item, copy_item)
         menu.Bind(wx.EVT_MENU, self.on_edit_history_item, edit_item)
+        menu.Bind(wx.EVT_MENU, self.on_branch_history_item, branch_item)
+        menu.Bind(wx.EVT_MENU, self.on_retry_history_item, retry_item)
         try:
             self.history_list.PopupMenu(menu)
         finally:
             menu.Destroy()
+
+    def on_branch_history_item(self, event: wx.CommandEvent | None) -> None:
+        self._recover_history_item(retry=False)
+
+    def on_retry_history_item(self, event: wx.CommandEvent | None) -> None:
+        self._recover_history_item(retry=True)
+
+    def _recover_history_item(self, *, retry: bool) -> None:
+        selected = self._selected_history_entry()
+        if self.generating or self._recovery_busy or selected is None:
+            return
+        index, entry = selected
+        source_id = self.current_conversation_id
+        if source_id is None or entry.id is None or entry.role not in {"user", "assistant"}:
+            return
+        if retry and entry.role != "user":
+            return
+        if self.message_input.GetValue() or self.pending_attachments:
+            self._speak("Save or send your draft before branching this conversation.")
+            return
+        boundary = entry.id
+        if retry:
+            boundary = next(
+                (
+                    message.id
+                    for message in reversed(self.history_entries[:index])
+                    if message.id is not None
+                ),
+                None,
+            )
+        prompt = entry.content if retry else ""
+        attachments = deepcopy(entry.attachments) if retry else []
+        profile = deepcopy(self.current_profile)
+        self._recovery_busy = True
+        self.send_button.Disable()
+        self._speak("Preparing a conversation copy. The original will stay unchanged.")
+
+        def work():
+            source = self.db.get_conversation(source_id)
+            if source is None:
+                raise ValueError("The source conversation no longer exists.")
+            suffix = "retry" if retry else "branch"
+            new_id = self.db.branch_conversation(source_id, boundary, f"{source.title} ({suffix})")
+            conversation = self.db.get_conversation(new_id)
+            messages = self.db.list_messages(new_id)
+            account = (
+                self.db.get_account(source.account_id) if source.account_id is not None else None
+            )
+            models = self.model_service.cached_models(account, self.model_order) if account else []
+            return conversation, messages, models
+
+        def done(result, error):
+            if self.closing:
+                return
+            self._recovery_busy = False
+            self.send_button.Enable(not self.generating)
+            if error:
+                text = f"Could not copy the conversation: {error}"
+            elif (
+                self.generating
+                or self.current_conversation_id != source_id
+                or self.message_input.GetValue()
+                or self.pending_attachments
+            ):
+                text = "Conversation copy saved in Recent Conversations. Your current draft is unchanged."
+            else:
+                conversation, messages, models = result
+                self._show_conversation(conversation, profile, messages, models)
+                self.message_input.SetValue(prompt)
+                self.pending_attachments = attachments
+                self._refresh_attachment_list()
+                self.message_input.SetInsertionPointEnd()
+                self.message_input.SetFocus()
+                text = (
+                    "Retry ready. Edit the message, then Send."
+                    if retry
+                    else "Branch ready. The original is unchanged."
+                )
+            self.SetStatusText(text)
+            self._speak(text)
+
+        self._recovery_tasks.start(work, done)
 
     def on_history_list_key_down(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() in (ord("C"), ord("c")) and event.ControlDown():
@@ -695,12 +789,15 @@ class ChatPanel(wx.Panel):
                 return index
         return fallback
 
-    def load_cached_models(self, preferred_model: str = "") -> None:
+    def load_cached_models(
+        self, preferred_model: str = "", *, models: list[str] | None = None
+    ) -> None:
         account = self.selected_account()
         if not account or account.id is None:
             self.model_combo.Set([])
             return
-        models = self.model_service.cached_models(account, self.model_order)
+        if models is None:
+            models = self.model_service.cached_models(account, self.model_order)
         self.model_combo.Set(models)
         preferred = preferred_model or account.default_model
         selected = self.model_combo.FindString(preferred) if preferred else wx.NOT_FOUND
@@ -811,17 +908,35 @@ class ChatPanel(wx.Panel):
         if conversation is None:
             self.SetStatusText("That conversation is no longer there.")
             return
-        self.current_conversation_id = conversation_id
-        self.current_system_prompt = conversation.system_prompt_snapshot
-        self.current_profile_id = conversation.profile_id
         # The profile as it stands now, for the settings the conversation did
         # not snapshot. It is None where the profile has since been deleted,
         # and the prompt it was started with still applies either way.
-        self.current_profile = (
+        profile = (
             self.db.get_profile(conversation.profile_id)
             if conversation.profile_id is not None
             else None
         )
+        account = (
+            self.db.get_account(conversation.account_id)
+            if conversation.account_id is not None
+            else None
+        )
+        models = self.model_service.cached_models(account, self.model_order) if account else []
+        self._show_conversation(
+            conversation, profile, self.db.list_messages(conversation_id), models
+        )
+
+    def _show_conversation(
+        self,
+        conversation: Conversation,
+        profile: Profile | None,
+        messages: list[Message],
+        models: list[str],
+    ) -> None:
+        self.current_conversation_id = conversation.id
+        self.current_system_prompt = conversation.system_prompt_snapshot
+        self.current_profile_id = conversation.profile_id
+        self.current_profile = profile
         for index, profile in enumerate(self.profiles, start=1):
             if profile.id == conversation.profile_id:
                 self.profile_choice.SetSelection(index)
@@ -832,13 +947,13 @@ class ChatPanel(wx.Panel):
             if account.id == conversation.account_id:
                 self.account_choice.SetSelection(index)
                 break
-        self.load_cached_models(conversation.model)
+        self.load_cached_models(conversation.model, models=models)
         self.regenerating_message_id = None
         self.pending_attachments.clear()
         self._refresh_attachment_list()
         self.message_input.Clear()
-        self._render_conversation()
-        self._update_regenerate_enabled()
+        self._render_conversation(messages=messages)
+        self.regenerate_button.Enable(bool(messages and messages[-1].role == "assistant"))
         said = conversation.title or "conversation"
         self.SetStatusText(f"Opened: {said}")
         self._speak(f"Opened {said}")
@@ -1009,7 +1124,11 @@ class ChatPanel(wx.Panel):
         )
 
     def _render_conversation(
-        self, exclude_message_id: int | None = None, add_assistant_heading: bool = False
+        self,
+        exclude_message_id: int | None = None,
+        add_assistant_heading: bool = False,
+        *,
+        messages: list[Message] | None = None,
     ) -> None:
         if self.current_conversation_id is None:
             self._replace_history_text("")
@@ -1017,7 +1136,9 @@ class ChatPanel(wx.Panel):
             return
         rendered: list[str] = []
         history_entries: list[Message] = []
-        for message in self.db.list_messages(self.current_conversation_id):
+        if messages is None:
+            messages = self.db.list_messages(self.current_conversation_id)
+        for message in messages:
             if message.id == exclude_message_id:
                 continue
             label = self._history_role_label(message.role)
@@ -1061,6 +1182,9 @@ class ChatPanel(wx.Panel):
         self._restore_history_review_selection(selection)
 
     def on_send(self, event: wx.CommandEvent | None) -> None:
+        if self._recovery_busy:
+            self._speak("Wait for the conversation copy to finish before sending.")
+            return
         account = self.selected_account()
         model = self.model_combo.GetStringSelection().strip()
         user_text = self.message_input.GetValue().strip()

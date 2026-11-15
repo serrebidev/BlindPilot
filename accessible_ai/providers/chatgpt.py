@@ -1055,7 +1055,11 @@ class ChatGPTProvider(BaseProvider):
             body["reasoning"] = reasoning
         if verbosity:
             body["text"] = {"verbosity": verbosity}
-        body["tools"] = list(settings.tools or plan_tools(OpenRouterFeatures())) + LOCAL_TOOLS
+        if settings.tools_disabled:
+            body["tools"] = []
+            body["tool_choice"] = "none"
+        else:
+            body["tools"] = list(settings.tools or plan_tools(OpenRouterFeatures())) + LOCAL_TOOLS
         # With nothing stored at OpenAI, the thinking behind a tool call comes
         # back sealed so the next round can carry it.
         body["include"] = ["reasoning.encrypted_content"]
@@ -1071,6 +1075,8 @@ class ChatGPTProvider(BaseProvider):
                 calls = [item for item in items if item.get("type") == "function_call"]
                 if cancel.is_set() or not calls:
                     break
+                if settings.tools_disabled:
+                    raise ProviderError("Tools are disabled for this request.")
                 # The turn's own items go back as they came, searches included:
                 # leave a search out and the model runs it again.
                 outputs: list[dict[str, Any]] = []

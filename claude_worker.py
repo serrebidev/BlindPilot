@@ -203,6 +203,8 @@ class ClaudeWorker(threading.Thread):
         remote_control: Optional[dict] = None,
         on_tasks: Optional[Callable[..., None]] = None,
         on_remote: Optional[Callable[[dict], None]] = None,
+        fork_source: str = "",
+        fork_at: str = "",
     ):
         super().__init__(daemon=True)
         # {"enabled", "name", "reattach"}: Remote Control as the tab wants it.
@@ -212,6 +214,8 @@ class ClaudeWorker(threading.Thread):
         self._on_permission = on_permission
         self._prompt = prompt
         self._session_id = session_id
+        self._fork_source = fork_source
+        self._fork_at = fork_at
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._model = model
@@ -611,6 +615,8 @@ class ClaudeWorker(threading.Thread):
             model=self._model,
             effort=self._effort,
             session_id=self._session_id,
+            fork_source=self._fork_source,
+            fork_at=self._fork_at,
         )
         session = self._take(wants, binary)
         if session is None:
@@ -778,6 +784,10 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "system" and event.get("subtype") == "init":
                 sid = event.get("session_id")
+                if self._fork_source and sid == self._fork_source:
+                    self._fail("Claude returned the source session instead of a conversation copy")
+                    self._drop_process()
+                    return
                 if sid:
                     self._on_session(sid)
 

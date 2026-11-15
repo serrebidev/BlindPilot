@@ -188,13 +188,26 @@ def test_starting_a_new_conversation_drops_the_name() -> None:
     panel._run_in_progress = lambda: False
     panel._worker = None
     panel._drop_held_backends = lambda: None
+    panel._pending_recovery = object()
 
     app.SessionPanel.clear_conversation(panel)
+    assert panel._pending_recovery is None
     panel.titles.clear()
     panel.prompt.SetValue("a different subject")
     _send(panel)
 
     assert panel.titles == ["a different subject"], panel.titles
+
+
+def test_imported_context_keeps_the_fresh_messages_attached_paths():
+    panel = _panel("Copy", prompt="Describe this file")
+    panel._attachments = ["sample.png"]
+    panel._build_send_text = lambda text: text + "\nAttached files (please read them):\nsample.png"
+    sent = []
+    panel._launch_turn = lambda text, backend, extra: sent.append(text)
+    app.SessionPanel._on_send(panel, import_context="Earlier conversation")
+    assert "sample.png" in sent[0]
+    assert "Earlier conversation" in sent[0]
 
 
 def test_switching_backend_mid_conversation_drops_the_name() -> None:

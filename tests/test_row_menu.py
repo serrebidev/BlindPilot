@@ -39,6 +39,9 @@ class _PanelStub:
     def _action_copy_conversation(self) -> None:
         self.calls.append("copy_conversation")
 
+    def _run_in_progress(self) -> bool:
+        return False
+
 
 def test_the_row_menu_binds_its_items_to_the_menu_itself(wx_app):
     """The handler still fires, and the panel gains nothing from the open."""

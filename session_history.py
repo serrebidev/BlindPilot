@@ -139,6 +139,10 @@ class HistoryTurn:
     prompt: str = ""
     response: str = ""
     sequence: Optional[int] = None
+    message_id: str = ""
+    turn_id: str = ""
+    attachments: tuple[str, ...] = ()
+    response_number: int = 0
 
 
 # Every CLI stuffs context of its own into the user side of the transcript —
@@ -461,10 +465,15 @@ def _jsonl_entries(fmt: _JsonlFormat, cwd: Optional[str]) -> List[HistoryEntry]:
 def _jsonl_turns(fmt: _JsonlFormat, entry: HistoryEntry) -> List[HistoryTurn]:
     """A whole transcript read back as prompt-and-answer turns."""
     turns: List[HistoryTurn] = []
+    turn_id = ""
     for record in _iter_jsonl(Path(entry.path)):
+        if fmt.backend == BACKEND_CODEX and record.get("type") == "turn_context":
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                turn_id = str(payload.get("turn_id") or "")
         role, text = fmt.message_of(record)
         if role == "user":
-            turns.append(HistoryTurn(prompt=text))
+            turns.append(HistoryTurn(prompt=text, turn_id=turn_id))
         elif role == "assistant":
             if not turns:
                 # An answer with nothing asked before it: a transcript that
@@ -472,6 +481,7 @@ def _jsonl_turns(fmt: _JsonlFormat, entry: HistoryEntry) -> List[HistoryTurn]:
                 # entirely the CLI's own injected context.
                 turns.append(HistoryTurn())
             turns[-1].response = _append(turns[-1].response, text)
+            turns[-1].message_id = str(record.get("uuid") or "")
     return turns
 
 
@@ -1087,7 +1097,7 @@ def _codex_db_turns(entry: HistoryEntry) -> List[HistoryTurn]:
             item = json.loads(row["item_json"])
         except ValueError:
             continue
-        turn = turns.setdefault(str(row["turn_id"]), HistoryTurn())
+        turn = turns.setdefault(str(row["turn_id"]), HistoryTurn(turn_id=str(row["turn_id"])))
         if row["item_type"] == "userMessage":
             parts = item.get("content") if isinstance(item.get("content"), list) else []
             text = "\n".join(

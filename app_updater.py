@@ -557,6 +557,8 @@ if (-not (Enter-UpdateTurn)) {
 try {
     Write-Log ("Updating " + $InstallDir)
     New-Item -ItemType Directory -Path $stage | Out-Null
+    # A Python launched from pwsh can inherit PS7's incompatible archive module.
+    Import-Module (Join-Path $PSHOME "Modules/Microsoft.PowerShell.Archive/Microsoft.PowerShell.Archive.psd1") -Force
     Expand-Archive -LiteralPath $Archive -DestinationPath $stage -Force
     $source = Join-Path $stage "BlindPilot"
     if (-not (Test-Path -LiteralPath (Join-Path $source $Executable) -PathType Leaf)) {

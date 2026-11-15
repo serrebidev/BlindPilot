@@ -239,9 +239,13 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
             "&Remote Control…",
             "Ctrl+Shift+U",
         )
-        for item, chord in zip(items[3:], agent_chords, strict=True):
+        for item, chord in zip(items[3 : 3 + len(agent_chords)], agent_chords, strict=True):
             assert item in frame._agent_menu_items
             assert item.GetItemLabel().endswith(chord)
+        recovery = items[-1]
+        assert recovery not in frame._agent_menu_items
+        assert recovery.GetSubMenu() is not None
+        assert recovery.GetItemLabel() == "Conversation &Copies"
     finally:
         menu.Destroy()
 

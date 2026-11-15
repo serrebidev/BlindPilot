@@ -2,6 +2,14 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.0 - 2026-11-14
+
+Conversation copies and separate questions, informed by The Chat Place and FastChat. Branch from Here keeps a conversation prefix; Retry from Here restores the selected question and retained attachments without sending it or changing the original. Claude and Codex use native forks when saved boundary IDs are available, with a labeled text-context copy otherwise. Chat copies atomically preserve messages and attachment bytes. Ask Aside sends completed conversation text to an explicitly chosen Chat account with all tools disabled, including account-provided tools and ChatGPT's usual built-in tools. It leaves source history and drafts alone.
+
+File, Recent Conversations now includes Export Conversations for selected saved Agent and Chat histories as Markdown, HTML or plain text. It preserves existing files, numbers duplicate names, reports failures, and keeps completed files when cancelled. Textual exports name attachments rather than exporting their binary contents. Chat requests retry transient failures up to twice before content or accepted work begins, with cancellable delays; partial responses and accepted batches are never replayed.
+
+The Windows updater explicitly imports the archive module supplied with its own PowerShell host, fixing extraction when Python carries a PowerShell 7 module path into Windows PowerShell 5.1. Command Code's retired Beam free-model entry is replaced by the current Inkling 2 Small entry. Download instructions now match the Apple Silicon macOS artifact and source-only Linux support. Automatic computer use and the remaining parity stages are planned work, not part of this release.
+
 ## v0.56.1 - 2026-11-12
 
 Hermes messages now include the submission identifier required by current Hermes gateways. Sending a message such as "Hello" no longer fails with invalid_params because that identifier was missing. Each worker turn gets its own UUID, and resubmitting that turn keeps the same identifier so Hermes can recognize a retry. JSON-RPC request IDs remain separate. Reported by Brandon; fix based on Codex's diagnosis. This change targets current Hermes gateways; older gateways that reject submission_id must be updated before use.

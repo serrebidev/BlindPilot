@@ -55,11 +55,11 @@ Get the latest build from the [Releases page](https://github.com/serrebidev/Blin
 
 **macOS**
 
-Download `BlindPilot-macOS-universal2.zip`. It runs on Apple Silicon and Intel Macs, and needs macOS 11 or later. The app isn't notarized by Apple, so the first time you open it you may have to allow it in System Settings, Privacy & Security.
+Download `BlindPilot-macOS-arm64.zip`. It runs on Apple Silicon Macs and needs macOS 11 or later. The app isn't notarized by Apple, so the first time you open it you may have to allow it in System Settings, Privacy & Security.
 
 **Linux**
 
-Download `BlindPilot-Linux-x64.tar.gz`, extract it, and run `BlindPilot`. It needs GTK 3 and its AT-SPI bridge, which most desktop distributions already have; Orca announces from the same tree. If GTK is missing, install the distribution's `libgtk-3-0` (and `at-spi2-core` for announcements). There is no system package yet; run it from the extracted folder.
+Linux currently runs from source; no Linux release artifact is published. It needs GTK 3 and its AT-SPI bridge, which most desktop distributions already have; Orca announces from the same tree. If GTK is missing, install the distribution's `libgtk-3-0` (and `at-spi2-core` for announcements).
 
 Only one copy runs at a time. Start it again on Windows and it brings the open one to the front.
 
@@ -245,6 +245,20 @@ On a Mac, Ctrl is Cmd. Two keys are different so macOS doesn't eat them: Recent 
 - **Codex in Auto:** steps that need to leave the sandbox go to Codex's automatic approval review instead of failing or asking you. Each decision is announced, with its risk level and reason.
 
 ## Chat mode
+
+### Conversation copies, separate questions, and export
+
+Conversation, Find and Browse, Conversation Copies offers Branch from Here, Retry from Here, and Ask Aside. Select a message first. Branch keeps the conversation up to that point; Retry puts the selected question back in a copy's prompt, ready to edit. Neither sends automatically, changes the original conversation, or puts workspace files back. Branch and Retry also appear on the message's context menu. In Agent mode, choose a completed turn; when several user rows share one response, choose its answer. Retry restores locally retained attachment references; Chat copies preserve stored attachment bytes.
+
+Claude and Codex use native forks when saved history identifies the boundary. Otherwise the new tab says it is a context copy and sends the earlier text with your first new instruction. An agent copy is saved when you first Send. Chat copies are saved immediately in Recent Conversations. Save or send a Chat draft before copying so it is not replaced.
+
+Ask Aside opens a separate question about completed messages. Choose the Chat account and model that should receive the text copy, then Ask. It uses no tools, including those in account settings, and leaves the original history and draft alone. Stop and Close cancel only that question. Add a Chat account and refresh its models first if none are available.
+
+File, Recent Conversations, Export Conversations exports selected saved Agent and Chat conversations as Markdown, HTML or plain text. Filter and select conversations, choose a format, then choose a folder. Existing files are kept and duplicate names get numbers. Cancel keeps completed exports and removes unfinished files. Textual exports name attachments; their binary contents are not exported. If source history changes while the dialog is open, reopen it to refresh the list.
+
+Chat requests retry transient connection or service failures at most twice, with cancellable delays. Requests are not replayed after answer text, thinking, tool activity or an accepted batch. Partial failures remain visible so you can decide what to do next.
+
+### Accounts and profiles
 
 Chat talks to an AI service directly. No agent, and it can't touch your files.
 
