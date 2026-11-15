@@ -77,6 +77,7 @@ def import_existing_accessible_ai_data(target: Path) -> Path | None:
 _IMPORT_LOCK = threading.Lock()
 _IMPORT_STARTED = False
 _IMPORTED: Path | None = None
+_IMPORT_REPORTED = False
 
 # shortcut: a copy killed as the app exits can leave a partial database that
 # target.exists() then treats as done; upgrade if copies grow slow enough for
@@ -122,6 +123,9 @@ def create_chat_panel(
         speak,
         model_order=model_order,
     )
-    if imported is not None:
+    global _IMPORT_REPORTED
+    if imported is not None and not _IMPORT_REPORTED:
+        # Said by the first chat only; every later Chat tab would repeat it.
+        _IMPORT_REPORTED = True
         set_status("AccessibleAI accounts, profiles, and conversations were imported.")
     return panel

@@ -207,3 +207,29 @@ def test_editing_an_account_says_a_blank_key_keeps_the_stored_one(tmp_path):
         wx.Yield()
         if owns_app:
             app.Destroy()
+
+
+def test_the_import_is_reported_by_the_first_chat_tab_only(monkeypatch, tmp_path):
+    """Every Chat tab builds its own panel; only the first says the import happened."""
+    import wx
+
+    owns_app = wx.GetApp() is None
+    app = wx.GetApp() or wx.App(False)
+    monkeypatch.setattr(chat_integration, "database_path", lambda: tmp_path / "chat.sqlite3")
+    monkeypatch.setattr(chat_integration, "ensure_legacy_import", lambda: tmp_path / "old.db")
+    monkeypatch.setattr(chat_integration, "_IMPORT_REPORTED", False)
+    frame = wx.Frame(None)
+    said: list[str] = []
+    try:
+        panels = [
+            chat_integration.create_chat_panel(frame, said.append, lambda _t: None)
+            for _ in range(2)
+        ]
+        assert sum("were imported" in text for text in said) == 1
+        for panel in panels:
+            panel.shutdown()
+    finally:
+        frame.Destroy()
+        app.ProcessPendingEvents()
+        if owns_app:
+            app.Destroy()
