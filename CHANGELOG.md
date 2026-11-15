@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.12 - 2026-11-14
+
+Computer Use moved once more, at the request to keep it out of the Chat menu: it now sits in Conversation, Find and Browse as an agent item, beside Queued Messages and the other session tools. In Chat mode it opens the same opt-in dialog; in Agent mode it explains computer use is Chat-only. The history list's context menu still carries it too.
+
 ## v0.57.11 - 2026-11-14
 
 Chat menu reachable Computer Use: the opt-in lived only on the history list's context menu, which is hard to find with a screen reader, so Computer Use… is now also in the Chat menu. No behavior changes.
