@@ -14,6 +14,12 @@ wx = pytest.importorskip("wx")
 import blindpilot_app as app  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def unrelated_sounds_do_not_start_threads(monkeypatch):
+    """A queued sound must not count as this test's worker."""
+    monkeypatch.setattr(app.earcons.Earcons, "_spawn", lambda *_args: None)
+
+
 @pytest.fixture
 def frame():
     owns_app = wx.GetApp() is None
