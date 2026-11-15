@@ -200,8 +200,8 @@ wx = pytest.importorskip("wx")
 def test_the_submenu_offers_one_switch_per_cue(frame):
     menu = app.MainFrame._build_sound_cue_menu(frame)
     try:
-        items = menu.GetMenuItems()
-        assert [item.GetKind() for item in items] == [wx.ITEM_CHECK] * len(CUES)
+        items = [item for item in menu.GetMenuItems() if item.GetKind() == wx.ITEM_CHECK]
+        assert len(items) == len(CUES)
         labels = " ".join(item.GetItemLabelText().lower() for item in items)
         for word in ("sent", "working", "received", "wrong"):
             assert word in labels
@@ -215,6 +215,7 @@ def test_the_submenu_is_greyed_out_while_the_master_switch_is_off(frame, monkeyp
 
     menu = app.MainFrame._build_sound_cue_menu(frame)
     try:
-        assert not any(item.IsEnabled() for item in menu.GetMenuItems())
+        checks = [item for item in menu.GetMenuItems() if item.GetKind() == wx.ITEM_CHECK]
+        assert not any(item.IsEnabled() for item in checks)
     finally:
         menu.Destroy()

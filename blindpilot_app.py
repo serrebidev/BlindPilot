@@ -9755,6 +9755,10 @@ class SessionPanel(wx.Panel):
         in the list, and the turn keeps their text as its response, so the
         transcript is not left with a question and no answer.
         """
+        speech_cancel: Optional[threading.Event] = getattr(self, "_speech_cancel", None)
+        if speech_cancel is not None:
+            speech_cancel.set()
+        self._speech_cancel: Optional[threading.Event] = None
         worker = self._worker
         if getattr(self, "_pending_messages", []):
             self._queue_paused = True
@@ -10486,6 +10490,42 @@ class SessionPanel(wx.Panel):
         announce(text)
         return True
 
+    def _speak_response_if_enabled(self, text: str) -> None:
+        """Speak a completed response with the independent SAPI voice.
+
+        Off unless the user enabled system speech; the per-conversation
+        override (stored by session id in the preferences config) decides.
+        Runs on a worker thread; stopping interrupts the playback.
+        """
+        from system_speech import SpeechSettings, resolve_override
+
+        cfg = _load_config()
+        saved = cfg.get("system_speech") or {}
+        settings = SpeechSettings(
+            enabled=bool(saved.get("enabled", False)),
+            voice=str(saved.get("voice") or ""),
+            rate=int(saved.get("rate", 0)),
+            volume=int(saved.get("volume", 100)),
+            speak_responses=bool(saved.get("speak_responses", True)),
+        )
+        override = str((cfg.get("speech_overrides") or {}).get(self._session_id or "", "inherit"))
+        if not resolve_override(override, settings) or not text.strip():
+            return
+        frame = self.GetTopLevelParent()
+        speech = getattr(frame, "_system_speech", None) if frame is not None else None
+        if speech is None:
+            from system_speech import SystemSpeech
+
+            speech = SystemSpeech()
+        speech.apply(settings)
+        cancel = threading.Event()
+
+        def work() -> None:
+            speech.speak(text.strip(), cancel)
+
+        threading.Thread(target=work, daemon=True).start()
+        self._speech_cancel = cancel
+
     def _narrate_completed_response(self, text: str) -> None:
         """Speak a final answer when no assistant activity was narrated live."""
         if not SETTINGS.speak_live or self._assistant_narrated_this_turn or not text.strip():
@@ -10535,6 +10575,7 @@ class SessionPanel(wx.Panel):
             self._stream_response = None
             return
         self._narrate_completed_response(text)
+        self._speak_response_if_enabled(text)
         if self._turns:
             self._turns[-1].response = text
         if self._stream_response is None:
@@ -13610,6 +13651,16 @@ class MainFrame(wx.Frame):
             "How many seconds between working sounds in the every-few-seconds mode",
         )
         options_menu.AppendSeparator()
+        speech_item = options_menu.Append(
+            wx.ID_ANY,
+            "System &Speech...",
+            "Independent voice for responses, separate from screen-reader speech",
+        )
+        self.Bind(
+            wx.EVT_MENU,
+            _gui_work("System speech", lambda _e: self._system_speech_active()),
+            speech_item,
+        )
         remote_hermes_item = options_menu.Append(
             wx.ID_ANY,
             "Re&mote Hermes...",
@@ -14020,6 +14071,24 @@ class MainFrame(wx.Frame):
             wx.CallAfter(self.focus_for_mode)
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
+
+        from system_speech import SystemSpeech
+
+        self._system_speech = SystemSpeech()
+        self._apply_sound_pack_and_overrides()
+
+    def _apply_sound_pack_and_overrides(self) -> None:
+        """Sound pack + per-cue files from config; called at startup and edits."""
+        cfg = _load_config()
+        pack = str(cfg.get("sound_pack") or "")
+        if pack:
+            from accessible_ai.storage.paths import app_data_dir
+
+            folder = app_data_dir() / "soundpacks" / pack
+            if folder.is_dir():
+                self.earcons.set_pack(str(folder))
+        for cue, path in (cfg.get("sound_overrides") or {}).items():
+            self.earcons.set_override(str(cue), str(path))
 
     def _fit_tab_strip(self) -> None:
         """Shrink the tab strip to its tab row, so no empty page shows under it.
@@ -16070,7 +16139,38 @@ class MainFrame(wx.Frame):
                 self._toggle_sound_cue(key)
 
             self.Bind(wx.EVT_MENU, _gui_work(f"Sound cue: {label}", toggle_cue), item)
+        menu.AppendSeparator()
+        self._menu_item(
+            menu,
+            "Choose Sound &Pack…",
+            "Use an installed sound pack instead of the built-in sounds",
+            lambda: self._sound_pack_active(),
+        )
+        self._menu_item(
+            menu,
+            "&Custom Cue Sounds…",
+            "Give each cue its own sound file",
+            lambda: self._custom_cues_active(),
+        )
         return menu
+
+    def _sound_pack_active(self) -> None:
+        from sound_dialogs import show_pack_dialog
+
+        show_pack_dialog(self, self.earcons, announce)
+
+    def _custom_cues_active(self) -> None:
+        from sound_dialogs import show_custom_cues_dialog
+
+        show_custom_cues_dialog(self, self.earcons, announce)
+        self._apply_sound_pack_and_overrides()
+
+    def _system_speech_active(self) -> None:
+        from sound_dialogs import show_speech_dialog
+
+        page = self.notebook.GetCurrentPage()
+        session_id = getattr(page, "_session_id", "") or "" if page is not None else ""
+        show_speech_dialog(self, self._system_speech, announce, session_id)
 
     def _toggle_sound_cue(self, cue: str) -> None:
         item = self._sound_cue_items[cue]

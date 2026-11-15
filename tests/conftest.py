@@ -364,7 +364,10 @@ def frame(wx_app):
     """A bare top-level window, destroyed however the test ends."""
     import wx
 
+    import blindpilot_app as app
+
     window = wx.Frame(None)
+    window._menu_item = lambda *args, **kwargs: app.MainFrame._menu_item(window, *args, **kwargs)
     try:
         yield window
     finally:

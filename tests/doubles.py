@@ -153,6 +153,7 @@ def panel_stub(base=None, **overrides):
         panel.status.append(text),
     )
     panel._set_status = lambda text: panel.status.append(text)
+    panel._speak_response_if_enabled = lambda _text: None
     panel._say = lambda _text, _kind="assistant": False
 
     # ----- what a tab closing has to put down -----

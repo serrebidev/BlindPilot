@@ -107,6 +107,9 @@ class Earcons:
         # Which cues the master switch turns on. Absent means on, so an
         # Earcons built without them behaves exactly as it did before.
         self.cues = dict(cues or {})
+        # Sound-pack folder (optional) and per-cue custom files (optional).
+        self._pack_folder: Optional[str] = None
+        self._overrides: dict[str, str] = {}
         self.send = self._resolve("send")
         self.received = self._resolve("received", "Recieved")
         self.in_progress = self._resolve("in-progress", "in_progress")
@@ -126,12 +129,35 @@ class Earcons:
         self.per_backend_send = False
         self._send_variants: dict[str, Optional[str]] = {}
 
+    def set_pack(self, pack_folder: Optional[str]) -> None:
+        """Resolve cues against a sound-pack folder before the built-in one."""
+        self._pack_folder = pack_folder
+        self.send = self._resolve("send")
+        self.received = self._resolve("received", "Recieved")
+        self.in_progress = self._resolve("in-progress", "in_progress")
+
+    def set_override(self, cue: str, path: Optional[str]) -> None:
+        """One cue's own file, chosen ahead of any pack or built-in sound."""
+        if path:
+            self._overrides[cue] = path
+        else:
+            self._overrides.pop(cue, None)
+        self.send = self._resolve("send")
+        self.received = self._resolve("received", "Recieved")
+        self.in_progress = self._resolve("in-progress", "in_progress")
+
     def _resolve(self, *basenames: str) -> Optional[str]:
         for name in basenames:
-            for ext in (".wav", ".ogg", ".aiff", ".aif", ".mp3"):
-                path = os.path.join(self._folder, name + ext)
-                if os.path.isfile(path):
-                    return path
+            override = self._overrides.get(name, "")
+            if override and os.path.isfile(override):
+                return override
+        folders = [folder for folder in (self._pack_folder, self._folder) if folder]
+        for folder in folders:
+            for name in basenames:
+                for ext in (".wav", ".ogg", ".aiff", ".aif", ".mp3"):
+                    path = os.path.join(folder, name + ext)
+                    if os.path.isfile(path):
+                        return path
         return None
 
     def _unix_player(self) -> Optional[list]:
