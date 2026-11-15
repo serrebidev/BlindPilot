@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.57.10 - 2026-11-14
+
+macOS computer use: the opt-in per-conversation control from 0.57.8 now runs on the Mac too, driving other apps through their accessibility trees (numbered controls, press and set-value actions; peer validation before every action; BlindPilot itself cannot be operated; no coordinates). Automatic actions need Accessibility permission, requested once when starting; without it the app says exactly where to enable it. The global stop key is Windows-only in this release, so on macOS the Ask-before-each-action mode is recommended; in-window Stop always works.
+
 ## v0.57.9 - 2026-11-14
 
 Test-only fix that the macOS release build exposed: a queued sound's player thread counted as a worker in the GitHub picker test, failing the macOS suite. The test now isolates unrelated sound spawns the same way the CLI-discovery test already did. No product behavior changes.
