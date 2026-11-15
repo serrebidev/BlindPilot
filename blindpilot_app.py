@@ -10631,7 +10631,7 @@ class SessionPanel(wx.Panel):
             self._turn_started_at = None
         fallback_model = getattr(self._worker, "fallback_model", "")
         if getattr(self, "model", "") == AUTO_MODEL and fallback_model:
-            self._auto_route = f"Switched to {fallback_model} after a Command Code stop."
+            self._set_auto_route(f"Switched to {fallback_model} after a Command Code stop.")
         self._replay_done = False
         SessionPanel._note_context(self, getattr(self._worker, "context_tokens", None))
         SessionPanel._drop_step_rows(self)
@@ -15118,6 +15118,12 @@ class MainFrame(wx.Frame):
         )
         add(
             browse,
+            "&Queued Messages…",
+            "Review, remove or clear messages queued for this session",
+            self._queued_messages_active,
+        )
+        add(
+            browse,
             "Co&mmands…\tCtrl+Shift+X",
             "List every command the agent ran, with whether it finished and its output",
             lambda: self._panel_action("open_commands"),
@@ -17099,6 +17105,13 @@ class MainFrame(wx.Frame):
         page = self.notebook.GetCurrentPage()
         if isinstance(page, SessionPanel):
             page.open_task_list()
+
+    def _queued_messages_active(self) -> None:
+        page = self.notebook.GetCurrentPage()
+        if isinstance(page, SessionPanel):
+            from queue_dialogs import show_queue_dialog
+
+            show_queue_dialog(self, page, announce)
 
     def _panel_action(self, name: str) -> None:
         """Run one of the current agent tab's list commands by name."""
