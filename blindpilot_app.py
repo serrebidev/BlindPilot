@@ -10678,6 +10678,15 @@ class SessionPanel(wx.Panel):
                 )
             else:
                 self._send_queued_message()
+        if answered:
+            from history_dialogs import maybe_keep_current_session
+
+            maybe_keep_current_session(
+                getattr(self, "_session_backend", "") or "",
+                getattr(self, "_session_id", "") or "",
+                getattr(self, "cwd", "") or "",
+                self._announce,
+            )
         waiting = getattr(self, "_late_turn_waiting", None)
         self._late_turn_waiting = None
         if written and not queued and waiting is None and SETTINGS.ask_written_questions:
@@ -14930,6 +14939,30 @@ class MainFrame(wx.Frame):
             "Export selected conversations without replacing existing files",
             lambda: self._export_conversations(),
         )
+        self._menu_item(
+            history_menu,
+            "&Back Up BlindPilot…",
+            "Save the Chat database and settings to one archive file",
+            lambda: self._backup_history_active(),
+        )
+        self._menu_item(
+            history_menu,
+            "&Restore from Backup…",
+            "Install a backup; current history is kept aside first",
+            lambda: self._restore_history_active(),
+        )
+        self._menu_item(
+            history_menu,
+            "&Import Conversation…",
+            "Import a Basilisk (.bskc) or BlindPilot interchange (.json) conversation",
+            lambda: self._import_history_active(),
+        )
+        self._menu_item(
+            history_menu,
+            "&Kept Transcripts…",
+            "List protected transcript copies, their storage use, and keeping preferences",
+            lambda: self._kept_history_active(),
+        )
         menu.AppendSubMenu(history_menu, "&Recent Conversations")
         self._hermes_sessions_item = self._menu_item(
             menu,
@@ -15181,6 +15214,26 @@ class MainFrame(wx.Frame):
         from conversation_export import show_export_dialog
 
         show_export_dialog(self, announce)
+
+    def _backup_history_active(self) -> None:
+        from history_dialogs import show_backup_dialog
+
+        show_backup_dialog(self, announce)
+
+    def _restore_history_active(self) -> None:
+        from history_dialogs import show_restore_dialog
+
+        show_restore_dialog(self, announce)
+
+    def _import_history_active(self) -> None:
+        from history_dialogs import show_import_dialog
+
+        show_import_dialog(self, announce)
+
+    def _kept_history_active(self) -> None:
+        from history_dialogs import show_kept_dialog
+
+        show_kept_dialog(self, announce)
 
     def _ask_aside_active(self) -> None:
         from ask_aside import AskAsideDialog
@@ -16345,6 +16398,9 @@ class MainFrame(wx.Frame):
         self._follow_tab_backend()
         responses = "1 response" if len(turns) == 1 else f"{len(turns)} responses"
         wx.CallAfter(announce, f"Resumed {entry.title}, {responses}")
+        from history_dialogs import maybe_keep_transcript
+
+        maybe_keep_transcript(entry.path, announce)
         if on_open:
             on_open(panel)
 
