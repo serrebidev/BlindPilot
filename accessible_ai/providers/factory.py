@@ -13,6 +13,7 @@ from accessible_ai.models import (
     PROVIDER_OPENAI,
     PROVIDER_OPENAI_COMPATIBLE,
     PROVIDER_OPENCODE_GO,
+    PROVIDER_OLLAMA,
     PROVIDER_OPENROUTER,
     PROVIDER_Z_AI,
 )
@@ -22,6 +23,7 @@ from accessible_ai.providers.chatgpt import ChatGPTProvider
 from accessible_ai.providers.chat_completions import ChatCompletionsProvider, GeminiProvider
 from accessible_ai.providers.command_code import CommandCodeProvider
 from accessible_ai.providers.config import apply_builtin_provider_defaults
+from accessible_ai.providers.ollama import OllamaProvider
 from accessible_ai.providers.openai_compatible import OpenAICompatibleProvider
 from accessible_ai.providers.openai_provider import OpenAIProvider
 from accessible_ai.providers.opencode_go import OpenCodeGoProvider
@@ -63,4 +65,6 @@ def create_provider(account: Account, credentials: CredentialStore) -> BaseProvi
         return CommandCodeProvider(account, credentials)
     if account.provider == PROVIDER_OPENAI_COMPATIBLE:
         return OpenAICompatibleProvider(account, credentials)
+    if account.provider == PROVIDER_OLLAMA:
+        return OllamaProvider(account, credentials)
     raise ProviderError(f"Unknown provider type: {account.provider}")

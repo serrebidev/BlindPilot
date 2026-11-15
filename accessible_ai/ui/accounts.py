@@ -28,6 +28,7 @@ from accessible_ai.models import (
     PROVIDER_OPENAI,
     PROVIDER_OPENAI_COMPATIBLE,
     PROVIDER_OPENCODE_GO,
+    PROVIDER_OLLAMA,
     PROVIDER_OPENROUTER,
     PROVIDER_Z_AI,
 )
@@ -88,6 +89,7 @@ PROVIDER_ORDER = [
     PROVIDER_COMMAND_CODE,
     PROVIDER_OPENCODE_GO,
     PROVIDER_OPENAI_COMPATIBLE,
+    PROVIDER_OLLAMA,
 ]
 
 # Said in the account dialog when a provider is chosen, so the requirements of
@@ -148,6 +150,10 @@ BUILTIN_PROVIDER_NOTES = {
     PROVIDER_OPENCODE_GO: (
         "OpenCode Go connection addresses and per-model protocol routing are built in. Enter an account "
         "name and your OpenCode Go API key. You do not need to enter or verify any URL."
+    ),
+    PROVIDER_OLLAMA: (
+        "Ollama runs on this machine, so no API key is needed. Make sure Ollama is running and "
+        "has pulled a model; the model list comes from Ollama itself."
     ),
 }
 
@@ -579,6 +585,8 @@ class AccountEditorDialog(wx.Dialog):
 
         provider = self._selected_provider()
         api_key = self.api_key.GetValue().strip()
+        if provider == PROVIDER_OLLAMA:
+            api_key = ""
         if provider == PROVIDER_CHATGPT:
             api_key = ""
             if not self._chatgpt_signed_in():
@@ -590,7 +598,7 @@ class AccountEditorDialog(wx.Dialog):
                 )
                 self.chatgpt_button.SetFocus()
                 return
-        elif is_builtin_provider(provider) and not api_key:
+        elif is_builtin_provider(provider) and not api_key and provider != PROVIDER_OLLAMA:
             wx.MessageBox(
                 f"An API key is required for {PROVIDER_LABELS[provider]}.",
                 "Account Settings",

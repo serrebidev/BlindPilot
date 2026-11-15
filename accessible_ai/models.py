@@ -17,6 +17,7 @@ PROVIDER_DEMON_ROUTE = "demon_route"
 PROVIDER_COMMAND_CODE = "command_code"
 PROVIDER_OPENCODE_GO = "opencode_go"
 PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+PROVIDER_OLLAMA = "ollama"
 
 PROVIDER_LABELS = {
     PROVIDER_OPENROUTER: "OpenRouter",
@@ -32,6 +33,7 @@ PROVIDER_LABELS = {
     PROVIDER_COMMAND_CODE: "Command Code",
     PROVIDER_OPENCODE_GO: "OpenCode Go",
     PROVIDER_OPENAI_COMPATIBLE: "OpenAI-compatible",
+    PROVIDER_OLLAMA: "Ollama (local)",
 }
 
 API_MODE_AUTO = "auto"

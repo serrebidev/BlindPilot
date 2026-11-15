@@ -262,7 +262,7 @@ Chat requests retry transient connection or service failures at most twice, with
 
 Chat talks to an AI service directly. No agent, and it can't touch your files.
 
-Set the Mode box to Chat, add an account and key under Chat, Accounts, then Chat, Refresh models, and pick one. Supported providers are OpenRouter, OpenAI, ChatGPT plan (sign in with your ChatGPT account instead of an API key), Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, Demon Route, Command Code, OpenCode Go, and any OpenAI-compatible endpoint. Keys are kept in your system's password store, not a text file.
+Set the Mode box to Chat, add an account and key under Chat, Accounts, then Chat, Refresh models, and pick one. Supported providers are OpenRouter, OpenAI, ChatGPT plan (sign in with your ChatGPT account instead of an API key), Claude, Gemini, Z.AI, Moonshot AI, Kimi, DeepSeek, Demon Route, Command Code, OpenCode Go, Ollama (local), and any OpenAI-compatible endpoint. Keys are kept in your system's password store, not a text file.
 
 Profiles hold a system prompt, a default account and model, temperature, token limit, and whether to stream. You can attach pictures, PDFs, and text files. OpenRouter accounts also get web search, image generation and its other server tools, plus thinking controls. Those tools run on OpenRouter's servers, not your computer.
 

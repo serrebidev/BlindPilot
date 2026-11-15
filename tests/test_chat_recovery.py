@@ -37,6 +37,15 @@ def source(tmp_path):
     return db, source_id, first, second
 
 
+def test_editing_message_content_preserves_attachment_bytes(source):
+    db, source_id, first, _second = source
+    assert first.id is not None
+    db.update_message_content(first.id, "edited question")
+    messages = db.list_messages(source_id)
+    assert messages[0].content == "edited question"
+    assert messages[0].attachments[0].data == b"\x00\x01"
+
+
 def test_branch_copies_prefix_settings_and_attachment_bytes(source):
     db, source_id, first, second = source
     before = db.list_messages(source_id)

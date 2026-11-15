@@ -499,6 +499,54 @@ class Database:
                     )
         return new_id
 
+    def compact_conversation(
+        self, conversation_id: int, keep_last_n: int, summary: str, title: str
+    ) -> int:
+        """New conversation: summary snapshot plus the newest messages only.
+
+        The source conversation is never changed. Returns the new id.
+        """
+        if keep_last_n < 0:
+            raise ValueError("keep_last_n must not be negative.")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            source = conn.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if source is None:
+                raise ValueError("The source conversation no longer exists.")
+            result = conn.execute(
+                "INSERT INTO conversations (title, profile_id, account_id, model, system_prompt_snapshot) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    title,
+                    source["profile_id"],
+                    source["account_id"],
+                    source["model"],
+                    summary.strip() or source["system_prompt_snapshot"],
+                ),
+            )
+            new_id = int(result.lastrowid)
+            if keep_last_n > 0:
+                messages = conn.execute(
+                    "SELECT id FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?",
+                    (conversation_id, keep_last_n),
+                ).fetchall()
+            else:
+                messages = []
+            for message in reversed(messages):
+                copied = conn.execute(
+                    "INSERT INTO messages (conversation_id, role, content, created_at) "
+                    "SELECT ?, role, content, created_at FROM messages WHERE id = ?",
+                    (new_id, message["id"]),
+                )
+                conn.execute(
+                    "INSERT INTO message_attachments (message_id, filename, mime_type, data) "
+                    "SELECT ?, filename, mime_type, data FROM message_attachments WHERE message_id = ?",
+                    (copied.lastrowid, message["id"]),
+                )
+        return new_id
+
     def delete_conversation(self, conversation_id: int) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))

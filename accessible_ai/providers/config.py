@@ -16,6 +16,7 @@ from accessible_ai.models import (
     PROVIDER_MOONSHOT,
     PROVIDER_OPENAI,
     PROVIDER_OPENCODE_GO,
+    PROVIDER_OLLAMA,
     PROVIDER_OPENROUTER,
     PROVIDER_Z_AI,
 )
@@ -58,10 +59,23 @@ _BUILTIN_PROVIDERS: dict[str, tuple[str, str]] = {
     # Demon Route: one prepaid key routing to open-weight models over an
     # OpenAI-compatible surface. Text only; it has no server-side tools.
     PROVIDER_DEMON_ROUTE: ("https://api.demonroute.com/v1", API_MODE_CHAT),
+    # Local server, no key. Chat uses Ollama's OpenAI-compatible surface;
+    # the catalog comes from /api/tags in the provider itself.
+    PROVIDER_OLLAMA: ("http://localhost:11434", API_MODE_CHAT),
+}
+
+# Endpoints that differ from the shared table above.
+_BUILTIN_ENDPOINT_OVERRIDES: dict[str, dict[str, str]] = {
+    PROVIDER_OLLAMA: {"chat_endpoint": "/v1/chat/completions"},
 }
 
 BUILTIN_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
-    provider: {"base_url": base_url, "api_mode": api_mode, **_ENDPOINTS}
+    provider: {
+        "base_url": base_url,
+        "api_mode": api_mode,
+        **_ENDPOINTS,
+        **_BUILTIN_ENDPOINT_OVERRIDES.get(provider, {}),
+    }
     for provider, (base_url, api_mode) in _BUILTIN_PROVIDERS.items()
 }
 

@@ -429,19 +429,105 @@ class ChatPanel(wx.Panel):
         edit_item = menu.Append(wx.ID_EDIT, "&Edit...")
         branch_item = menu.Append(wx.ID_ANY, "&Branch from Here")
         retry_item = menu.Append(wx.ID_ANY, "&Retry from Here")
+        compact_item = menu.Append(wx.ID_ANY, "&Compact Conversation...")
         _, entry = selected
         edit_item.Enable(entry.id is not None and entry.role != "status" and not self.generating)
         can_recover = entry.id is not None and not self.generating and not self._recovery_busy
         branch_item.Enable(can_recover and entry.role in {"user", "assistant"})
         retry_item.Enable(can_recover and entry.role == "user")
+        compact_item.Enable(
+            not self.generating
+            and not self._recovery_busy
+            and self.current_conversation_id is not None
+        )
         menu.Bind(wx.EVT_MENU, self.on_copy_history_item, copy_item)
         menu.Bind(wx.EVT_MENU, self.on_edit_history_item, edit_item)
         menu.Bind(wx.EVT_MENU, self.on_branch_history_item, branch_item)
         menu.Bind(wx.EVT_MENU, self.on_retry_history_item, retry_item)
+        menu.Bind(wx.EVT_MENU, self.on_compact_history_item, compact_item)
         try:
             self.history_list.PopupMenu(menu)
         finally:
             menu.Destroy()
+
+    def on_compact_history_item(self, event: wx.CommandEvent | None) -> None:
+        """Summarize older messages, keep the last few, preserve the original."""
+        source_id = self.current_conversation_id
+        if self.generating or self._recovery_busy or source_id is None:
+            return
+        messages = self.db.list_messages(source_id)
+        if len(messages) < 4:
+            self.SetStatusText("This conversation is too short to compact.")
+            self._speak("This conversation is too short to compact.")
+            return
+        profile = deepcopy(self.current_profile)
+        keep_last_n = 6
+        self._recovery_busy = True
+        self.send_button.Disable()
+        self._speak("Compacting this conversation. The original will stay unchanged.")
+
+        def work():
+            source = self.db.get_conversation(source_id)
+            if source is None:
+                raise ValueError("The source conversation no longer exists.")
+            account = (
+                self.db.get_account(source.account_id) if source.account_id is not None else None
+            )
+            if account is None:
+                raise ValueError("This conversation has no account to summarize with.")
+            model = source.model or account.default_model
+            if not model:
+                raise ValueError("This conversation has no model to summarize with.")
+            history_text = "\n\n".join(f"{message.role}: {message.content}" for message in messages)
+            settings = GenerationSettings(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Summarize this conversation for continuation. Keep "
+                        "facts, names, decisions and open tasks; drop wording.",
+                    },
+                    {"role": "user", "content": history_text},
+                ],
+                streaming=False,
+            )
+            settings.tools_disabled = True
+            cancel = Event()
+            service = GenerationService(self.credentials)
+            summary = "".join(
+                event.text
+                for event in service.generate(account, settings, cancel)
+                if event.kind == "text" and event.text
+            ).strip()
+            if not summary:
+                raise ValueError("The summary came back empty; the original is unchanged.")
+            new_id = self.db.compact_conversation(
+                source_id, keep_last_n, summary, f"{source.title} (compacted)"
+            )
+            conversation = self.db.get_conversation(new_id)
+            new_messages = self.db.list_messages(new_id)
+            models = self.model_service.cached_models(account, self.model_order)
+            return conversation, new_messages, models
+
+        def done(result, error):
+            if self.closing:
+                return
+            self._recovery_busy = False
+            self.send_button.Enable(not self.generating)
+            if error:
+                text = f"Could not compact the conversation: {error}"
+            elif self.generating or self.current_conversation_id != source_id:
+                text = (
+                    "Compacted copy saved in Recent Conversations. Your current draft is unchanged."
+                )
+            else:
+                conversation, new_messages, models = result
+                self._show_conversation(conversation, profile, new_messages, models)
+                text = "Compacted conversation ready. The original is unchanged."
+            self.SetStatusText(text)
+            self._speak(text)
+
+        self._recovery_tasks.start(work, done)
 
     def on_branch_history_item(self, event: wx.CommandEvent | None) -> None:
         self._recover_history_item(retry=False)
