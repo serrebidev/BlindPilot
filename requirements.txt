@@ -14,6 +14,10 @@ certifi>=2026.10.23
 markdown-it-py>=4.2.0
 pyobjc-framework-Cocoa>=13.0; sys_platform == "darwin"
 accessible-output2>=0.17; sys_platform == "win32"
+# Computer use drives other apps through their accessibility trees (UIA on
+# Windows only). macOS/Linux builds skip it; computer use reports itself
+# unavailable there instead of failing to start.
+pywinauto>=0.6.9; sys_platform == "win32"
 pyte>=0.8.2
 pexpect>=4.9; sys_platform != "win32"
 keyring>=25.7.0; sys_platform != "win32"

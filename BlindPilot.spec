@@ -57,6 +57,12 @@ if sys.platform == "win32":
     # accessible_output2 loads its outputs by iterating the package at
     # runtime.
     hiddenimports += ["accessible_output2", "accessible_output2.outputs"]
+    # Computer use imports pywinauto lazily, so static analysis never sees it;
+    # without this the frozen build reports the package as missing.
+    _pywinauto_datas, _pywinauto_binaries, _pywinauto_hidden = collect_all("pywinauto")
+    datas += _pywinauto_datas
+    binaries += _pywinauto_binaries
+    hiddenimports += _pywinauto_hidden
     app_icon = str(spec_dir / "packaging" / "BlindPilot.ico")
 
     # Explorer's Properties tab and the SmartScreen prompt read the version

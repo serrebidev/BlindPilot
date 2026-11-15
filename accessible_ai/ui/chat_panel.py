@@ -122,6 +122,8 @@ class ChatPanel(wx.Panel):
         self.closing = False
         self._recovery_tasks = TaskSlot(wx.CallAfter)
         self._recovery_busy = False
+        self._computer_sessions: dict[int, dict[str, Any]] = {}
+        self._stop_key_unregister = None
 
         self.refresh_models_item = _ActionState()
         self.history_list_view_item = _ActionState()
@@ -430,6 +432,7 @@ class ChatPanel(wx.Panel):
         branch_item = menu.Append(wx.ID_ANY, "&Branch from Here")
         retry_item = menu.Append(wx.ID_ANY, "&Retry from Here")
         compact_item = menu.Append(wx.ID_ANY, "&Compact Conversation...")
+        computer_item = menu.Append(wx.ID_ANY, "&Computer Use...")
         _, entry = selected
         edit_item.Enable(entry.id is not None and entry.role != "status" and not self.generating)
         can_recover = entry.id is not None and not self.generating and not self._recovery_busy
@@ -440,15 +443,103 @@ class ChatPanel(wx.Panel):
             and not self._recovery_busy
             and self.current_conversation_id is not None
         )
+        computer_item.Enable(not self.generating and self.current_conversation_id is not None)
         menu.Bind(wx.EVT_MENU, self.on_copy_history_item, copy_item)
         menu.Bind(wx.EVT_MENU, self.on_edit_history_item, edit_item)
         menu.Bind(wx.EVT_MENU, self.on_branch_history_item, branch_item)
         menu.Bind(wx.EVT_MENU, self.on_retry_history_item, retry_item)
         menu.Bind(wx.EVT_MENU, self.on_compact_history_item, compact_item)
+        menu.Bind(wx.EVT_MENU, self.on_computer_use_item, computer_item)
         try:
             self.history_list.PopupMenu(menu)
         finally:
             menu.Destroy()
+
+    @property
+    def _computer_tool_definitions(self) -> list[dict[str, Any]]:
+        from computer_tools import TOOL_DEFINITIONS
+
+        return TOOL_DEFINITIONS
+
+    def _computer_use_executor(self):
+        """The turn executor when computer use is on for this conversation."""
+        conversation_id = self.current_conversation_id
+        entry = self._computer_sessions.get(conversation_id or -1)
+        if entry is None:
+            return None
+        session = entry.get("session")
+        if session is None:
+            try:
+                from computer_use import ComputerUseSession
+
+                session = ComputerUseSession()
+                session.open(app_path=str(entry.get("app_path") or ""))
+            except Exception as exc:
+                self.SetStatusText(f"Computer use could not start: {exc}")
+                self._speak(f"Computer use could not start: {exc}")
+                return None
+            entry["session"] = session
+        from computer_dialog import register_stop_key
+        from computer_tools import ComputerUseExecutor
+
+        if self._stop_key_unregister is None:
+            try:
+                self._stop_key_unregister = register_stop_key(lambda: self.generation_cancel.set())
+            except Exception as exc:
+                self.SetStatusText(f"Computer use needs the stop key: {exc}")
+                self._speak(f"Computer use needs the stop key: {exc}")
+                return None
+        ask_mode = bool(entry.get("ask"))
+
+        def ask(label: str) -> bool:
+            answer: list[bool] = []
+            decided = threading.Event()
+
+            def prompt() -> None:
+                accepted = (
+                    wx.MessageBox(
+                        f"The model wants to: {label}. Allow it?",
+                        "Computer Use",
+                        wx.YES_NO | wx.ICON_QUESTION,
+                        self,
+                    )
+                    == wx.YES
+                )
+                answer.append(accepted)
+                decided.set()
+
+            wx.CallAfter(prompt)
+            decided.wait(120)
+            return bool(answer and answer[0])
+
+        return ComputerUseExecutor(session, self.generation_cancel, ask if ask_mode else None)
+
+    def on_computer_use_item(self, event: wx.CommandEvent | None) -> None:
+        """Start (or stop) computer use for this conversation. Opt-in only."""
+        conversation_id = self.current_conversation_id
+        if conversation_id is None:
+            return
+        if conversation_id in self._computer_sessions:
+            del self._computer_sessions[conversation_id]
+            self._speak("Computer use stopped for this conversation.")
+            self.SetStatusText("Computer use stopped for this conversation.")
+            return
+        from computer_dialog import show_computer_use_dialog
+
+        choice = show_computer_use_dialog(self, self._speak)
+        if choice is None:
+            return
+        app_path, ask = choice
+        self._computer_sessions[conversation_id] = {
+            "app_path": app_path,
+            "ask": ask,
+            "session": None,
+        }
+        self._speak(
+            "Computer use will operate the window in front when you send your next message. "
+            "The model will act through its accessibility tree."
+        )
+        self.SetStatusText("Computer use is on for this conversation.")
 
     def on_compact_history_item(self, event: wx.CommandEvent | None) -> None:
         """Summarize older messages, keep the last few, preserve the original."""
@@ -1392,6 +1483,9 @@ class ChatPanel(wx.Panel):
         self._cancel_response_announcement_timer()
         self.assistant_announcement_buffer = ""
         self.generation_cancel = Event()
+        executor = self._computer_use_executor()
+        if executor is not None:
+            settings.tools = list(settings.tools) + list(self._computer_tool_definitions)
         self.regenerate_button.Disable()
         self.add_files_button.Disable()
         self.remove_files_button.Disable()
@@ -1411,7 +1505,7 @@ class ChatPanel(wx.Panel):
             error: Exception | None = None
             try:
                 for stream_event in self.generation_service.generate(
-                    account, settings, self.generation_cancel
+                    account, settings, self.generation_cancel, tool_executor=executor
                 ):
                     if stream_event.kind == "status":
                         if stream_event.text:

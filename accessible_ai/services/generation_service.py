@@ -21,10 +21,13 @@ class GenerationService:
         account: Account,
         settings: GenerationSettings,
         cancel: Event,
+        tool_executor=None,
     ) -> Iterator[StreamEvent]:
         if settings.tools_disabled:
             account = replace(account, custom_body={})
-            settings = replace(settings, tools=[], plugins=[])
+            settings = replace(settings, tools=[], plugins=[], tool_executor=None)
+        if tool_executor is not None:
+            settings = replace(settings, tool_executor=tool_executor)
         provider = create_provider(account, self.credentials)
         started = False
         for attempt in range(3):

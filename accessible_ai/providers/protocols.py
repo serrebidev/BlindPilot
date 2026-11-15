@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Iterator
+import json
+from collections.abc import Callable, Iterator
 from pathlib import PurePath
 from threading import Event
 from typing import Any
@@ -98,6 +99,15 @@ def chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         role = str(message.get("role", "user"))
         content = str(message.get("content", ""))
         attachments = message.get("attachments") or []
+        if role == "tool":
+            result.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(message.get("tool_call_id") or ""),
+                    "content": content,
+                }
+            )
+            continue
         if not attachments:
             result.append({"role": role, "content": content})
             continue
@@ -187,6 +197,8 @@ class ToolCallCollector:
 
     def __init__(self) -> None:
         self._named: dict[str, str] = {}
+        # Assembled calls, in order: {"id", "name", "arguments"}.
+        self.calls: list[dict[str, str]] = []
 
     def absorb(self, payload: dict[str, Any]) -> list[str]:
         """Take in one delta or message. Returns anything newly worth saying."""
@@ -197,11 +209,27 @@ class ToolCallCollector:
                 continue
             key = str(call.get("id") or call.get("index") or index)
             name = self._call_name(call)
+            self._collect(key, call, name)
             if not name or key in self._named:
                 continue
             self._named[key] = name
             announcements.append(self._announcement(name))
         return announcements
+
+    def _collect(self, key: str, call: dict[str, Any], name: str) -> None:
+        """Append one call's id/name/arguments, assembling streamed fragments."""
+        function = call.get("function")
+        fragment = ""
+        if isinstance(function, dict):
+            fragment = str(function.get("arguments") or "")
+        slot = next((c for c in self.calls if c["id"] == key), None)
+        if slot is None:
+            self.calls.append({"id": key, "name": name, "arguments": fragment})
+        else:
+            if name and not slot["name"]:
+                slot["name"] = name
+            if fragment:
+                slot["arguments"] += fragment
 
     @staticmethod
     def _call_name(call: dict[str, Any]) -> str:
@@ -272,6 +300,12 @@ class SourceCollector:
 
 
 class ProtocolMixin(BaseProvider):
+    def tool_executor(
+        self, settings: GenerationSettings
+    ) -> Callable[[str, dict[str, Any]], str] | None:
+        """The local executor for client calls, when the caller set one."""
+        return getattr(settings, "tool_executor", None)
+
     def list_models_from_endpoint(self) -> list[str]:
         url = self.build_url(self.account.models_endpoint)
         with self.client() as client:
@@ -292,86 +326,97 @@ class ProtocolMixin(BaseProvider):
         settings: GenerationSettings,
         cancel: Event,
     ) -> Iterator[StreamEvent]:
+        tool_executor = self.tool_executor(settings)
         url = self.build_url(self.account.chat_endpoint)
         headers = self.headers()
-        body: dict[str, Any] = dict(self.account.custom_body)
-        body.update(
-            {
-                "model": settings.model,
-                "messages": chat_messages(settings.messages),
-                "stream": bool(settings.streaming),
-            }
-        )
-        if settings.temperature is not None:
-            body["temperature"] = settings.temperature
-        if settings.max_output_tokens is not None:
-            body["max_tokens"] = settings.max_output_tokens
-        # Only sent when something asked for them, so a provider that rejects
-        # a key it does not know never sees one.
-        if settings.reasoning:
-            body["reasoning"] = settings.reasoning
-        if settings.tools:
-            body["tools"] = settings.tools
-        if settings.plugins:
-            body["plugins"] = settings.plugins
+        messages = chat_messages(settings.messages)
+
+        def build_body() -> dict[str, Any]:
+            body: dict[str, Any] = dict(self.account.custom_body)
+            body.update(
+                {
+                    "model": settings.model,
+                    "messages": messages,
+                    "stream": bool(settings.streaming),
+                }
+            )
+            if settings.temperature is not None:
+                body["temperature"] = settings.temperature
+            if settings.max_output_tokens is not None:
+                body["max_tokens"] = settings.max_output_tokens
+            # Only sent when something asked for them, so a provider that rejects
+            # a key it does not know never sees one.
+            if settings.reasoning:
+                body["reasoning"] = settings.reasoning
+            if settings.tools:
+                body["tools"] = settings.tools
+            if settings.plugins:
+                body["plugins"] = settings.plugins
+            return body
 
         received_text = False
         cut_off = False
         sources = SourceCollector()
         tools = ToolCallCollector()
-        with self.client() as client:
-            if settings.streaming:
-                with client.stream("POST", url, headers=headers, json=body) as response:
+        for _round in range(30):
+            tools = ToolCallCollector()
+            body = build_body()
+            with self.client() as client:
+                if settings.streaming:
+                    with client.stream("POST", url, headers=headers, json=body) as response:
+                        self.raise_for_status(response)
+                        yield StreamEvent("headers", metadata=dict(response.headers))
+                        for data in iter_sse_json(response, cancel):
+                            choices = data.get("choices")
+                            if not isinstance(choices, list) or not choices:
+                                continue
+                            first = choices[0]
+                            if not isinstance(first, dict):
+                                continue
+                            _raise_choice_error(first)
+                            cut_off = cut_off or first.get("finish_reason") == "length"
+                            delta = first.get("delta", {})
+                            if not isinstance(delta, dict):
+                                continue
+                            # The thinking arrives on its own key, ahead of and
+                            # interleaved with the answer, so it is reported as its
+                            # own kind rather than mixed into the response text.
+                            thinking = reasoning_text(delta)
+                            if thinking:
+                                yield StreamEvent("reasoning", text=thinking)
+                            for announcement in tools.absorb(delta):
+                                yield StreamEvent("tool", text=announcement)
+                            sources.absorb(delta)
+                            sources.absorb(first)
+                            text = content_to_text(delta.get("content"))
+                            if text:
+                                received_text = True
+                                yield StreamEvent("text", text=text)
+                else:
+                    response = client.post(url, headers=headers, json=body)
                     self.raise_for_status(response)
                     yield StreamEvent("headers", metadata=dict(response.headers))
-                    for data in iter_sse_json(response, cancel):
-                        choices = data.get("choices")
-                        if not isinstance(choices, list) or not choices:
-                            continue
-                        first = choices[0]
-                        if not isinstance(first, dict):
-                            continue
-                        _raise_choice_error(first)
-                        cut_off = cut_off or first.get("finish_reason") == "length"
-                        delta = first.get("delta", {})
-                        if not isinstance(delta, dict):
-                            continue
-                        # The thinking arrives on its own key, ahead of and
-                        # interleaved with the answer, so it is reported as its
-                        # own kind rather than mixed into the response text.
-                        thinking = reasoning_text(delta)
-                        if thinking:
-                            yield StreamEvent("reasoning", text=thinking)
-                        for announcement in tools.absorb(delta):
-                            yield StreamEvent("tool", text=announcement)
-                        sources.absorb(delta)
-                        sources.absorb(first)
-                        text = content_to_text(delta.get("content"))
-                        if text:
-                            received_text = True
-                            yield StreamEvent("text", text=text)
-            else:
-                response = client.post(url, headers=headers, json=body)
-                self.raise_for_status(response)
-                yield StreamEvent("headers", metadata=dict(response.headers))
-                data = response.json()
-                choices = data.get("choices", []) if isinstance(data, dict) else []
-                if choices and isinstance(choices[0], dict):
-                    _raise_choice_error(choices[0])
-                    cut_off = choices[0].get("finish_reason") == "length"
-                    message = choices[0].get("message", {})
-                    if isinstance(message, dict):
-                        thinking = reasoning_text(message)
-                        if thinking:
-                            yield StreamEvent("reasoning", text=thinking)
-                        for announcement in tools.absorb(message):
-                            yield StreamEvent("tool", text=announcement)
-                        sources.absorb(message)
-                        sources.absorb(choices[0])
-                        text = content_to_text(message.get("content"))
-                        if text:
-                            received_text = True
-                            yield StreamEvent("text", text=text)
+                    data = response.json()
+                    choices = data.get("choices", []) if isinstance(data, dict) else []
+                    if choices and isinstance(choices[0], dict):
+                        _raise_choice_error(choices[0])
+                        cut_off = choices[0].get("finish_reason") == "length"
+                        message = choices[0].get("message", {})
+                        if isinstance(message, dict):
+                            thinking = reasoning_text(message)
+                            if thinking:
+                                yield StreamEvent("reasoning", text=thinking)
+                            for announcement in tools.absorb(message):
+                                yield StreamEvent("tool", text=announcement)
+                            sources.absorb(message)
+                            sources.absorb(choices[0])
+                            text = content_to_text(message.get("content"))
+                            if text:
+                                received_text = True
+                                yield StreamEvent("text", text=text)
+            if not (tool_executor is not None and tools.calls and not cancel.is_set()):
+                break
+            self._run_tools_and_extend(messages, tools, tool_executor)
         listed = sources.listing()
         if listed:
             yield StreamEvent("sources", text=listed, metadata={"sources": sources.as_list()})
@@ -380,11 +425,49 @@ class ProtocolMixin(BaseProvider):
             # Recorded into History so the reason is still there afterwards.
             yield StreamEvent("status", text=LENGTH_LIMIT_NOTICE, metadata={"record": True})
         if not received_text and not cancel.is_set():
-            raise ProviderError(self._empty_response_reason(tools))
+            raise ProviderError(self._empty_response_reason(tools, executor=tool_executor))
         yield StreamEvent("done")
 
     @staticmethod
-    def _empty_response_reason(tools: "ToolCallCollector") -> str:
+    def _run_tools_and_extend(
+        messages: list[dict[str, Any]],
+        tools: ToolCallCollector,
+        tool_executor: Callable[[str, dict[str, Any]], str],
+    ) -> None:
+        """Run one round of client calls and append them to the message list.
+
+        The assistant's tool-calls message goes back with the very calls the
+        provider returned, and each result follows as a ``tool`` message, so
+        the next request resumes the turn where it left off.
+        """
+        assembled = [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": call["arguments"] or "{}",
+                },
+            }
+            for call in tools.calls
+            if call["name"]
+        ]
+        if not assembled:
+            return
+        messages.append({"role": "assistant", "content": "", "tool_calls": assembled})
+        for call in assembled:
+            try:
+                arguments = json.loads(call["function"]["arguments"] or "{}")
+            except (TypeError, ValueError):
+                arguments = {}
+            result = tool_executor(call["function"]["name"], arguments)
+            messages.append({"role": "tool", "tool_call_id": call["id"], "content": str(result)})
+
+    @staticmethod
+    def _empty_response_reason(
+        tools: "ToolCallCollector",
+        executor: Callable[[str, dict[str, Any]], str] | None = None,
+    ) -> str:
         """Why a request that returned no answer returned no answer.
 
         A model that ends its turn asking for a tool this application does not
@@ -394,6 +477,8 @@ class ProtocolMixin(BaseProvider):
         model can answer on its own.
         """
         pending = tools.client_side_names()
+        if executor is not None and pending:
+            pending = set()
         if pending:
             return (
                 "The model ended its turn asking to run "

@@ -349,6 +349,9 @@ class GenerationSettings:
     # Answer length, "" for the model's default. Only the ChatGPT plan sends it.
     verbosity: str = ""
     tools_disabled: bool = False
+    # Optional local tool executor, set by the caller (computer use). When it
+    # is set, client-side tool calls run locally and the turn resumes.
+    tool_executor: Any = None
 
 
 @dataclass(slots=True)
