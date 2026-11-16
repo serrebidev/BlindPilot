@@ -27,4 +27,17 @@ Pull requests and issues opened by serrebidev, the maintainer, are not listed ab
 
 Claude and Claude Code are Anthropic's. Codex is OpenAI's. Hermes Agent is Nous Research's. FreeBuff and opencode belong to their own projects. The names identify the command-line tools BlindPilot drives; no endorsement is implied.
 
+## Third-party libraries
+
+Runtime libraries, from `requirements.txt`:
+
+- wxPython (the window toolkit; the Ubuntu 24.04 wheel is named in the file).
+- httpx and certifi (HTTP and the trust store a packaged build verifies against).
+- markdown-it-py (Markdown rendering).
+- websocket-client (only for a Hermes gateway on another machine).
+- accessible-output2, pywinauto, and pyte (Windows output, computer use, and terminal parsing).
+- keyring and pyobjc-framework-Cocoa (platform key storage and macOS bindings).
+
+These belong to their own projects; BlindPilot only depends on them.
+
 BlindPilot is distributed under the MIT License (see [LICENSE](LICENSE)). The upstream snapshot did not contain a LICENSE file when it was forked, so this notice does not claim the upstream project was MIT-licensed.
