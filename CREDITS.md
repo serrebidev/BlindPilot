@@ -41,3 +41,12 @@ Runtime libraries, from `requirements.txt`:
 These belong to their own projects; BlindPilot only depends on them.
 
 BlindPilot is distributed under the MIT License (see [LICENSE](LICENSE)). The upstream snapshot did not contain a LICENSE file when it was forked, so this notice does not claim the upstream project was MIT-licensed.
+
+
+## About this project
+
+- GitHub profile: [serrebidev](https://github.com/serrebidev)
+- Repository (GitHub): [https://github.com/serrebidev/BlindPilo](https://github.com/serrebidev/BlindPilo)
+- Repository (Forgejo): [https://git.serrebiradio.com/serrebi/BlindPilo](https://git.serrebiradio.com/serrebi/BlindPilo)
+- Projects site: [projects.serrebiradio.com](https://projects.serrebiradio.com)
+- Questions and bug reports: [SerrebiProjects Telegram group](https://t.me/SerrebiProjects)
