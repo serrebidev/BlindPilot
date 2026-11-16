@@ -7,6 +7,8 @@ A screen-reader-first desktop app for AI coding agents. It runs Claude Code, Cod
 
 **Questions, bugs, or release news?** Join the [SerrebiProjects Telegram group](https://t.me/SerrebiProjects). That's the fastest way to reach me. Bug reports and feature requests can also go in [Issues](https://github.com/serrebidev/BlindPilot/issues).
 
+More serrebi projects: [projects.serrebiradio.com](https://projects.serrebiradio.com)
+
 ## Why this exists
 
 Coding agents live in terminals, and terminals are miserable with a screen reader. Output scrolls past, the screen redraws under you, and you can't tell if the thing is working, stuck, or waiting on you. BlindPilot puts the agent in a window your screen reader understands. Every answer is a list you can arrow through, and it tells you when something happens.
@@ -398,3 +400,7 @@ Notes per backend:
 MIT. See [LICENSE](LICENSE). Use it, change it, share it, or package it, no permission needed. Every source file carries an `SPDX-License-Identifier: MIT` header.
 
 Copyright (c) 2026 doubletaponair and BlindPilot contributors. BlindPilot was written with AI coding help. Claude Code Reader is credited here, in the About dialog, in the source headers, in [CREDITS.md](CREDITS.md), and in the original specification kept at [`original-claude-code-reader-spec.html`](original-claude-code-reader-spec.html).
+
+## Credits
+
+See [CREDITS.md](CREDITS.md) for where the ideas behind this project came from, and the third-party projects it builds on.
