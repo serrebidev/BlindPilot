@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.59.0"
+APP_VERSION = "0.59.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -16917,7 +16917,7 @@ class MainFrame(wx.Frame):
         """Give the progress bar the real transcript count once it is known."""
         if not self or serial != getattr(self, "_find_all_serial", None):
             return
-        if progress is getattr(self, "_find_all_progress", None):
+        if progress is getattr(self, "_find_all_progress", None) and progress is not None:
             progress.SetRange(total)
 
     def _find_all_progress_update(
@@ -16932,7 +16932,7 @@ class MainFrame(wx.Frame):
         if not self or serial != getattr(self, "_find_all_serial", None):
             cancel.set()
             return
-        if progress is not getattr(self, "_find_all_progress", None):
+        if progress is not getattr(self, "_find_all_progress", None) or progress is None:
             cancel.set()
             return
         if not progress.Update(done, f"Searching {title}")[0]:

@@ -1,11 +1,9 @@
-# BlindPilot 0.59.0
+# BlindPilot 0.59.1
 
-This release finishes the last two agent controls from the comparison with The Chat Place, both for Claude Code sessions.
+This release is about credit where it is due.
 
-Stop Background Task, in Conversation, Find and Browse, lists what Claude is running in the background: agents it started and shell commands it left running, each by what it is doing. Choose one and only that one stops. The turn and every other task keep going. Before, Stop ended the turn and all of its agents together, and a background command could only be stopped by stopping everything.
+Help, About now names the author and gives the GitHub and Forgejo pages, the projects site at projects.serrebiradio.com and the Telegram channel at t.me/SerrebiProjects, then points to CREDITS.md for the full list. It still lists every backend BlindPilot can drive, and a new test keeps that list honest whenever a backend is added.
 
-Put Files Back Before Here, in Conversation, Find and Browse, Conversation Copies, undoes Claude's file edits. Select one of your messages or its answer, confirm, and every file Claude changed with its edit tools since that message goes back to how it was. Changes made by shell commands are not undone, and the conversation itself stays as it is, so you can carry on or branch from there. BlindPilot now asks Claude Code to keep file checkpoints for every session it runs, so this works for turns from this version on; for older turns it says no checkpoints were kept.
+CREDITS.md is new. It credits Claude Code Reader by doubletaponair, the project BlindPilot grew from, the AccessibleAI code Chat mode is adapted from, the upstream code an audit of the source turned up, and everyone who opened an issue or pull request. The README follows the same layout as the other serrebi projects.
 
-Smaller fixes: Chat mode says that AccessibleAI data was imported once, instead of on every new chat tab. Importing a sound pack works when the temporary folder is on a different drive, which is common on Linux. Computer Use no longer leaves an app it launched running when that app never opens a window.
-
-Windows ships an installer and portable archive; macOS ships an Apple Silicon archive. Linux remains source-only.
+One test change: the Freebuff turn-deadline test now leaves its fake turn enough room past the composer settle, so it no longer fails on a busy machine.

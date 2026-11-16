@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.59.1 - 2026-11-16
+
+Help, About names the author and links GitHub, Forgejo, the projects site and the Telegram channel, and points to the new CREDITS.md, which credits Claude Code Reader, AccessibleAI, the upstream code BlindPilot uses and its contributors. The README follows the shared layout, and the Freebuff turn-deadline test no longer fails on a busy machine.
+
 ## v0.59.0 - 2026-11-14
 
 Finishes the reference-app comparison's agent controls for Claude Code. Conversation, Find and Browse, Stop Background Task lists the agents and background commands Claude is running and stops only the chosen one through the CLI's stop_task control, leaving the turn and the other tasks running. Conversation Copies, Put Files Back Before Here returns the files Claude changed with its edit tools since the selected message, after a confirmation, using Claude Code's file checkpoints, which BlindPilot now turns on for every Claude process it starts; shell-command changes are not undone and the conversation is unchanged. Both were checked live against Claude Code 2.1.325. Also: the AccessibleAI import message is said once rather than on every new chat tab, sound pack import works when the temp folder is on another filesystem, and Computer Use no longer leaves an app it launched running when no window appears.
