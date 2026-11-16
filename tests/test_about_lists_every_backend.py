@@ -43,3 +43,16 @@ def test_about_keeps_the_rest_of_what_it_says() -> None:
     text = about_description()
     assert "Claude Code Reader" in text
     assert "Licensed under the MIT License" in text
+
+
+def test_about_names_the_author_and_every_project_link() -> None:
+    text = about_description()
+    for expected in (
+        "Author: serrebidev",
+        "https://github.com/serrebidev/BlindPilot",
+        "https://git.serrebiradio.com/serrebi/BlindPilot",
+        "https://projects.serrebiradio.com",
+        "https://t.me/SerrebiProjects",
+        "Full credits: CREDITS.md",
+    ):
+        assert expected in text, expected

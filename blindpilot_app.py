@@ -529,7 +529,11 @@ def about_description() -> str:
         f"An accessible desktop frontend for {listed}.\n\n"
         f"{ORIGINAL_APP_CREDIT}\n"
         "BlindPilot preserves and extends its accessibility-first work.\n\n"
-        "Licensed under the MIT License. See LICENSE and CREDITS.md."
+        "Licensed under the MIT License. See LICENSE and CREDITS.md.\n\n"
+        "Author: serrebidev. GitHub: https://github.com/serrebidev/BlindPilot. "
+        "Forgejo: https://git.serrebiradio.com/serrebi/BlindPilot. "
+        "Projects: https://projects.serrebiradio.com. "
+        "Telegram: https://t.me/SerrebiProjects. Full credits: CREDITS.md."
     )
 
 
