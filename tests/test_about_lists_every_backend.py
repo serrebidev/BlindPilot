@@ -15,7 +15,7 @@ tests hold it to that.
 from __future__ import annotations
 
 from agent_backends import BACKEND_IDS, BACKEND_LABELS
-from blindpilot_app import about_description
+from blindpilot_app import about_description, about_links
 
 OPENING = "An accessible desktop frontend for "
 
@@ -46,13 +46,13 @@ def test_about_keeps_the_rest_of_what_it_says() -> None:
 
 
 def test_about_names_the_author_and_every_project_link() -> None:
-    text = about_description()
-    for expected in (
-        "Author: serrebidev",
+    """The links are tab stops in the dialog, not text inside the description."""
+    assert "Author: serrebidev" in about_description()
+    urls = [url for _label, url in about_links()]
+    assert urls == [
         "https://github.com/serrebidev/BlindPilot",
         "https://git.serrebiradio.com/serrebi/BlindPilot",
         "https://projects.serrebiradio.com",
         "https://t.me/SerrebiProjects",
-        "Full credits: CREDITS.md",
-    ):
-        assert expected in text, expected
+        "https://git.serrebiradio.com/serrebi/BlindPilot/src/branch/main/CREDITS.md",
+    ]

@@ -530,11 +530,15 @@ def about_description() -> str:
         f"{ORIGINAL_APP_CREDIT}\n"
         "BlindPilot preserves and extends its accessibility-first work.\n\n"
         "Licensed under the MIT License. See LICENSE and CREDITS.md.\n\n"
-        "Author: serrebidev. GitHub: https://github.com/serrebidev/BlindPilot. "
-        "Forgejo: https://git.serrebiradio.com/serrebi/BlindPilot. "
-        "Projects: https://projects.serrebiradio.com. "
-        "Telegram: https://t.me/SerrebiProjects. Full credits: CREDITS.md."
+        "Author: serrebidev."
     )
+
+
+def about_links() -> list[tuple[str, str]]:
+    """The About dialog's links, each its own tab stop."""
+    from about_dialog import serrebi_links
+
+    return serrebi_links("serrebidev/BlindPilot", "serrebi/BlindPilot")
 
 
 # ---------------------------------------------------------------------------
@@ -14686,29 +14690,18 @@ class MainFrame(wx.Frame):
             dlg.Destroy()
 
     def _show_about(self) -> None:
-        description = about_description()
-        # The native About panel on macOS carries the app icon and the name
-        # from the bundle, which is what a Mac user expects. Where the native
-        # panel is unavailable it falls back to a plain message box.
-        try:
-            import wx.adv
+        from about_dialog import show_about
 
-            info = wx.adv.AboutDialogInfo()
-            info.SetName(APP_NAME)
-            info.SetVersion(APP_VERSION)
-            info.SetDescription(description)
-            info.SetCopyright("Copyright (c) 2026 doubletaponair and BlindPilot contributors")
-            # No icon on purpose. Giving AboutDialogInfo one makes wx use its
-            # own generic dialog instead of the native message box, and a
-            # message box reads its whole text aloud the moment it opens.
-            wx.adv.AboutBox(info, self)
-        except Exception:
-            wx.MessageBox(
-                f"{APP_NAME} {APP_VERSION}\n\n{description}",
-                f"About {APP_NAME}",
-                wx.OK | wx.ICON_INFORMATION,
-                self,
-            )
+        # A real dialog, not AboutBox or a message box, so each link
+        # (GitHub, Forgejo, projects site, Telegram, credits) is a tab stop
+        # that Enter opens.
+        show_about(
+            self,
+            f"About {APP_NAME}",
+            f"{APP_NAME} {APP_VERSION}",
+            f"{about_description()}\n\nCopyright (c) 2026 doubletaponair and BlindPilot contributors",
+            about_links(),
+        )
 
     def check_for_updates_silently(self) -> None:
         """Startup entry point: report only an available update, never network noise.
