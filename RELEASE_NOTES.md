@@ -1,5 +1,7 @@
-# BlindPilot 0.59.2
+# BlindPilot 0.59.3
 
-This release makes the About dialog's links reachable from the keyboard.
+This release stops a console window from stealing focus when you send a Hermes prompt.
 
-In 0.59.1, Help, About listed the GitHub and Forgejo pages, the projects site, the Telegram channel and the full credits as text inside the description, so a screen reader read them out but no key could reach or open any of them. About is now its own dialog: the description comes first, then each of those five links as a separate control. Tab moves to a link, Enter or Space opens it in your browser, and Tab and the arrow keys never open anything by accident. OK or Escape closes the dialog.
+Before each Hermes prompt, BlindPilot checks whether a Hermes gateway is already running. That check started Hermes' Python without hiding its console, so Windows opened a console window for a moment, moved focus to it and NVDA read out its title and "terminal" before focus came back. The check now runs hidden. Nothing about the reply changes.
+
+An audit of every place BlindPilot starts a process found no other Windows launch that opens a console. The only ones that do are the ones meant to: the interactive sign-in terminal and an app you ask BlindPilot to open. A new test fails if any process is started without hiding its console.

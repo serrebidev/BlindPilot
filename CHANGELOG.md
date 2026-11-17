@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.59.3 - 2026-11-17
+
+A console window no longer flashes up and takes focus when you send a Hermes prompt, so NVDA stops announcing the Hermes python.exe window mid-turn. A new test fails if any code starts a process without hiding its console.
+
 ## v0.59.2 - 2026-11-16
 
 Help, About is its own dialog: GitHub, Forgejo, the projects site, Telegram and the full credits are each a control Tab reaches and Enter or Space opens, instead of text inside the description.
