@@ -2233,6 +2233,22 @@ def test_no_running_gateway_falls_back_to_spawning_its_own(tmp_path, monkeypatch
     assert isinstance(hermes_backend.local_transport("."), hermes_backend.StdioTransport)
 
 
+def test_the_attach_probe_opens_no_console_window(tmp_path, monkeypatch):
+    """A console flashing up on every prompt steals focus from a screen reader."""
+    _bootstrap_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(hermes_backend.platform, "system", lambda: "Windows")
+    seen = {}
+
+    def _run(*_args, **kwargs):
+        seen.update(kwargs)
+        return _completed(json.dumps({"error": "gateway absent: not ready"}))
+
+    monkeypatch.setattr(hermes_backend.subprocess, "run", _run)
+    hermes_backend.running_gateway_target()
+
+    assert seen["creationflags"] & 0x08000000
+
+
 def test_an_old_hermes_without_the_bootstrap_script_is_not_probed(tmp_path, monkeypatch):
     monkeypatch.setattr(hermes_backend, "hermes_python", lambda: "hermes-python")
     monkeypatch.setattr(hermes_backend, "hermes_source_root", lambda: tmp_path)

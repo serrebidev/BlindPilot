@@ -1055,6 +1055,7 @@ def running_gateway_target() -> Optional[tuple[str, list[str]]]:
             timeout=GATEWAY_ATTACH_TIMEOUT,
             env=env,
             **_text_output_kwargs(),
+            **_no_window_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
