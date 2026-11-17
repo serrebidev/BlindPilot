@@ -232,6 +232,10 @@ def test_cancel_during_auto_probe_prevents_command_code_launch(monkeypatch, work
     real_popen = subprocess.Popen
 
     def launch(*args, **kwargs):
+        if args[0][0] == "afplay":
+            # A sound cue left running by an earlier test shares this Popen
+            # on macOS; it is not a Command Code launch either.
+            return real_popen(*args, **kwargs)
         if args[0][1] == "--list-models":
             return probe
         if args[0][1] == "-l":
