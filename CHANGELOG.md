@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.59.2 - 2026-11-16
+
+Help, About is its own dialog: GitHub, Forgejo, the projects site, Telegram and the full credits are each a control Tab reaches and Enter or Space opens, instead of text inside the description.
+
 ## v0.59.1 - 2026-11-16
 
 Help, About names the author and links GitHub, Forgejo, the projects site and the Telegram channel, and points to the new CREDITS.md, which credits Claude Code Reader, AccessibleAI, the upstream code BlindPilot uses and its contributors. The README follows the shared layout, and the Freebuff turn-deadline test no longer fails on a busy machine.

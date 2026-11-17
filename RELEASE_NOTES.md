@@ -1,9 +1,5 @@
-# BlindPilot 0.59.1
+# BlindPilot 0.59.2
 
-This release is about credit where it is due.
+This release makes the About dialog's links reachable from the keyboard.
 
-Help, About now names the author and gives the GitHub and Forgejo pages, the projects site at projects.serrebiradio.com and the Telegram channel at t.me/SerrebiProjects, then points to CREDITS.md for the full list. It still lists every backend BlindPilot can drive, and a new test keeps that list honest whenever a backend is added.
-
-CREDITS.md is new. It credits Claude Code Reader by doubletaponair, the project BlindPilot grew from, the AccessibleAI code Chat mode is adapted from, the upstream code an audit of the source turned up, and everyone who opened an issue or pull request. The README follows the same layout as the other serrebi projects.
-
-One test change: the Freebuff turn-deadline test now leaves its fake turn enough room past the composer settle, so it no longer fails on a busy machine.
+In 0.59.1, Help, About listed the GitHub and Forgejo pages, the projects site, the Telegram channel and the full credits as text inside the description, so a screen reader read them out but no key could reach or open any of them. About is now its own dialog: the description comes first, then each of those five links as a separate control. Tab moves to a link, Enter or Space opens it in your browser, and Tab and the arrow keys never open anything by accident. OK or Escape closes the dialog.
