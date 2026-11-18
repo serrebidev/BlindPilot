@@ -211,6 +211,7 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
         ask_written_questions = False
         notify_in_background = False
         read_back_sent = False
+        send_with_ctrl_enter = True
         appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30
@@ -229,6 +230,7 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
     assert app.SETTINGS.ask_written_questions is False
     assert app.SETTINGS.notify_in_background is False
     assert app.SETTINGS.read_back_sent is False
+    assert app.SETTINGS.send_with_ctrl_enter is True
     assert app.SETTINGS.progress_cue == app.CUE_OFF
     assert app.SETTINGS.progress_cue_seconds == 30
     assert app.SETTINGS.model_refresh_minutes == 0
@@ -327,6 +329,7 @@ def test_changing_the_appearance_says_it_takes_effect_next_launch(wx_app, monkey
         ask_written_questions = app.SETTINGS.ask_written_questions
         notify_in_background = app.SETTINGS.notify_in_background
         read_back_sent = app.SETTINGS.read_back_sent
+        send_with_ctrl_enter = app.SETTINGS.send_with_ctrl_enter
         sounds_enabled = app.SETTINGS.sounds_enabled
         sound_cues = dict(app.SETTINGS.sound_cues)
         text_view = app.SETTINGS.text_view

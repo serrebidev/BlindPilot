@@ -162,6 +162,43 @@ def test_enter_still_sends_and_shift_enter_still_inserts_a_newline():
     assert event.skipped
 
 
+# ----- Send with Ctrl+Enter (issue: Enter sends by accident) -----
+
+
+@pytest.fixture
+def ctrl_enter_mode(monkeypatch):
+    monkeypatch.setattr(app.SETTINGS, "send_with_ctrl_enter", True)
+    yield
+    monkeypatch.setattr(app.SETTINGS, "send_with_ctrl_enter", False)
+
+
+def test_enter_does_not_send_when_ctrl_enter_mode_is_on(ctrl_enter_mode):
+    panel = _PanelStub()
+
+    event = _press(panel, wx.WXK_RETURN)
+
+    assert not panel.sent, "Enter sent the message despite Ctrl+Enter mode"
+    assert event.skipped, "Enter was swallowed instead of inserting a new line"
+
+
+def test_ctrl_enter_sends_when_ctrl_enter_mode_is_on(ctrl_enter_mode):
+    panel = _PanelStub()
+
+    event = _press(panel, wx.WXK_RETURN, cmd=True)
+
+    assert panel.sent
+    assert not event.skipped
+
+
+def test_shift_enter_still_inserts_a_newline_when_ctrl_enter_mode_is_on(ctrl_enter_mode):
+    panel = _PanelStub()
+
+    event = _press(panel, wx.WXK_RETURN, shift=True)
+
+    assert not panel.sent
+    assert event.skipped
+
+
 # ----- 2. The Hermes list in the File menu -----
 
 

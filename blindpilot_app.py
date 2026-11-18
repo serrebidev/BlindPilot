@@ -2885,6 +2885,11 @@ class _Settings:
         # Read your message back as it goes, so you hear what was actually
         # sent: dictation and paste put text in the prompt nobody heard.
         self.read_back_sent = bool(cfg.get("read_back_sent", True))
+        # Send only with Ctrl+Enter: plain Enter inserts a new line instead
+        # of sending, so a stray Enter cannot send an unfinished message.
+        # Off by default, so Enter keeps sending for everyone else. Asked
+        # for by a screen reader user who kept sending half-typed prompts.
+        self.send_with_ctrl_enter = bool(cfg.get("send_with_ctrl_enter", False))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Minutes between background re-reads of a tab's model catalog; 0 turns
@@ -2910,6 +2915,7 @@ class _Settings:
         cfg["ask_written_questions"] = self.ask_written_questions
         cfg["notify_in_background"] = self.notify_in_background
         cfg["read_back_sent"] = self.read_back_sent
+        cfg["send_with_ctrl_enter"] = self.send_with_ctrl_enter
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["model_refresh_minutes"] = self.model_refresh_minutes
@@ -6964,7 +6970,10 @@ class SessionPanel(wx.Panel):
         )
         self.prompt.SetName("Prompt")
         self.prompt.SetHint(
-            "Type your prompt. Enter to send, Shift+Enter for newline, Ctrl+Up to enter "
+            "Type your prompt. Ctrl+Enter to send, Enter for newline, Ctrl+Up to enter "
+            "responses; Tab returns here from responses."
+            if SETTINGS.send_with_ctrl_enter
+            else "Type your prompt. Enter to send, Shift+Enter for newline, Ctrl+Up to enter "
             "responses; Tab returns here from responses."
         )
         self.prompt.Bind(wx.EVT_KEY_DOWN, self._on_prompt_key)
@@ -8535,6 +8544,16 @@ class SessionPanel(wx.Panel):
             if event.ShiftDown() and event.CmdDown():
                 self._save_prompt_and_send()
                 return
+            if SETTINGS.send_with_ctrl_enter:
+                # Enter must not send: Ctrl+Enter sends, plain Enter and
+                # Shift+Enter insert a new line, and Tab to the Send button
+                # still works. A stray Enter can no longer send a half-typed
+                # message by accident.
+                if event.CmdDown() or event.ControlDown():
+                    self._on_send()
+                    return
+                event.Skip()  # insert newline
+                return
             if event.ShiftDown():
                 event.Skip()  # default: insert newline
                 return
@@ -8561,6 +8580,16 @@ class SessionPanel(wx.Panel):
             if self._try_paste_attachment():
                 return
         event.Skip()
+
+    def refresh_prompt_hint(self) -> None:
+        """Restate how Enter behaves in the prompt after Preferences change it."""
+        self.prompt.SetHint(
+            "Type your prompt. Ctrl+Enter to send, Enter for newline, Ctrl+Up to enter "
+            "responses; Tab returns here from responses."
+            if SETTINGS.send_with_ctrl_enter
+            else "Type your prompt. Enter to send, Shift+Enter for newline, Ctrl+Up to enter "
+            "responses; Tab returns here from responses."
+        )
 
     def _on_send_key(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
@@ -13296,6 +13325,10 @@ class PreferencesDialog(wx.Dialog):
         self._notify.SetValue(SETTINGS.notify_in_background)
         self._read_back = wx.CheckBox(panel, label="Read my message back when it is sent")
         self._read_back.SetValue(SETTINGS.read_back_sent)
+        self._ctrl_enter = wx.CheckBox(
+            panel, label="Send with Ctrl+Enter (Enter inserts a new line instead of sending)"
+        )
+        self._ctrl_enter.SetValue(SETTINGS.send_with_ctrl_enter)
         for check in (
             self._live_rows,
             self._speak_live,
@@ -13304,6 +13337,7 @@ class PreferencesDialog(wx.Dialog):
             self._written_questions,
             self._notify,
             self._read_back,
+            self._ctrl_enter,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -13479,6 +13513,10 @@ class PreferencesDialog(wx.Dialog):
     @property
     def read_back_sent(self) -> bool:
         return self._read_back.GetValue()
+
+    @property
+    def send_with_ctrl_enter(self) -> bool:
+        return self._ctrl_enter.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -14631,6 +14669,7 @@ class MainFrame(wx.Frame):
         SETTINGS.ask_written_questions = dialog.ask_written_questions
         SETTINGS.notify_in_background = dialog.notify_in_background
         SETTINGS.read_back_sent = dialog.read_back_sent
+        SETTINGS.send_with_ctrl_enter = dialog.send_with_ctrl_enter
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         SETTINGS.model_refresh_minutes = dialog.model_refresh_minutes
@@ -14662,6 +14701,8 @@ class MainFrame(wx.Frame):
         if changed_text_view:
             for page in self._session_panels():
                 page.apply_view_mode()
+        for page in self._session_panels():
+            page.refresh_prompt_hint()
         # The catalog timer follows the new interval at once, so a change from
         # 15 minutes to 0, or the other way, is not left until the next start.
         self._sync_model_timer()
@@ -17745,6 +17786,7 @@ Ctrl+Comma: Preferences. F1: this list.
 
 Prompt
 Enter: send. Shift+Enter: new line. Ctrl+Shift+Enter: save as a prompt, then send.
+With "Send with Ctrl+Enter" on in Preferences, Enter inserts a new line instead and only Ctrl+Enter (or the Send button) sends.
 Ctrl+Shift+P: saved prompts. In its list, Enter inserts one and Delete removes it.
 Ctrl+/: slash commands. Ctrl+Shift+A: attach files. Ctrl+V: paste a picture as an attachment.
 Ctrl+Period: stop the running task.
