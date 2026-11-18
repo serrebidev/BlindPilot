@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.59.4 - 2026-11-18
+
+Preferences gains "Send with Ctrl+Enter (Enter inserts a new line instead of sending)", off by default. With it on, a stray Enter can no longer send a half-typed prompt: Enter and Shift+Enter insert a new line, and only Ctrl+Enter or the Send button sends; Ctrl+Shift+Enter still saves as a prompt and sends. The prompt hint and the keyboard shortcuts list follow the setting. Requested by István Tábor, a screen reader user who kept sending unfinished messages by accident.
+
 ## v0.59.3 - 2026-11-17
 
 A console window no longer flashes up and takes focus when you send a Hermes prompt, so NVDA stops announcing the Hermes python.exe window mid-turn. A new test fails if any code starts a process without hiding its console.

@@ -1,3 +1,11 @@
+# BlindPilot 0.59.4
+
+This release adds a setting that stops Enter from sending your message by accident.
+
+In Preferences, turn on "Send with Ctrl+Enter (Enter inserts a new line instead of sending)". With it on, pressing Enter in the prompt just starts a new line, like Shift+Enter does today. Your message goes only when you press Ctrl+Enter, or when you Tab to the Send button and press Enter there. Ctrl+Shift+Enter still saves the message as a prompt and sends it. The setting is off by default, so nothing changes unless you turn it on.
+
+Thank you to István Tábor for asking for this: typing quickly with a screen reader, it is easy to hit Enter before a message is finished, and until now that sent it.
+
 # BlindPilot 0.59.3
 
 This release stops a console window from stealing focus when you send a Hermes prompt.
