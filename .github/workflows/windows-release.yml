@@ -1,0 +1,131 @@
+name: Windows release
+
+# The macOS release attaches through macos-release.yml; this is its Windows
+# twin. release.yml's build job only runs on github.com, so on Forgejo the
+# Windows build used to be a manual build on the release host over SSH. This
+# workflow builds it on the Forgejo Windows runner instead and attaches the
+# files to the existing Forgejo release. The build runs with a read-only
+# token; only the small attach job at the end, which installs nothing, can
+# write to the release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build Windows for and attach to
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.release_tag }}
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip -r requirements-build.txt
+
+      - name: Run regression tests
+        # Forgejo exports GITHUB_TOKEN to jobs; Copilot would count it as a sign-in.
+        shell: pwsh
+        run: |
+          Remove-Item Env:GITHUB_TOKEN, Env:GITEA_TOKEN, Env:FORGEJO_TOKEN, Env:GH_TOKEN -ErrorAction SilentlyContinue
+          python -m pytest -q -W error
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run static checks
+        shell: pwsh
+        run: |
+          python -m ruff check .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m ruff format --check .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Generate application icons
+        run: python tools/make_icon.py
+
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          # Same build as release.yml's Windows leg. Inno Setup is already
+          # installed on this host, so there is no choco install step; the
+          # compiler is located from the candidate paths below.
+          python -m PyInstaller --noconfirm --clean BlindPilot.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed: $LASTEXITCODE" }
+          $startupSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-smoke" -PassThru -Wait
+          if ($startupSmoke.ExitCode -ne 0) { throw "Packaged startup smoke test failed: $($startupSmoke.ExitCode)" }
+          $guiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-gui-smoke" -PassThru -Wait
+          if ($guiSmoke.ExitCode -ne 0) { throw "Packaged GUI startup smoke test failed: $($guiSmoke.ExitCode)" }
+          $chatGuiSmoke = Start-Process -FilePath .\dist\BlindPilot\BlindPilot.exe -ArgumentList "--startup-chat-gui-smoke" -PassThru -Wait
+          if ($chatGuiSmoke.ExitCode -ne 0) { throw "Packaged Chat GUI startup smoke test failed: $($chatGuiSmoke.ExitCode)" }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Compress-Archive -Path dist\BlindPilot -DestinationPath "artifacts\BlindPilot-Windows-x64.zip" -CompressionLevel Optimal
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "artifacts\BlindPilot-Windows-x64.zip").Hash.ToLowerInvariant()
+          Set-Content -Encoding ascii -NoNewline -LiteralPath "artifacts\BlindPilot-Windows-x64.zip.sha256" -Value "$hash  BlindPilot-Windows-x64.zip"
+          $appVersion = (Select-String -LiteralPath blindpilot_app.py -Pattern '^APP_VERSION = "([^"]+)"$').Matches[0].Groups[1].Value
+          $sourceDir = (Resolve-Path -LiteralPath dist\BlindPilot).Path
+          $outputDir = (Resolve-Path -LiteralPath artifacts).Path
+          $iscc = @(
+            "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe"
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup compiler was not found" }
+          & $iscc "/DMyAppVersion=$appVersion" "/DMySourceDir=$sourceDir" "/DMyOutputDir=$outputDir" installer\BlindPilot.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup exited with code $LASTEXITCODE" }
+          $setupAsset = "BlindPilot-Setup-x64.exe"
+          $setupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "artifacts\$setupAsset").Hash.ToLowerInvariant()
+          Set-Content -Encoding ascii -NoNewline -LiteralPath "artifacts\$setupAsset.sha256" -Value "$setupHash  $setupAsset"
+
+      - name: Upload build output
+        # GitHub's artifact actions v4+ refuse a non-github.com server.
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: windows
+          path: artifacts/*
+          if-no-files-found: error
+
+  attach:
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download build output
+        uses: https://code.forgejo.org/forgejo/download-artifact@v4
+        with:
+          name: windows
+          path: artifacts
+
+      - name: Attach to the Forgejo release
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: |
+          set -euo pipefail
+          (cd artifacts && sha256sum --check *.sha256)
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          h="Authorization: token $FORGEJO_TOKEN"
+          release="$(curl -sf -H "$h" "$api/releases/tags/$TAG")"
+          id="$(echo "$release" | jq -r .id)"
+          for file in artifacts/*; do
+            name="$(basename "$file")"
+            old="$(echo "$release" | jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id')"
+            [ -z "$old" ] || curl -sf -X DELETE -H "$h" "$api/releases/$id/assets/$old"
+            curl -sf -o /dev/null -H "$h" -F "attachment=@$file" "$api/releases/$id/assets?name=$name"
+            echo "Attached $name to $TAG"
+          done
