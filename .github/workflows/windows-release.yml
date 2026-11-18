@@ -91,8 +91,7 @@ jobs:
           Set-Content -Encoding ascii -NoNewline -LiteralPath "artifacts\$setupAsset.sha256" -Value "$setupHash  $setupAsset"
 
       - name: Upload build output
-        # GitHub's artifact actions v4+ refuse a non-github.com server.
-        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        uses: actions/upload-artifact@v4
         with:
           name: windows
           path: artifacts/*
@@ -106,7 +105,7 @@ jobs:
       contents: write
     steps:
       - name: Download build output
-        uses: https://code.forgejo.org/forgejo/download-artifact@v4
+        uses: actions/download-artifact@v4
         with:
           name: windows
           path: artifacts
@@ -118,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           (cd artifacts && sha256sum --check *.sha256)
-          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          api="https://git.serrebiradio.com/api/v1/repos/serrebi/BlindPilot"
           h="Authorization: token $FORGEJO_TOKEN"
           release="$(curl -sf -H "$h" "$api/releases/tags/$TAG")"
           id="$(echo "$release" | jq -r .id)"
