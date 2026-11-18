@@ -167,10 +167,10 @@ def test_no_workflow_hands_every_job_a_write_token():
 def test_the_job_that_publishes_still_has_what_it_needs():
     """Least privilege that removes the privilege the release needs is just a
     broken release."""
-    publishing = [text for text in _workflow_text().values() if "gh release create" in text]
+    publishing = [text for text in _workflow_text().values() if "/releases/$id/assets" in text]
     assert publishing, "nothing publishes a release any more"
     for text in publishing:
-        assert "contents: write" in text, "the publishing workflow cannot write a release"
+        assert "secrets.FORGEJO_TOKEN" in text, "the publishing workflow cannot write a release"
 
 
 def test_every_multi_command_step_fails_on_its_first_failing_command():

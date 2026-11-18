@@ -355,7 +355,7 @@ python -m PyInstaller --noconfirm --clean BlindPilot.spec
 
 `BlindPilot.spec` reads the version from `APP_VERSION` in `blindpilot_app.py` and carries the bundle identifier, minimum macOS version, and icon (`tools/make_icon.py` generates the icon files into `packaging/`). The one-directory layout is what lets the updater replace the app after it exits. The Windows installer is `installer/BlindPilot.iss` (Inno Setup).
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. It runs the tests and the packaged startup checks (`--startup-smoke`, `--startup-gui-smoke`), then publishes the Windows installer, the Windows zip, the universal2 macOS zip, the Linux x64 tarball, and a SHA-256 file for each. The updater verifies that SHA-256 before installing. macOS builds are ad-hoc signed, not notarized.
+Push a `v*` tag, then start `.github/workflows/release.yml` on GitHub runners with `gh workflow run release.yml --repo serrebidev/BlindPilot --ref vX.Y.Z`. It runs the tests and the packaged startup checks (`--startup-smoke`, `--startup-gui-smoke`), then publishes the Windows installer, the Windows zip, the Apple Silicon macOS zip, and a SHA-256 file for each on Forgejo. The updater verifies that SHA-256 before installing. macOS builds are ad-hoc signed, not notarized.
 
 ### How each backend is driven
 

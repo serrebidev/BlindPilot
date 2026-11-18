@@ -1,9 +1,10 @@
 name: Build and release BlindPilot
 
+# Manual only: the Forgejo-to-GitHub sync disables GitHub workflows with
+# automatic triggers.
+# Push the tag, then run:
+#   gh workflow run release.yml --repo serrebidev/BlindPilot --ref vX.Y.Z
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
 
 # Applies to every job below. The build installs requirements-build.txt and
@@ -28,7 +29,7 @@ jobs:
             runner: macos-15
             asset: BlindPilot-macOS-arm64.zip
             kind: macos
-    # Forgejo releases go through the release host and macos-release.yml.
+    # GitHub runners build every release; the job below publishes it on Forgejo.
     if: github.server_url == 'https://github.com'
     runs-on: ${{ matrix.runner }}
     # PyInstaller and Inno Setup make this the slow one; a green build is
@@ -125,14 +126,14 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish GitHub release
+    name: Publish Forgejo release
     if: github.server_url == 'https://github.com' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
-    # Only here, and only this. This job installs nothing: it downloads the
-    # artifacts the build made, checks their sums, and creates the release.
+    # This job installs nothing: it downloads the artifacts the build made,
+    # checks their sums, and publishes them with the Forgejo token.
     permissions:
-      contents: write
+      contents: read
     timeout-minutes: 20
     steps:
       - name: Check out release notes
@@ -151,13 +152,28 @@ jobs:
           cd artifacts
           sha256sum --check *.sha256
 
-      - name: Create GitHub release
+      - name: Create the Forgejo release
         env:
-          GH_TOKEN: ${{ github.token }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         shell: bash
         run: |
-          gh release create "${GITHUB_REF_NAME}" artifacts/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "BlindPilot ${GITHUB_REF_NAME#v}" \
-            --notes-file RELEASE_NOTES.md \
-            --verify-tag
+          set -euo pipefail
+          api="https://git.serrebiradio.com/api/v1/repos/serrebi/BlindPilot"
+          h="Authorization: token $FORGEJO_TOKEN"
+          tag="${GITHUB_REF_NAME}"
+          release="$(curl -sf -H "$h" "$api/releases/tags/$tag" || true)"
+          if [ -z "$release" ]; then
+            body="$(jq -n --arg tag "$tag" --arg name "BlindPilot ${tag#v}" --rawfile notes RELEASE_NOTES.md \
+              '{tag_name: $tag, name: $name, body: $notes, draft: true, prerelease: false}')"
+            release="$(curl -sf -X POST -H "$h" -H 'Content-Type: application/json' -d "$body" "$api/releases")"
+          fi
+          id="$(jq -r .id <<<"$release")"
+          for file in artifacts/*; do
+            name="$(basename "$file")"
+            old="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$release")"
+            [ -z "$old" ] || curl -sf -X DELETE -H "$h" "$api/releases/$id/assets/$old"
+            curl -sf -o /dev/null -H "$h" -F "attachment=@$file" "$api/releases/$id/assets?name=$name"
+          done
+          curl -sf -o /dev/null -X PATCH -H "$h" -H 'Content-Type: application/json' -d '{"draft": false}' "$api/releases/$id"
+          latest="$(curl -sf "$api/releases/latest" | jq -r .tag_name)"
+          [ "$latest" = "$tag" ] || { echo "::error::/releases/latest is $latest"; exit 1; }
