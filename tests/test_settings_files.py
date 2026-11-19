@@ -38,6 +38,8 @@ def home(tmp_path, monkeypatch):
     # would make the real config.yaml answer "present" instead of the files
     # the test itself created. Same class as the CODEX_HOME deletion above.
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    # Without HERMES_HOME, Windows' default is %LOCALAPPDATA%\hermes.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     return tmp_path
 
 

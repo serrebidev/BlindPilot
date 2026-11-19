@@ -27,6 +27,7 @@ SPDX-License-Identifier: MIT
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -91,10 +92,19 @@ def _text_output_kwargs() -> dict:
 
 
 def hermes_home() -> Path:
-    """Where Hermes keeps its configuration, sessions, and installed source."""
+    """Where Hermes keeps its configuration, sessions, and installed source.
+
+    Hermes' own default (``hermes_constants._platform_default_hermes_home``) is
+    ``%LOCALAPPDATA%\\hermes`` on Windows and ``~/.hermes`` elsewhere. Its
+    Windows installer no longer sets HERMES_HOME persistently, so a fresh
+    install leaves nothing in the environment and only the default is right.
+    """
     override = os.environ.get("HERMES_HOME", "").strip()
     if override:
         return Path(override).expanduser()
+    if platform.system() == "Windows":
+        local = os.environ.get("LOCALAPPDATA", "").strip()
+        return (Path(local) if local else Path.home() / "AppData" / "Local") / "hermes"
     return Path.home() / ".hermes"
 
 
@@ -127,17 +137,49 @@ def hermes_source_root() -> Optional[Path]:
     return None
 
 
+def _pm_venv(root: Path) -> Optional[Path]:
+    """The environment Hermes' package manager (PM) committed for *root*.
+
+    Installs made since PM took over keep no venv in the checkout: it lives at
+    ``<home>/installs/<key>/environments/<generation>/venv`` and is recorded in
+    ``<home>/installs/<key>/facts.json``. ``<key>`` is the first 16 hex digits
+    of the SHA-256 of the resolved checkout path (``pm.environments.install_key``
+    upstream). The home that owns the checkout is the one it sits in, so that
+    is asked first.
+    """
+    key = hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()[:16]
+    for home in dict.fromkeys((root.parent, hermes_home())):
+        try:
+            facts = json.loads(
+                (home / "installs" / key / "facts.json").read_text(encoding="utf-8-sig")
+            )
+            venv = Path(facts["packages"]["venv"]["environment"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if (venv / "pyvenv.cfg").is_file():
+            return venv
+    return None
+
+
 def hermes_python() -> Optional[str]:
-    """The interpreter that can import Hermes, i.e. the one in its venv."""
+    """The interpreter that can import Hermes, i.e. the one in its venv.
+
+    PM's committed environment wins over an in-tree ``venv``: an install that
+    predates PM keeps its old in-tree venv after migrating, and that copy goes
+    stale. A fresh install has only PM's, which is why it used to read as "not
+    installed".
+    """
     root = hermes_source_root()
     if root is None:
         return None
     names = ("python.exe", "python") if platform.system() == "Windows" else ("python3", "python")
-    for directory in ("Scripts", "bin"):
-        for name in names:
-            candidate = root / "venv" / directory / name
-            if candidate.is_file():
-                return str(candidate)
+    venvs = [v for v in (_pm_venv(root),) if v] + [root / "venv", root / ".venv"]
+    for venv in venvs:
+        for directory in ("Scripts", "bin"):
+            for name in names:
+                candidate = venv / directory / name
+                if candidate.is_file():
+                    return str(candidate)
     return None
 
 
@@ -1675,6 +1717,13 @@ def _model_rows(payload: dict) -> tuple[list[str], str]:
             models.append(qualified)
             if provider.get("is_current") and not current:
                 current = qualified
+    # The payload names the model in use at its top level. The first model of
+    # the current provider is only a fallback: measured, it is the newest one
+    # listed (claude-fable-5-2) while config.yaml ran claude-sonnet-5-5, so the
+    # picker preselected a model the account may not be able to use.
+    named = f"{payload.get('provider') or ''}{MODEL_ROW_SEPARATOR}{payload.get('model') or ''}"
+    if named in models:
+        current = named
     return models, current
 
 
@@ -1809,6 +1858,50 @@ def hermes_session_catalog(
         return sessions, live, ""
     finally:
         transport.close()
+
+
+def hermes_slash_commands(cwd: Optional[str] = None) -> list[tuple[str, str]]:
+    """Hermes' own command list, from ``complete.slash``; [] when it cannot say.
+
+    A list kept in BlindPilot drifts: measured against the Hermes of
+    2026-11-09 it had five commands Hermes no longer has and lacked 78 it
+    does, /model, /new and /resume among them.
+    """
+    if not hermes_installed():
+        return []
+    transport = local_transport(cwd or str(Path.home()))
+    try:
+        transport.start()  # type: ignore[attr-defined]
+    except OSError:
+        return []
+    try:
+        if _ready_or_fail(transport, MODEL_QUERY_TIMEOUT):
+            return []
+        transport.send(
+            {"jsonrpc": "2.0", "id": 1, "method": "complete.slash", "params": {"text": "/"}}
+        )
+        deadline = time.monotonic() + MODEL_QUERY_TIMEOUT
+        while time.monotonic() < deadline:
+            frame = transport.receive(0.5)
+            if frame is None or frame.get("id") != 1:
+                continue
+            return _slash_rows(frame.get("result"))
+        return []
+    finally:
+        transport.close()
+
+
+def _slash_rows(result: object) -> list[tuple[str, str]]:
+    """``complete.slash`` items as picker rows; paths and other kinds are left out."""
+    items = result.get("items") if isinstance(result, dict) else None
+    commands = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or item.get("kind", "command") != "command":
+            continue
+        name = str(item.get("text") or "").strip().lstrip("/")
+        if name:
+            commands.append((f"/{name}", str(item.get("meta") or f"Run Hermes' /{name}")))
+    return commands
 
 
 def hermes_model_options(

@@ -787,10 +787,21 @@ _HERMES_SKIP_ROLES = ("system", "session_meta", "tool")
 _HERMES_HIDDEN_KIND = "hidden"
 
 
+def _hermes_default_home() -> Path:
+    """Hermes' home with no HERMES_HOME set: the one hermes_backend uses.
+
+    It was ``~/.hermes`` here even on Windows, where Hermes' default is
+    ``%LOCALAPPDATA%\\hermes``, so a fresh Windows install had no history.
+    """
+    from hermes_backend import hermes_home
+
+    return hermes_home()
+
+
 def _hermes_db_path() -> Path:
     """Hermes' session store on this side of the machine, if there is one."""
     override = os.environ.get("HERMES_HOME", "").strip()
-    root = Path(override).expanduser() if override else _home() / ".hermes"
+    root = Path(override).expanduser() if override else _hermes_default_home()
     return root / "state.db"
 
 
@@ -811,15 +822,25 @@ def _hermes_query(sql: str, params: Sequence = ()) -> List[dict]:
     """
     path = _hermes_db_path()
     if path.is_file():
-        connection = _hermes_connect(path)
-        if connection is None:
-            return []
-        try:
-            return [dict(row) for row in connection.execute(sql, tuple(params)).fetchall()]
-        except Exception:  # noqa: BLE001 - an older schema is not a crash
-            return []
-        finally:
-            connection.close()
+        # A gateway that has just exited leaves the WAL mid-reset, and the
+        # next read fails with "disk I/O error" for a moment (measured right
+        # after a catalog query): every Hermes conversation vanished from
+        # Recent Conversations. This only ever runs off the GUI thread.
+        for attempt in range(3):
+            connection = _hermes_connect(path)
+            if connection is None:
+                return []
+            try:
+                return [dict(row) for row in connection.execute(sql, tuple(params)).fetchall()]
+            except sqlite3.OperationalError as exc:
+                if "I/O" not in str(exc) or attempt == 2:
+                    return []
+            except Exception:  # noqa: BLE001 - an older schema is not a crash
+                return []
+            finally:
+                connection.close()
+            time.sleep(0.3 * (attempt + 1))
+        return []
 
     if os.environ.get("HERMES_HOME", "").strip():
         # An explicit home names one store. If it is not there, that is the

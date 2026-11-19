@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.59.5"
+APP_VERSION = "0.59.6"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -1343,6 +1343,18 @@ def _slash_commands_for_backend(backend: str, cwd: Optional[str] = None) -> list
             if name.lower() not in have:
                 have.add(name.lower())
                 commands.append((name, f"{description} [Command Code console]"))
+    elif backend == BACKEND_HERMES:
+        # Hermes' live list replaces the one kept here, which is only the
+        # answer while Hermes cannot be asked (a remote Hermes, or none yet).
+        # ponytail: local Hermes only; ask the remote one too if it matters.
+        import hermes_backend
+
+        live = [] if REMOTE_HERMES.url() else hermes_backend.hermes_slash_commands(cwd)
+        if live:
+            kept = {name for name, _ in _HERMES_SLASH_COMMANDS}
+            commands = [c for c in commands if c[0] not in kept]
+            have = {name.split()[0].lower() for name, _ in commands}
+            commands.extend(c for c in live if c[0].lower() not in have)
     elif backend == BACKEND_MUSE:
         # Whatever this directory's Muse offers: its bundled, user, and
         # project skills, invoked the way the TUI invokes them. A skill the
@@ -3565,6 +3577,14 @@ class ReadView(wx.Dialog):
         event.Skip()
 
 
+def _museai_key(item: dict) -> str:
+    """What identifies a muse.ai item across refreshes; its title can change."""
+    for key in ("approval_id", "suggestion_id", "goal_id", "ideaCardId", "unit_id", "id"):
+        if item.get(key):
+            return f"{key}={item[key]}"
+    return ""
+
+
 class MuseAiDialog(wx.Dialog):
     """Native readers for Muse.ai account data and explicit one-action approvals."""
 
@@ -3682,6 +3702,10 @@ class MuseAiDialog(wx.Dialog):
     def _refresh(self) -> None:
         from museai_backend import museai_items, museai_item_title, museai_goal_suggestions
 
+        # A refresh after Pause or Edit must leave the reader on the same item,
+        # not back at the top of a long list.
+        before = self._selected()
+        keep = _museai_key(before) if before else None
         self.items = []
         self.list.Clear()
 
@@ -3696,12 +3720,10 @@ class MuseAiDialog(wx.Dialog):
             self.items = value if isinstance(value, list) else []
             self.list.Set([museai_item_title(self.view, item) for item in self.items])
             if self.items:
-                self.list.SetSelection(0)
-            message = (
-                f"{len(self.items)} {self.view}. Enter reads one."
-                if self.items
-                else f"No {self.view}."
-            )
+                keys = [_museai_key(item) for item in self.items]
+                self.list.SetSelection(keys.index(keep) if keep in keys else 0)
+            noun = "feed posts" if self.view == "feed" else self.view
+            message = f"{len(self.items)} {noun}. Enter reads one." if self.items else f"No {noun}."
             self.status.SetLabel(message)
             self._selection_changed()
             announce(message)
@@ -3728,6 +3750,7 @@ class MuseAiDialog(wx.Dialog):
         selected = self.list.GetSelection()
         valid = 0 <= selected < len(self.items)
         self.read.Enable(valid)
+        self.refresh_button.Enable(True)
         if self.decide:
             self.decide.Enable(valid and bool(self.items[selected].get("_pending")))
         for button in (self.discuss, self.history, self.manage, self.suggestions):

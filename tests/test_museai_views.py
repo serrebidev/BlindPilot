@@ -245,3 +245,65 @@ def test_unreadable_approval_decision_is_spoken_without_sending(frame, gateway, 
         assert calls == [["raw", "egress.approvals"]]
     finally:
         dialog.Destroy()
+
+
+def test_titles_and_schedule_times_read_as_words(gateway):
+    """Measured on a real account: decisions came back as ids (allow_always,
+    timed_out), the heartbeat schedule had no title, a disabled schedule's
+    title did not say so, and the next run was seconds since 1970."""
+    replies, _calls = gateway
+    replies["egress.approvals"] = {
+        "pending_approvals": [],
+        "recent_approvals": [
+            {"approval_id": "a", "decision": "allow_always", "display": {"summary_title": "Fill"}},
+            {"approval_id": "b", "decision": "timed_out", "display": {"summary_title": "SSH"}},
+        ],
+    }
+    replies["tasks.list"] = {
+        "schedules": [
+            {"id": "heartbeat", "title": None, "is_heartbeat": True, "next_run_at_utc": 1795128579},
+            {"id": "s2", "title": "Watch", "enabled": False},
+        ]
+    }
+    titles = [backend.museai_item_title("approvals", a) for a in backend.museai_items("approvals")]
+    assert titles == ["Allow always: Fill", "Timed out: SSH"]
+    beat, off = backend.museai_items("schedules")
+    assert backend.museai_item_title("schedules", beat) == "Heartbeat"
+    assert backend.museai_item_title("schedules", off) == "Disabled: Watch"
+    text = backend.museai_item_text("schedules", beat)
+    assert "1795128579" not in text and "Next run: " in text and "2026" in text
+
+
+def test_refresh_stays_usable_and_keeps_the_selected_item(frame, gateway):
+    """Refresh was disabled after every load, and a refresh after Pause put
+    the reader back on the first of 82 goals."""
+    replies, _calls = gateway
+    replies["goals.list"] = {
+        "goals": [{"goal_id": f"g{i}", "title": f"Goal {i}", "status": "active"} for i in range(3)]
+    }
+    dialog = app.MuseAiDialog(frame, "goals")
+    _loaded(dialog)
+    try:
+        assert dialog.refresh_button.IsEnabled()
+        dialog.list.SetSelection(2)
+        replies["goals.list"]["goals"][2]["status"] = "paused"
+        dialog._refresh()
+        _loaded(dialog)
+        assert dialog.refresh_button.IsEnabled()
+        assert dialog.list.GetSelection() == 2
+        assert dialog.list.GetString(2) == "paused: Goal 2"
+    finally:
+        dialog.Destroy()
+
+
+def test_the_main_chat_id_is_asked_for_once(monkeypatch):
+    calls = []
+
+    def threads(args):
+        calls.append(args)
+        return [{"session_id": "main", "thread": False}, {"session_id": "side", "thread": True}]
+
+    monkeypatch.setattr(backend, "_cli_json", threads)
+    assert backend.museai_main_session_id() == "main"
+    assert backend.museai_main_session_id() == "main"
+    assert len(calls) == 1

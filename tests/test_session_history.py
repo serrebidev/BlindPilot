@@ -36,6 +36,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Hermes in WSL answers these tests with its own hundreds of conversations.
     """
     monkeypatch.setattr(session_history, "_home", lambda: tmp_path)
+    monkeypatch.setattr(session_history, "_hermes_default_home", lambda: tmp_path / ".hermes")
     import hermes_backend
 
     monkeypatch.setattr(hermes_backend, "wsl_sqlite_query", lambda _sql, _params=(): [])
@@ -1165,3 +1166,38 @@ def test_claude_turns_keep_each_prompts_own_id(home: Path) -> None:
     turns = session_history.load_turns(entry)
     assert [turn.prompt_id for turn in turns] == ["user-0001-aaaa", "user-0002-bbbb"]
     assert [turn.message_id for turn in turns] == ["asst-0001-aaaa", "asst-0002-bbbb"]
+
+
+def test_a_store_mid_reset_is_read_again(home: Path, monkeypatch) -> None:
+    """Measured: right after a Hermes gateway exits, the first read of its
+    store fails with "disk I/O error" and the next one works. Treating that
+    as an empty store emptied Recent Conversations of every Hermes chat."""
+    import sqlite3
+
+    _write_hermes(
+        home,
+        [{"id": "s7", "title": "Still here"}],
+        [
+            {"session_id": "s7", "role": "user", "content": "a"},
+            {"session_id": "s7", "role": "assistant", "content": "b"},
+        ],
+    )
+    real = session_history._hermes_connect
+    failures = [1]
+
+    class Flaky:
+        def __init__(self, connection):
+            self._c = connection
+
+        def execute(self, *args):
+            if failures:
+                failures.pop()
+                raise sqlite3.OperationalError("disk I/O error")
+            return self._c.execute(*args)
+
+        def close(self):
+            self._c.close()
+
+    monkeypatch.setattr(session_history, "_hermes_connect", lambda path: Flaky(real(path)))
+    monkeypatch.setattr(session_history.time, "sleep", lambda _s: None)
+    assert [entry.title for entry in list_history("hermes")] == ["Still here"]

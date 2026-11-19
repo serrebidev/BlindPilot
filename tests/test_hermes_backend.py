@@ -2353,3 +2353,65 @@ def test_the_gateway_refusal_is_translated_for_the_user():
     detail = transport.failure_detail()
     assert "already running" in detail
     assert "gateway-exit" not in detail
+
+
+def test_the_current_model_is_the_one_hermes_names_not_its_providers_first():
+    """Measured: model.options lists the newest model first under the current
+    provider (claude-fable-5-2) while naming claude-sonnet-5-5 at the top
+    level, the one config.yaml runs. The picker preselected the first."""
+    sep = hermes_backend.MODEL_ROW_SEPARATOR
+    _models, current = hermes_backend._model_rows(
+        {
+            "model": "claude-sonnet-5-5",
+            "provider": "anthropic",
+            "providers": [
+                {
+                    "slug": "anthropic",
+                    "models": ["claude-fable-5-2", "claude-sonnet-5-5"],
+                    "is_current": True,
+                },
+            ],
+        }
+    )
+    assert current == f"anthropic{sep}claude-sonnet-5-5"
+
+
+def test_the_slash_picker_uses_hermes_own_command_list(monkeypatch):
+    """The list kept in BlindPilot had drifted from Hermes in both directions."""
+    import blindpilot_app
+
+    monkeypatch.setattr(
+        hermes_backend,
+        "hermes_slash_commands",
+        lambda _cwd=None: [("/model", "Switch model"), ("/new", "Start a new session")],
+    )
+    monkeypatch.setattr(blindpilot_app.REMOTE_HERMES, "url", lambda: "")
+    names = [name for name, _ in blindpilot_app._slash_commands_for_backend("hermes", "C:/")]
+    assert "/model" in names and "/new" in names
+    assert "/toolsets" not in names  # only in the stale list
+    own = [name for name, _ in blindpilot_app._BLINDPILOT_SLASH_COMMANDS]
+    assert names[: len(own)] == own
+
+
+def test_the_kept_list_answers_when_hermes_cannot(monkeypatch):
+    import blindpilot_app
+
+    monkeypatch.setattr(blindpilot_app.REMOTE_HERMES, "url", lambda: "")
+    names = [name for name, _ in blindpilot_app._slash_commands_for_backend("hermes", "C:/")]
+    assert "/yolo" in names
+
+
+def test_hermes_command_list_keeps_only_commands():
+    """complete.slash answers with paths as well as commands (measured shape)."""
+    rows = hermes_backend._slash_rows(
+        {
+            "items": [
+                {"text": "model", "display": "/model", "meta": "Switch model", "kind": "command"},
+                {"text": "src/", "kind": "path"},
+                {"text": "", "kind": "command"},
+                "nonsense",
+            ]
+        }
+    )
+    assert rows == [("/model", "Switch model")]
+    assert hermes_backend._slash_rows(None) == []

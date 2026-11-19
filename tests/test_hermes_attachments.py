@@ -547,14 +547,15 @@ def test_submission_id_is_stable_per_worker_and_unique_per_turn(monkeypatch):
         worker._live_session = "live-1"
         monkeypatch.setattr(worker, "_consume_turn", lambda: None)
 
-        def capture(method, params, *args):
+        def capture(method, params):
             assert method == "prompt.submit"
             assert params["session_id"] == "live-1"
             assert params["text"] == "Hello"
             submissions.append(params["submission_id"])
-            return {}
+            return 1
 
-        monkeypatch.setattr(worker, "_call", capture)
+        monkeypatch.setattr(worker, "_send", capture)
+        monkeypatch.setattr(worker, "_await_response", lambda _id, _t: {"result": {}})
         worker._run_turn()
         worker._run_turn()
 
@@ -562,3 +563,38 @@ def test_submission_id_is_stable_per_worker_and_unique_per_turn(monkeypatch):
     assert submissions[0] == submissions[1]
     assert submissions[2] == submissions[3]
     assert submissions[0] != submissions[2]
+
+
+@pytest.mark.parametrize(
+    "first_error, expect_retry",
+    [
+        # The private stdio gateway (measured on Hermes of 2026-11-09).
+        ({"code": 4000, "message": "submission_id: Extra inputs are not permitted"}, True),
+        # Anything else is a real refusal and is reported as it is.
+        ({"code": 4000, "message": "text: field required"}, False),
+    ],
+)
+def test_a_gateway_that_refuses_the_submission_id_gets_the_prompt_without_it(
+    monkeypatch, first_error, expect_retry
+):
+    """The always-on gateway requires submission_id and the stdio gateway
+    forbids it, so every message failed on whichever one BlindPilot was not
+    written against."""
+    failed, sent = [], []
+    callbacks = _callbacks()
+    callbacks["on_failed"] = failed.append
+    worker = HermesWorker("Hello", None, ".", "default", **callbacks)
+    worker._live_session = "live-1"
+    worker._transport = object()
+    monkeypatch.setattr(worker, "_consume_turn", lambda: None)
+    replies = [{"error": first_error}, {"result": {}}]
+    monkeypatch.setattr(worker, "_send", lambda method, params: sent.append(dict(params)) or 1)
+    monkeypatch.setattr(worker, "_await_response", lambda _id, _t: replies.pop(0))
+    worker._run_turn()
+
+    assert "submission_id" in sent[0]
+    if expect_retry:
+        assert len(sent) == 2 and "submission_id" not in sent[1]
+        assert failed == []
+    else:
+        assert len(sent) == 1 and failed

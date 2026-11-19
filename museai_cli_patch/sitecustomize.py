@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Receive compatibility for muse-cli 0.3.2, loaded only in its child processes."""
+"""What BlindPilot needs from muse-cli, loaded only in its child processes."""
 
 import os
 import sys
@@ -32,8 +32,7 @@ def assemble(groups, frame):
 
 def install():
     try:
-        if version("muse-cli") != "0.3.2":
-            return
+        installed = version("muse-cli")
         from muse_cli import gateway
     except (ImportError, PackageNotFoundError):
         return
@@ -42,8 +41,13 @@ def install():
     gateway.ROUTES.setdefault(
         "tasks.run", {"method": "tasks.run", "http": "POST", "path": "/tasks/{job_id}/run"}
     )
+    if installed == "0.3.2":
+        _reassemble_chunks(gateway)
+    _stream_watch()
 
-    # 0.3.2 decodes partial protobuf messages; remove when upstream reassembles chunks.
+
+def _reassemble_chunks(gateway):
+    # 0.3.2 decodes partial protobuf messages; later releases reassemble them.
     def read_frame(self):
         if not hasattr(self, "_blindpilot_chunks"):
             self._blindpilot_chunks = {}
@@ -62,12 +66,16 @@ def install():
 
     gateway.Gateway._read_frame = read_frame
 
+
+def _stream_watch():
     from muse_cli import cli
 
     plain_watch = cli.cmd_watch
 
     # 0.3.2's watch sends capabilities as {} and no session, so it never sees a
-    # side chat's live status, and prints nothing until it ends. With
+    # side chat's live status, and prints nothing until it ends. Later releases
+    # subscribe properly but print formatted rows, stop after 60 s of quiet,
+    # and have no Activity feed, so every version gets this one. With
     # BLINDPILOT_MUSEAI_WATCH set to a chat id, subscribe the way the web
     # client does and stream each event as one JSON line while the agent works.
     # The web client's Activity panel is a second subscription on the same

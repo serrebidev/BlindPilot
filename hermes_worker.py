@@ -1162,18 +1162,32 @@ class HermesWorker(JsonRpcCalls, threading.Thread):
             if uploaded is None:
                 return
             text = self._prompt_with_attachments(uploaded)
-        accepted = self._call(
-            "prompt.submit",
-            {
-                "session_id": self._live_session,
-                "text": text,
-                "submission_id": self._submission_id,
-            },
-            120.0,
-            "Hermes did not accept the prompt",
-            "Hermes could not start the turn",
-        )
-        if accepted is None:
+        params = {
+            "session_id": self._live_session,
+            "text": text,
+            "submission_id": self._submission_id,
+        }
+        # Hermes' two hosts disagree about submission_id: the always-on
+        # gateway refuses a prompt without one (invalid_params), and the
+        # private stdio gateway refuses one that has it ("submission_id:
+        # Extra inputs are not permitted", measured on the Hermes of
+        # 2026-11-09). A remote address can be either, so the id goes first
+        # and comes off only when Hermes names it as the problem.
+        request_id = self._send("prompt.submit", params)
+        reply = self._await_response(request_id, 120.0) if request_id is not None else None
+        error = (reply or {}).get("error")
+        if isinstance(error, dict) and "submission_id" in str(error):
+            params.pop("submission_id")
+            request_id = self._send("prompt.submit", params)
+            reply = self._await_response(request_id, 120.0) if request_id is not None else None
+        if reply is None:
+            if not self._cancelled and not self._ended and self._transport is not None:
+                self._on_failed(
+                    self._transport.failure_detail() or "Hermes did not accept the prompt"
+                )
+            return
+        if reply.get("error"):
+            self._on_failed(self._error_text(reply["error"], "Hermes could not start the turn"))
             return
         self._accepting_input.set()
         self._on_started()

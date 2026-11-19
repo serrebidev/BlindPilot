@@ -60,6 +60,23 @@ def no_ambient_github_tokens(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_hermes_command_list(monkeypatch):
+    """Opening the slash picker on Hermes asks a real Hermes, which a machine
+    with Hermes installed would start. Tests about that list set their own."""
+    import hermes_backend
+
+    monkeypatch.setattr(hermes_backend, "hermes_slash_commands", lambda _cwd=None: [])
+
+
+@pytest.fixture(autouse=True)
+def museai_main_chat_is_looked_up_again(monkeypatch):
+    """muse.ai's main chat id is remembered per run; each test is a new run."""
+    import museai_backend
+
+    monkeypatch.setattr(museai_backend, "_MAIN_SESSION", None)
+
+
+@pytest.fixture(autouse=True)
 def no_real_native_muse(monkeypatch, tmp_path_factory):
     """The developer's own native Windows Muse must not answer for a test.
 

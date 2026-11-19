@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.59.6 - 2026-11-19
+
+Hermes: a fresh Windows install is found. Its venv is now PM-built under `<home>\installs\<key>` and recorded in `facts.json`, and its default home is `%LOCALAPPDATA%\hermes` (BlindPilot and its history reader both assumed `~\.hermes`). `prompt.submit` falls back to no `submission_id` when the stdio gateway rejects it (the always-on gateway requires it), which fixes every message failing with "Extra inputs are not permitted". Reads of `state.db` retry on the transient "disk I/O error" a gateway leaves on exit, which had emptied Recent Conversations of Hermes chats. The Model dialog preselects the model `model.options` names, not the current provider's first one. The slash picker reads `complete.slash` instead of a stale built-in list.
+
+muse.ai: the main chat id is looked up once per run. The `museai_cli_patch` watch stream and `tasks.run` route now apply to every muse-cli version; chunk reassembly stays 0.3.2 only. In the muse.ai dialogs, Refresh stays enabled, the selection survives a refresh, approval decisions and schedule times read as words, disabled schedules and the heartbeat are named, and Feed counts "feed posts". Token reuse in muse-cli itself is upstream as nikships/muse-cli#20.
+
 ## v0.59.5 - 2026-11-19
 
 "Send with Ctrl+Enter" now works in Chat as well as in Agent mode. Chat's Message field ignored the preference: Enter always made a new line and only Ctrl+Enter sent, so switching the setting on or off seemed to do nothing. It now follows the setting the same way the Agent prompt does. Shift+Enter, and Enter when it makes a new line, now insert a real line break in both places; the rich edit control was putting in an invisible vertical tab character instead, which went out in the message.

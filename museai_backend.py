@@ -106,8 +106,18 @@ def museai_chats() -> list[dict]:
     return [c for c in chats if c.get("session_id") and not c.get("archived")]
 
 
+_MAIN_SESSION: Optional[str] = None
+
+
 def museai_main_session_id() -> Optional[str]:
-    return next((str(c["session_id"]) for c in museai_chats() if c.get("thread") is False), None)
+    """The main chat's id. It never changes for an account, so it is asked
+    for once per run: every later switch to muse.ai skips a round trip."""
+    global _MAIN_SESSION
+    if _MAIN_SESSION is None:
+        _MAIN_SESSION = next(
+            (str(c["session_id"]) for c in museai_chats() if c.get("thread") is False), None
+        )
+    return _MAIN_SESSION
 
 
 MUSEAI_VIEWS = {
@@ -182,12 +192,18 @@ def museai_item_title(view: str, item: dict) -> str:
     if not isinstance(display, dict):
         raise ValueError("muse.ai returned unreadable item details.")
     title = str(
-        display.get("summary_title") or item.get("title") or item.get("display_name") or "Untitled"
+        display.get("summary_title")
+        or item.get("title")
+        or item.get("display_name")
+        or ("Heartbeat" if item.get("is_heartbeat") else "Untitled")
     )
     if view == "approvals":
-        title = (
-            f"{'Pending' if item.get('_pending') else item.get('decision') or 'Recent'}: {title}"
-        )
+        # Decisions arrive as ids (allow_always, timed_out); a screen reader
+        # would spell the underscore out.
+        decision = str(item.get("decision") or "Recent").replace("_", " ").capitalize()
+        title = f"{'Pending' if item.get('_pending') else decision}: {title}"
+    elif view == "schedules" and item.get("enabled") is False:
+        title = f"Disabled: {title}"
     elif view in ("goals", "suggestions") and item.get("status"):
         title = f"{item['status']}: {title}"
     if view == "goals" and item.get("parent_title"):
@@ -229,13 +245,21 @@ def museai_item_text(view: str, item: dict) -> str:
                 lines.append(f"{key.title()}: {network[key]}")
     elif view == "schedules":
         lines += ["Disabled" if item.get("enabled") is False else "Enabled"]
-        for key, label in (
-            ("schedule_key", "Schedule"),
-            ("timezone", "Timezone"),
-            ("next_run_at_utc", "Next run (UTC)"),
-        ):
+        for key, label in (("schedule_key", "Schedule"), ("timezone", "Timezone")):
             if item.get(key):
                 lines.append(f"{label}: {item[key]}")
+        # Seconds since 1970, which is no use read aloud.
+        stamp = item.get("next_run_at_utc")
+        if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+            from datetime import datetime
+
+            try:
+                when = datetime.fromtimestamp(stamp).strftime("%A %B %d %Y, %I:%M %p")
+                lines.append(f"Next run: {when.replace(' 0', ' ')}")
+            except (OverflowError, OSError, ValueError):
+                pass
+        elif stamp:
+            lines.append(f"Next run: {stamp}")
     else:
         content = item.get("content") or {}
         for key in (
