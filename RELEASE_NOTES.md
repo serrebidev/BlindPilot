@@ -1,3 +1,11 @@
+# BlindPilot 0.59.5
+
+This release makes the "Send with Ctrl+Enter" setting from 0.59.4 work everywhere you type a message.
+
+The setting only reached the Agent prompt. Chat's Message field had its own fixed keys: Enter always started a new line and only Ctrl+Enter sent, whichever way the checkbox was set. In Chat, turning the setting on or off seemed to do nothing. Chat now follows the setting too. With it off, Enter sends and Shift+Enter starts a new line, the same as the Agent prompt. With it on, Enter and Shift+Enter start a new line, and only Ctrl+Enter or the Send button sends. Ctrl+Enter sends in both modes.
+
+Shift+Enter also inserts a real line break now. The text field was quietly adding an invisible vertical tab character instead of a new line, and that character went out with your message. The same fix covers Enter when it starts a new line.
+
 # BlindPilot 0.59.4
 
 This release adds a setting that stops Enter from sending your message by accident.

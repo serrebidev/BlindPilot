@@ -7,7 +7,7 @@ import threading
 from copy import deepcopy
 from pathlib import Path
 from threading import Event
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import wx
 
@@ -102,6 +102,9 @@ class ChatPanel(wx.Panel):
         # who to tell when it changes.
         self.tab_title = ""
         self.on_title_changed = None
+        # The app's "Send with Ctrl+Enter" preference, read at each Enter so a
+        # change in Preferences applies at once. BlindPilot sets it per tab.
+        self.send_with_ctrl_enter: Callable[[], bool] = lambda: False
         self.current_system_prompt = ""
         self.current_profile_id: int | None = None
         # The profile as it stood when this conversation was created. The
@@ -1779,9 +1782,19 @@ class ChatPanel(wx.Panel):
         if key == wx.WXK_ESCAPE and self.generating:
             self.on_stop(None)
             return
-        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and modifiers == wx.MOD_CONTROL:
-            if self.message_input.HasFocus():
+        if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self.message_input.HasFocus():
+            # Same keys as the Agent prompt, following the "Send with
+            # Ctrl+Enter" preference: off, Enter sends; on, Enter is a new
+            # line. Ctrl+Enter sends and Shift+Enter is a new line either way.
+            if modifiers == wx.MOD_CONTROL or (
+                modifiers == wx.MOD_NONE and not self.send_with_ctrl_enter()
+            ):
                 self.on_send(None)
+                return
+            if modifiers in (wx.MOD_NONE, wx.MOD_SHIFT):
+                # Written, not skipped: the rich edit control inserts a
+                # vertical tab (\x0b) for Shift+Enter, which went out as is.
+                self.message_input.WriteText("\n")
                 return
         event.Skip()
 

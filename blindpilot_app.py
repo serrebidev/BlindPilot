@@ -417,7 +417,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.59.4"
+APP_VERSION = "0.59.5"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -8552,10 +8552,14 @@ class SessionPanel(wx.Panel):
                 if event.CmdDown() or event.ControlDown():
                     self._on_send()
                     return
-                event.Skip()  # insert newline
+                # Written, not skipped: the rich edit control inserts a vertical
+                # tab (\x0b) for Shift+Enter, which then went out in the message.
+                self.prompt.WriteText("\n")
                 return
             if event.ShiftDown():
-                event.Skip()  # default: insert newline
+                # Written, not skipped: the rich edit control inserts a vertical
+                # tab (\x0b) for Shift+Enter, which then went out in the message.
+                self.prompt.WriteText("\n")
                 return
             self._on_send()
             return
@@ -14330,6 +14334,7 @@ class MainFrame(wx.Frame):
         panel.history_list_view_item = self._chat_history_list_item
         panel.history_text_view_item = self._chat_history_text_item
         panel.on_title_changed = lambda p=panel: self._relabel_chat_tab(p)
+        panel.send_with_ctrl_enter = lambda: SETTINGS.send_with_ctrl_enter
         self.chat_panel = panel
         book.AddPage(panel, _chat_tab_label(panel), select=True)
         self._sync_tab_switcher()
@@ -17786,7 +17791,7 @@ Ctrl+Comma: Preferences. F1: this list.
 
 Prompt
 Enter: send. Shift+Enter: new line. Ctrl+Shift+Enter: save as a prompt, then send.
-With "Send with Ctrl+Enter" on in Preferences, Enter inserts a new line instead and only Ctrl+Enter (or the Send button) sends.
+With "Send with Ctrl+Enter" on in Preferences, Enter inserts a new line instead and only Ctrl+Enter (or the Send button) sends. Chat's Message field follows the same setting.
 Ctrl+Shift+P: saved prompts. In its list, Enter inserts one and Delete removes it.
 Ctrl+/: slash commands. Ctrl+Shift+A: attach files. Ctrl+V: paste a picture as an attachment.
 Ctrl+Period: stop the running task.

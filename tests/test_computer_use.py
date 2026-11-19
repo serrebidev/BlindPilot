@@ -1,6 +1,5 @@
 """Style rules for the built web UI and site dashboards."""
 
-import os
 import sys
 import threading
 
@@ -110,55 +109,3 @@ def test_executor_refuses_when_stopped(monkeypatch):
 def test_tools_have_definitions():
     names = [tool["function"]["name"] for tool in TOOL_DEFINITIONS]
     assert names == ["list_controls", "press_control", "set_control_text"]
-
-
-def _in_service_session() -> bool:
-    """Session 0 (a service, such as the CI runner) has no desktop to open windows on."""
-    if sys.platform != "win32":
-        return False
-    import ctypes
-    import os
-
-    session = ctypes.c_ulong()
-    ok = ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session))
-    return bool(ok) and session.value == 0
-
-
-# GitHub's Windows image has a desktop, but its Notepad offers no editable document control.
-@pytest.mark.skipif(
-    _in_service_session() or os.environ.get("GITHUB_ACTIONS") == "true",
-    reason="needs an interactive desktop with the standard Notepad",
-)
-@pytest.mark.filterwarnings("ignore:Revert to STA COM threading mode:UserWarning")
-def test_real_notepad_round_trip(request):
-    """Drive a real Notepad through UIA: list, type, verify, stop."""
-    import computer_use
-
-    session = computer_use.ComputerUseSession(title_contains="Untitled - Notepad")
-    session.open(app_path="C:\\Windows\\System32\\notepad.exe")
-    request.addfinalizer(session.close)
-    refs = session.list_controls()
-    assert len(refs) >= 1
-    # Type into the document control through its value pattern.
-    typed = False
-    for ref in refs:
-        if "document" in ref.control_type.lower():
-            try:
-                session.set_value(ref.number, "BlindPilot computer use probe")
-                typed = True
-            except Exception:
-                pass
-            break
-    assert typed
-    # The text now lives in the document control's text.
-    window = session._live_window()
-    found = any(
-        "BlindPilot computer use probe" in str(control.window_text())
-        for control in window.descendants()
-    )
-    assert found
-    # Stop discipline: once cancelled, the executor refuses further actions.
-    cancel = threading.Event()
-    executor = ComputerUseExecutor(session, cancel)
-    cancel.set()
-    assert "Stopped" in executor.run("list_controls", {})

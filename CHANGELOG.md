@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.59.5 - 2026-11-19
+
+"Send with Ctrl+Enter" now works in Chat as well as in Agent mode. Chat's Message field ignored the preference: Enter always made a new line and only Ctrl+Enter sent, so switching the setting on or off seemed to do nothing. It now follows the setting the same way the Agent prompt does. Shift+Enter, and Enter when it makes a new line, now insert a real line break in both places; the rich edit control was putting in an invisible vertical tab character instead, which went out in the message.
+
 ## v0.59.4 - 2026-11-18
 
 Preferences gains "Send with Ctrl+Enter (Enter inserts a new line instead of sending)", off by default. With it on, a stray Enter can no longer send a half-typed prompt: Enter and Shift+Enter insert a new line, and only Ctrl+Enter or the Send button sends; Ctrl+Shift+Enter still saves as a prompt and sends. The prompt hint and the keyboard shortcuts list follow the setting. Requested by István Tábor, a screen reader user who kept sending unfinished messages by accident.

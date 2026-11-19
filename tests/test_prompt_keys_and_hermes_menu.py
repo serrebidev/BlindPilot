@@ -72,6 +72,9 @@ class _PromptStub:
     def GetValue(self) -> str:
         return self._text
 
+    def WriteText(self, text: str) -> None:
+        self._text += text
+
 
 class _PanelStub:
     """A panel that answers only what the prompt key handler asks of it."""
@@ -156,10 +159,10 @@ def test_enter_still_sends_and_shift_enter_still_inserts_a_newline():
     _press(panel, wx.WXK_RETURN)
     assert panel.sent
 
-    other = _PanelStub()
-    event = _press(other, wx.WXK_RETURN, shift=True)
+    other = _PanelStub(text="")
+    _press(other, wx.WXK_RETURN, shift=True)
     assert not other.sent
-    assert event.skipped
+    assert other.prompt.GetValue() == "\n"
 
 
 # ----- Send with Ctrl+Enter (issue: Enter sends by accident) -----
@@ -173,12 +176,12 @@ def ctrl_enter_mode(monkeypatch):
 
 
 def test_enter_does_not_send_when_ctrl_enter_mode_is_on(ctrl_enter_mode):
-    panel = _PanelStub()
+    panel = _PanelStub(text="")
 
-    event = _press(panel, wx.WXK_RETURN)
+    _press(panel, wx.WXK_RETURN)
 
     assert not panel.sent, "Enter sent the message despite Ctrl+Enter mode"
-    assert event.skipped, "Enter was swallowed instead of inserting a new line"
+    assert panel.prompt.GetValue() == "\n", "Enter did not insert a new line"
 
 
 def test_ctrl_enter_sends_when_ctrl_enter_mode_is_on(ctrl_enter_mode):
@@ -191,12 +194,73 @@ def test_ctrl_enter_sends_when_ctrl_enter_mode_is_on(ctrl_enter_mode):
 
 
 def test_shift_enter_still_inserts_a_newline_when_ctrl_enter_mode_is_on(ctrl_enter_mode):
-    panel = _PanelStub()
+    panel = _PanelStub(text="")
 
-    event = _press(panel, wx.WXK_RETURN, shift=True)
+    _press(panel, wx.WXK_RETURN, shift=True)
 
     assert not panel.sent
-    assert event.skipped
+    # A real newline, not the vertical tab the rich edit control would insert.
+    assert panel.prompt.GetValue() == "\n"
+
+
+# Chat's Message field follows the same preference. It used to ignore it:
+# Enter always made a new line and only Ctrl+Enter sent, whichever way the
+# checkbox was set, so turning it on or off appeared to do nothing.
+
+
+class _ChatKeyEvent:
+    def __init__(self, modifiers: int):
+        self._modifiers = modifiers
+        self.skipped = False
+
+    def GetKeyCode(self) -> int:
+        return wx.WXK_RETURN
+
+    def GetModifiers(self) -> int:
+        return self._modifiers
+
+    def Skip(self) -> None:
+        self.skipped = True
+
+
+class _ChatInputStub(_PromptStub):
+    def HasFocus(self) -> bool:
+        return True
+
+
+class _ChatStub:
+    def __init__(self, ctrl_enter: bool):
+        self.message_input = _ChatInputStub()
+        self.send_with_ctrl_enter = lambda: ctrl_enter
+        self.generating = False
+        self.sent = False
+
+    def on_send(self, _event) -> None:
+        self.sent = True
+
+
+@pytest.mark.parametrize(
+    ("ctrl_enter", "modifiers", "sends"),
+    [
+        (False, wx.MOD_NONE, True),
+        (False, wx.MOD_SHIFT, False),
+        (False, wx.MOD_CONTROL, True),
+        (True, wx.MOD_NONE, False),
+        (True, wx.MOD_SHIFT, False),
+        (True, wx.MOD_CONTROL, True),
+    ],
+)
+def test_chat_message_enter_follows_the_preference(ctrl_enter, modifiers, sends):
+    from accessible_ai.ui.chat_panel import ChatPanel
+
+    chat = _ChatStub(ctrl_enter)
+
+    event = _ChatKeyEvent(modifiers)
+    ChatPanel.on_char_hook(chat, event)
+
+    assert chat.sent is sends
+    assert not event.skipped
+    assert chat.message_input.GetValue() == ("" if sends else "\n")
 
 
 # ----- 2. The Hermes list in the File menu -----
