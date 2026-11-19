@@ -1,5 +1,6 @@
 """Style rules for the built web UI and site dashboards."""
 
+import os
 import sys
 import threading
 
@@ -123,14 +124,19 @@ def _in_service_session() -> bool:
     return bool(ok) and session.value == 0
 
 
-@pytest.mark.skipif(_in_service_session(), reason="needs an interactive desktop")
+# GitHub's Windows image has a desktop, but its Notepad offers no editable document control.
+@pytest.mark.skipif(
+    _in_service_session() or os.environ.get("GITHUB_ACTIONS") == "true",
+    reason="needs an interactive desktop with the standard Notepad",
+)
 @pytest.mark.filterwarnings("ignore:Revert to STA COM threading mode:UserWarning")
-def test_real_notepad_round_trip():
+def test_real_notepad_round_trip(request):
     """Drive a real Notepad through UIA: list, type, verify, stop."""
     import computer_use
 
     session = computer_use.ComputerUseSession(title_contains="Untitled - Notepad")
     session.open(app_path="C:\\Windows\\System32\\notepad.exe")
+    request.addfinalizer(session.close)
     refs = session.list_controls()
     assert len(refs) >= 1
     # Type into the document control through its value pattern.
@@ -156,4 +162,3 @@ def test_real_notepad_round_trip():
     executor = ComputerUseExecutor(session, cancel)
     cancel.set()
     assert "Stopped" in executor.run("list_controls", {})
-    session.close()
