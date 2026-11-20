@@ -26,7 +26,7 @@ jobs:
             asset: BlindPilot-Windows-x64.zip
             kind: windows
           - label: macOS Apple Silicon
-            runner: macos-15
+            runner: macos-26
             asset: BlindPilot-macOS-arm64.zip
             kind: macos
     # GitHub runners build every release; the job below publishes it on Forgejo.

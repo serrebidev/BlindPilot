@@ -33,7 +33,7 @@ jobs:
           - label: Windows
             runner: windows-2025
           - label: macOS
-            runner: macos-15
+            runner: macos-26
           # Linux ships — linux_accessibility.py, the pexpect pseudo-terminal,
           # the POSIX process groups — and several tests skip themselves on
           # Windows and macOS, so without this runner they execute nowhere.
