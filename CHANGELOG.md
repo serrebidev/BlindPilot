@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.62.0 - 2026-11-24
+
+The Chat Place API-credits parity finished: Codex tabs on API credits (an OpenAI key in the credential store, its own app-server on a `blindpilot-api-credits` model provider with `base_url` https://api.openai.com/v1 and `env_key` BLINDPILOT_OPENAI_API_KEY, pooled by a hash of the key, so the ChatGPT sign-in is untouched); Codex cost estimated per turn from `thread/tokenUsage/updated` `last` reports for this turn and a fixed OpenAI price table, "Cost: an estimated X", and a price-unknown model says its tokens and counts the whole per-message limit; a per-message limit ($2 to start) for Claude and Codex that stops the reply partway once the usage it has reported reaches it (Claude from each response's usage and a fixed Anthropic price table, deduplicated by message id; the reported total is still what is counted); Claude and Codex keep separate keys, limits and totals (0.61's Claude figures carried over). A Claude turn stopped with Stop on API credits is now counted. Tests in tests/test_api_credits.py.
+
 ## v0.61.1 - 2026-11-24
 
 Window activation focus (issue #25, István Tábor): the main frame records the control that had focus when it is deactivated and restores it on activation, falling back to the mode's starting control (the prompt) when nothing restorable remains — Alt+Tab back into the window no longer lands on the Attach button. Regression tests in tests/test_window_activation_focus.py.

@@ -211,6 +211,8 @@ class ClaudeWorker(threading.Thread):
         # {"enabled", "name", "reattach"}: Remote Control as the tab wants it.
         self._remote_control = remote_control
         self._api_key = api_key
+        self._turn_spend: dict[str, float] = {}
+        self._limit_said = False
         # Asked about a tool the permission mode leaves to a person; returns
         # the control response's own body (allow or deny).
         self._on_permission = on_permission
@@ -439,6 +441,48 @@ class ClaudeWorker(threading.Thread):
                     continue
                 status = SUBAGENT_FAILED if block.get("is_error") else SUBAGENT_COMPLETED
                 report(call_id, "", status, subagent_line(result) or f"Finished: {status}")
+
+    def _record_cost(self, event: dict) -> None:
+        """Count an API-credits turn's reported cost, and say it."""
+        if not self._api_key:
+            return
+        import api_credits
+
+        cost = api_credits.record(
+            str(event.get("session_id") or self._session_id or ""),
+            event.get("total_cost_usd"),
+        )
+        if cost is not None:
+            self._on_activity("notice", f"Cost: {api_credits.money(cost)}")
+
+    def _count_spend(self, message: dict) -> None:
+        """Stop an API-credits turn whose responses so far reach the per-message limit.
+
+        Claude Code reports the dollars only when the turn ends, so this is an
+        estimate from each response's usage; the reported cost is what is
+        counted. A subagent's responses are this message's spending too.
+        """
+        if not self._api_key or self._limit_said or not isinstance(message, dict):
+            return
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            return
+        import api_credits
+
+        cost = api_credits.claude_cost(str(message.get("model") or ""), usage)
+        if cost is None:
+            return
+        spend = self._turn_spend
+        spend[str(message.get("id") or len(spend))] = cost
+        limit = api_credits.message_limit("claude")
+        if sum(spend.values()) >= limit:
+            self._limit_said = True
+            self._on_activity(
+                "notice",
+                f"Stopped at the {api_credits.money(limit)} per-message limit for API credits.",
+            )
+            # Not on this thread: the interrupt waits for a reply this thread reads.
+            threading.Thread(target=self.cancel, daemon=True).start()
 
     def _drop_process(self) -> None:
         """Stop the process this turn borrowed and take it out of the pool.
@@ -714,6 +758,10 @@ class ClaudeWorker(threading.Thread):
             return
         self._accepting_input.set()
 
+        # API credits: each API response's estimated cost, by message id, so a
+        # message reported once per content block is counted once.
+        self._turn_spend = {}
+        self._limit_said = False
         text_parts: list[str] = []
         first_assistant_seen = False
         complete = False
@@ -775,6 +823,8 @@ class ClaudeWorker(threading.Thread):
                         # Somebody else's result, as on the live path. Ours is
                         # the one that leaves nothing queued behind it.
                         continue
+                    # A stopped turn on API credits still spent what it used.
+                    self._record_cost(event)
                     return
                 continue
 
@@ -840,6 +890,7 @@ class ClaudeWorker(threading.Thread):
                 # collected up and read out as the reply.
                 from_subagent = bool(event.get("parent_tool_use_id"))
                 message = event.get("message") or {}
+                self._count_spend(message)
                 if not from_subagent:
                     # Everything the model was sent for this reply, which is
                     # how full the conversation's context now is.
@@ -954,15 +1005,7 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
-                if self._api_key:
-                    import api_credits
-
-                    cost = api_credits.record(
-                        str(event.get("session_id") or self._session_id or ""),
-                        event.get("total_cost_usd"),
-                    )
-                    if cost is not None:
-                        self._on_activity("notice", f"Cost: {api_credits.money(cost)}")
+                self._record_cost(event)
                 usage_by_model = event.get("modelUsage") or {}
                 main = usage_by_model.get(getattr(self, "_context_model", ""))
                 if isinstance(main, dict) and getattr(self, "context_tokens", None):

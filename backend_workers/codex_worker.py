@@ -42,6 +42,13 @@ def codex_input(text: str, files: list[str]) -> list[dict]:
     ]
 
 
+def _credits_identity(key: str) -> str:
+    """Which API key a Codex process holds, without keeping the key in the pool key."""
+    import hashlib
+
+    return "api-credits-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
 class CodexWorker(_TurnWorker):
     """Run one Codex turn through the official app-server JSONL protocol."""
 
@@ -114,6 +121,15 @@ class CodexWorker(_TurnWorker):
         self._assistant_live: dict[str, SentenceStreamer] = {}
         self._reasoning_streams: dict[str, list[str]] = {}
         self._tool_outputs: dict[str, list[str]] = {}
+        # API credits: this turn's estimated cost so far, the tokens it used,
+        # whether every report was for a model with a known price, and the
+        # model the conversation runs (the turn's choice, or the thread's).
+        self._turn_cost = 0.0
+        self._turn_tokens = 0
+        self._priced = True
+        self._charged = False
+        self._limit_said = False
+        self._codex_model = self._model
 
     @property
     def _stderr_lines(self) -> list[str]:
@@ -272,6 +288,8 @@ class CodexWorker(_TurnWorker):
             server.abandon_turn(thread_id, turn_id)
 
     def _teardown(self) -> None:
+        # A turn whose server died before it completed still spent what it used.
+        self._charge_turn()
         for path in self._message_files:
             try:
                 os.unlink(path)
@@ -341,11 +359,19 @@ class CodexWorker(_TurnWorker):
         cannot be sent somewhere else under it.
         """
         account = self._plan_account
-        if account is ab.UNBOUND:
+        if self._api_key:
+            # API credits run on a process of their own, keyed by the key so
+            # a changed key never borrows a process holding the old one.
+            account = None
+        elif account is ab.UNBOUND:
             account = ab.codex_plan_account()
         account = ab.cast(ab.Optional[ab.PlanAccount], account)
         self._plan_account = account
-        key = ab.codex_pool_key(account)
+        key = (
+            ab.backend_pool.pool_key(ab.BACKEND_CODEX, account=_credits_identity(self._api_key))
+            if self._api_key
+            else ab.codex_pool_key(account)
+        )
         shared = ab.backend_pool.pool()
         with ab._CODEX_START_LOCK:
             held = shared.take(key)
@@ -354,7 +380,7 @@ class CodexWorker(_TurnWorker):
             reused = held is not None
             if held is None:
                 try:
-                    started = ab._start_codex_server(plan_account=account)
+                    started = ab._start_codex_server(plan_account=account, api_key=self._api_key)
                 except OSError as exc:
                     self.plan_token_failed = isinstance(exc, ab.PlanTokenError)
                     self._fail(f"Failed to launch Codex: {exc}")
@@ -525,6 +551,9 @@ class CodexWorker(_TurnWorker):
                     self._fail(self._error_text(error, "Could not start a Codex session"))
                     return
                 thread = (message.get("result") or {}).get("thread") or {}
+                self._codex_model = self._model or str(
+                    (message.get("result") or {}).get("model") or ""
+                )
                 self._thread_id = str(thread.get("id") or self._session_id or "")
                 if not self._thread_id:
                     self._discard_server()
@@ -684,6 +713,7 @@ class CodexWorker(_TurnWorker):
             elif method == "thread/tokenUsage/updated":
                 usage = params.get("tokenUsage") or {}
                 last = usage.get("last") or {}
+                self._count_cost(params, last)
                 used = ab._as_number(last.get("totalTokens"))
                 if used:
                     window = ab._as_number(usage.get("modelContextWindow")) or 0
@@ -703,6 +733,7 @@ class CodexWorker(_TurnWorker):
                     self._on_activity("tool", f"Codex warning: {warning}")
             elif method == "turn/completed":
                 self._accepting_input.clear()
+                self._charge_turn()
                 turn = params.get("turn") or {}
                 status = turn.get("status")
                 if status == "failed":
@@ -720,6 +751,50 @@ class CodexWorker(_TurnWorker):
 
         if not self._cancelled:
             self._fail(self._why_it_died("Codex app server closed before the turn completed"))
+
+    def _count_cost(self, params: dict, last: dict) -> None:
+        """Add one model response's usage to an API-credits turn, and stop it at the limit.
+
+        Each report's ``last`` is one response's usage. A report naming another
+        turn -- such as the one a resume repeats -- is not this turn's spending.
+        """
+        if not self._api_key or not isinstance(last, dict):
+            return
+        turn = str(params.get("turnId") or "")
+        if turn and turn != self._turn_id:
+            return
+        import api_credits
+
+        self._turn_tokens += int(ab._as_number(last.get("totalTokens")) or 0)
+        cost = api_credits.codex_cost(self._codex_model, last)
+        if cost is None:
+            self._priced = False
+            return
+        self._turn_cost += cost
+        limit = api_credits.message_limit("codex")
+        if self._priced and self._turn_cost >= limit and not self._limit_said:
+            self._limit_said = True
+            self._on_activity(
+                "notice",
+                f"Stopped at the {api_credits.money(limit)} per-message limit for API credits.",
+            )
+            # Not on this thread: the cancel waits for the reply this thread reads.
+            ab.threading.Thread(target=self.cancel, daemon=True).start()
+
+    def _charge_turn(self) -> None:
+        """Count an API-credits turn once, and say what it cost."""
+        if not self._api_key or self._charged:
+            return
+        self._charged = True
+        import api_credits
+
+        if not self._priced:
+            # Its cost cannot be known, so it uses up the per-message limit.
+            api_credits.add(api_credits.message_limit("codex"), "codex")
+            self._on_activity("notice", f"Cost: unknown, {self._turn_tokens:,} tokens")
+        elif self._turn_tokens:
+            api_credits.add(self._turn_cost, "codex")
+            self._on_activity("notice", f"Cost: an estimated {api_credits.money(self._turn_cost)}")
 
     def _handshake(self) -> bool:
         """Introduce BlindPilot to a freshly started app-server, once.

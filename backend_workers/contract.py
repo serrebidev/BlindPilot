@@ -72,6 +72,8 @@ class CodexOptions:
     plan_account: object = _UNSET
     fork_source: str = ""
     fork_at: str = ""
+    # An OpenAI key the turn is charged to (API credits); "" uses the login.
+    api_key: str = ""
 
 
 @dataclass(frozen=True)

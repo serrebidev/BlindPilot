@@ -418,7 +418,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.61.1"
+APP_VERSION = "0.62.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -7889,18 +7889,27 @@ class SessionPanel(wx.Panel):
                 "Find and Browse copies its claude.ai address."
             )
 
-    def _claude_billing_ready(self) -> bool:
-        """Say how this Claude turn is paid for before it is sent.
+    def _credits_provider(self, backend: str = "") -> str:
+        """The API-credits provider for a backend: "claude", "codex" or ""."""
+        return {BACKEND_CLAUDE: "claude", BACKEND_CODEX: "codex"}.get(
+            backend or self.selected_backend(), ""
+        )
+
+    def _billing_ready(self, backend: str) -> bool:
+        """Say how this Claude or Codex turn is paid for before it is sent.
 
         On API credits: refuse once the overall limit is spent, and ask before
-        the first message of each tab. On the subscription: say once if an
+        the first message of each tab. On a Claude subscription: say once if an
         API key in the environment or Claude Code's settings would bill this
         tab instead (it does not stop the message).
         """
         import api_credits
 
+        provider = SessionPanel._credits_provider(self, backend)
+        if not provider:
+            return True
         if not getattr(self, "api_credits", False):
-            if not getattr(self, "_billing_warned", False):
+            if provider == "claude" and not getattr(self, "_billing_warned", False):
                 source = api_credits.subscription_charged_elsewhere(cwd=getattr(self, "cwd", ""))
                 if source:
                     self._billing_warned = True
@@ -7909,50 +7918,67 @@ class SessionPanel(wx.Panel):
                         "not your Claude subscription."
                     )
             return True
-        if not api_credits.get_key():
-            self._announce("API credits are on but no key is saved. Open API Credits to add one.")
-            return False
-        if api_credits.limit_reached():
+        company = "Anthropic" if provider == "claude" else "OpenAI"
+        if not api_credits.get_key(provider):
             self._announce(
-                f"Not sent: {api_credits.summary()}. Raise the limit or reset the total in "
-                "API Credits. Your message is still in the box."
+                f"API credits are on but no {company} key is saved. Open API Credits to add one."
             )
             return False
-        if not getattr(self, "_api_credits_confirmed", False):
+        if api_credits.limit_reached(provider):
+            self._announce(
+                f"Not sent: {api_credits.summary(provider)}. Raise the limit or reset the total "
+                "in API Credits. Your message is still in the box."
+            )
+            return False
+        confirmed: set[str] = getattr(self, "_api_credits_confirmed", set())
+        if not isinstance(confirmed, set):
+            confirmed = set()
+        if provider not in confirmed:
             answer = wx.MessageBox(
-                f"Send on API credits? This message is charged to your Anthropic API key. "
-                f"{api_credits.summary()}.",
+                f"Send on API credits? This message is charged to your {company} API key. "
+                f"{api_credits.summary(provider)}.",
                 "API Credits",
                 wx.YES_NO | wx.ICON_QUESTION,
                 self,
             )
             if answer != wx.YES:
                 return False
-            self._api_credits_confirmed = True
+            self._api_credits_confirmed = confirmed | {provider}
         self._announce("Sent on API credits.")
         return True
 
     def api_credits_menu(self) -> None:
-        """Charge this Claude Code tab to an Anthropic API key, or back to the plan."""
+        """Charge this Claude Code or Codex tab to an API key, or back to the plan."""
         import api_credits
 
-        if self.selected_backend() != BACKEND_CLAUDE:
-            self._announce("API credits are for Claude Code tabs. Switch this tab to Claude Code.")
+        provider = SessionPanel._credits_provider(self)
+        if not provider:
+            self._announce(
+                "API credits are for Claude Code and Codex tabs. Switch this tab to one of them."
+            )
             return
+        company = "Anthropic" if provider == "claude" else "OpenAI"
         on = getattr(self, "api_credits", False)
-        has_key = bool(api_credits.get_key())
+        has_key = bool(api_credits.get_key(provider))
         choices = [
             "Charge this tab to my subscription again" if on else "Charge this tab to API credits",
-            "Change the API key" if has_key else "Add an Anthropic API key",
-            f"Change the overall limit ({api_credits.money(api_credits.overall_limit())})",
+            f"Change the {company} API key" if has_key else f"Add an {company} API key",
+            f"Change the per-message limit ({api_credits.money(api_credits.message_limit(provider))})",
+            f"Change the overall limit ({api_credits.money(api_credits.overall_limit(provider))})",
             "Reset the total spent",
         ]
         if has_key:
-            choices.append("Remove the API key")
+            choices.append(f"Remove the {company} API key")
+        source = (
+            "Costs are what Claude Code reports"
+            if provider == "claude"
+            else "Codex costs are estimates from OpenAI's prices"
+        )
+        bill = "the Claude Console" if provider == "claude" else "the OpenAI dashboard"
         with wx.SingleChoiceDialog(
             self,
-            f"{api_credits.summary()}. Costs are what Claude Code reports, counted on this "
-            "computer only; the Claude Console shows the bill.",
+            f"{company}: {api_credits.summary(provider)}. {source}, counted on this computer "
+            f"only; {bill} shows the bill.",
             "API Credits",
             choices,
         ) as dlg:
@@ -7960,48 +7986,60 @@ class SessionPanel(wx.Panel):
                 return
             picked = dlg.GetSelection()
         if picked == 0:
-            if not on and not has_key and not self._ask_api_key():
+            if not on and not has_key and not SessionPanel._ask_api_key(self, provider):
                 return
             self.api_credits = not on
-            self._api_credits_confirmed = False
+            self._api_credits_confirmed = set()
             self._announce(
                 "This tab is charged to API credits from your next message."
                 if self.api_credits
-                else "This tab is charged to your Claude subscription from your next message."
+                else "This tab is charged to your subscription from your next message."
             )
         elif picked == 1:
-            self._ask_api_key()
-        elif picked == 2:
+            SessionPanel._ask_api_key(self, provider)
+        elif picked in (2, 3):
+            per_message = picked == 2
+            current = (
+                api_credits.message_limit(provider)
+                if per_message
+                else api_credits.overall_limit(provider)
+            )
             with wx.TextEntryDialog(
                 self,
-                "Overall API credits limit, in dollars:",
+                f"{'Per-message' if per_message else 'Overall'} {company} API credits limit, "
+                "in dollars:",
                 "API Credits",
-                f"{api_credits.overall_limit():g}",
+                f"{current:g}",
             ) as entry:
                 if entry.ShowModal() != wx.ID_OK:
                     return
                 text = entry.GetValue().strip().lstrip("$")
             try:
-                api_credits.set_overall_limit(float(text))
+                if per_message:
+                    api_credits.set_message_limit(float(text), provider)
+                else:
+                    api_credits.set_overall_limit(float(text), provider)
             except (ValueError, OSError):
                 self._announce(f"Error: {text} is not an amount")
                 return
-            self._announce(api_credits.summary())
-        elif picked == 3:
-            api_credits.reset_total()
-            self._announce(api_credits.summary())
+            self._announce(api_credits.summary(provider))
+        elif picked == 4:
+            api_credits.reset_total(provider)
+            self._announce(api_credits.summary(provider))
         else:
-            api_credits.set_key("")
+            api_credits.set_key("", provider)
             self.api_credits = False
-            self._announce("API key removed. This tab is charged to your subscription.")
+            self._announce(f"{company} API key removed. This tab is charged to your subscription.")
 
-    def _ask_api_key(self) -> bool:
+    def _ask_api_key(self, provider: str = "claude") -> bool:
         import api_credits
 
+        where = "console.anthropic.com" if provider == "claude" else "platform.openai.com"
+        company = "Anthropic" if provider == "claude" else "OpenAI"
         with wx.PasswordEntryDialog(
             self,
-            "Paste your Anthropic API key (from console.anthropic.com). It is kept in this "
-            "computer's credential store and goes only to Anthropic.",
+            f"Paste your {company} API key (from {where}). It is kept in this computer's "
+            f"credential store and goes only to {company}.",
             "API Credits",
         ) as entry:
             if entry.ShowModal() != wx.ID_OK:
@@ -8010,11 +8048,11 @@ class SessionPanel(wx.Panel):
         if not key:
             return False
         try:
-            api_credits.set_key(key)
+            api_credits.set_key(key, provider)
         except Exception as exc:
             self._announce(f"Error: the key could not be saved: {exc}")
             return False
-        self._announce("API key saved.")
+        self._announce(f"{company} API key saved.")
         return True
 
     def remote_control_menu(self) -> None:
@@ -9588,7 +9626,7 @@ class SessionPanel(wx.Panel):
             return
 
         selected_backend = self.selected_backend()
-        if selected_backend == BACKEND_CLAUDE and not SessionPanel._claude_billing_ready(self):
+        if not SessionPanel._billing_ready(self, selected_backend):
             return
         if selected_backend == BACKEND_MUSEAI and getattr(self, "_museai_main_required", False):
             self.open_museai_main(resume_pending=True)
@@ -9805,6 +9843,10 @@ class SessionPanel(wx.Panel):
             # The Account this conversation began on, so its turns -- and any
             # resume of it -- stay there however the saved choice moves.
             extra["plan_account"] = self._codex_conversation_account()
+            if getattr(self, "api_credits", False):
+                import api_credits
+
+                extra["api_key"] = api_credits.get_key("codex")
         request = SessionPanel._worker_request(
             self, selected_backend, send_text, extra, model=model, effort=effort
         )

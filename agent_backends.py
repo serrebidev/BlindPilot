@@ -3608,7 +3608,7 @@ def _plan_token_or_report(account: PlanAccount) -> None:
 
 
 def _start_codex_server(
-    binary: str = "", plan_account: Optional[PlanAccount] = None
+    binary: str = "", plan_account: Optional[PlanAccount] = None, api_key: str = ""
 ) -> CodexServer:
     """Launch the shared app-server. Raises OSError if it cannot be started.
 
@@ -3622,7 +3622,15 @@ def _start_codex_server(
         raise OSError("Codex is not installed. Run: npm install -g @openai/codex")
     server_binary = _codex_app_server_binary(binary)
     plan: tuple[str, ...] = ()
-    if plan_account is not None:
+    env = subprocess_env(server_binary)
+    if api_key:
+        # API credits: an OpenAI key, sent only to api.openai.com, on a
+        # process of its own so the ChatGPT sign-in is left as it is.
+        import api_credits
+
+        plan = api_credits.codex_args()
+        env = api_credits.codex_env(env, api_key)
+    elif plan_account is not None:
         _plan_token_or_report(plan_account)
         plan = codex_plan_args(plan_account.account_id)
     proc = owned_popen(
@@ -3635,7 +3643,7 @@ def _start_codex_server(
         bufsize=1,
         encoding="utf-8",
         errors="replace",
-        env=subprocess_env(server_binary),
+        env=env,
         # npm's `codex` is a Node launcher that runs the real Codex as a child
         # of its own; stopping only the launcher leaves that child holding the
         # app-server session.
@@ -3718,6 +3726,7 @@ class _TurnWorker(threading.Thread):
         plan_account: object = UNBOUND,
         fork_source: str = "",
         fork_at: str = "",
+        api_key: str = "",
     ) -> None:
         super().__init__(daemon=True)
         self._prompt = prompt
@@ -3746,6 +3755,8 @@ class _TurnWorker(threading.Thread):
         # the saved choice. Only Codex reads this; the rest never see one. It
         # is `object` because `None` is itself a binding -- Codex's own login.
         self._plan_account = plan_account
+        # An OpenAI key the turn is charged to (api_credits); only Codex reads it.
+        self._api_key = api_key
         self._fork_source = fork_source
         self._fork_at = fork_at
         self._cancelled = False

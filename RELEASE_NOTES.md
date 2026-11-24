@@ -1,3 +1,17 @@
+# BlindPilot 0.62.0
+
+This release finishes API credits from The Chat Place: Codex tabs can now be charged to an OpenAI API key, and both Claude Code and Codex get a spending limit for each message.
+
+**Codex on API credits.** A Codex tab can now be charged to an OpenAI API key instead of your ChatGPT plan. Open Conversation, Find and Browse, API Credits in a Codex tab, add your key, and choose "Charge this tab to API credits". The key is kept in this computer's credential store and goes only to api.openai.com. Codex runs a separate copy of itself for API credits, so your ChatGPT sign-in and your other Codex tabs are not touched. It takes effect from the tab's next message.
+
+**What a Codex reply cost.** Codex reports the tokens it used, not dollars, so each reply ends with an estimate from OpenAI's prices, for example "Cost: an estimated 3 cents". If BlindPilot does not know a model's price, it says the tokens instead, for example "Cost: unknown, 12,400 tokens", and counts the whole per-message limit against your overall limit, so unpriced messages still run it down.
+
+**A limit for each message.** Claude Code and Codex on API credits now stop a reply partway once it reaches the per-message limit, $2 to start. You hear "Stopped at the $2.00 per-message limit for API credits", then what the message cost, and you can send another message straight away. A message can go a little over, by the cost of one request to the AI. Change the limit in API Credits.
+
+**Claude and Codex are counted separately.** Each has its own key, its own per-message and overall limits, and its own total. What you had already spent on Claude is kept. A Claude reply you stopped with Stop is now counted too; before, its cost was left out of the total.
+
+As before, every figure is BlindPilot's own count on this computer. The Claude Console and the OpenAI dashboard show what you are actually billed.
+
 # BlindPilot 0.61.1
 
 **Focus comes back with you.** Switching away from the BlindPilot window and back (for example with Alt+Tab) could leave keyboard focus on the Attach button instead of where you left it, so every message started with a hunt for the prompt field. The window now remembers which control had focus when you left it and puts focus back there when you return; if there is nothing to restore, focus starts in the prompt. Reported by István Tábor — thank you.
