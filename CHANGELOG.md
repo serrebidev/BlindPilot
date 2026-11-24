@@ -2,6 +2,12 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.60.0 - 2026-11-23
+
+FastChat parity (masonasons/FastChat through b966df2). Chat accounts without tools of their own get BlindPilot's read-only `web_search` (DuckDuckGo HTML), `fetch_page` and `current_time`, on by default with a profile "Web tools" checkbox; a model that refuses tools is retried without them. The Messages and Responses protocols gained tool loops. The Responses API takes attachments (they were refused), streams reasoning summaries as thinking, sends the profile's thinking effort for OpenAI, and drops refused reasoning options once per model. Gemini and OpenCode Go no longer drop tools and the local executor; computer use passes a callable executor (its first action used to fail). Linux computer use through AT-SPI (`computer_use_linux.py`, ctypes on libatspi).
+
+From muse.ai: VoLlama JSON import (`history_backup.import_vollama`); attachments decoded from any encoding (BOM, UTF-8, cp1252) with binary files sent as base64 up to 100 KB on Messages instead of mojibake; Linux Speech Dispatcher voices in `system_speech.py`. `test_ci_workflows` recognises the `xcode-27` macOS runner.
+
 ## v0.59.6 - 2026-11-19
 
 Hermes: a fresh Windows install is found. Its venv is now PM-built under `<home>\installs\<key>` and recorded in `facts.json`, and its default home is `%LOCALAPPDATA%\hermes` (BlindPilot and its history reader both assumed `~\.hermes`). `prompt.submit` falls back to no `submission_id` when the stdio gateway rejects it (the always-on gateway requires it), which fixes every message failing with "Extra inputs are not permitted". Reads of `state.db` retry on the transient "disk I/O error" a gateway leaves on exit, which had emptied Recent Conversations of Hermes chats. The Model dialog preselects the model `model.options` names, not the current provider's first one. The slash picker reads `complete.slash` instead of a stale built-in list.

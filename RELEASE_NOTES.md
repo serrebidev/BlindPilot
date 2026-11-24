@@ -1,3 +1,33 @@
+# BlindPilot 0.60.0
+
+This release brings over the features FastChat added since BlindPilot last caught up with it. Chat conversations on any account can now search the web and read pages, OpenAI accounts can take attachments and show the model's thinking, and Linux gets computer use and a voice of its own. Half of the work was done by muse.ai, the other half by Claude.
+
+## Chat
+
+**Every account can search the web.** Until now, only OpenRouter and ChatGPT plan accounts could look anything up, because their providers run search themselves. Every other account, such as OpenAI with an API key, Claude, Gemini, DeepSeek, Ollama or a custom endpoint, now gets three tools that BlindPilot runs itself: a web search through DuckDuckGo, which needs no key; reading one public web page as text; and checking the date and time on this computer. They only read, so nothing stops to ask permission. The model decides when to use them, and you hear "Searching the web", "Reading a web page" or "Checking the date and time" when it does. They are on by default. To turn them off for a conversation, clear "Web tools" in its profile. A model that cannot take tools at all, which includes many local Ollama models, still answers without them. BlindPilot tells you it answered without web search instead of failing the message.
+
+**OpenAI accounts take attachments.** An OpenAI account uses OpenAI's Responses API, and until now that refused every attached file and asked you to switch the account to Chat Completions. Pictures, PDFs, text and other files now go through on the Responses API too.
+
+**OpenAI shows the model's thinking.** A reasoning model's thinking summary now arrives as thinking, the same as on a ChatGPT plan, and the profile's thinking effort is sent. Models that take no thinking settings, like gpt-4o, and organizations OpenAI has not verified for summaries are retried once without them. BlindPilot then remembers that for the rest of the session, so later messages do not pay for a refused request.
+
+**Tools work on every protocol.** Before this release, only the Chat Completions protocol could run a tool and carry on with the answer. Claude's Messages protocol and OpenAI's Responses protocol now can too. Gemini and OpenCode Go accounts were quietly losing their tools on the way to the provider; they keep them now.
+
+**Computer use no longer fails on its first action.** Computer use passed its action runner in a form the providers could not call, so the first press or typed text ended the turn with an error. This is fixed.
+
+**Attachments in any encoding.** A text file saved in UTF-16, with a byte order mark, or in the older Windows encoding used to reach the model as garbled characters. It now arrives as readable text. A file that is not text at all, sent to a Claude account, used to arrive as a page of nonsense characters. Now it goes as base64 if it is 100 KB or less. A larger one is named, and the model is told it was too large to include.
+
+**Import VoLlama conversations.** History, Import now reads VoLlama JSON saves, as well as Basilisk conversations and BlindPilot's own exports. A save without a system message keeps your default system prompt. A JSON file that is not a VoLlama save is refused, and nothing is created.
+
+## Linux
+
+**Computer use on Linux.** A Chat conversation can now operate another app on Linux, as it already could on Windows and the Mac. It works through the app's accessibility tree, the same tree Orca reads, and never by screen position. BlindPilot asks before each action, because Linux has no global stop key yet. It was tested by filling in and confirming a real dialog.
+
+**A voice of its own on Linux.** Sound and speech settings can now use Speech Dispatcher voices directly on Linux, with their own voice, rate and volume, separate from Orca's. Voices are listed by name, speech module and language, with your own language first. BlindPilot's sentences wait their turn instead of cutting each other off, and Orca does not interrupt them. Stopping speech stops only BlindPilot's voice. This needs the python3-speechd package. Without it, there are no voices and nothing breaks.
+
+## Fixed in testing
+
+The release checks failed to find the macOS test run after the move to GitHub's newer macOS runner image, because that image is named after its Xcode version. They now recognise it.
+
 # BlindPilot 0.59.6
 
 This release fixes Hermes for people who install it fresh, makes Hermes messages work again, and makes muse.ai quicker and easier to read. Every Hermes and muse.ai dialog was tested against real accounts before release.

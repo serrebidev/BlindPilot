@@ -89,7 +89,9 @@ def test_the_tests_run_on_every_platform_that_ships(platform):
         if "\n  pull_request:" in text and "pytest" in text
     ]
     assert testing, "nothing tests a pull request, so no platform is covered"
-    covered = any(platform in text for text in testing)
+    # GitHub's macOS images are named for their Xcode (runs-on: xcode-27).
+    names = {"macos": ("macos", "xcode-")}.get(platform, (platform,))
+    covered = any(name in text for text in testing for name in names)
     assert covered, f"pull requests are tested, but never on a {platform} runner"
 
 

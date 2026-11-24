@@ -257,7 +257,10 @@ def test_a_non_openrouter_account_is_never_given_openrouters_keys():
     deepseek = ChatPanel._generation_settings(
         panel, Account(id=2, name="d", provider=PROVIDER_DEEPSEEK), "some/model"
     )
-    assert deepseek.tools == []
+    # Only BlindPilot's own web tools, never OpenRouter's server tools.
+    from accessible_ai import web_tools
+
+    assert deepseek.tools == web_tools.DEFINITIONS
     assert deepseek.reasoning is None
     assert deepseek.plugins == []
 
