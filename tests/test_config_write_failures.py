@@ -309,6 +309,7 @@ def test_applying_preferences_that_cannot_be_saved_says_so(
         notify_in_background = False
         read_back_sent = False
         send_with_ctrl_enter = False
+        claude_chrome = True
         appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30

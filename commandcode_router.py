@@ -411,6 +411,29 @@ def _leaderboard_rank(*sources: Optional[Iterable[str]]) -> dict:
     return rank
 
 
+STEALTH_PREFIX = "stealth/"
+
+
+def _candidates(tier: str, catalog: dict) -> tuple[str, ...]:
+    """The tier's shortlist, with the quick tier's free slot filled live.
+
+    Free offers come and go faster than releases, so the quick tier does not
+    rely on one hard-coded free id: it tries the catalog's stealth models
+    first, in catalog order, then the curated shortlist, then any other
+    model the catalog marks free.
+    """
+    static = _TIER_CANDIDATES.get(tier, ())
+    if tier != QUICK:
+        return static
+    stealth = [model_id for model_id in catalog if model_id.startswith(STEALTH_PREFIX)]
+    free = [
+        model_id
+        for model_id, entry in catalog.items()
+        if isinstance(entry, dict) and entry.get("free") is True
+    ]
+    return tuple(dict.fromkeys([*stealth, *static, *free]))
+
+
 def select(
     tier: str,
     catalog: dict,
@@ -444,7 +467,7 @@ def select(
     best_model = ""
     best_cost = float("inf")
     best_rank = None
-    for model_id in _TIER_CANDIDATES.get(tier, ()):
+    for model_id in _candidates(tier, catalog):
         entry = catalog.get(model_id)
         if not entry:
             continue
@@ -466,6 +489,10 @@ def select(
         if not plan_eligible(entry.get("minPlan", ""), _resolve_max_plan(max_plan)):
             continue
         cost = model_cost(entry, peak, context_tokens)
+        if model_id.startswith(STEALTH_PREFIX):
+            # The first usable stealth model wins outright, whatever the price.
+            best_model, best_cost = model_id, cost
+            break
         rank = popular.get(model_id.casefold(), len(popular) + 1 if popular else 0)
         if (
             cost < best_cost
@@ -588,8 +615,10 @@ def best_free_model(
     # may already pick), then any free catalog entry whose id matches a tier
     # candidate -- this keeps the fallback working across CLI versions whose
     # exact model ids changed.
-    candidate_ids: list[str] = []
-    for model_id in _FREE_FALLBACK_CANDIDATES + _TIER_CANDIDATES.get(QUICK, ()):
+    candidate_ids: list[str] = [
+        model_id for model_id in active_catalog if model_id.startswith(STEALTH_PREFIX)
+    ]
+    for model_id in _FREE_FALLBACK_CANDIDATES + _candidates(QUICK, active_catalog):
         if model_id not in candidate_ids:
             candidate_ids.append(model_id)
     # Also consider any tier candidate (any tier) the catalog marks free, so
@@ -628,7 +657,13 @@ def catalog_missing_candidates(catalog: Optional[dict] = None) -> dict:
     active = catalog if catalog is not None else price_catalog()
     missing: dict = {}
     for tier, ids in _TIER_CANDIDATES.items():
-        absent = [model_id for model_id in ids if model_id not in active]
+        # A retired free offer is not a gap: the quick tier's free slot is
+        # filled from the live catalog (see _candidates).
+        absent = [
+            model_id
+            for model_id in ids
+            if model_id not in active and not model_id.endswith(":free")
+        ]
         if absent:
             missing[tier] = absent
     return missing

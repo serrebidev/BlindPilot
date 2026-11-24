@@ -60,3 +60,12 @@ step runs under the distribution's wxPython 4.2.1, where the suite is not
 clean; neither platform is primary. macOS ships arm64-only, as it did
 before this ADR, and there is no Linux release artifact until the suite
 passes under the distribution wxPython. The rest of this ADR stands.
+
+## Second amendment (2026-11-23, Brandon's decision)
+
+Linux x64 ships again, as the `tar.gz` described above, built on GitHub's
+`ubuntu-24.04` runner and published on Forgejo with the other two. The
+blocker named in the first amendment is gone: the Linux build installs the
+wxPython 4.3 wheel requirements.txt points at, not the distribution's 4.2.1,
+and the suite passes under it in CI. The packaged app updates itself through
+a folder-swap helper like the macOS one. universal2 stays withdrawn.

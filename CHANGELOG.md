@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.61.0 - 2026-11-23
+
+Linux x64 ships again (`BlindPilot-Linux-x64.tar.gz`, GitHub `ubuntu-24.04` runner with the wxPython 4.3 wheel, published on Forgejo; ADR 0004 second amendment) and self-updates through a folder-swap helper (`_LINUX_HELPER`). The Chat Place parity through 0.6.3: Claude in Chrome (`--chrome`/`--no-chrome`, Preferences "Let Claude use Chrome", on by default); Claude Code tabs on API credits (`api_credits.py`: key in the credential store, redirects stripped from the env, per-reply cost from the `total_cost_usd` delta, overall limit $20, first-send confirmation, Conversation, Find and Browse, API Credits); a once-per-tab warning when an API key would bill a subscription tab; Codex messages over 32,000 characters sent as a temporary file; local file links in the Links list with Open and Open Containing Folder (code-running types folder/copy only). Command Code quick tier: first stealth model in the catalog wins, then any free model, then the shortlist; retired `:free` ids are no longer reported missing.
+
 ## v0.60.0 - 2026-11-23
 
 FastChat parity (masonasons/FastChat through b966df2). Chat accounts without tools of their own get BlindPilot's read-only `web_search` (DuckDuckGo HTML), `fetch_page` and `current_time`, on by default with a profile "Web tools" checkbox; a model that refuses tools is retried without them. The Messages and Responses protocols gained tool loops. The Responses API takes attachments (they were refused), streams reasoning summaries as thinking, sends the profile's thinking effort for OpenAI, and drops refused reasoning options once per model. Gemini and OpenCode Go no longer drop tools and the local executor; computer use passes a callable executor (its first action used to fail). Linux computer use through AT-SPI (`computer_use_linux.py`, ctypes on libatspi).

@@ -188,12 +188,14 @@ def test_best_free_model_uses_current_catalog_and_skips_current_model():
     alternate = router.best_free_model(
         catalog=catalog, exclude_model="thinkingmachines/inkling-2-small:free"
     )
-    assert alternate is None
+    # Any other model the catalog marks free fills the slot.
+    assert alternate is not None and alternate.model == "inclusionai/ling-3.1-flash:free"
 
 
 def test_best_free_model_never_guesses_when_price_or_plan_is_unconfirmed():
     catalog = router.parse_prices(CATALOG)
     catalog["thinkingmachines/inkling-2-small:free"]["free"] = False
+    catalog["inclusionai/ling-3.1-flash:free"]["free"] = False
     assert router.best_free_model(catalog=catalog) is None
     assert router.best_free_model(catalog={}) is None
 
@@ -348,6 +350,7 @@ def test_route_runs_quick_on_free_while_cooling_down(monkeypatch, tmp_path):
         == ""
     )
     catalog["thinkingmachines/inkling-2-small:free"]["minPlan"] = "max"
+    catalog["inclusionai/ling-3.1-flash:free"]["minPlan"] = "max"
     unavailable = router.route("Refactor the authentication flow", catalog=catalog)
     assert unavailable.model == ""
     assert unavailable.cooldown is True
@@ -843,3 +846,21 @@ def test_a_lock_held_too_long_fails_the_record_instead_of_hanging(monkeypatch, t
     assert router.cooling_down(now=moment + timedelta(minutes=29)) is False
     # The lock sidecar is cleaned up even on the failure path.
     assert sorted(path.name for path in tmp_path.iterdir()) == ["usage.json"]
+
+
+def test_quick_takes_the_first_stealth_model_then_any_free_one():
+    """A stealth model wins the quick tier outright, first in catalog order;
+    with none, a free model the catalog offers fills the slot even when the
+    hard-coded free id has been retired."""
+    catalog = dict(router.parse_prices(CATALOG))
+    stealth = {"input": 0.1, "output": 0.2, "cacheRead": 0.0, "minPlan": "go and above"}
+    catalog["stealth/first"] = {**stealth, "efforts": [], "free": False}
+    catalog["stealth/second"] = {**stealth, "efforts": [], "free": False}
+    assert router.select(router.QUICK, catalog).model == "stealth/first"
+    assert router.best_free_model(catalog=catalog).model == "thinkingmachines/inkling-2-small:free"
+
+    retired = dict(router.parse_prices(CATALOG))
+    del retired["thinkingmachines/inkling-2-small:free"]
+    assert router.select(router.QUICK, retired).model == "inclusionai/ling-3.1-flash:free"
+    missing = router.catalog_missing_candidates(retired)
+    assert "thinkingmachines/inkling-2-small:free" not in missing.get(router.QUICK, [])

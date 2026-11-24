@@ -156,7 +156,7 @@ def test_agent_browser_keeps_symbols_removed_from_spoken_rows(monkeypatch):
     monkeypatch.setattr(
         app,
         "_show_conversation_items",
-        lambda _parent, messages, kind: calls.extend(collect_items(messages, kind)),
+        lambda _parent, messages, kind, _cwd="": calls.extend(collect_items(messages, kind)),
     )
     panel = SimpleNamespace(_rows=parse_response('```python\nstatus = "✅ ready"\n```', 1))
     app.SessionPanel.open_items(panel, "code")
@@ -168,7 +168,7 @@ def test_browser_can_read_the_current_stream_without_waiting_for_completion(monk
     monkeypatch.setattr(
         app,
         "_show_conversation_items",
-        lambda _parent, messages, kind: calls.extend(collect_items(messages, kind)),
+        lambda _parent, messages, kind, _cwd="": calls.extend(collect_items(messages, kind)),
     )
     panel = SimpleNamespace(
         _rows=[Row("header", "Response 1", "", 1)],
@@ -248,6 +248,7 @@ def test_browser_menu_keeps_shortcuts_available_in_chat_mode(frame):
             "Chat &Permissions…",
             "Copy Session Lin&k",
             "&Remote Control…",
+            "API Cre&dits…",
             "Ctrl+Shift+U",
         )
         for item, chord in zip(items[3 : 3 + len(agent_chords)], agent_chords, strict=True):

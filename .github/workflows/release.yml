@@ -29,6 +29,10 @@ jobs:
             runner: xcode-27
             asset: BlindPilot-macOS-arm64.zip
             kind: macos
+          - label: Linux x64
+            runner: ubuntu-24.04
+            asset: BlindPilot-Linux-x64.tar.gz
+            kind: linux
     # GitHub runners build every release; the job below publishes it on Forgejo.
     if: github.server_url == 'https://github.com'
     runs-on: ${{ matrix.runner }}
@@ -42,16 +46,37 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Set up Python
+        # Linux uses Ubuntu's own Python 3.12, the one the wxPython wheel that
+        # requirements.txt points at is built against (as in ci.yml).
+        if: runner.os != 'Linux'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
           cache: pip
 
+      - name: Install wxPython's runtime and a virtual display
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-wxgtk4.0 xvfb libsdl2-2.0-0
+          python3 -m venv --system-site-packages .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
       - name: Install dependencies
-        run: python -m pip install --upgrade pip -r requirements-build.txt
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=wxPython -r requirements-build.txt
 
       - name: Run regression tests
-        run: python -m pytest -q -W error
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python -m pytest -q -W error
+          else
+            python -m pytest -q -W error
+          fi
 
       - name: Run static checks
         # bash on every runner: pwsh, the Windows default, reports only the
@@ -117,6 +142,21 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent dist/BlindPilot.app "artifacts/${{ matrix.asset }}"
           cd artifacts
           shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
+      - name: Build Linux application
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tarball, not a zip: it keeps the executable bits. GTK 3 and
+          # AT-SPI come from the user's distribution (ADR 0004).
+          python -m PyInstaller --noconfirm --clean BlindPilot.spec
+          xvfb-run -a dist/BlindPilot/BlindPilot --startup-smoke
+          xvfb-run -a dist/BlindPilot/BlindPilot --startup-gui-smoke
+          mkdir -p artifacts
+          tar -czf "artifacts/${{ matrix.asset }}" -C dist BlindPilot
+          cd artifacts
+          sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
 
       - name: Upload release files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

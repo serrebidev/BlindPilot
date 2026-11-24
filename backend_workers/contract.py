@@ -57,6 +57,7 @@ class ClaudeOptions:
     remote_control: dict | None = None
     fork_source: str = ""
     fork_at: str = ""
+    api_key: str = ""
 
 
 _UNSET = object()

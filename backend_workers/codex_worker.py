@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import queue
+import tempfile
 from typing import Optional
 
 import agent_backends as ab
@@ -11,12 +13,43 @@ from agent_backends import CodexServer, _TurnWorker
 from markdown_rows import SentenceStreamer
 
 
+# Codex refuses a message longer than this. A longer one (a pasted build log)
+# used to fail the turn outright.
+CODEX_INPUT_LIMIT = 32_000
+
+
+def codex_input(text: str, files: list[str]) -> list[dict]:
+    """The input items for one message, saved to a file when it is too long.
+
+    The file's path is appended to ``files``, which the turn deletes when it
+    ends.
+    """
+    if len(text) <= CODEX_INPUT_LIMIT:
+        return [{"type": "text", "text": text}]
+    fd, path = tempfile.mkstemp(prefix="blindpilot-codex-message-", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    files.append(path)
+    return [
+        {
+            "type": "text",
+            "text": (
+                f"My message is {len(text):,} characters, too long to send directly, so it "
+                f"is saved in this file. Read the whole file and treat its contents as my "
+                f"message: {path}"
+            ),
+        }
+    ]
+
+
 class CodexWorker(_TurnWorker):
     """Run one Codex turn through the official app-server JSONL protocol."""
 
     _backend = ab.BACKEND_CODEX
 
     def _setup(self) -> None:
+        # Long messages saved for Codex to read; deleted when the turn ends.
+        self._message_files: list[str] = []
         # Borrowed from the pool, which starts and stops it; other tabs read it too.
         self._server: Optional[CodexServer] = None
         self._held: Optional[backend_pool.HeldProcess] = None
@@ -120,7 +153,7 @@ class CodexWorker(_TurnWorker):
                 "id": self._next_id(),
                 "params": {
                     "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": text}],
+                    "input": codex_input(text, self._message_files),
                     "expectedTurnId": self._turn_id,
                 },
             }
@@ -239,6 +272,11 @@ class CodexWorker(_TurnWorker):
             server.abandon_turn(thread_id, turn_id)
 
     def _teardown(self) -> None:
+        for path in self._message_files:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
         # This turn is over, however it ended. Read by `cancel` before it
         # interrupts anything, because the watch it would wait on is about
         # to be given back below.
@@ -528,7 +566,7 @@ class CodexWorker(_TurnWorker):
                 approval, sandbox = self._policy(self._permission_mode)
                 params = {
                     "threadId": self._thread_id,
-                    "input": [{"type": "text", "text": self._prompt}],
+                    "input": codex_input(self._prompt, self._message_files),
                     "cwd": self._cwd,
                     "approvalPolicy": approval,
                     "sandboxPolicy": sandbox,
@@ -546,6 +584,10 @@ class CodexWorker(_TurnWorker):
                     return
                 inbox.put(ab._CODEX_ASKED)
                 self._expect(turn_request)
+                if self._message_files:
+                    self._on_activity(
+                        "notice", "Your message was long, so it was given to Codex as a file."
+                    )
                 self._send({"method": "turn/start", "id": turn_request, "params": params})
                 continue
 

@@ -110,6 +110,8 @@ def asset_name_for_platform(
         # Apple Silicon only; Intel Macs fall through to the error below.
         if machine in ("arm64", "aarch64"):
             return "BlindPilot-macOS-arm64.zip"
+    if system == "linux" and machine in ("x86_64", "amd64"):
+        return "BlindPilot-Linux-x64.tar.gz"
     raise UpdateError(
         f"Automatic updates are not available for {platform.system()} {platform.machine()}."
     )
@@ -269,7 +271,8 @@ def download_update(
         raise UpdateError("The update download URL is not trusted.")
     expected = release.sha256 or _checksum_from_sidecar(release, current_version, opener)
     # Keep the published extension: an installer has to stay a .exe to be run.
-    suffix = ".exe" if release.asset_name.casefold().endswith(".exe") else ".zip"
+    name = release.asset_name.casefold()
+    suffix = ".exe" if name.endswith(".exe") else ".tar.gz" if name.endswith(".tar.gz") else ".zip"
     fd, temporary_name = tempfile.mkstemp(prefix=TEMPORARY_PREFIX, suffix=suffix)
     temporary = Path(temporary_name)
     digest = hashlib.sha256()
@@ -934,6 +937,148 @@ exit 0
 """
 
 
+_LINUX_HELPER = r"""#!/bin/sh
+# BlindPilot's Linux update helper: the macOS helper's rules for a plain
+# folder. It waits for BlindPilot to close, unpacks the verified tarball,
+# moves the current folder aside, puts the new one in place, puts the old one
+# back on any failure, and always restarts something.
+set -u
+
+parent_pid="$1"
+archive="$2"
+install_dir="$3"
+log_file="$4"
+status_file="$5"
+
+executable="$install_dir/BlindPilot"
+stage=""
+backup_dir=""
+lock=""
+moved_aside=0
+replaced=0
+
+log() {
+    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$log_file" 2>/dev/null || true
+}
+
+save_failure() {
+    printf '%s\n%s\n' "$1" "$log_file" >"$status_file" 2>/dev/null || true
+}
+
+discard() {
+    if [ -n "$stage" ]; then rm -rf "$stage"; fi
+    if [ -n "$lock" ]; then rm -rf "$lock"; fi
+    rm -f "$archive"
+    rm -f "$0"
+    return 0
+}
+
+start_blindpilot() {
+    if [ ! -x "$executable" ]; then
+        log "Cannot restart: $executable is missing."
+        return 1
+    fi
+    (cd "$HOME" && nohup "$executable" >/dev/null 2>&1 &)
+    return 0
+}
+
+restore() {
+    if [ "$moved_aside" -ne 1 ] || [ ! -d "$backup_dir/BlindPilot" ]; then
+        return 0
+    fi
+    log "Putting the previous version back."
+    if [ "$replaced" -eq 1 ]; then rm -rf "$install_dir"; fi
+    if cp -a "$backup_dir/BlindPilot" "$install_dir" >>"$log_file" 2>&1; then
+        log "Previous version restored; its backup is kept at $backup_dir"
+    else
+        log "Restore failed; the backup is kept at $backup_dir"
+    fi
+    return 0
+}
+
+fail() {
+    log "Update failed: $1"
+    restore
+    save_failure "$1"
+    start_blindpilot
+    discard
+    exit 1
+}
+
+# Two updaters over one folder meet in the middle; the first one wins. A lock
+# nobody has touched for half an hour belongs to a dead updater.
+lock_candidate="${TMPDIR:-/tmp}/BlindPilot-update-lock"
+if mkdir "$lock_candidate" 2>/dev/null; then
+    lock="$lock_candidate"
+elif [ -z "$(find "$lock_candidate" -maxdepth 0 -mmin -30 2>/dev/null)" ]; then
+    rm -rf "$lock_candidate"
+    if mkdir "$lock_candidate" 2>/dev/null; then lock="$lock_candidate"; fi
+fi
+if [ -z "$lock" ]; then
+    log "Another update is already running; leaving it to finish."
+    rm -f "$archive"
+    rm -f "$0"
+    exit 0
+fi
+
+log "Updating $install_dir"
+
+waited=0
+while kill -0 "$parent_pid" 2>/dev/null; do
+    if [ "$waited" -ge 30 ]; then
+        log "BlindPilot has not closed after 30 seconds; asking it to quit."
+        kill -TERM "$parent_pid" 2>/dev/null || true
+        sleep 2
+        kill -KILL "$parent_pid" 2>/dev/null || true
+        sleep 1
+        if kill -0 "$parent_pid" 2>/dev/null; then
+            fail "BlindPilot is still running, so its files could not be replaced."
+        fi
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+stage="$(mktemp -d "${TMPDIR:-/tmp}/BlindPilot-stage.XXXXXX" 2>/dev/null)" || stage=""
+if [ -z "$stage" ]; then
+    fail "A temporary folder for the update could not be created."
+fi
+if ! tar -xzf "$archive" -C "$stage" >>"$log_file" 2>&1; then
+    fail "The update archive could not be expanded."
+fi
+if [ ! -x "$stage/BlindPilot/BlindPilot" ]; then
+    fail "The update archive does not contain BlindPilot."
+fi
+
+backup_dir="$(mktemp -d "${install_dir}.update-backup-XXXXXX" 2>/dev/null)" || backup_dir=""
+if [ -z "$backup_dir" ]; then
+    fail "A backup folder for the current version could not be created."
+fi
+if ! mv "$install_dir" "$backup_dir/BlindPilot" 2>>"$log_file"; then
+    rmdir "$backup_dir" 2>/dev/null || true
+    fail "The current version could not be moved aside."
+fi
+moved_aside=1
+if ! mv "$stage/BlindPilot" "$install_dir" 2>>"$log_file" \
+    && ! cp -a "$stage/BlindPilot" "$install_dir" >>"$log_file" 2>&1; then
+    fail "The new version could not be put in place."
+fi
+replaced=1
+if [ ! -x "$executable" ]; then
+    fail "The installed folder has no BlindPilot in it after the update."
+fi
+
+log "Update applied. Restarting BlindPilot."
+start_blindpilot
+rm -rf "$backup_dir"
+log "Done."
+rm -f "$log_file"
+discard
+exit 0
+"""
+
+
 def macos_install_problem(app_path: Path) -> str:
     """Why this bundle cannot be replaced where it stands, or "" when it can.
 
@@ -1164,6 +1309,38 @@ def schedule_install(archive: Path) -> None:
                     str(os.getpid()),
                     str(archive),
                     str(app_path),
+                    str(log),
+                    str(_status_path()),
+                ]
+            )
+        except (OSError, ValueError) as exc:
+            if helper is not None:
+                helper.unlink(missing_ok=True)
+            raise UpdateError(f"Could not start the update installer: {exc}") from exc
+        return
+    if platform.system() == "Linux":
+        install_dir = executable.parent
+        if not os.access(install_dir.parent, os.W_OK):
+            raise UpdateError(
+                f"BlindPilot cannot replace itself in {install_dir}: that folder's parent "
+                "is not writable. Unpack the new release there yourself."
+            )
+        log = Path(tempfile.gettempdir()) / f"{TEMPORARY_PREFIX}{os.getpid()}.log"
+        clear_pending_failure()
+        helper = None
+        try:
+            fd, helper_name = tempfile.mkstemp(prefix=TEMPORARY_PREFIX, suffix=".sh")
+            os.close(fd)
+            helper = Path(helper_name)
+            helper.write_text(_LINUX_HELPER, encoding="utf-8")
+            helper.chmod(0o700)
+            _spawn_detached(
+                [
+                    "/bin/sh",
+                    str(helper),
+                    str(os.getpid()),
+                    str(archive),
+                    str(install_dir),
                     str(log),
                     str(_status_path()),
                 ]

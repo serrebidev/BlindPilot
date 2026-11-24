@@ -71,6 +71,7 @@ from backend_workers import (
     worker_capabilities,
 )
 from backend_updates import BackendUpdateResult, BackendUpdateService, BackendUpdateState
+import claude_session
 from claude_session import _find_claude
 import diagnostics
 import earcons
@@ -417,7 +418,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.60.0"
+APP_VERSION = "0.61.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -2902,6 +2903,10 @@ class _Settings:
         # Off by default, so Enter keeps sending for everyone else. Asked
         # for by a screen reader user who kept sending half-typed prompts.
         self.send_with_ctrl_enter = bool(cfg.get("send_with_ctrl_enter", False))
+        # Claude in Chrome for Claude Code tabs. On by default, as in The Chat
+        # Place: without the extension it simply offers no browser tools.
+        self.claude_chrome = bool(cfg.get("claude_chrome", True))
+        claude_session.use_chrome = self.claude_chrome
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Minutes between background re-reads of a tab's model catalog; 0 turns
@@ -2928,6 +2933,8 @@ class _Settings:
         cfg["notify_in_background"] = self.notify_in_background
         cfg["read_back_sent"] = self.read_back_sent
         cfg["send_with_ctrl_enter"] = self.send_with_ctrl_enter
+        cfg["claude_chrome"] = self.claude_chrome
+        claude_session.use_chrome = self.claude_chrome
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["model_refresh_minutes"] = self.model_refresh_minutes
@@ -3433,9 +3440,11 @@ class BugReportDialog(wx.Dialog):
         self.EndModal(wx.ID_OK)
 
 
-def _show_conversation_items(parent: wx.Window, messages: list[tuple[str, str]], kind: str) -> None:
+def _show_conversation_items(
+    parent: wx.Window, messages: list[tuple[str, str]], kind: str, cwd: str = ""
+) -> None:
     title = "Links" if kind == "links" else "Code Blocks"
-    items = collect_items(messages, kind)
+    items = collect_items(messages, kind, cwd)
     if not items:
         announce(f"No {title.lower()} in this conversation or response")
         return
@@ -3456,6 +3465,7 @@ def _show_conversation_items(parent: wx.Window, messages: list[tuple[str, str]],
         copy=_copy_to_clipboard,
         read=read,
         announce=announce,
+        open_file=_open_path,
     )
     try:
         dialog.ShowModal()
@@ -7879,6 +7889,134 @@ class SessionPanel(wx.Panel):
                 "Find and Browse copies its claude.ai address."
             )
 
+    def _claude_billing_ready(self) -> bool:
+        """Say how this Claude turn is paid for before it is sent.
+
+        On API credits: refuse once the overall limit is spent, and ask before
+        the first message of each tab. On the subscription: say once if an
+        API key in the environment or Claude Code's settings would bill this
+        tab instead (it does not stop the message).
+        """
+        import api_credits
+
+        if not getattr(self, "api_credits", False):
+            if not getattr(self, "_billing_warned", False):
+                source = api_credits.subscription_charged_elsewhere(cwd=getattr(self, "cwd", ""))
+                if source:
+                    self._billing_warned = True
+                    self._announce(
+                        f"Note: Claude Code will charge this tab to an API key from {source}, "
+                        "not your Claude subscription."
+                    )
+            return True
+        if not api_credits.get_key():
+            self._announce("API credits are on but no key is saved. Open API Credits to add one.")
+            return False
+        if api_credits.limit_reached():
+            self._announce(
+                f"Not sent: {api_credits.summary()}. Raise the limit or reset the total in "
+                "API Credits. Your message is still in the box."
+            )
+            return False
+        if not getattr(self, "_api_credits_confirmed", False):
+            answer = wx.MessageBox(
+                f"Send on API credits? This message is charged to your Anthropic API key. "
+                f"{api_credits.summary()}.",
+                "API Credits",
+                wx.YES_NO | wx.ICON_QUESTION,
+                self,
+            )
+            if answer != wx.YES:
+                return False
+            self._api_credits_confirmed = True
+        self._announce("Sent on API credits.")
+        return True
+
+    def api_credits_menu(self) -> None:
+        """Charge this Claude Code tab to an Anthropic API key, or back to the plan."""
+        import api_credits
+
+        if self.selected_backend() != BACKEND_CLAUDE:
+            self._announce("API credits are for Claude Code tabs. Switch this tab to Claude Code.")
+            return
+        on = getattr(self, "api_credits", False)
+        has_key = bool(api_credits.get_key())
+        choices = [
+            "Charge this tab to my subscription again" if on else "Charge this tab to API credits",
+            "Change the API key" if has_key else "Add an Anthropic API key",
+            f"Change the overall limit ({api_credits.money(api_credits.overall_limit())})",
+            "Reset the total spent",
+        ]
+        if has_key:
+            choices.append("Remove the API key")
+        with wx.SingleChoiceDialog(
+            self,
+            f"{api_credits.summary()}. Costs are what Claude Code reports, counted on this "
+            "computer only; the Claude Console shows the bill.",
+            "API Credits",
+            choices,
+        ) as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            picked = dlg.GetSelection()
+        if picked == 0:
+            if not on and not has_key and not self._ask_api_key():
+                return
+            self.api_credits = not on
+            self._api_credits_confirmed = False
+            self._announce(
+                "This tab is charged to API credits from your next message."
+                if self.api_credits
+                else "This tab is charged to your Claude subscription from your next message."
+            )
+        elif picked == 1:
+            self._ask_api_key()
+        elif picked == 2:
+            with wx.TextEntryDialog(
+                self,
+                "Overall API credits limit, in dollars:",
+                "API Credits",
+                f"{api_credits.overall_limit():g}",
+            ) as entry:
+                if entry.ShowModal() != wx.ID_OK:
+                    return
+                text = entry.GetValue().strip().lstrip("$")
+            try:
+                api_credits.set_overall_limit(float(text))
+            except (ValueError, OSError):
+                self._announce(f"Error: {text} is not an amount")
+                return
+            self._announce(api_credits.summary())
+        elif picked == 3:
+            api_credits.reset_total()
+            self._announce(api_credits.summary())
+        else:
+            api_credits.set_key("")
+            self.api_credits = False
+            self._announce("API key removed. This tab is charged to your subscription.")
+
+    def _ask_api_key(self) -> bool:
+        import api_credits
+
+        with wx.PasswordEntryDialog(
+            self,
+            "Paste your Anthropic API key (from console.anthropic.com). It is kept in this "
+            "computer's credential store and goes only to Anthropic.",
+            "API Credits",
+        ) as entry:
+            if entry.ShowModal() != wx.ID_OK:
+                return False
+            key = entry.GetValue().strip()
+        if not key:
+            return False
+        try:
+            api_credits.set_key(key)
+        except Exception as exc:
+            self._announce(f"Error: the key could not be saved: {exc}")
+            return False
+        self._announce("API key saved.")
+        return True
+
     def remote_control_menu(self) -> None:
         """Turn Remote Control on or off for this Claude Code tab, or copy its address."""
         if self.selected_backend() != BACKEND_CLAUDE:
@@ -9450,6 +9588,8 @@ class SessionPanel(wx.Panel):
             return
 
         selected_backend = self.selected_backend()
+        if selected_backend == BACKEND_CLAUDE and not SessionPanel._claude_billing_ready(self):
+            return
         if selected_backend == BACKEND_MUSEAI and getattr(self, "_museai_main_required", False):
             self.open_museai_main(resume_pending=True)
             if self._museai_main_required:
@@ -9725,11 +9865,17 @@ class SessionPanel(wx.Panel):
             "name": getattr(self, "tab_title", "") or _tab_label("", getattr(self, "cwd", "")),
             "reattach": getattr(self, "remote_bridge", ""),
         }
+        charged = ""
+        if getattr(self, "api_credits", False):
+            import api_credits
+
+            charged = api_credits.get_key()
         return {
             "held_for": self,
             "on_unsolicited": wake,
             "on_permission": ask,
             "remote_control": remote,
+            "api_key": charged,
         }
 
     def _start_late_turn(self, generation: int) -> None:
@@ -11123,7 +11269,7 @@ class SessionPanel(wx.Panel):
             if row.kind == "header" and live is not None and live[0] == row.response_number:
                 source = f"{source}\n\n{live[2]}" if source else live[2]
             messages.append((row.label, source))
-        _show_conversation_items(self, messages, kind)
+        _show_conversation_items(self, messages, kind, getattr(self, "cwd", ""))
 
     def _build_row_menu(self, row: Row) -> wx.Menu:
         """The actions offered for one row.
@@ -13356,6 +13502,10 @@ class PreferencesDialog(wx.Dialog):
             panel, label="Send with Ctrl+Enter (Enter inserts a new line instead of sending)"
         )
         self._ctrl_enter.SetValue(SETTINGS.send_with_ctrl_enter)
+        self._claude_chrome = wx.CheckBox(
+            panel, label="Let Claude use Chrome (Claude in Chrome, in Claude Code tabs)"
+        )
+        self._claude_chrome.SetValue(SETTINGS.claude_chrome)
         for check in (
             self._live_rows,
             self._speak_live,
@@ -13365,6 +13515,7 @@ class PreferencesDialog(wx.Dialog):
             self._notify,
             self._read_back,
             self._ctrl_enter,
+            self._claude_chrome,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -13544,6 +13695,10 @@ class PreferencesDialog(wx.Dialog):
     @property
     def send_with_ctrl_enter(self) -> bool:
         return self._ctrl_enter.GetValue()
+
+    @property
+    def claude_chrome(self) -> bool:
+        return self._claude_chrome.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -14698,6 +14853,7 @@ class MainFrame(wx.Frame):
         SETTINGS.notify_in_background = dialog.notify_in_background
         SETTINGS.read_back_sent = dialog.read_back_sent
         SETTINGS.send_with_ctrl_enter = dialog.send_with_ctrl_enter
+        SETTINGS.claude_chrome = dialog.claude_chrome
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         SETTINGS.model_refresh_minutes = dialog.model_refresh_minutes
@@ -15453,6 +15609,12 @@ class MainFrame(wx.Frame):
             "&Remote Control…",
             "Reach this Claude Code session from claude.ai while it works, or turn that off",
             lambda: self._panel_action("remote_control_menu"),
+        )
+        add(
+            browse,
+            "API Cre&dits…",
+            "Charge this Claude Code tab to an Anthropic API key, with a spending limit",
+            lambda: self._panel_action("api_credits_menu"),
         )
         add(
             browse,

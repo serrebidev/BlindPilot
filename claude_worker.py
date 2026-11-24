@@ -201,6 +201,7 @@ class ClaudeWorker(threading.Thread):
         on_unsolicited: Optional[Callable[[], None]] = None,
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         remote_control: Optional[dict] = None,
+        api_key: str = "",
         on_tasks: Optional[Callable[..., None]] = None,
         on_remote: Optional[Callable[[dict], None]] = None,
         fork_source: str = "",
@@ -209,6 +210,7 @@ class ClaudeWorker(threading.Thread):
         super().__init__(daemon=True)
         # {"enabled", "name", "reattach"}: Remote Control as the tab wants it.
         self._remote_control = remote_control
+        self._api_key = api_key
         # Asked about a tool the permission mode leaves to a person; returns
         # the control response's own body (allow or deny).
         self._on_permission = on_permission
@@ -617,6 +619,8 @@ class ClaudeWorker(threading.Thread):
             session_id=self._session_id,
             fork_source=self._fork_source,
             fork_at=self._fork_at,
+            chrome=claude_session.use_chrome,
+            api_key=self._api_key,
         )
         session = self._take(wants, binary)
         if session is None:
@@ -950,6 +954,15 @@ class ClaudeWorker(threading.Thread):
 
             elif etype == "result":
                 complete = True
+                if self._api_key:
+                    import api_credits
+
+                    cost = api_credits.record(
+                        str(event.get("session_id") or self._session_id or ""),
+                        event.get("total_cost_usd"),
+                    )
+                    if cost is not None:
+                        self._on_activity("notice", f"Cost: {api_credits.money(cost)}")
                 usage_by_model = event.get("modelUsage") or {}
                 main = usage_by_model.get(getattr(self, "_context_model", ""))
                 if isinstance(main, dict) and getattr(self, "context_tokens", None):

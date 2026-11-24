@@ -122,11 +122,14 @@ def test_the_command_line_is_the_one_a_turn_used_to_build():
         "opus",
         "--effort",
         "high",
+        "--chrome",
         "--resume",
         "s1",
     ]
     bare = cs.build_command("claude", cs.Wants(cwd="C:/work", permission_mode=""), "")
     assert "--permission-mode" not in bare and "--resume" not in bare
+    off = cs.Wants(cwd="C:/work", permission_mode="", chrome=False)
+    assert "--no-chrome" in cs.build_command("claude", off, "")
 
 
 def test_the_ask_through_the_tool_instruction_goes_with_the_tool_it_names():

@@ -127,17 +127,13 @@ def test_every_production_module_is_type_checked():
 
 
 def test_the_release_builds_every_platform_it_ships():
-    """Windows and arm64 macOS are published; there is no Linux artifact.
-
-    A universal2 macOS build and a Linux tarball were tried and withdrawn
-    (2026-11-07): the universal2 collect fails on wcwidth's single-arch C
-    extension, and the Linux job's suite is not clean under the
-    distribution's wxPython 4.2.1.
-    """
+    """Windows, arm64 macOS and Linux x64 are published (ADR 0004, second
+    amendment). universal2 stays withdrawn: its collect fails on wcwidth's
+    single-arch C extension."""
     release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     assert "kind: windows" in release
     assert "kind: macos" in release and "macOS-arm64" in release
-    assert "kind: linux" not in release
+    assert "kind: linux" in release and "BlindPilot-Linux-x64.tar.gz" in release
 
 
 def test_a_job_cannot_run_for_six_hours():

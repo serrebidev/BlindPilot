@@ -49,6 +49,7 @@ def test_version_and_platform_asset_selection():
     assert version_tuple("v1.2.10-beta") == (1, 2, 10)
     assert asset_name_for_platform("Windows", "AMD64") == "BlindPilot-Windows-x64.zip"
     assert asset_name_for_platform("Darwin", "arm64") == "BlindPilot-macOS-arm64.zip"
+    assert asset_name_for_platform("Linux", "x86_64") == "BlindPilot-Linux-x64.tar.gz"
     # Intel Macs are no longer built, so they get no automatic update.
     with pytest.raises(UpdateError):
         asset_name_for_platform("Darwin", "x86_64")

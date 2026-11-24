@@ -74,10 +74,14 @@ _REWIND_SECONDS = 120.0
 _SAFE_ID = re.compile(r"^[0-9A-Za-z][0-9A-Za-z-]{7,63}$")
 
 
-def claude_env(binary: str) -> dict[str, str]:
+def claude_env(binary: str, api_key: str = "") -> dict[str, str]:
     """The environment every Claude process BlindPilot starts runs with."""
     env = dict(subprocess_env(binary))
     env[CHECKPOINT_VAR] = "1"
+    if api_key:
+        import api_credits
+
+        env = api_credits.claude_env(env, api_key)
     return env
 
 
@@ -132,6 +136,12 @@ class Wants:
     session_id: Optional[str] = None
     fork_source: str = ""
     fork_at: str = ""
+    # Claude in Chrome. Part of what the process is started with, so changing
+    # the preference takes effect from each chat's next message.
+    chrome: bool = True
+    # An Anthropic API key to charge this process to (api_credits); "" runs
+    # on whatever Claude Code is signed in with.
+    api_key: str = ""
 
 
 ASK_THROUGH_THE_TOOL = ask_through_the_tool("AskUserQuestion")
@@ -140,6 +150,10 @@ ASK_THROUGH_THE_TOOL = ask_through_the_tool("AskUserQuestion")
 # old to know `--include-partial-messages`, the same way the permission
 # prompt tool is dropped. Read by `build_command` on the next start.
 include_partial_messages = True
+
+# Preferences, "Let Claude use Chrome". Set by the window's settings; read
+# when a turn builds its Wants.
+use_chrome = True
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +293,9 @@ def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:
         cmd.extend(["--model", wants.model])
     if wants.effort:
         cmd.extend(["--effort", wants.effort])
+    # Claude in Chrome: pages in Chrome or Edge, through the extension. Without
+    # the extension the CLI simply has no browser tools.
+    cmd.append("--chrome" if wants.chrome and not wants.api_key else "--no-chrome")
     if wants.fork_source:
         if wants.session_id or not wants.fork_at:
             raise ValueError("A fork needs a source boundary and no destination session yet.")
@@ -357,7 +374,7 @@ class ClaudeSession:
             errors="replace",
             # `claude` is often a shim that has to find `node`, and a window
             # started from a Dock or Start menu has a PATH that holds neither.
-            env=claude_env(binary),
+            env=claude_env(binary, wants.api_key),
             # The shim may have the real agent as its child; stopping has to
             # stop that too.
             **own_group_kwargs(),

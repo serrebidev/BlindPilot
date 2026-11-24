@@ -61,7 +61,7 @@ Download `BlindPilot-macOS-arm64.zip`. It runs on Apple Silicon Macs and needs m
 
 **Linux**
 
-Linux currently runs from source; no Linux release artifact is published. It needs GTK 3 and its AT-SPI bridge, which most desktop distributions already have; Orca announces from the same tree. If GTK is missing, install the distribution's `libgtk-3-0` (and `at-spi2-core` for announcements).
+Download `BlindPilot-Linux-x64.tar.gz`, unpack it with `tar -xzf BlindPilot-Linux-x64.tar.gz` in a folder you own, and run `BlindPilot/BlindPilot`. It updates itself in place. It needs GTK 3 and its AT-SPI bridge, which most desktop distributions already have; Orca announces from the same tree. If GTK is missing, install the distribution's `libgtk-3-0` (and `at-spi2-core` for announcements).
 
 Only one copy runs at a time. Start it again on Windows and it brings the open one to the front.
 

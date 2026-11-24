@@ -1,3 +1,35 @@
+# BlindPilot 0.61.0
+
+This release brings BlindPilot up to date with The Chat Place 0.6.3, ships a Linux download again, and makes Command Code's quick tasks use a stealth model when one is offered.
+
+## Linux
+
+**BlindPilot is released for Linux again.** Every release now has `BlindPilot-Linux-x64.tar.gz` beside the Windows and Mac downloads. All three are built on GitHub's runners and published on Forgejo. Unpack it in a folder you own and run `BlindPilot/BlindPilot`. Help, Check for Updates installs new versions in place: it waits for BlindPilot to close, swaps in the new folder, and puts the old one back if anything goes wrong. The Linux build needs GTK 3 and AT-SPI from your distribution, which most desktops already have. Linux was withdrawn earlier because the test suite failed under the distribution's older wxPython. The build now uses wxPython 4.3, where the suite passes.
+
+## Claude Code
+
+**Claude in Chrome.** Claude can now use Chrome or Edge in Claude Code tabs: open pages, read them, fill in forms and click. You need the Claude in Chrome extension, signed in to the same claude.ai account as Claude Code. Each website asks your permission first. Preferences, "Let Claude use Chrome", turns it off. A change takes effect from each tab's next message.
+
+**API credits.** A Claude Code tab can now be charged to an Anthropic API key instead of your Claude subscription. To set it up, open Conversation, Find and Browse, API Credits, add your key, and choose "Charge this tab to API credits". The key is kept in this computer's credential store. BlindPilot removes any redirect from Claude Code's environment, so the key goes only to Anthropic.
+
+Before the tab's first message on API credits, BlindPilot asks "Send on API credits?". After you send, you hear "Sent on API credits", and each reply ends with what it cost, for example "Cost: 6 cents". The cost is what Claude Code reports for that reply.
+
+An overall limit, $20 to start, stops sending once it is spent. Your message stays in the box. Raise the limit or reset the total in the same dialog. The totals are BlindPilot's own count on this computer, and the Claude Console shows what you are actually billed. Claude in Chrome is off on API credits, because Claude Code turns it off when it runs with a key.
+
+**A warning when your subscription would be billed to a key.** If an API key in your environment, or an apiKeyHelper or key in a Claude Code settings file, would make Claude Code charge a subscription tab to that key, BlindPilot now tells you once per tab before the first message. A `claude setup-token` sign-in belongs to your subscription and does not trigger it.
+
+## Codex
+
+**Long messages go through.** Codex takes at most 32,000 characters in a message, so a longer one, such as a pasted build log, used to fail. BlindPilot now saves it to a temporary file and asks Codex to read the file. You hear that it was given to Codex as a file, and the file is deleted when the turn ends.
+
+## Links
+
+**Open files named in a reply.** The Links list (Ctrl+Shift+L) now finds files on this computer as well as web addresses. That includes links to files, file paths in code, and a code block that holds just a path. Relative paths are taken from the tab's folder. A file gets Open, which opens it in its usual app, and Open Containing Folder. Programs, scripts and shortcuts only offer the folder and Copy, so a reply can never start a program with one key. A file that isn't there is Copy only. Each row says which of these applies, and the file is checked again just before it opens.
+
+## Command Code
+
+**Quick tasks use a stealth model first.** Command Code retired the free Inkling 2 Small model. The quick tier no longer depends on one free model's name. It takes the first stealth model the installed Command Code offers. If there is none, it takes a free one, and only then the paid shortlist. Stealth models are previews whose providers may train on what you send.
+
 # BlindPilot 0.60.0
 
 This release brings over the features FastChat added since BlindPilot last caught up with it. Chat conversations on any account can now search the web and read pages, OpenAI accounts can take attachments and show the model's thinking, and Linux gets computer use and a voice of its own. Half of the work was done by muse.ai, the other half by Claude.
