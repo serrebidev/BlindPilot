@@ -53,6 +53,7 @@ from accessible_ai.providers.protocols import (
     LENGTH_LIMIT_NOTICE,
     TEXT_EXTENSIONS,
     SourceCollector,
+    attachment_text,
 )
 from accessible_ai.storage.credentials import CredentialStore
 from accessible_ai.storage.paths import app_data_dir
@@ -714,8 +715,9 @@ def responses_input(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str,
                 )
             if mime_type.startswith("image/"):
                 parts.append({"type": "input_image", "image_url": data_url})
-            elif mime_type.startswith("text/") or suffix in TEXT_EXTENSIONS:
-                text = attachment.data.decode("utf-8", errors="replace")
+            elif (mime_type.startswith("text/") or suffix in TEXT_EXTENSIONS) and (
+                text := attachment_text(attachment)
+            ) is not None:
                 parts.append(
                     {
                         "type": "input_text",

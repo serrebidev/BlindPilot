@@ -318,7 +318,8 @@ def show_import_dialog(parent, speak: Callable[[str], None]) -> None:
             outer.Add(
                 wx.StaticText(
                     self,
-                    label="Import a Basilisk (.bskc) or BlindPilot interchange (.json) conversation.",
+                    label="Import a Basilisk (.bskc), BlindPilot interchange (.json) "
+                    "or VoLlama (.json) conversation.",
                 ),
                 0,
                 wx.ALL,
@@ -346,7 +347,8 @@ def show_import_dialog(parent, speak: Callable[[str], None]) -> None:
                 defaultDir=str(Path.home()),
                 style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                 wildcard="Basilisk conversations (*.bskc)|*.bskc|"
-                "BlindPilot interchange (*.json)|*.json|All files|*.*",
+                "BlindPilot interchange (*.json)|*.json|"
+                "VoLlama saves (*.json)|*.json|All files|*.*",
             )
             try:
                 if dialog.ShowModal() != wx.ID_OK or not dialog.GetPath():
@@ -360,8 +362,13 @@ def show_import_dialog(parent, speak: Callable[[str], None]) -> None:
             def work() -> backup.ImportReport:
                 database = Database(database_path())
                 if path.suffix.lower() == ".json":
-                    data = json.loads(path.read_text(encoding="utf-8"))
-                    return backup.import_interchange(data, database)
+                    try:
+                        data = json.loads(path.read_text(encoding="utf-8"))
+                    except ValueError:
+                        data = None
+                    if isinstance(data, dict) and data.get("format") == backup.INTERCHANGE_FORMAT:
+                        return backup.import_interchange(data, database)
+                    return backup.import_vollama(path, database)
                 return backup.import_bskc(path, database)
 
             self._tasks.start(work, self._imported)

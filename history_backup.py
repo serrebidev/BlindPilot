@@ -596,6 +596,157 @@ def _guess_mime(name: str) -> str:
     }.get(suffix, "application/octet-stream")
 
 
+# ----- VoLlama JSON import -----
+
+_VOLLAMA_ROLES = ("system", "user", "assistant", "tool")
+
+
+def import_vollama(
+    path_or_data: Any, database: Database, cancel: Any | None = None
+) -> ImportReport:
+    """Import a VoLlama JSON save as a new Chat conversation.
+
+    ``path_or_data`` is a path to the save, the save's JSON text, or the
+    already-parsed save. A save is either a JSON array of messages or an
+    object with a ``messages`` array. Each message has a ``role`` in
+    system/user/assistant/tool, a string-or-null ``content``, and may carry
+    an ``extra`` or ``additional_kwargs`` object holding reasoning,
+    ``tool_call_id``, ``name`` and ``tool_calls``.
+
+    Everything is validated before anything is created, so unrelated JSON
+    is refused and leaves no conversation behind. The title is the file
+    stem. Leading system messages become the conversation's system prompt;
+    with none, ``system_prompt_snapshot`` is left unset so the default
+    prompt applies. Message order is kept.
+    """
+    title = "Imported VoLlama conversation"
+    data: Any = path_or_data
+    if isinstance(path_or_data, (str, os.PathLike)):
+        candidate = Path(path_or_data)
+        is_path = isinstance(path_or_data, os.PathLike) or (
+            candidate.is_file() and not str(path_or_data).lstrip().startswith(("[", "{"))
+        )
+        if is_path:
+            title = candidate.stem or title
+            try:
+                raw_text = candidate.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise HistoryBackupError(f"The VoLlama save could not be read: {exc}") from None
+            try:
+                data = json.loads(raw_text)
+            except ValueError:
+                raise HistoryBackupError("The VoLlama save is not valid JSON.") from None
+        else:
+            try:
+                data = json.loads(str(path_or_data))
+            except ValueError:
+                raise HistoryBackupError("The VoLlama save is not valid JSON.") from None
+    elif isinstance(path_or_data, (bytes, bytearray)):
+        try:
+            data = json.loads(bytes(path_or_data).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise HistoryBackupError("The VoLlama save is not valid JSON.") from None
+
+    if isinstance(data, list):
+        messages_data = data
+    elif isinstance(data, dict) and isinstance(data.get("messages"), list):
+        messages_data = data["messages"]
+        if isinstance(data.get("title"), str) and data["title"]:
+            # A parsed object handed in directly has no file stem to use.
+            if not isinstance(path_or_data, (str, os.PathLike)):
+                title = data["title"]
+    else:
+        raise HistoryBackupError(
+            "The VoLlama save could not be read: "
+            "expected a JSON message list or an object containing one."
+        )
+
+    # Validate everything before creating anything.
+    parsed: list[tuple[str, str, dict[str, Any]]] = []
+    for item in messages_data:
+        if not isinstance(item, dict):
+            raise HistoryBackupError(
+                "The VoLlama save contains a message with an invalid role or content."
+            )
+        role = item.get("role")
+        content = item.get("content")
+        if role not in _VOLLAMA_ROLES or not (content is None or isinstance(content, str)):
+            raise HistoryBackupError(
+                "The VoLlama save contains a message with an invalid role or content."
+            )
+        extra: Any = {}
+        for key in ("extra", "additional_kwargs"):
+            if key in item and item[key] is not None and not isinstance(item[key], dict):
+                raise HistoryBackupError("The VoLlama save contains invalid message metadata.")
+        raw_extra = item.get("extra")
+        if isinstance(raw_extra, dict):
+            extra = raw_extra
+        elif isinstance(item.get("additional_kwargs"), dict):
+            extra = item["additional_kwargs"]
+        for key in ("reasoning", "tool_call_id", "name"):
+            value = extra.get(key)
+            if value is not None and not isinstance(value, str):
+                raise HistoryBackupError("The VoLlama save contains invalid message metadata.")
+        tool_calls = extra.get("tool_calls")
+        if tool_calls is not None:
+            if not isinstance(tool_calls, list):
+                raise HistoryBackupError("The VoLlama save contains an invalid tool call list.")
+            for call in tool_calls:
+                function = call.get("function") if isinstance(call, dict) else None
+                if (
+                    not isinstance(call, dict)
+                    or not isinstance(function, dict)
+                    or not isinstance(call.get("id"), str)
+                    or not call.get("id")
+                    or not isinstance(function.get("name"), str)
+                    or not function.get("name")
+                ):
+                    raise HistoryBackupError("The VoLlama save contains an invalid tool call.")
+                arguments = function.get("arguments")
+                if arguments is not None and not isinstance(
+                    arguments, (str, dict, list, int, float, bool)
+                ):
+                    raise HistoryBackupError("The VoLlama save contains an invalid tool call.")
+        parsed.append((str(role), content or "", dict(extra)))
+
+    _check_cancelled(cancel)
+
+    system_parts: list[str] = []
+    index = 0
+    while index < len(parsed) and parsed[index][0] == "system":
+        system_parts.append(parsed[index][1])
+        index += 1
+
+    unsupported: list[str] = []
+    for _role, _content, extra in parsed:
+        if extra.get("reasoning"):
+            unsupported.append("reasoning is not carried over")
+        if extra.get("tool_calls"):
+            unsupported.append("tool calls are not carried over")
+        if extra.get("tool_call_id") or extra.get("name"):
+            unsupported.append("tool result names are not carried over")
+
+    if system_parts:
+        conversation_id = database.create_conversation(
+            Conversation(title=title, system_prompt_snapshot="\n\n".join(system_parts))
+        )
+    else:
+        # Leave system_prompt_snapshot unset: the default prompt applies.
+        conversation_id = database.create_conversation(Conversation(title=title))
+    count = 0
+    for role, content, _extra in parsed[index:]:
+        _check_cancelled(cancel)
+        database.add_message(Message(conversation_id=conversation_id, role=role, content=content))
+        count += 1
+    return ImportReport(
+        conversation_id=conversation_id,
+        title=title,
+        messages=count,
+        attachments=0,
+        unsupported=tuple(dict.fromkeys(unsupported)),
+    )
+
+
 # ----- Interchange export/import -----
 
 
