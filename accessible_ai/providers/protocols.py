@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import json
 from collections.abc import Callable, Iterator
 from pathlib import PurePath
@@ -50,6 +51,58 @@ TEXT_EXTENSIONS = {
 
 LENGTH_LIMIT_NOTICE = "Response cut off at the model's length limit"
 
+# Other files reach a Messages request as base64 only up to this size; past
+# it the file is named and left out, rather than sent as garbled text.
+MAX_INLINE_BINARY_BYTES = 100 * 1024
+
+_ALLOWED_CONTROLS = frozenset(b"\t\n\f\r")
+
+
+def attachment_text(attachment: Any) -> str | None:
+    """An attachment's bytes as text, or None when they look binary.
+
+    Text arrives in more encodings than UTF-8: a byte order mark names
+    UTF-8, UTF-16 or UTF-32 outright, strict UTF-8 covers the modern
+    default, and what is left is tried as cp1252, the older Windows
+    encoding. Bytes with NULs or a high ratio of control characters are
+    not text in any of those, however they decode, so they return None
+    instead of mojibake. ``attachment`` is a MessageAttachment; raw bytes
+    are accepted too.
+    """
+    data = bytes(getattr(attachment, "data", attachment) or b"")
+    if not data:
+        return ""
+    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        try:
+            return data.decode("utf-32")
+        except (UnicodeDecodeError, ValueError):
+            return None
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        try:
+            return data.decode("utf-16")
+        except (UnicodeDecodeError, ValueError):
+            return None
+    if data.startswith(codecs.BOM_UTF8):
+        try:
+            return data.decode("utf-8-sig")
+        except (UnicodeDecodeError, ValueError):
+            return None
+    if b"\x00" in data:
+        return None
+    controls = sum(
+        1 for byte in data if (byte < 0x20 and byte not in _ALLOWED_CONTROLS) or byte == 0x7F
+    )
+    if controls * 10 > len(data):
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("cp1252")
+    except UnicodeDecodeError:
+        return None
+
 
 def _raise_choice_error(choice: dict[str, Any]) -> None:
     """OpenRouter reports a failure part-way through inside the choice itself.
@@ -74,8 +127,11 @@ def attachment_content_part(attachment: MessageAttachment) -> dict[str, Any]:
     suffix = PurePath(attachment.filename).suffix.lower()
 
     if mime_type.startswith("text/") or suffix in TEXT_EXTENSIONS:
-        text = attachment.data.decode("utf-8", errors="replace")
-        return {"type": "text", "text": f"[Attached file: {attachment.filename}]\n{text}"}
+        text = attachment_text(attachment)
+        if text is not None:
+            return {"type": "text", "text": f"[Attached file: {attachment.filename}]\n{text}"}
+        # Claimed as text but binary underneath: fall through to the file
+        # part below, which carries the bytes as base64, not mojibake.
     if mime_type.startswith("image/"):
         return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}}
     if mime_type.startswith("audio/"):
@@ -150,8 +206,28 @@ def attachment_source_block(attachment: MessageAttachment) -> dict[str, Any]:
             "type": "document",
             "source": {"type": "base64", "media_type": "application/pdf", "data": encoded},
         }
-    text = attachment.data.decode("utf-8", errors="replace")
-    return {"type": "text", "text": f"[Attached file: {attachment.filename}]\n{text}"}
+    text = attachment_text(attachment)
+    if text is not None:
+        return {"type": "text", "text": f"[Attached file: {attachment.filename}]\n{text}"}
+    # Not an image, not a PDF and not text: never send the bytes decoded
+    # as if they were text. Small files travel as base64 in a text block;
+    # large ones are named and left out.
+    size = len(attachment.data)
+    if size <= MAX_INLINE_BINARY_BYTES:
+        return {
+            "type": "text",
+            "text": (
+                f"[Attached file: {attachment.filename}, {mime_type}, "
+                f"{size} bytes, base64]\n{encoded}"
+            ),
+        }
+    return {
+        "type": "text",
+        "text": (
+            f"[Attached file: {attachment.filename}, {mime_type}, {size} bytes] "
+            "This file is binary and too large to include."
+        ),
+    }
 
 
 def reasoning_text(payload: dict[str, Any]) -> str:
