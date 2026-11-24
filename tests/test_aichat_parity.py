@@ -39,7 +39,7 @@ def test_web_addresses_and_other_schemes_are_not_files():
     assert file_target("mailto:a@b.c") is None
     assert file_target("relative.txt") is None  # no working folder to find it in
     assert file_target("file:///tmp/a.txt") is not None
-    assert file_target(r"C:\work\a.txt") is not None
+    assert file_target(os.path.abspath("a.txt")) is not None  # C:\... here, /... elsewhere
 
 
 def test_a_short_codex_message_goes_as_text():
