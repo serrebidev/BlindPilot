@@ -1,3 +1,7 @@
+# BlindPilot 0.61.1
+
+**Focus comes back with you.** Switching away from the BlindPilot window and back (for example with Alt+Tab) could leave keyboard focus on the Attach button instead of where you left it, so every message started with a hunt for the prompt field. The window now remembers which control had focus when you left it and puts focus back there when you return; if there is nothing to restore, focus starts in the prompt. Reported by István Tábor — thank you.
+
 # BlindPilot 0.61.0
 
 This release brings BlindPilot up to date with The Chat Place 0.6.3, ships a Linux download again, and makes Command Code's quick tasks use a stealth model when one is offered.

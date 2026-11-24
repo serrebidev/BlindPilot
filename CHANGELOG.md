@@ -2,6 +2,10 @@
 
 Release history for BlindPilot, newest first. Entries are short by design. The reasoning behind each change is in the commit messages.
 
+## v0.61.1 - 2026-11-24
+
+Window activation focus (issue #25, István Tábor): the main frame records the control that had focus when it is deactivated and restores it on activation, falling back to the mode's starting control (the prompt) when nothing restorable remains — Alt+Tab back into the window no longer lands on the Attach button. Regression tests in tests/test_window_activation_focus.py.
+
 ## v0.61.0 - 2026-11-23
 
 Linux x64 ships again (`BlindPilot-Linux-x64.tar.gz`, GitHub `ubuntu-24.04` runner with the wxPython 4.3 wheel, published on Forgejo; ADR 0004 second amendment) and self-updates through a folder-swap helper (`_LINUX_HELPER`). The Chat Place parity through 0.6.3: Claude in Chrome (`--chrome`/`--no-chrome`, Preferences "Let Claude use Chrome", on by default); Claude Code tabs on API credits (`api_credits.py`: key in the credential store, redirects stripped from the env, per-reply cost from the `total_cost_usd` delta, overall limit $20, first-send confirmation, Conversation, Find and Browse, API Credits); a once-per-tab warning when an API key would bill a subscription tab; Codex messages over 32,000 characters sent as a temporary file; local file links in the Links list with Open and Open Containing Folder (code-running types folder/copy only). Command Code quick tier: first stealth model in the catalog wins, then any free model, then the shortlist; retired `:free` ids are no longer reported missing.
