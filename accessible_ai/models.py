@@ -240,6 +240,9 @@ class OpenRouterFeatures:
     # Kept here, though only the ChatGPT plan reads it, so the one JSON
     # column still holds every per-conversation request choice.
     verbosity: str = VERBOSITY_DEFAULT
+    # BlindPilot's own read-only web tools (search, read a page, the time) for
+    # accounts that have none of their own: not OpenRouter, not a ChatGPT plan.
+    web_tools: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -251,6 +254,7 @@ class OpenRouterFeatures:
             "show_reasoning": bool(self.show_reasoning),
             "pdf_engine": self.pdf_engine,
             "verbosity": self.verbosity,
+            "web_tools": bool(self.web_tools),
         }
 
     @classmethod
@@ -282,6 +286,7 @@ class OpenRouterFeatures:
             show_reasoning=payload.get("show_reasoning", True) is not False,
             pdf_engine=engine if engine in PDF_ENGINES else PDF_ENGINE_OFF,
             verbosity=verbosity if verbosity in VERBOSITY_LEVELS else VERBOSITY_DEFAULT,
+            web_tools=payload.get("web_tools", True) is not False,
         )
 
     def request_tools(self) -> list[dict[str, Any]]:

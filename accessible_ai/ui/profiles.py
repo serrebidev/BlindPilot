@@ -175,6 +175,18 @@ class ProfileEditorDialog(wx.Dialog):
         self.search_context.SetToolTip("How much of each page found is given to the model.")
         grid.Add(self.search_context, 1, wx.EXPAND)
 
+        grid.Add(wx.StaticText(panel, label="Web tools:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.web_tools = wx.CheckBox(
+            panel, label="Let the model search the web, read pages and check the time"
+        )
+        self.web_tools.SetName("Web tools")
+        self.web_tools.SetToolTip(
+            "BlindPilot runs these itself for accounts without tools of their own: a DuckDuckGo "
+            "search, reading one public page, and this computer's clock. They only read, so "
+            "nothing asks first. OpenRouter and ChatGPT plan accounts use their own tools instead."
+        )
+        grid.Add(self.web_tools, 1, wx.EXPAND)
+
         grid.Add(
             wx.StaticText(panel, label="Read attached PDFs with:"), 0, wx.ALIGN_CENTER_VERTICAL
         )
@@ -267,6 +279,7 @@ class ProfileEditorDialog(wx.Dialog):
             "" if features.reasoning_max_tokens is None else str(features.reasoning_max_tokens)
         )
         self.show_reasoning.SetValue(features.show_reasoning)
+        self.web_tools.SetValue(features.web_tools)
         self.search_max_results.SetValue(
             "" if features.search_max_results is None else str(features.search_max_results)
         )
@@ -355,6 +368,7 @@ class ProfileEditorDialog(wx.Dialog):
             show_reasoning=self.show_reasoning.GetValue(),
             pdf_engine=_PDF_ENGINE_VALUES[max(self.pdf_engine.GetSelection(), 0)],
             verbosity=_VERBOSITY_VALUES[max(self.verbosity.GetSelection(), 0)],
+            web_tools=self.web_tools.GetValue(),
         )
 
         try:

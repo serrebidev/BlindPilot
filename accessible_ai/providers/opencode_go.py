@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from threading import Event
 
@@ -49,13 +50,7 @@ class OpenCodeGoProvider(ProtocolMixin):
 
     def generate(self, settings: GenerationSettings, cancel: Event) -> Iterator[StreamEvent]:
         normalized = settings.model.removeprefix("opencode-go/")
-        effective = GenerationSettings(
-            model=normalized,
-            messages=settings.messages,
-            temperature=settings.temperature,
-            max_output_tokens=settings.max_output_tokens,
-            streaming=settings.streaming,
-        )
+        effective = dataclasses.replace(settings, model=normalized)
         protocol = self.protocol_for_model(normalized)
         if protocol == API_MODE_RESPONSES:
             yield from self.generate_responses(effective, cancel)

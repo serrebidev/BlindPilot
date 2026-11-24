@@ -6,6 +6,7 @@ from threading import Event
 
 import httpx
 
+from accessible_ai import web_tools
 from accessible_ai.models import Account, GenerationSettings, StreamEvent
 from accessible_ai.providers.base import ProviderError
 from accessible_ai.providers.factory import create_provider
@@ -46,6 +47,24 @@ class GenerationService:
                     yield event
                 return
             except (ProviderError, httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                web = [tool for tool in settings.tools if _is_web_tool(tool)]
+                if (
+                    isinstance(exc, ProviderError)
+                    and not started
+                    and web
+                    and exc.status_code in {400, 404, 422}
+                    and "tool" in str(exc).lower()
+                ):
+                    # A model that takes no tools (many local Ollama models)
+                    # still answers, just without looking anything up.
+                    settings = replace(
+                        settings, tools=[t for t in settings.tools if not _is_web_tool(t)]
+                    )
+                    yield StreamEvent(
+                        "status",
+                        "This model does not take tools, so it answered without web search.",
+                    )
+                    continue
                 if started or attempt == 2:
                     raise
                 delay = float(attempt + 1)
@@ -60,3 +79,7 @@ class GenerationService:
                 )
                 if cancel.wait(delay):
                     return
+
+
+def _is_web_tool(tool: dict) -> bool:
+    return (tool.get("function") or {}).get("name") in web_tools.NAMES

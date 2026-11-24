@@ -50,6 +50,10 @@ TEXT_EXTENSIONS = {
 
 LENGTH_LIMIT_NOTICE = "Response cut off at the model's length limit"
 
+# (base URL, model) pairs that refused Responses reasoning options this run,
+# so a model without thinking is not sent them, refused and retried each turn.
+_REASONING_REFUSED: set[tuple[str, str]] = set()
+
 
 def _raise_choice_error(choice: dict[str, Any]) -> None:
     """OpenRouter reports a failure part-way through inside the choice itself.
@@ -246,7 +250,12 @@ class ToolCallCollector:
         if name.startswith(cls.SERVER_PREFIX):
             spoken = name[len(cls.SERVER_PREFIX) :].replace("experimental__", "")
             return f"Running {spoken.replace('_', ' ')}"
-        return f"The model asked to run {name}"
+        spoken = {
+            "web_search": "Searching the web",
+            "fetch_page": "Reading a web page",
+            "current_time": "Checking the date and time",
+        }.get(name)
+        return spoken or f"The model asked to run {name}"
 
     def client_side_names(self) -> set[str]:
         """Names of calls this application would have had to run itself."""
@@ -493,27 +502,117 @@ class ProtocolMixin(BaseProvider):
         settings: GenerationSettings,
         cancel: Event,
     ) -> Iterator[StreamEvent]:
-        if any(message.get("attachments") for message in settings.messages):
-            raise ProviderError(
-                "File attachments need an account using the Chat Completions or Messages protocol. "
-                "Pick a different model, or set the account's API mode to Chat Completions."
-            )
+        # The ChatGPT plan's input builder: system text becomes instructions and
+        # attachments become input_image / input_file / input_text parts.
+        from accessible_ai.providers.chatgpt import responses_input
+
+        tool_executor = self.tool_executor(settings)
         url = self.build_url(self.account.responses_endpoint)
         headers = self.headers()
-        body: dict[str, Any] = dict(self.account.custom_body)
-        body.update(
-            {
-                "model": settings.model,
-                "input": settings.messages,
-                "stream": bool(settings.streaming),
-            }
-        )
-        if settings.temperature is not None:
-            body["temperature"] = settings.temperature
-        if settings.max_output_tokens is not None:
-            body["max_output_tokens"] = settings.max_output_tokens
+        instructions, items = responses_input(settings.messages)
+        tools = responses_tools(settings.tools)
+        refusal_key = (self.account.base_url, settings.model)
+        reasoning = None if refusal_key in _REASONING_REFUSED else settings.reasoning
+
+        def build_body() -> dict[str, Any]:
+            body: dict[str, Any] = dict(self.account.custom_body)
+            body.update(
+                {
+                    "model": settings.model,
+                    "input": items,
+                    "stream": bool(settings.streaming),
+                }
+            )
+            if instructions:
+                body["instructions"] = instructions
+            if settings.temperature is not None:
+                body["temperature"] = settings.temperature
+            if settings.max_output_tokens is not None:
+                body["max_output_tokens"] = settings.max_output_tokens
+            if reasoning:
+                body["reasoning"] = reasoning
+            if tools:
+                body["tools"] = tools
+            return body
 
         received_text = False
+        named = ToolCallCollector()
+        for _round in range(30):
+            calls: list[dict[str, Any]] = []
+            round_text: list[str] = []
+            try:
+                for event in self._responses_round(url, headers, build_body(), settings, cancel):
+                    if event.kind == "_call":
+                        calls.append(event.metadata)
+                        continue
+                    if event.kind == "text":
+                        received_text = True
+                        round_text.append(event.text)
+                    elif event.kind == "tool":
+                        for announcement in named.absorb({"tool_calls": [event.metadata]}):
+                            yield StreamEvent("tool", text=announcement)
+                        continue
+                    yield event
+            except ProviderError as exc:
+                # Asked-for thinking that the model or organization refuses
+                # (gpt-4o takes no reasoning; an unverified organization gets
+                # no summaries) is dropped rather than failing the turn.
+                refused = str(exc).lower()
+                if (
+                    reasoning
+                    and exc.status_code == 400
+                    and not received_text
+                    and ("reasoning" in refused or "summary" in refused)
+                ):
+                    reasoning = None
+                    _REASONING_REFUSED.add(refusal_key)
+                    yield StreamEvent(
+                        "status",
+                        text="This model does not take thinking settings, so it answered without them.",
+                    )
+                    continue
+                raise
+            if not (tool_executor is not None and calls and not cancel.is_set()):
+                break
+            if round_text:
+                items.append({"role": "assistant", "content": "".join(round_text)})
+            for call in calls:
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call["call_id"],
+                        "name": call["name"],
+                        "arguments": call["arguments"] or "{}",
+                    }
+                )
+            for call in calls:
+                try:
+                    arguments = json.loads(call["arguments"] or "{}")
+                except (TypeError, ValueError):
+                    arguments = {}
+                result = tool_executor(
+                    call["name"], arguments if isinstance(arguments, dict) else {}
+                )
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call["call_id"],
+                        "output": str(result),
+                    }
+                )
+        if not received_text and not cancel.is_set():
+            raise ProviderError(self._empty_response_reason(named, executor=tool_executor))
+        yield StreamEvent("done")
+
+    def _responses_round(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: dict[str, Any],
+        settings: GenerationSettings,
+        cancel: Event,
+    ) -> Iterator[StreamEvent]:
+        """One Responses request. Function calls come out as ``_call`` events."""
         with self.client() as client:
             if settings.streaming:
                 with client.stream("POST", url, headers=headers, json=body) as response:
@@ -524,14 +623,31 @@ class ProtocolMixin(BaseProvider):
                         if event_type == "response.output_text.delta":
                             delta = data.get("delta")
                             if isinstance(delta, str) and delta:
-                                received_text = True
                                 yield StreamEvent("text", text=delta)
-                        elif event_type == "response.failed":
+                        elif event_type == "response.reasoning_summary_text.delta":
+                            delta = data.get("delta")
+                            if isinstance(delta, str) and delta:
+                                yield StreamEvent("reasoning", text=delta)
+                        elif event_type == "response.output_item.added":
+                            item = data.get("item")
+                            if isinstance(item, dict) and item.get("type") == "function_call":
+                                yield StreamEvent(
+                                    "tool",
+                                    metadata={
+                                        "id": str(item.get("call_id") or item.get("id") or ""),
+                                        "name": str(item.get("name") or ""),
+                                    },
+                                )
+                        elif event_type == "response.output_item.done":
+                            item = data.get("item")
+                            if isinstance(item, dict) and item.get("type") == "function_call":
+                                yield StreamEvent("_call", metadata=_responses_call(item))
+                        elif event_type in {"response.failed", "error"}:
                             response_data = data.get("response")
                             error = (
                                 response_data.get("error")
                                 if isinstance(response_data, dict)
-                                else None
+                                else data.get("error") or data
                             )
                             detail = (
                                 error.get("message")
@@ -546,13 +662,27 @@ class ProtocolMixin(BaseProvider):
                 self.raise_for_status(response)
                 yield StreamEvent("headers", metadata=dict(response.headers))
                 payload = response.json()
+                output = payload.get("output") if isinstance(payload, dict) else None
+                for item in output if isinstance(output, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "reasoning":
+                        summary = "".join(
+                            str(part.get("text") or "")
+                            for part in item.get("summary") or []
+                            if isinstance(part, dict)
+                        )
+                        if summary:
+                            yield StreamEvent("reasoning", text=summary)
+                    elif item.get("type") == "function_call":
+                        call = _responses_call(item)
+                        yield StreamEvent(
+                            "tool", metadata={"id": call["call_id"], "name": call["name"]}
+                        )
+                        yield StreamEvent("_call", metadata=call)
                 text = self._responses_text(payload)
                 if text:
-                    received_text = True
                     yield StreamEvent("text", text=text)
-        if not received_text and not cancel.is_set():
-            raise ProviderError("The provider completed the request without returning any text.")
-        yield StreamEvent("done")
 
     @staticmethod
     def _responses_text(payload: Any) -> str:
@@ -584,6 +714,7 @@ class ProtocolMixin(BaseProvider):
         settings: GenerationSettings,
         cancel: Event,
     ) -> Iterator[StreamEvent]:
+        tool_executor = self.tool_executor(settings)
         url = self.build_url(self.account.messages_endpoint)
         headers = self.headers()
         headers.setdefault("anthropic-version", "2023-06-01")
@@ -601,46 +732,187 @@ class ProtocolMixin(BaseProvider):
                 if attachments:
                     body_content = messages_content(content, attachments)
                 messages.append({"role": role, "content": body_content})
+        tools = messages_tools(settings.tools)
 
-        body: dict[str, Any] = dict(self.account.custom_body)
-        body.update(
-            {
-                "model": settings.model,
-                "messages": messages,
-                "max_tokens": settings.max_output_tokens or 4096,
-                "stream": bool(settings.streaming),
-            }
-        )
-        if system_parts:
-            body["system"] = "\n\n".join(system_parts)
-        if settings.temperature is not None:
-            body["temperature"] = settings.temperature
+        def build_body() -> dict[str, Any]:
+            body: dict[str, Any] = dict(self.account.custom_body)
+            body.update(
+                {
+                    "model": settings.model,
+                    "messages": messages,
+                    "max_tokens": settings.max_output_tokens or 4096,
+                    "stream": bool(settings.streaming),
+                }
+            )
+            if system_parts:
+                body["system"] = "\n\n".join(system_parts)
+            if settings.temperature is not None:
+                body["temperature"] = settings.temperature
+            if tools:
+                body["tools"] = tools
+            return body
 
         received_text = False
-        with self.client() as client:
-            if settings.streaming:
-                with client.stream("POST", url, headers=headers, json=body) as response:
-                    self.raise_for_status(response)
-                    yield StreamEvent("headers", metadata=dict(response.headers))
-                    for data in iter_sse_json(response, cancel):
-                        if data.get("type") != "content_block_delta":
-                            continue
-                        delta = data.get("delta")
-                        if isinstance(delta, dict):
+        cut_off = False
+        named = ToolCallCollector()
+        for _round in range(30):
+            # Blocks of this round's answer by index: text and tool_use, the
+            # latter with its input JSON assembled from partial deltas.
+            blocks: dict[int, dict[str, Any]] = {}
+            with self.client() as client:
+                if settings.streaming:
+                    with client.stream("POST", url, headers=headers, json=build_body()) as response:
+                        self.raise_for_status(response)
+                        yield StreamEvent("headers", metadata=dict(response.headers))
+                        for data in iter_sse_json(response, cancel):
+                            kind = data.get("type")
+                            if kind == "error":
+                                error = data.get("error")
+                                detail = error.get("message") if isinstance(error, dict) else error
+                                raise ProviderError(f"Provider stream error: {detail or data}")
+                            if kind == "message_delta":
+                                delta = data.get("delta")
+                                if (
+                                    isinstance(delta, dict)
+                                    and delta.get("stop_reason") == "max_tokens"
+                                ):
+                                    cut_off = True
+                                continue
+                            index = data.get("index", 0)
+                            if not isinstance(index, int):
+                                continue
+                            if kind == "content_block_start":
+                                block = data.get("content_block")
+                                if isinstance(block, dict) and block.get("type") == "tool_use":
+                                    blocks[index] = {
+                                        "type": "tool_use",
+                                        "id": str(block.get("id") or ""),
+                                        "name": str(block.get("name") or ""),
+                                        "json": "",
+                                    }
+                                    for announcement in named.absorb(
+                                        {"tool_calls": [blocks[index]]}
+                                    ):
+                                        yield StreamEvent("tool", text=announcement)
+                                continue
+                            if kind != "content_block_delta":
+                                continue
+                            delta = data.get("delta")
+                            if not isinstance(delta, dict):
+                                continue
+                            if delta.get("type") == "input_json_delta" and index in blocks:
+                                blocks[index]["json"] += str(delta.get("partial_json") or "")
+                                continue
+                            thinking = delta.get("thinking")
+                            if isinstance(thinking, str) and thinking:
+                                yield StreamEvent("reasoning", text=thinking)
                             text = delta.get("text")
                             if isinstance(text, str) and text:
                                 received_text = True
+                                slot = blocks.setdefault(index, {"type": "text", "text": ""})
+                                slot["text"] = slot.get("text", "") + text
                                 yield StreamEvent("text", text=text)
-            else:
-                response = client.post(url, headers=headers, json=body)
-                self.raise_for_status(response)
-                yield StreamEvent("headers", metadata=dict(response.headers))
-                payload = response.json()
-                content = payload.get("content", []) if isinstance(payload, dict) else []
-                text = content_to_text(content)
-                if text:
-                    received_text = True
-                    yield StreamEvent("text", text=text)
+                else:
+                    response = client.post(url, headers=headers, json=build_body())
+                    self.raise_for_status(response)
+                    yield StreamEvent("headers", metadata=dict(response.headers))
+                    payload = response.json()
+                    content = payload.get("content", []) if isinstance(payload, dict) else []
+                    cut_off = (
+                        isinstance(payload, dict) and payload.get("stop_reason") == "max_tokens"
+                    )
+                    for index, block in enumerate(content if isinstance(content, list) else []):
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            blocks[index] = {
+                                "type": "tool_use",
+                                "id": str(block.get("id") or ""),
+                                "name": str(block.get("name") or ""),
+                                "json": json.dumps(block.get("input") or {}),
+                            }
+                            for announcement in named.absorb({"tool_calls": [blocks[index]]}):
+                                yield StreamEvent("tool", text=announcement)
+                    text = content_to_text(content)
+                    if text:
+                        received_text = True
+                        blocks[-1] = {"type": "text", "text": text}
+                        yield StreamEvent("text", text=text)
+            calls = [block for block in blocks.values() if block["type"] == "tool_use"]
+            if not (tool_executor is not None and calls and not cancel.is_set()):
+                break
+            assistant: list[dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
+            for index in sorted(blocks):
+                block = blocks[index]
+                if block["type"] == "text":
+                    if block.get("text"):
+                        assistant.append({"type": "text", "text": block["text"]})
+                    continue
+                try:
+                    arguments = json.loads(block["json"] or "{}")
+                except (TypeError, ValueError):
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                assistant.append(
+                    {
+                        "type": "tool_use",
+                        "id": block["id"],
+                        "name": block["name"],
+                        "input": arguments,
+                    }
+                )
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": str(tool_executor(block["name"], arguments)),
+                    }
+                )
+            messages.append({"role": "assistant", "content": assistant})
+            messages.append({"role": "user", "content": results})
+        if cut_off:
+            yield StreamEvent("status", text=LENGTH_LIMIT_NOTICE, metadata={"record": True})
         if not received_text and not cancel.is_set():
-            raise ProviderError("The provider completed the request without returning any text.")
+            raise ProviderError(self._empty_response_reason(named, executor=tool_executor))
         yield StreamEvent("done")
+
+
+def responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Chat Completions function tools in the Responses shape; others as given."""
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function") if tool.get("type") == "function" else None
+        if isinstance(function, dict):
+            converted.append({"type": "function", **function})
+        else:
+            converted.append(tool)
+    return converted
+
+
+def messages_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Chat Completions function tools in the Anthropic Messages shape.
+
+    Anything else (OpenRouter's server tools) has no Messages form and is
+    left out rather than failing the request.
+    """
+    converted: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function") if tool.get("type") == "function" else None
+        if isinstance(function, dict) and function.get("name"):
+            converted.append(
+                {
+                    "name": function["name"],
+                    "description": str(function.get("description") or ""),
+                    "input_schema": function.get("parameters")
+                    or {"type": "object", "properties": {}},
+                }
+            )
+    return converted
+
+
+def _responses_call(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "call_id": str(item.get("call_id") or item.get("id") or ""),
+        "name": str(item.get("name") or ""),
+        "arguments": str(item.get("arguments") or ""),
+    }

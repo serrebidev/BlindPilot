@@ -11,7 +11,10 @@ from typing import Any, Callable, Sequence
 
 import wx
 
+from accessible_ai import web_tools
 from accessible_ai.models import (
+    API_MODE_AUTO,
+    API_MODE_RESPONSES,
     Account,
     Conversation,
     GenerationSettings,
@@ -19,6 +22,7 @@ from accessible_ai.models import (
     MessageAttachment,
     Profile,
     PROVIDER_CHATGPT,
+    PROVIDER_OPENAI,
     PROVIDER_OPENROUTER,
 )
 from accessible_ai.providers import chatgpt
@@ -489,6 +493,10 @@ class ChatPanel(wx.Panel):
                     from computer_use_mac import MacAXSession
 
                     session = MacAXSession()
+                elif sys.platform.startswith("linux"):
+                    from computer_use_linux import LinuxAtspiSession
+
+                    session = LinuxAtspiSession()
                 else:
                     from computer_use import ComputerUseSession
 
@@ -1314,6 +1322,19 @@ class ChatPanel(wx.Panel):
             settings.reasoning = chatgpt.plan_reasoning(profile.openrouter)
             settings.tools = chatgpt.plan_tools(profile.openrouter)
             settings.verbosity = profile.openrouter.verbosity
+        elif (
+            profile is not None
+            and account.provider == PROVIDER_OPENAI
+            and account.api_mode in {API_MODE_AUTO, API_MODE_RESPONSES}
+        ):
+            # OpenAI's Responses API takes the same thinking choices; a model
+            # that refuses them is retried without (see generate_responses).
+            settings.reasoning = chatgpt.plan_reasoning(profile.openrouter)
+        if account.provider not in {PROVIDER_OPENROUTER, PROVIDER_CHATGPT} and (
+            profile is None or profile.openrouter.web_tools
+        ):
+            # Accounts with no tools of their own get BlindPilot's read-only ones.
+            settings.tools = list(settings.tools) + web_tools.DEFINITIONS
         return settings
 
     def _last_assistant_message(self) -> Message | None:
@@ -1520,9 +1541,15 @@ class ChatPanel(wx.Panel):
         self._cancel_response_announcement_timer()
         self.assistant_announcement_buffer = ""
         self.generation_cancel = Event()
-        executor = self._computer_use_executor()
-        if executor is not None:
+        computer = self._computer_use_executor()
+        executor: Callable[[str, dict[str, Any]], str] | None = None
+        if computer is not None:
             settings.tools = list(settings.tools) + list(self._computer_tool_definitions)
+            executor = computer.run
+        if any(
+            (tool.get("function") or {}).get("name") in web_tools.NAMES for tool in settings.tools
+        ):
+            executor = web_tools.executor(executor)
         self.regenerate_button.Disable()
         self.add_files_button.Disable()
         self.remove_files_button.Disable()

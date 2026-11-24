@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Iterator
 from threading import Event
@@ -67,11 +68,6 @@ class GeminiProvider(ChatCompletionsProvider):
         return sorted(chat or models, key=str.casefold)
 
     def generate(self, settings: GenerationSettings, cancel: Event) -> Iterator[StreamEvent]:
-        effective = GenerationSettings(
-            model=normalize_gemini_model(settings.model),
-            messages=settings.messages,
-            temperature=settings.temperature,
-            max_output_tokens=settings.max_output_tokens,
-            streaming=settings.streaming,
-        )
+        # Only the model id changes; tools and the local executor stay.
+        effective = dataclasses.replace(settings, model=normalize_gemini_model(settings.model))
         yield from super().generate(effective, cancel)

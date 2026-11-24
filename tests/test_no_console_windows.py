@@ -26,6 +26,7 @@ EXEMPT = {
     ("blindpilot_app.py", "_open_path"): "Windows uses os.startfile",
     ("diagnostics.py", "_reveal"): "Windows uses os.startfile",
     ("computer_use_mac.py", "open"): "macOS only",
+    ("computer_use_linux.py", "open"): "Linux only",
     ("earcons.py", "_spawn"): "POSIX audio players",
     ("earcons.py", "_loop_unix"): "POSIX audio players",
     # Deliberate: the user is meant to see and use this console.
