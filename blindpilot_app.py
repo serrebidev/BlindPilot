@@ -418,7 +418,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.61.0"
+APP_VERSION = "0.61.1"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -13804,6 +13804,11 @@ class MainFrame(wx.Frame):
         # window is shown (`watch_for_links`), never in a window built and torn
         # down by a check, where a timer firing mid-teardown crashed macOS.
         self._links_timer: Optional[wx.Timer] = None
+        # The control that had focus when the window was last deactivated,
+        # so switching back to the window returns there instead of wherever
+        # the platform decides to put focus (issue #25: the Attach button).
+        self._focus_before_deactivate: Optional[wx.Window] = None
+        self.Bind(wx.EVT_ACTIVATE, self._on_window_activate)
         # Re-reads every tab's model catalog on a timer, so a model retired
         # upstream drops out of the picker on a window left open. Watched only
         # once the window is shown, like the links timer above.
@@ -14650,6 +14655,30 @@ class MainFrame(wx.Frame):
         self.focus_for_mode()
         if announce_change:
             self._announce_setting(f"{APP_MODE_LABELS[mode]} mode" if saved else _SAVE_FAILED)
+
+    def _on_window_activate(self, event: wx.ActivateEvent) -> None:
+        """Give focus back to whoever had it when the window was left.
+
+        wx on Windows does not promise that itself: Alt+Tab back into the
+        window could land on the Attach button (issue #25), so every message
+        started with a hunt for the prompt. Remember the focused control on
+        the way out and restore it on the way back in; with nothing worth
+        restoring, the prompt is where work starts.
+        """
+        event.Skip()
+        if _STARTUP_CHECK:
+            return
+        if not event.GetActive():
+            focused = wx.Window.FindFocus()
+            if focused is not None and focused is not self and focused.GetTopLevelParent() is self:
+                self._focus_before_deactivate = focused
+            return
+        target = self._focus_before_deactivate
+        self._focus_before_deactivate = None
+        if target is not None and target.IsShownOnScreen() and target.IsEnabled():
+            target.SetFocus()
+            return
+        self.focus_for_mode()
 
     def focus_for_mode(self) -> None:
         """Put focus where the mode that is showing actually starts.
