@@ -65,6 +65,7 @@ from accessible_ai.storage.paths import bundle_dir as _mac_bundle_dir
 
 import backend_pool
 import backend_workers
+import limit_resume
 from backend_workers import (
     WorkerCallbacks,
     WorkerRequest,
@@ -126,7 +127,9 @@ from agent_backends import (
     PlanAccount,
     backend_auth_ok,
     backend_label,
+    backend_limit_state,
     backend_status,
+    codex_consume_banked_reset,
     blindpilot_config_dir,
     blindpilot_data_dir,
     migrate_macos_legacy_dirs,
@@ -2934,6 +2937,17 @@ class _Settings:
         # an extra request on the plan.
         self.prompt_suggestions = bool(cfg.get("prompt_suggestions", False))
         claude_session.use_suggestions = self.prompt_suggestions
+        # Hold a turn a usage limit stopped until the limit resets, then
+        # send it again: Claude Code does this in an interactive session
+        # since 2.1.234, and there is no way to ask it to do so headless.
+        # On by default. Stop cancels the hold.
+        self.auto_continue_at_limit = bool(cfg.get("auto_continue_at_limit", True))
+        # Let an assistant spend a banked Codex reset on its own when a
+        # limit stops the turn. Off by default: a banked reset is spent
+        # once, so spending it without asking should be the choice, not
+        # the default. Even when on, it is spent only below ten percent
+        # remaining, the same gate ChatGPT's app uses.
+        self.spend_codex_resets = bool(cfg.get("spend_codex_resets", False))
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Minutes between background re-reads of a tab's model catalog; 0 turns
@@ -2966,6 +2980,8 @@ class _Settings:
         codex_browser.allowed = self.codex_browser
         cfg["prompt_suggestions"] = self.prompt_suggestions
         claude_session.use_suggestions = self.prompt_suggestions
+        cfg["auto_continue_at_limit"] = self.auto_continue_at_limit
+        cfg["spend_codex_resets"] = self.spend_codex_resets
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["model_refresh_minutes"] = self.model_refresh_minutes
@@ -6986,6 +7002,9 @@ class SessionPanel(wx.Panel):
         # question was read out of prose, or the block's own Question list,
         # which is what carries options for the dialog to offer.
         self._question_in_the_answer: str | Sequence[Question] = ""
+        # A turn held for a usage limit: its prompt, backend, session and
+        # cancel event. None when nothing is waiting for a limit.
+        self._limit_hold: Optional[dict] = None
 
         self._turns: List[Turn] = []
         # The agent's own task list, as its task tools last left it.
@@ -7737,6 +7756,191 @@ class SessionPanel(wx.Panel):
             wx.CallAfter(self._show_status, backend, report)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _open_usage_reset(self) -> None:
+        """/usage reset - spend one banked Codex reset, after asking.
+
+        Manual spending is the only spending done without the Preferences
+        gate: the reset is spent once, so the windows, the count and the
+        soonest expiry are read out loud and the spend needs an explicit
+        yes. Asked of the Account this tab's Codex conversation uses.
+        """
+        backend = self.selected_backend()
+        if backend != BACKEND_CODEX:
+            self._announce(
+                f"Banked resets exist for Codex only. {backend_label(backend)} "
+                "has no manual reset: wait for the limit, use usage credits, "
+                "or switch account."
+            )
+            return
+        self._announce("Reading banked Codex resets")
+
+        def work() -> None:
+            binary = find_backend_cli(BACKEND_CODEX) or ""
+            state = backend_limit_state(BACKEND_CODEX, binary) if binary else None
+            wx.CallAfter(self._show_usage_reset, binary, state)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_usage_reset(self, binary: str, state: Optional[dict]) -> None:
+        """Read the banked resets aloud and ask before spending one."""
+        if state is None or not binary:
+            self._announce("Error: Codex is not installed, so banked resets cannot be read")
+            return
+        count = int(state.get("banked_count") or 0)
+        windows = state.get("windows") or []
+        if count < 1:
+            self._announce(
+                "No banked Codex resets available. Reset history is kept on the "
+                "web at chatgpt.com/settings/usage, under Usage history."
+            )
+            return
+        lines = (
+            [f"{count} banked Codex reset available."]
+            if count == 1
+            else [f"{count} banked Codex resets available."]
+        )
+        for window in windows:
+            from agent_backends import _usage_window_line
+
+            line = _usage_window_line(window)
+            if line:
+                lines.append(line)
+        from agent_backends import _reset_or_granted
+
+        for row in state.get("credits") or []:
+            title = str(row.get("title") or "").strip()
+            pieces = []
+            granted = row.get("grantedAt")
+            expires = row.get("expiresAt")
+            if isinstance(granted, (int, float)):
+                pieces.append(f"granted {_reset_or_granted(float(granted))}")
+            if isinstance(expires, (int, float)):
+                pieces.append(f"expires {_reset_or_granted(float(expires))}")
+            if pieces:
+                lines.append(f"{title}: {'; '.join(pieces)}" if title else "; ".join(pieces))
+        self._announce("; ".join(lines))
+
+        def spend() -> None:
+            self._announce("Spending one banked Codex reset")
+
+            def do_spend() -> None:
+                outcome = codex_consume_banked_reset(binary, 20)
+                wx.CallAfter(self._announce, limit_resume.consume_outcome_line(outcome))
+
+            threading.Thread(target=do_spend, daemon=True).start()
+
+        if (
+            wx.MessageBox(
+                f"{' '.join(lines)}\n\nSpend one banked reset now?",
+                "Spend a banked Codex reset?",
+                wx.YES_NO | wx.ICON_QUESTION,
+                self,
+            )
+            == wx.YES
+        ):
+            spend()
+
+    def _hold_for_limit(
+        self, message: str, prompt_text: str, backend: str, session_id: Optional[str]
+    ) -> bool:
+        """Hold a turn a usage limit stopped, and resume it when the limit resets.
+
+        Returns True when the turn was held. The wait runs on its own
+        thread -- a five-hour wait on the window's thread would freeze the
+        app -- and Stop or a new send cancels it, because the plan changed
+        underneath the held prompt.
+        """
+        if not SETTINGS.auto_continue_at_limit:
+            return False
+        if backend not in (BACKEND_CLAUDE, BACKEND_CODEX):
+            return False
+        if not limit_resume.is_usage_limit_failure(message):
+            return False
+        resets_at = getattr(self._worker, "_limit_reset_at", None)
+        held: dict = {
+            "prompt": prompt_text,
+            "backend": backend,
+            "session": session_id,
+            "cancel": threading.Event(),
+        }
+        self._limit_hold = held
+
+        def work() -> None:
+            nonlocal resets_at
+            if backend == BACKEND_CODEX and SETTINGS.spend_codex_resets:
+                binary = find_backend_cli(BACKEND_CODEX) or ""
+                if binary:
+                    state = backend_limit_state(BACKEND_CODEX, binary)
+                    if limit_resume.auto_spend_allowed(
+                        state["windows"], int(state["banked_count"])
+                    ):
+                        outcome = codex_consume_banked_reset(binary, 20)
+                        if limit_resume.consume_succeeded(outcome):
+                            wx.CallAfter(
+                                self._announce,
+                                "Banked Codex reset spent. "
+                                + limit_resume.consume_outcome_line(outcome),
+                            )
+                            wx.CallAfter(self._resume_holding, held)
+                            return
+            if resets_at is None:
+                binary = find_backend_cli(backend) or ""
+                if binary:
+                    state = backend_limit_state(backend, binary)
+                    resets_at = limit_resume.earliest_reset_at(state["windows"])
+            wait = limit_resume.wait_seconds(resets_at)
+            if wait is None:
+                wx.CallAfter(
+                    self._announce,
+                    "Usage limit reached. The backend did not say when it "
+                    "resets, so the turn is not held.",
+                )
+                return
+            wx.CallAfter(
+                self._announce,
+                "Usage limit reached. This turn will resume when the limit "
+                "resets. Press Stop to cancel it.",
+            )
+            # Sleep in short slices so Stop cancels at once instead of
+            # after the rest of a five-hour wait.
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                if held["cancel"].is_set():
+                    return
+                time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+                if held["cancel"].is_set():
+                    return
+            wx.CallAfter(self._resume_holding, held)
+
+        threading.Thread(target=work, daemon=True).start()
+        self._announce(
+            "Usage limit reached. Holding this turn until the limit resets; Stop cancels the hold."
+        )
+        return True
+
+    def _resume_holding(self, held: dict) -> None:
+        """Send a held turn again, only if nothing changed underneath it."""
+        if getattr(self, "_limit_hold", None) is not held:
+            return
+        held["cancel"].set()
+        self._limit_hold = None
+        if self.selected_backend() != held["backend"]:
+            self._announce("Usage limit reset: the backend changed, so the held turn was not sent.")
+            return
+        if self._session_id != held["session"]:
+            self._announce(
+                "Usage limit reset: the conversation changed, so the held turn was not sent."
+            )
+            return
+        if self._run_in_progress():
+            self._announce(
+                "Usage limit reset: another turn is running, so the held turn was not sent."
+            )
+            return
+        self.prompt.SetValue(held["prompt"])
+        self._announce("Usage limit reset. Sending the held turn again.")
+        self._on_send()
 
     def _note_context(self, seen: Optional[tuple[int, int]]) -> None:
         """Keep the context fill the turn reported, and warn once past 80%.
@@ -9702,6 +9906,13 @@ class SessionPanel(wx.Panel):
                 return
             raw = self.prompt.GetValue().strip()
         low = raw.lower() if import_context is None else ""
+        # A manual send supersedes a held turn: the plan changed underneath
+        # the held prompt. _resume_holding clears the hold before it sends,
+        # so this never cancels a resume that is already on its way.
+        held = getattr(self, "_limit_hold", None)
+        if held is not None:
+            held["cancel"].set()
+            self._limit_hold = None
         recovery = getattr(self, "_pending_recovery", None)
         if recovery is not None and not self._session_id:
             if self.selected_backend() != self._session_backend:
@@ -9759,6 +9970,13 @@ class SessionPanel(wx.Panel):
         if low == "/status":
             self.prompt.SetValue("")
             self.open_status_dialog()
+            return
+        if low == "/usage" or low.startswith("/usage "):
+            self.prompt.SetValue("")
+            if low.split()[1:] == ["reset"]:
+                self._open_usage_reset()
+            else:
+                self.open_status_dialog()
             return
 
         if self._run_in_progress() and self._session_backend in _QUEUEING_BACKENDS:
@@ -10193,6 +10411,11 @@ class SessionPanel(wx.Panel):
         if speech_cancel is not None:
             speech_cancel.set()
         self._speech_cancel: Optional[threading.Event] = None
+        held = getattr(self, "_limit_hold", None)
+        if held is not None:
+            held["cancel"].set()
+            self._limit_hold = None
+            self._announce("Held turn cancelled")
         worker = self._worker
         if getattr(self, "_pending_messages", []):
             self._queue_paused = True
@@ -10365,6 +10588,10 @@ class SessionPanel(wx.Panel):
         the next message the first of a new conversation. The old conversation
         is still on disk, and Recent Conversations can bring it back.
         """
+        held = getattr(self, "_limit_hold", None)
+        if held is not None:
+            held["cancel"].set()
+            self._limit_hold = None
         if self._run_in_progress():
             # Emptying `_turns` here while the last turn's `complete` is still
             # queued leaves that event writing into a list with nothing in it.
@@ -11052,6 +11279,19 @@ class SessionPanel(wx.Panel):
             # A cancelled backend reports its own interruption. The user asked
             # for it, so it is not news, and it is not an error.
             return
+        # Held for the limit where one applies. The failure is still reported
+        # as an error -- the turn did stop -- and the hold says what happens
+        # next; falling through keeps the error row and the failed-turn
+        # handling above intact. Looked up rather than called so the stub
+        # panels in tests, which carry no hold, still exercise the rest.
+        hold_for_limit = getattr(self, "_hold_for_limit", None)
+        if callable(hold_for_limit):
+            hold_for_limit(
+                message,
+                getattr(self, "_active_send_text", "") or "",
+                getattr(self, "_session_backend", "") or self.selected_backend(),
+                getattr(self, "_session_id", None),
+            )
         self._queue_paused = True
         self._flush_live_answer()
         self._earcons.stop_progress()
@@ -13739,6 +13979,22 @@ class PreferencesDialog(wx.Dialog):
             panel, label="Suggest what to send next after each Claude reply (Claude Code tabs)"
         )
         self._suggestions.SetValue(SETTINGS.prompt_suggestions)
+        self._auto_continue = wx.CheckBox(
+            panel,
+            label=(
+                "Auto-continue a turn stopped by a usage limit when the "
+                "limit resets (Claude Code and Codex tabs)"
+            ),
+        )
+        self._auto_continue.SetValue(SETTINGS.auto_continue_at_limit)
+        self._spend_resets = wx.CheckBox(
+            panel,
+            label=(
+                "Let the assistant spend a banked Codex usage reset when a "
+                "limit stops the turn (only below ten percent remaining)"
+            ),
+        )
+        self._spend_resets.SetValue(SETTINGS.spend_codex_resets)
         for check in (
             self._live_rows,
             self._speak_live,
@@ -13751,6 +14007,8 @@ class PreferencesDialog(wx.Dialog):
             self._claude_chrome,
             self._codex_browser,
             self._suggestions,
+            self._auto_continue,
+            self._spend_resets,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -13944,6 +14202,14 @@ class PreferencesDialog(wx.Dialog):
     @property
     def prompt_suggestions(self) -> bool:
         return self._suggestions.GetValue()
+
+    @property
+    def auto_continue_at_limit(self) -> bool:
+        return self._auto_continue.GetValue()
+
+    @property
+    def spend_codex_resets(self) -> bool:
+        return self._spend_resets.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -15130,6 +15396,8 @@ class MainFrame(wx.Frame):
         SETTINGS.claude_chrome = dialog.claude_chrome
         SETTINGS.codex_browser = dialog.codex_browser
         SETTINGS.prompt_suggestions = dialog.prompt_suggestions
+        SETTINGS.auto_continue_at_limit = dialog.auto_continue_at_limit
+        SETTINGS.spend_codex_resets = dialog.spend_codex_resets
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         SETTINGS.model_refresh_minutes = dialog.model_refresh_minutes

@@ -1326,13 +1326,13 @@ def _codex_usage_handshake(server: "CodexServer") -> bool:
     return sent and server.send({"method": "initialized", "params": {}})
 
 
-def _codex_rate_limits(server: "CodexServer", timeout: int) -> object:
-    """Ask one app-server for the account's windows and wait for the reply."""
+def _codex_server_request(server: "CodexServer", timeout: int, method: str, params: dict) -> object:
+    """Ask one app-server one question and wait for the reply."""
     inbox: queue.Queue[object] = queue.Queue()
     request_id = server.next_id()
     server.expect(request_id, inbox)
     try:
-        if not server.send({"method": "account/rateLimits/read", "id": request_id, "params": {}}):
+        if not server.send({"method": method, "id": request_id, "params": params}):
             return None
         deadline = time.monotonic() + timeout
         while True:
@@ -1353,15 +1353,20 @@ def _codex_rate_limits(server: "CodexServer", timeout: int) -> object:
         server.unexpect([request_id])
 
 
-def _codex_usage_result(binary: str, timeout: int) -> object:
-    """Ask Codex for the account's windows, sharing the app-server if there is one.
+def _codex_rate_limits(server: "CodexServer", timeout: int) -> object:
+    """Ask one app-server for the account's windows and wait for the reply."""
+    return _codex_server_request(server, timeout, "account/rateLimits/read", {})
+
+
+def _codex_call(binary: str, timeout: int, method: str, params: dict) -> object:
+    """Ask the Codex app-server one account question, sharing its process if held.
 
     The pooled process is used where one is running: it has been through the
     handshake already, several tabs may be mid-turn on it, and this question
-    is a read that does not touch any of their conversations. It is borrowed
-    for the length of the question so the reaper cannot stop it underneath.
-    Where no process is held, one is started for the question and stopped
-    again, the way every other part of this report is asked.
+    does not touch any of their conversations. It is borrowed for the length
+    of the question so the reaper cannot stop it underneath. Where no
+    process is held, one is started for the question and stopped again, the
+    way every other part of this report is asked.
 
     Asked of the Account the backend is set to use, because that is whose
     windows the report is about: a plan's remaining usage is not the same
@@ -1379,7 +1384,7 @@ def _codex_usage_result(binary: str, timeout: int) -> object:
             server.borrow()
     if server is not None:
         try:
-            return _codex_rate_limits(server, timeout)
+            return _codex_server_request(server, timeout, method, params)
         finally:
             server.give_back()
     try:
@@ -1389,9 +1394,127 @@ def _codex_usage_result(binary: str, timeout: int) -> object:
     try:
         if not _codex_usage_handshake(started):
             return None
-        return _codex_rate_limits(started, timeout)
+        return _codex_server_request(started, timeout, method, params)
     finally:
         started.stop()
+
+
+def _codex_usage_result(binary: str, timeout: int) -> object:
+    """Ask Codex for the account's windows, sharing the app-server if there is one."""
+    return _codex_call(binary, timeout, "account/rateLimits/read", {})
+
+
+def _codex_banked_credits(result: object) -> list[dict]:
+    """The banked rate-limit reset credits in a `rateLimits/read` answer.
+
+    OpenAI grants these one-time resets to selected accounts; they sit
+    unused until spent, each with its own expiry. Only the count is
+    authoritative -- the detail rows can be capped -- so callers read the
+    count beside this list rather than trusting its length.
+    """
+    if not isinstance(result, dict):
+        return []
+    banked = result.get("rateLimitResetCredits")
+    if not isinstance(banked, dict):
+        return []
+    rows = banked.get("credits")
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _codex_banked_count(result: object) -> int:
+    """How many banked resets are available, or zero where the answer is silent."""
+    if not isinstance(result, dict):
+        return 0
+    banked = result.get("rateLimitResetCredits")
+    if not isinstance(banked, dict):
+        return 0
+    count = _as_number(banked.get("availableCount"))
+    return int(count) if count is not None else len(_codex_banked_credits(result))
+
+
+def _codex_banked_lines(result: object) -> list[str]:
+    """The banked resets as /status lines, or nothing where there are none.
+
+    No line is written for an account the backend never granted one to:
+    a count of zero is the normal state, not news worth a line on every
+    report.
+    """
+    count = _codex_banked_count(result)
+    if count <= 0:
+        return []
+    lines = [f"Banked resets: {count} available. Type /usage reset to spend one."]
+    for row in _codex_banked_credits(result):
+        expires = _as_number(row.get("expiresAt"))
+        granted = _as_number(row.get("grantedAt"))
+        title = str(row.get("title") or "").strip()
+        pieces = []
+        if granted is not None:
+            pieces.append(f"granted {_reset_or_granted(granted)}")
+        if expires is not None:
+            pieces.append(f"expires {_reset_or_granted(expires)}")
+        if pieces:
+            lines.append(f"- {title + ' ' if title else ''}{', '.join(pieces)}")
+    return lines
+
+
+def _reset_or_granted(epoch: float) -> str:
+    try:
+        when = datetime.datetime.fromtimestamp(epoch).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return ""
+    return when.strftime("%a %d %b %Y %H:%M")
+
+
+def _codex_usage_lines(binary: str, timeout: int) -> list[str]:
+    """Windows first, then the banked resets, from one `rateLimits/read`."""
+    result = _codex_usage_result(binary, timeout)
+    return [*_usage_lines(_codex_usage_windows(result)), *_codex_banked_lines(result)]
+
+
+def codex_consume_banked_reset(
+    binary: str, timeout: int, credit_id: str = "", idempotency_key: str = ""
+) -> str:
+    """Spend one banked Codex reset. Returns the app-server's outcome word.
+
+    An empty ``credit_id`` lets the server pick the next available credit.
+    The idempotency key must be a fresh UUID per logical redemption:
+    reusing it on a retry reports the same redemption instead of spending
+    a second reset.
+    """
+    params: dict = {}
+    if credit_id:
+        params["creditId"] = credit_id
+    params["idempotencyKey"] = idempotency_key or str(uuid.uuid4())
+    result = _codex_call(binary, timeout, "account/rateLimitResetCredit/consume", params)
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get("outcome") or "").strip()
+
+
+def backend_limit_state(backend: str, binary: str, timeout: int = 20) -> dict:
+    """The windows and banked credits for wait-and-resume, read off-thread.
+
+    Only Claude Code and Codex meter a subscription of their own. Anything
+    else answers with no windows, and a backend that could not be asked
+    answers with no windows too, so the caller can tell "no limit to wait
+    for" from a limit whose reset time it does not know.
+    """
+    backend = normalize_backend(backend)
+    if backend == BACKEND_CLAUDE:
+        payload = _claude_usage_payload(binary, timeout)
+        return {
+            "windows": _claude_usage_windows(payload),
+            "banked_count": 0,
+            "credits": [],
+        }
+    if backend == BACKEND_CODEX:
+        result = _codex_usage_result(binary, timeout)
+        return {
+            "windows": _codex_usage_windows(result),
+            "banked_count": _codex_banked_count(result),
+            "credits": _codex_banked_credits(result),
+        }
+    return {"windows": [], "banked_count": 0, "credits": []}
 
 
 # FreeBuff's own banner reads this, and reaching it is one request against an
@@ -6381,9 +6504,7 @@ ADAPTERS: dict[str, BackendAdapter] = {
         account_lines=lambda binary, timeout: _codex_account_lines(
             *_probe_backend(binary, ["login", "status"], timeout)
         ),
-        usage_lines=lambda binary, timeout: _usage_lines(
-            _codex_usage_windows(_codex_usage_result(binary, timeout))
-        ),
+        usage_lines=_codex_usage_lines,
     ),
     BACKEND_FREEBUFF: BackendAdapter(
         auth_ok=_stored_signed_in(

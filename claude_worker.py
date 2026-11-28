@@ -215,6 +215,9 @@ class ClaudeWorker(threading.Thread):
         self._api_key = api_key
         self._turn_spend: dict[str, float] = {}
         self._limit_said = False
+        # Epoch of the limit reset this turn was stopped by, when the CLI
+        # named one. The panel reads it to hold the turn until then.
+        self._limit_reset_at: Optional[float] = None
         # Asked about a tool the permission mode leaves to a person; returns
         # the control response's own body (allow or deny).
         self._on_permission = on_permission
@@ -883,7 +886,14 @@ class ClaudeWorker(threading.Thread):
                                 live.feed(piece)
 
             elif etype == "rate_limit_event":
-                warning = claude_limit_warning(event.get("rate_limit_info"))
+                info = event.get("rate_limit_info")
+                if isinstance(info, dict) and info.get("status") == "rejected":
+                    # Kept so the window can hold this turn until the limit
+                    # resets instead of leaving it to be re-sent by hand.
+                    resets_at = info.get("resetsAt")
+                    if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+                        self._limit_reset_at = float(resets_at)
+                warning = claude_limit_warning(info)
                 if warning:
                     self._on_activity("notice", warning)
 

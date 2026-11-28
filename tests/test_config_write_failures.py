@@ -312,6 +312,8 @@ def test_applying_preferences_that_cannot_be_saved_says_so(
         claude_chrome = True
         codex_browser = True
         prompt_suggestions = False
+        auto_continue_at_limit = True
+        spend_codex_resets = False
         appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30

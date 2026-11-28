@@ -1,3 +1,17 @@
+# BlindPilot 0.64.0
+
+This release makes usage limits something you can act on without leaving BlindPilot: banked Codex resets can be read and spent in the app, and a turn a usage limit stops is held and sent again when the limit is back.
+
+## Codex
+
+**Banked usage resets.** Some ChatGPT accounts hold banked, one-time usage resets OpenAI granted them. Session Status now names how many your account holds, with when each was granted and when it expires, and `/usage reset` reads those aloud and asks before spending one. Reset history lives on the web at chatgpt.com/settings/usage. Claude Code has no manual reset of any kind, so nothing is offered for it.
+
+## Claude Code and Codex
+
+**Auto-continue at a usage limit.** When a usage limit stops a turn, BlindPilot holds that turn and sends it again once the limit resets, instead of leaving you to re-send it by hand five hours later. This is on by default; Preferences, "Auto-continue a turn stopped by a usage limit when the limit resets", turns it off. Pressing Stop, starting a new conversation, or sending a different message cancels the hold.
+
+**Let the assistant spend a banked reset.** Preferences also has "Let the assistant spend a banked Codex usage reset when a limit stops the turn". It is off, because a banked reset is spent once; turn it on and BlindPilot may spend one itself, only when an allowance sits below ten percent remaining, the same gate the ChatGPT app uses.
+
 # BlindPilot 0.63.0
 
 This release lets Codex use your web browser, and brings BlindPilot up to date with what The Chat Place has added since 0.6.3.
