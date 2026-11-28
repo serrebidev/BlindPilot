@@ -108,6 +108,7 @@ def create_worker(backend: str, request: WorkerRequest) -> Worker:
     }
     if backend == "claude":
         kwargs["on_unsolicited"] = callbacks.on_unsolicited
+        kwargs["on_suggestion"] = callbacks.on_suggestion
         kwargs["on_tasks"] = callbacks.on_tasks
         kwargs["on_remote"] = callbacks.on_remote
     elif backend == "copilot":

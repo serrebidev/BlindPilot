@@ -72,12 +72,146 @@ CHECKPOINT_VAR = "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"
 # How long a rewind may take. No turn runs: the CLI restores files and exits.
 _REWIND_SECONDS = 120.0
 _SAFE_ID = re.compile(r"^[0-9A-Za-z][0-9A-Za-z-]{7,63}$")
+# Suggested messages: what Claude predicts you will send next. Checked with
+# Claude Code 2.1.332: `--prompt-suggestions true` sends nothing without this
+# variable; with both, a `prompt_suggestion` event comes a second or two after
+# a turn's result, when no turn is reading. Not every turn has one.
+SUGGESTION_VAR = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
+# One message, not a document.
+MAX_SUGGESTION = 2000
+# What may be passed as `--agent`: Claude Code's own names ("Explore",
+# "general-purpose", "plugin:agent-name"), nothing that reads as a flag.
+_SAFE_AGENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/ -]{0,127}$")
+_INIT_SECONDS = 20.0
 
 
-def claude_env(binary: str, api_key: str = "") -> dict[str, str]:
+@dataclass(frozen=True)
+class Agent:
+    """One agent Claude Code offers for a folder, as `initialize` lists it."""
+
+    name: str
+    description: str = ""
+    model: str = ""
+
+    @property
+    def own_model(self) -> str:
+        """The model it always runs on, or "" when it takes the tab's."""
+        model = " ".join(self.model.split())
+        return "" if model.lower() == "inherit" else model
+
+    def label(self) -> str:
+        """The name only: the whole description goes in a box of its own."""
+        if self.own_model:
+            return f"{self.name} (uses its own model, {self.own_model})"
+        return self.name
+
+
+def is_safe_agent(name: str) -> bool:
+    return name == "" or bool(_SAFE_AGENT.fullmatch(name))
+
+
+def agents_from_init(body: object) -> Optional[list[Agent]]:
+    """The agents in an `initialize` answer, or None if it lists none at all."""
+    raw = body.get("agents") if isinstance(body, dict) else None
+    if not isinstance(raw, list):
+        return None
+    agents: list[Agent] = []
+    seen: set[str] = set()
+    for item in raw:
+        name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name or not is_safe_agent(name) or name in seen:
+            continue
+        seen.add(name)
+        description, model = item.get("description"), item.get("model")
+        agents.append(
+            Agent(
+                name,
+                description if isinstance(description, str) else "",
+                model if isinstance(model, str) else "",
+            )
+        )
+    return agents
+
+
+def fetch_agents(binary: str, cwd: Optional[str]) -> Optional[list[Agent]]:
+    """The agents Claude Code offers in `cwd`, without running a turn.
+
+    Only `initialize` is sent, and stdin is closed as soon as it is answered,
+    so no conversation is made and nothing is billed (about 1.4 seconds with
+    Claude Code 2.1.332). Blocking: call it off the GUI thread. None if the
+    answer could not be had.
+    """
+    if cwd and not os.path.isdir(cwd):
+        return None
+    try:
+        proc = subprocess.Popen(
+            [
+                binary,
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ],
+            cwd=cwd or None,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=claude_env(binary),
+            **no_window_kwargs(),
+        )
+    except OSError:
+        return None
+    timer = threading.Timer(_INIT_SECONDS, proc.kill)
+    timer.start()
+    body: object = None
+    try:
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(
+            json.dumps(
+                {
+                    "type": "control_request",
+                    "request_id": "blindpilot-agents",
+                    "request": {"subtype": "initialize", "hooks": None},
+                }
+            )
+            + "\n"
+        )
+        proc.stdin.flush()
+        for line in proc.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get("type") == "control_response":
+                response = event.get("response")
+                body = response.get("response") if isinstance(response, dict) else None
+                break
+    except (OSError, ValueError):
+        body = None
+    finally:
+        timer.cancel()
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001 - a stuck probe is killed, never waited on for ever
+            proc.kill()
+        if proc.stdout is not None:
+            proc.stdout.close()
+    return agents_from_init(body)
+
+
+def claude_env(binary: str, api_key: str = "", suggestions: bool = False) -> dict[str, str]:
     """The environment every Claude process BlindPilot starts runs with."""
     env = dict(subprocess_env(binary))
     env[CHECKPOINT_VAR] = "1"
+    if suggestions and not api_key:
+        env[SUGGESTION_VAR] = "1"
     if api_key:
         import api_credits
 
@@ -142,6 +276,12 @@ class Wants:
     # An Anthropic API key to charge this process to (api_credits); "" runs
     # on whatever Claude Code is signed in with.
     api_key: str = ""
+    # Suggested messages (Preferences). Never on API credits: each suggestion
+    # is an extra request the reply's cost would not show.
+    suggestions: bool = False
+    # Run as agent: one of the agents Claude Code offers for the folder, or ""
+    # for its own. Fixed at start, so a change starts a new process.
+    agent: str = ""
 
 
 ASK_THROUGH_THE_TOOL = ask_through_the_tool("AskUserQuestion")
@@ -154,6 +294,9 @@ include_partial_messages = True
 # Preferences, "Let Claude use Chrome". Set by the window's settings; read
 # when a turn builds its Wants.
 use_chrome = True
+# Preferences, "Suggest what to send next after each Claude reply". Off by
+# default: each suggestion spends a little of the plan.
+use_suggestions = False
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +439,10 @@ def build_command(binary: str, wants: Wants, prompt_tool: str) -> list[str]:
     # Claude in Chrome: pages in Chrome or Edge, through the extension. Without
     # the extension the CLI simply has no browser tools.
     cmd.append("--chrome" if wants.chrome and not wants.api_key else "--no-chrome")
+    if wants.suggestions and not wants.api_key:
+        cmd.extend(["--prompt-suggestions", "true"])
+    if wants.agent and is_safe_agent(wants.agent):
+        cmd.extend(["--agent", wants.agent])
     if wants.fork_source:
         if wants.session_id or not wants.fork_at:
             raise ValueError("A fork needs a source boundary and no destination session yet.")
@@ -346,6 +493,10 @@ class ClaudeSession:
         # Called on every event the CLI sends, so the pool's idle clock
         # measures silence from the CLI rather than time since the last prompt.
         self.on_event: Optional[Callable[[], None]] = None
+        # Given each suggested message. Suggestions come after the turn has
+        # ended, so they are kept out of the event stream: a late turn woken
+        # for one would have nothing to say.
+        self.on_suggestion: Optional[Callable[[str], None]] = None
         self._reader = threading.Thread(target=self._read, name="claude-reader", daemon=True)
         self._drainer = threading.Thread(
             target=self._drain_stderr, name="claude-stderr", daemon=True
@@ -374,7 +525,7 @@ class ClaudeSession:
             errors="replace",
             # `claude` is often a shim that has to find `node`, and a window
             # started from a Dock or Start menu has a PATH that holds neither.
-            env=claude_env(binary, wants.api_key),
+            env=claude_env(binary, wants.api_key, wants.suggestions),
             # The shim may have the real agent as its child; stopping has to
             # stop that too.
             **own_group_kwargs(),
@@ -461,6 +612,9 @@ class ClaudeSession:
                     if event.get("type") == "control_response":
                         self._settle(event)
                         continue
+                    if event.get("type") == "prompt_suggestion":
+                        self._suggest(event.get("suggestion"))
+                        continue
                     if event.get("type") == "system" and event.get("subtype") == "init":
                         sid = event.get("session_id")
                         if sid:
@@ -479,6 +633,15 @@ class ClaudeSession:
             for done, _slot in waiters:
                 done.set()
             self._deliver(EOF)
+
+    def _suggest(self, text: object) -> None:
+        callback = self.on_suggestion
+        if not isinstance(text, str) or not text.strip() or callback is None:
+            return
+        try:
+            callback(text.strip()[:MAX_SUGGESTION])
+        except Exception:
+            _log.exception("the Claude session's suggestion callback raised")
 
     def _note_task(self, event: dict) -> None:
         if event.get("type") != "system":
@@ -614,7 +777,12 @@ class ClaudeSession:
             return False
         if not self.alive():
             return False
-        if (self.wants.cwd, self.wants.effort) != (wants.cwd, wants.effort):
+        if (self.wants.cwd, self.wants.effort, self.wants.suggestions, self.wants.agent) != (
+            wants.cwd,
+            wants.effort,
+            wants.suggestions,
+            wants.agent,
+        ):
             return False
         return wants.session_id is not None and wants.session_id == self.session_id
 

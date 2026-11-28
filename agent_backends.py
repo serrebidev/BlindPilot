@@ -998,6 +998,11 @@ _CLAUDE_USAGE_WINDOWS = (
     ("seven_day", "Weekly limit", 10080.0),
     ("seven_day_opus", "Weekly Opus limit", 10080.0),
     ("seven_day_sonnet", "Weekly Sonnet limit", 10080.0),
+    # Claude Code's own names (2.1.331). Only Fable turns report the first:
+    # Fable's weekly allowance. The second is the usage credits a plan can
+    # spend past its limits, which has no fixed length.
+    ("seven_day_overage_included", "Weekly Fable limit", 10080.0),
+    ("overage", "Usage credit limit", 0.0),
 )
 
 
@@ -3633,6 +3638,11 @@ def _start_codex_server(
     elif plan_account is not None:
         _plan_token_or_report(plan_account)
         plan = codex_plan_args(plan_account.account_id)
+    # Browser use: without an access host Codex's Computer Use plugin refuses
+    # every browser call (see codex_browser).
+    import codex_browser
+
+    env.update(codex_browser.env())
     proc = owned_popen(
         [server_binary, *plan, *codex_question_args(), "app-server", "--stdio"],
         cwd=str(Path.home()),

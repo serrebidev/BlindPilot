@@ -663,3 +663,40 @@ def test_a_late_turn_takes_the_held_process_exactly_as_it_is(monkeypatch, reques
     assert len(made) == 1, "the late turn replaced the process it was woken for"
     assert first.alive() and first.wants.model == ""
     assert [p for p in made[0].stdin.payloads() if p["type"] == "control_request"] == []
+
+
+def test_a_suggestion_after_the_turn_goes_to_the_tab_not_to_a_late_turn():
+    """Claude Code sends its suggested next message after the result, when no
+    turn is reading. It must reach the tab's callback and must not wake the
+    idle sink, or a late turn would start with nothing to say."""
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, WANTS)
+    woken: list[int] = []
+    said: list[str] = []
+    session.set_idle_sink(lambda: woken.append(1))
+    session.on_suggestion = said.append
+    proc.stdout.feed({"type": "prompt_suggestion", "suggestion": "  Now show test_todo.py "})
+    proc.stdout.feed({"type": "prompt_suggestion", "suggestion": " "})
+    proc.stdout.feed({"type": "prompt_suggestion", "suggestion": ["not", "text"]})
+    assert _settle(lambda: said == ["Now show test_todo.py"])
+    time.sleep(0.05)
+    assert said == ["Now show test_todo.py"]
+    assert woken == [] and not session._pending
+
+
+def test_suggestions_are_asked_for_on_the_plan_only_and_restart_a_process_that_lacks_them():
+    on = cs.Wants(cwd="C:/work", permission_mode="", suggestions=True)
+    on_credits = cs.Wants(cwd="C:/work", permission_mode="", suggestions=True, api_key="k")
+    assert cs.build_command("claude", on, "")[-2:] == ["--prompt-suggestions", "true"]
+    assert "--prompt-suggestions" not in cs.build_command("claude", on_credits, "")
+    assert cs.claude_env("claude", suggestions=True)[cs.SUGGESTION_VAR] == "1"
+    assert cs.SUGGESTION_VAR not in cs.claude_env("claude", "k", suggestions=True)
+
+    proc = _Proc()
+    session = cs.ClaudeSession(proc, cs.Wants(cwd="C:/work", permission_mode="", session_id="s"))
+    session.session_id = "s"
+    same = cs.Wants(cwd="C:/work", permission_mode="", session_id="s")
+    assert session.can_serve(same)
+    assert not session.can_serve(
+        cs.Wants(cwd="C:/work", permission_mode="", session_id="s", suggestions=True)
+    )

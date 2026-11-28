@@ -92,3 +92,16 @@ def test_a_reached_limit_is_said_even_after_its_warning(fresh):
 @pytest.mark.parametrize("info", [{**INFO, "status": "allowed"}, None, "x", {}])
 def test_nothing_is_said_while_within_the_limit(fresh, info):
     assert agent_backends.claude_limit_warning(info) == ""
+
+
+def test_the_fable_window_is_named_as_claude_code_names_it(fresh):
+    """`seven_day_overage_included` is what Claude Code 2.1.331 calls the Fable
+    limit; it is reported only by Fable turns."""
+    said = agent_backends.claude_limit_warning(
+        {**INFO, "rateLimitType": "seven_day_overage_included"}
+    )
+    assert said.startswith("Claude Code Weekly Fable limit: 92% used")
+    windows = agent_backends._claude_usage_windows(
+        {"rate_limits": {"seven_day_overage_included": {"utilization": 40, "resets_at": None}}}
+    )
+    assert [window.label for window in windows] == ["Weekly Fable limit"]

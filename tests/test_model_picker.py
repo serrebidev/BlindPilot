@@ -141,11 +141,14 @@ def _probe_with(
     real_find, real_run = blindpilot_app._find_claude, blindpilot_app._run_claude
     blindpilot_app._find_claude = lambda: "claude"  # type: ignore[assignment]
     blindpilot_app._run_claude = fake_run  # type: ignore[assignment]
+    real_agents = claude_session.fetch_agents
+    claude_session.fetch_agents = lambda binary, cwd: None  # type: ignore[assignment]
     try:
         return probe_model_options(os.getcwd() if cwd is None else cwd, max_age)
     finally:
         blindpilot_app._find_claude = real_find  # type: ignore[assignment]
         blindpilot_app._run_claude = real_run  # type: ignore[assignment]
+        claude_session.fetch_agents = real_agents  # type: ignore[assignment]
 
 
 # Every fake CLI invocation any probe in this file made, so tests can assert

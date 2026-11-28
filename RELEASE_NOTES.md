@@ -1,3 +1,27 @@
+# BlindPilot 0.63.0
+
+This release lets Codex use your web browser, and brings BlindPilot up to date with what The Chat Place has added since 0.6.3.
+
+## Codex
+
+**Codex can use your web browser.** Asking Codex to do something in your browser used to get "browser use is disabled", although computer use worked. Codex checks with the ChatGPT app before it touches a browser, and only the ChatGPT app answered that check. BlindPilot now answers it itself, so Codex tabs can use your browser through the ChatGPT browser extension: open pages, read them, click and type, in the browser and profile you are already signed in with. You need the ChatGPT app installed, which provides Codex's computer use plugin, and the ChatGPT browser extension in your browser. Preferences, "Let Codex use your web browser", turns it off, and that takes effect from Codex's next browser step. Windows only for now.
+
+## Claude Code
+
+**Suggested messages.** After a reply, Claude can suggest what you might send next. Turn it on with Preferences, "Suggest what to send next after each Claude reply"; it is off at first, because each suggestion uses a little of your plan. The suggestion is put in your empty message box, selected, and you hear "Suggested message in the message box". Type to replace it, or press Enter to send it as it is. Your own text is never replaced, and not every reply has a suggestion. It is not used on API credits.
+
+**Run as an agent.** Model and Effort (Ctrl+Shift+E) in a Claude Code tab now has "Run as agent": the tab can run as one of the agents Claude Code knows for its folder, such as Explore, Plan or your own, with that agent's instructions and tools. The list names each agent, and an agent that always uses its own model says so. The Agent description box under it (Alt+P) holds the chosen agent's whole description, to read line by line, and changes as you choose another agent. A change takes effect from the tab's next message.
+
+**Approve, don't start.** Claude's plan dialog has a new button, "Approve, don't start" (Alt+D). It tells Claude the plan is right but not to build it yet, and the tab stays in plan mode. Anything typed in the box goes with it. Keep planning is still the default button, so Enter never approves anything.
+
+**The weekly Fable limit, by Claude Code's name.** Usage and limit warnings now name the window only Fable turns report "Weekly Fable limit", and the usage credits a plan can spend past its limits "Usage credit limit", as Claude Code does.
+
+## Mac
+
+**Command+C copies from the formatted view.** Copying from a response opened in the formatted view did nothing on a Mac: the page's security policy refused the script wx uses to copy. The viewer now allows only that; scripts in an answer are still never run, and exported pages are unchanged.
+
+**Number boxes are named for VoiceOver.** On a Mac a number box is a text box and a stepper, and Tab stops on each. The stepper was read as just "stepper"; both parts now carry the box's name, in Preferences, Remote Hermes and agent hand-offs.
+
 # BlindPilot 0.62.0
 
 This release finishes API credits from The Chat Place: Codex tabs can now be charged to an OpenAI API key, and both Claude Code and Codex get a spending limit for each message.

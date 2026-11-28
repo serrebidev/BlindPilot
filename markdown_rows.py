@@ -420,14 +420,22 @@ def reassemble(rows: List[Row], response_number: int) -> str:
 _MD_PAGE = MarkdownIt("commonmark", {"html": False}).enable("table")
 
 
-def markdown_page(text: str, title: str) -> str:
-    """A whole HTML page of `text` rendered as Markdown, for browse mode."""
+def markdown_page(text: str, title: str, viewer: bool = False) -> str:
+    """A whole HTML page of `text` rendered as Markdown, for browse mode.
+
+    `viewer`: the page is for BlindPilot's own web view. On macOS, wx's Copy()
+    -- what Command+C runs there -- is a script wx evaluates, and
+    `default-src 'none'` refused it, so nothing was copied. The viewer's page
+    allows `eval` only: inline scripts, handlers and `javascript:` links in an
+    answer are still refused. Exported pages keep the stricter policy.
+    """
+    scripts = " script-src 'unsafe-eval';" if viewer else ""
     return (
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
         # Nothing an answer names is fetched: an image or stylesheet URL in it
         # would otherwise be loaded the moment the page opens.
         '<meta http-equiv="Content-Security-Policy" '
-        "content=\"default-src 'none'; style-src 'unsafe-inline'\">"
+        f"content=\"default-src 'none';{scripts} style-src 'unsafe-inline'\">"
         f"<title>{html.escape(title)}</title></head>\n<body>\n"
         f"<h1>{html.escape(title)}</h1>\n{_MD_PAGE.render(text)}</body></html>\n"
     )

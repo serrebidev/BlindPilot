@@ -199,6 +199,7 @@ class ClaudeWorker(threading.Thread):
         on_subagent: Optional[SubagentReport] = None,
         held_for: object = None,
         on_unsolicited: Optional[Callable[[], None]] = None,
+        on_suggestion: Optional[Callable[[str], None]] = None,
         on_permission: Optional[Callable[[str, dict, list], dict]] = None,
         remote_control: Optional[dict] = None,
         api_key: str = "",
@@ -206,6 +207,7 @@ class ClaudeWorker(threading.Thread):
         on_remote: Optional[Callable[[dict], None]] = None,
         fork_source: str = "",
         fork_at: str = "",
+        agent: str = "",
     ):
         super().__init__(daemon=True)
         # {"enabled", "name", "reattach"}: Remote Control as the tab wants it.
@@ -220,6 +222,7 @@ class ClaudeWorker(threading.Thread):
         self._session_id = session_id
         self._fork_source = fork_source
         self._fork_at = fork_at
+        self._agent = agent
         self._cwd = cwd
         self._permission_mode = permission_mode
         self._model = model
@@ -236,6 +239,7 @@ class ClaudeWorker(threading.Thread):
         # CLI speaks with no turn attached.
         self._held_for = held_for
         self._on_unsolicited = on_unsolicited
+        self._on_suggestion = on_suggestion
         self.on_tasks = on_tasks
         self.on_remote = on_remote
         self._session: Optional[claude_session.ClaudeSession] = None
@@ -665,6 +669,8 @@ class ClaudeWorker(threading.Thread):
             fork_at=self._fork_at,
             chrome=claude_session.use_chrome,
             api_key=self._api_key,
+            suggestions=claude_session.use_suggestions and self._on_suggestion is not None,
+            agent=self._agent,
         )
         session = self._take(wants, binary)
         if session is None:
@@ -678,6 +684,8 @@ class ClaudeWorker(threading.Thread):
             if session is None:
                 return
         self._session = session
+        if self._on_suggestion is not None:
+            session.on_suggestion = self._on_suggestion
         events = session.attach()
         self._events = events
         try:

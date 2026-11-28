@@ -18,6 +18,10 @@ accessible-output2>=0.17; sys_platform == "win32"
 # Windows only). macOS/Linux builds skip it; computer use reports itself
 # unavailable there instead of failing to start.
 pywinauto>=0.6.9; sys_platform == "win32"
+# Signs BlindPilot's answer to Codex's browser access check (codex_browser.py),
+# the check the ChatGPT desktop app otherwise answers. Ed25519 is not in the
+# standard library.
+cryptography>=50.0.2; sys_platform == "win32"
 pyte>=0.8.2
 pexpect>=4.9; sys_platform != "win32"
 keyring>=25.7.0; sys_platform != "win32"

@@ -54,7 +54,7 @@ import webbrowser
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Sequence, cast
+from typing import Any, Callable, Iterable, List, Optional, Sequence, cast
 
 from linux_accessibility import announce as _linux_native_announce
 
@@ -72,6 +72,7 @@ from backend_workers import (
 )
 from backend_updates import BackendUpdateResult, BackendUpdateService, BackendUpdateState
 import claude_session
+import codex_browser
 from claude_session import _find_claude
 import diagnostics
 import earcons
@@ -418,7 +419,7 @@ APP_NAME = "BlindPilot"
 # share a left edge.
 PAD = 8
 PAD_DIALOG = 12
-APP_VERSION = "0.62.0"
+APP_VERSION = "0.63.0"
 APP_MODE_AGENT = "agent"
 APP_MODE_CHAT = "chat"
 APP_MODE_LABELS = {APP_MODE_AGENT: "Agent", APP_MODE_CHAT: "Chat"}
@@ -686,6 +687,9 @@ class ModelOptions:
     from_cache: bool = False  # served from a recent probe, not a fresh one
     # alias -> the model it currently resolves to, e.g. "opus" -> "Opus 5.5".
     labels: dict[str, str] = field(default_factory=dict)
+    # Claude Code's agents for the folder (Run as agent); None where the
+    # backend has none to offer or they could not be read.
+    agents: Optional[List["claude_session.Agent"]] = None
 
 
 def _parse_model_aliases(text: str) -> List[str]:
@@ -865,12 +869,18 @@ def _probe_claude_models(cwd: Optional[str], binary: Optional[str]) -> ModelOpti
         daemon=True,
     )
     help_thread.start()
+    agents: List[Optional[List[claude_session.Agent]]] = []
+    agents_thread = threading.Thread(
+        target=lambda: agents.append(claude_session.fetch_agents(binary, cwd)), daemon=True
+    )
+    agents_thread.start()
     # `/model` with no argument only prints status — it does not start a turn.
     status = _run_claude(binary, ["-p", "/model", "--output-format", "text"], cwd, 45)
     models = _parse_model_aliases(status)
     current_model, current_effort = _parse_current_model(status)
     labels = _resolve_claude_aliases(binary, models, cwd) if models else {}
     help_thread.join(30)
+    agents_thread.join(30)
     efforts = _parse_effort_levels(help_text[0] if help_text else "")
 
     problems = []
@@ -883,7 +893,15 @@ def _probe_claude_models(cwd: Optional[str], binary: Optional[str]) -> ModelOpti
     error = ""
     if problems:
         error = f"Could not read the {' and '.join(problems)} from Claude Code; showing the built-in list."
-    options = ModelOptions(models, efforts, current_model, current_effort, error, labels=labels)
+    options = ModelOptions(
+        models,
+        efforts,
+        current_model,
+        current_effort,
+        error,
+        labels=labels,
+        agents=agents[0] if agents else None,
+    )
     if not problems:
         # Only a clean answer is worth reusing; a failed probe should be retried.
         _remember_model_options(BACKEND_CLAUDE, cwd, binary, options)
@@ -2907,6 +2925,15 @@ class _Settings:
         # Place: without the extension it simply offers no browser tools.
         self.claude_chrome = bool(cfg.get("claude_chrome", True))
         claude_session.use_chrome = self.claude_chrome
+        # Browser use for Codex tabs, through the ChatGPT browser extension.
+        # On by default for the same reason: without the extension there is
+        # no browser to use, and the extension asks before each new site.
+        self.codex_browser = bool(cfg.get("codex_browser", True))
+        codex_browser.allowed = self.codex_browser
+        # Suggested messages in Claude Code tabs. Off by default: each one is
+        # an extra request on the plan.
+        self.prompt_suggestions = bool(cfg.get("prompt_suggestions", False))
+        claude_session.use_suggestions = self.prompt_suggestions
         self.progress_cue = _valid_progress_cue(cfg.get("progress_cue"))
         self.progress_cue_seconds = _valid_cue_seconds(cfg.get("progress_cue_seconds"))
         # Minutes between background re-reads of a tab's model catalog; 0 turns
@@ -2935,6 +2962,10 @@ class _Settings:
         cfg["send_with_ctrl_enter"] = self.send_with_ctrl_enter
         cfg["claude_chrome"] = self.claude_chrome
         claude_session.use_chrome = self.claude_chrome
+        cfg["codex_browser"] = self.codex_browser
+        codex_browser.allowed = self.codex_browser
+        cfg["prompt_suggestions"] = self.prompt_suggestions
+        claude_session.use_suggestions = self.prompt_suggestions
         cfg["progress_cue"] = self.progress_cue
         cfg["progress_cue_seconds"] = self.progress_cue_seconds
         cfg["model_refresh_minutes"] = self.model_refresh_minutes
@@ -3253,6 +3284,27 @@ class SettingsFilesDialog(wx.Dialog):
             self._open_selected()
             return
         event.Skip()
+
+
+def name_number_box(control: wx.SpinCtrl, label: str) -> None:
+    """Name a number box for every screen reader, its parts too on a Mac.
+
+    On macOS a wx.SpinCtrl is a text box and a stepper, and Tab stops on each.
+    VoiceOver reads the part, which SetName does not reach, so the stepper was
+    read as just "stepper". Windows' number box has no parts.
+    """
+    control.SetName(label)
+    if platform.system() != "Darwin":
+        return
+    for part in (control, *control.GetChildren()):
+        part.SetName(label)
+        try:
+            import objc  # type: ignore[import-not-found]
+
+            view = objc.objc_object(c_void_p=part.GetHandle())
+            view.setAccessibilityLabel_(label)
+        except Exception:  # noqa: BLE001 - a missing name never takes the window down
+            logging.getLogger("blindpilot").debug("could not name %s", label, exc_info=True)
 
 
 def _monospace_font(window: wx.Window) -> wx.Font:
@@ -4313,6 +4365,21 @@ class AddNoteDialog(wx.Dialog):
         self.CentreOnParent()
 
 
+AGENT_NONE_LABEL = "None (Claude Code's own agent)"
+
+
+def agent_about(agent: Optional["claude_session.Agent"], known: bool, names: Iterable[str]) -> str:
+    """What the Agent description box says for a choice in the agent list."""
+    if agent is None:
+        return "The conversation runs as Claude Code's own agent."
+    if agent.name not in names:
+        if not known:
+            return "No description: Claude Code's agents for this folder could not be read."
+        return "No description: Claude Code doesn't list this agent for this folder."
+    text = "\n".join(line.rstrip() for line in agent.description.strip().splitlines())
+    return text or f"{agent.name} has no description."
+
+
 class ModelDialog(wx.Dialog):
     """Model picker for /model: one combo box for the model, one for effort.
 
@@ -4334,6 +4401,7 @@ class ModelDialog(wx.Dialog):
         selected_effort: str,
         backend_name: str = "CLI",
         allow_auto_model: bool = False,
+        selected_agent: Optional[str] = None,
     ):
         super().__init__(parent, title="Model")
 
@@ -4395,12 +4463,17 @@ class ModelDialog(wx.Dialog):
         self.effort_box.SetName("Effort")
         self.effort_box.SetStringSelection(selected_effort or self._effort_keep)
 
-        grid = wx.FlexGridSizer(2, 2, self.FromDIP(PAD), self.FromDIP(PAD))
+        # rows=0: the agent rows are only there for Claude, and a grid with
+        # fewer rows than children asserts in an installed build.
+        grid = wx.FlexGridSizer(0, 2, self.FromDIP(PAD), self.FromDIP(PAD))
         grid.AddGrowableCol(1, 1)
         grid.Add(model_label, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.model_box, 1, wx.EXPAND)
         grid.Add(effort_label, 0, wx.ALIGN_CENTER_VERTICAL)
         grid.Add(self.effort_box, 1, wx.EXPAND)
+        self.agent_box: Optional[wx.Choice] = None
+        if selected_agent is not None:
+            self._add_agent_rows(grid, options.agents, selected_agent)
 
         buttons = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
 
@@ -4421,6 +4494,62 @@ class ModelDialog(wx.Dialog):
             self.EndModal(wx.ID_CANCEL)
             return
         event.Skip()
+
+    def _add_agent_rows(
+        self,
+        grid: wx.FlexGridSizer,
+        agents: Optional[List["claude_session.Agent"]],
+        selected: str,
+    ) -> None:
+        """Run as agent, and the chosen agent's whole description to read.
+
+        The list names each agent only: a description cut to fit a list stops
+        mid-word, so it sits whole in a read-only box under the list, line
+        breaks kept, and changes as another agent is chosen.
+        """
+        known = list(agents or [])
+        names = [agent.name for agent in known]
+        self._agents_known = agents is not None
+        self._agent_names = set(names)
+        if selected and selected not in names:
+            # The tab's agent stays a choice even when the folder no longer
+            # lists it, so OK does not quietly drop it.
+            known.append(claude_session.Agent(selected))
+        self._agents: list[Optional[claude_session.Agent]] = [None, *known]
+        self.agent_box = wx.Choice(
+            self, choices=[AGENT_NONE_LABEL, *(agent.label() for agent in known)]
+        )
+        self.agent_box.SetName("Run as agent")
+        chosen = [agent.name if agent else "" for agent in self._agents].index(selected)
+        self.agent_box.SetSelection(chosen)
+        self.agent_about = wx.TextCtrl(
+            self, style=wx.TE_MULTILINE | wx.TE_READONLY, size=self.FromDIP(wx.Size(420, 90))
+        )
+        self.agent_about.SetName("Agent description")
+        self.agent_box.Bind(wx.EVT_CHOICE, lambda _event: self._show_agent_about())
+        self._show_agent_about()
+        grid.Add(wx.StaticText(self, label="Run as &agent:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        grid.Add(self.agent_box, 1, wx.EXPAND)
+        grid.Add(wx.StaticText(self, label="Agent descri&ption:"), 0, wx.ALIGN_TOP)
+        grid.Add(self.agent_about, 1, wx.EXPAND)
+
+    def _show_agent_about(self) -> None:
+        if self.agent_box is None:
+            return
+        self.agent_about.ChangeValue(
+            agent_about(
+                self._agents[self.agent_box.GetSelection()],
+                self._agents_known,
+                self._agent_names,
+            )
+        )
+
+    def agent(self) -> str:
+        """The agent chosen, or "" for Claude Code's own."""
+        if self.agent_box is None:
+            return ""
+        chosen = self._agents[self.agent_box.GetSelection()]
+        return chosen.name if chosen is not None else ""
 
     def selection(self) -> tuple[str, str]:
         """(model, effort), with "" for either one left as the backend has it."""
@@ -4528,6 +4657,12 @@ def _permission_text(tool: str, payload: dict) -> str:
     return "\n".join(lines)
 
 
+PLAN_HELD_MESSAGE = (
+    "The user approved the plan, but don't start implementing it. Stay in plan mode "
+    "and make no changes until they ask you to go ahead."
+)
+
+
 class PermissionDialog(wx.Dialog):
     """A backend asks to use a tool, or (Claude) to leave plan mode with a plan.
 
@@ -4537,6 +4672,8 @@ class PermissionDialog(wx.Dialog):
 
     ALLOW, ALLOW_SESSION, DENY = wx.ID_HIGHEST + 1, wx.ID_HIGHEST + 2, wx.ID_HIGHEST + 3
     APPROVE_EDITS, APPROVE_ASK = wx.ID_HIGHEST + 4, wx.ID_HIGHEST + 5
+    # The plan is right, but not to be built yet: Claude stays in plan mode.
+    HOLD = wx.ID_HIGHEST + 6
 
     def __init__(
         self,
@@ -4572,6 +4709,7 @@ class PermissionDialog(wx.Dialog):
             choices = [
                 (self.APPROVE_EDITS, "&Approve, accept edits"),
                 (self.APPROVE_ASK, "Approve, as&k before edits"),
+                (self.HOLD, "Approve, &don't start"),
                 (self.DENY, "&Keep planning"),
             ]
         else:
@@ -4966,7 +5104,8 @@ class SendToTabDialog(wx.Dialog):
             wx.StaticText(self, label="&Hand-offs before stopping:"),
             0, wx.LEFT | wx.RIGHT | wx.TOP, pad,
         )  # fmt: skip
-        self.turns = wx.SpinCtrl(self, min=1, max=50, initial=6, name="Hand-offs before stopping")
+        self.turns = wx.SpinCtrl(self, min=1, max=50, initial=6)
+        name_number_box(self.turns, "Hand-offs before stopping")
         rows.Add(self.turns, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
         self.manual = wx.CheckBox(self, label="&Ask me before each hand-off")
         self.manual.Enable(False)
@@ -6892,6 +7031,9 @@ class SessionPanel(wx.Panel):
         # whenever those processes are let go, so a wake-up queued before that
         # cannot open a late turn on whatever the tab holds now.
         self._claude_generation = 0
+        # Run as agent (Model and Effort): "" is Claude Code's own.
+        # ponytail: per tab for this run only; save it with the tab if asked.
+        self.claude_agent = ""
         # The generation of a wake-up that arrived while the last turn's `done`
         # was still in the mailbox, or None. The late turn starts once it
         # drains, if the conversation it belongs to is still the one here.
@@ -7543,14 +7685,23 @@ class SessionPanel(wx.Panel):
             self.effort,
             backend_label(provider),
             allow_auto_model=provider == BACKEND_COMMANDCODE,
+            selected_agent=self.claude_agent if provider == BACKEND_CLAUDE else None,
         )
         try:
             if dlg.ShowModal() != wx.ID_OK:
                 self._announce(f"Model unchanged. Still using {self._model_summary()}.")
                 return
             model, effort = dlg.selection()
+            agent = dlg.agent() if provider == BACKEND_CLAUDE else self.claude_agent
         finally:
             dlg.Destroy()
+        if agent != self.claude_agent:
+            self.claude_agent = agent
+            self._announce(
+                f"From the next message, Claude runs as {agent}."
+                if agent
+                else "From the next message, Claude runs as its own agent."
+            )
         self.set_model(model, effort)
 
     def open_connect_dialog(self) -> None:
@@ -8924,7 +9075,13 @@ class SessionPanel(wx.Panel):
                         mine.append(line)
                 _remember_session_rules(self._session_id or "", granted)
             return {"behavior": "allow", "updatedPermissions": for_session}
-        if plan:
+        if plan and choice == PermissionDialog.HOLD:
+            # ExitPlanMode has only allow and deny, and allow starts the work,
+            # so "approved, not yet" is a deny that says so. The mode is left
+            # alone: the tab stays in plan mode.
+            self._announce("Plan approved. Claude won't start on it.")
+            message = PLAN_HELD_MESSAGE
+        elif plan:
             self._announce("Kept planning")
             message = "The user wants to keep planning."
         else:
@@ -9102,6 +9259,8 @@ class SessionPanel(wx.Panel):
                     self._on_remote(cast(dict, args[0]))
                 elif name == "done":
                     self._on_worker_finished()
+                elif name == "suggestion":
+                    self._on_suggestion(cast(int, args[0]), str(args[1]))
                 elif name == "late_turn":
                     # The mailbox carries plain objects. This one is the
                     # generation `_claude_worker_extra` put in it.
@@ -9779,7 +9938,7 @@ class SessionPanel(wx.Panel):
         option_values = {
             key: value
             for key, value in extra.items()
-            if key not in ("on_permission", "on_unsolicited")
+            if key not in ("on_permission", "on_unsolicited", "on_suggestion")
         }
         recovery = getattr(self, "_pending_recovery", None)
         if recovery is not None and not self._session_id and recovery.fork_source:
@@ -9814,6 +9973,7 @@ class SessionPanel(wx.Panel):
             if normal_turn
             else None,
             on_unsolicited=extra.get("on_unsolicited"),
+            on_suggestion=extra.get("on_suggestion"),
         )
         return WorkerRequest(
             prompt,
@@ -9895,6 +10055,11 @@ class SessionPanel(wx.Panel):
             if panel is not None:
                 panel._queue_worker_event("late_turn", generation)
 
+        def suggest(text: str) -> None:
+            panel = tab()
+            if panel is not None:
+                panel._queue_worker_event("suggestion", generation, text)
+
         def ask(tool: str, payload: dict, suggestions: list) -> dict:
             # Weak for the same reason as the wake-up: a closed tab is denied.
             panel = tab()
@@ -9914,11 +10079,28 @@ class SessionPanel(wx.Panel):
             charged = api_credits.get_key()
         return {
             "held_for": self,
+            "agent": getattr(self, "claude_agent", ""),
             "on_unsolicited": wake,
+            "on_suggestion": suggest,
             "on_permission": ask,
             "remote_control": remote,
             "api_key": charged,
         }
+
+    def _on_suggestion(self, generation: int, text: str) -> None:
+        """Put Claude's suggested next message in an empty message box, selected.
+
+        Typing replaces it and Enter sends it as it stands. Text of your own is
+        never replaced, and a suggestion for a conversation this tab has since
+        left is dropped.
+        """
+        if not self or generation != self._claude_generation:
+            return
+        if not SETTINGS.prompt_suggestions or self.prompt.GetValue().strip():
+            return
+        self.prompt.ChangeValue(text)
+        self.prompt.SetSelection(-1, -1)
+        self._announce("Suggested message in the message box")
 
     def _start_late_turn(self, generation: int) -> None:
         """Receive what the CLI says with no turn of ours running.
@@ -11400,7 +11582,7 @@ class SessionPanel(wx.Panel):
             header.payload if header is not None and header.payload else reassemble(self._rows, n)
         )
         title = f"Response {n}"
-        dlg = FormattedView.open(self, markdown_page(text, title), title) or ReadView(
+        dlg = FormattedView.open(self, markdown_page(text, title, viewer=True), title) or ReadView(
             self, text, title
         )
         try:
@@ -13312,6 +13494,7 @@ class RemoteHermesDialog(wx.Dialog):
 
         port_label = wx.StaticText(self, label="&Port:")
         self._port = wx.SpinCtrl(self, min=1, max=65535, initial=REMOTE_HERMES.port)
+        name_number_box(self._port, "Port")
         self._port.SetToolTip("The port hermes serve listens on")
 
         self._secure = wx.CheckBox(self, label="Connect over &TLS (wss)")
@@ -13548,6 +13731,14 @@ class PreferencesDialog(wx.Dialog):
             panel, label="Let Claude use Chrome (Claude in Chrome, in Claude Code tabs)"
         )
         self._claude_chrome.SetValue(SETTINGS.claude_chrome)
+        self._codex_browser = wx.CheckBox(
+            panel, label="Let Codex use your web browser (ChatGPT browser extension, in Codex tabs)"
+        )
+        self._codex_browser.SetValue(SETTINGS.codex_browser)
+        self._suggestions = wx.CheckBox(
+            panel, label="Suggest what to send next after each Claude reply (Claude Code tabs)"
+        )
+        self._suggestions.SetValue(SETTINGS.prompt_suggestions)
         for check in (
             self._live_rows,
             self._speak_live,
@@ -13558,6 +13749,8 @@ class PreferencesDialog(wx.Dialog):
             self._read_back,
             self._ctrl_enter,
             self._claude_chrome,
+            self._codex_browser,
+            self._suggestions,
         ):
             root.Add(check, 0, wx.LEFT | wx.RIGHT | wx.TOP, pad)
 
@@ -13614,6 +13807,7 @@ class PreferencesDialog(wx.Dialog):
             max=CUE_SECONDS_MAX,
             initial=SETTINGS.progress_cue_seconds,
         )
+        name_number_box(self._interval, "Seconds between working sounds")
         interval_row.Add(self._interval, 0)
         root.Add(interval_row, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, pad)
         self._cue_box.Bind(wx.EVT_RADIOBOX, lambda _e: self._sync_interval())
@@ -13662,6 +13856,7 @@ class PreferencesDialog(wx.Dialog):
             max=MODEL_REFRESH_MINUTES_MAX,
             initial=SETTINGS.model_refresh_minutes,
         )
+        name_number_box(self._model_refresh, "Minutes between model list re-reads")
         self._model_refresh.SetToolTip(
             "BlindPilot re-reads each open tab's model list so a model retired "
             "upstream drops out of the picker, and says so. Each read starts the "
@@ -13741,6 +13936,14 @@ class PreferencesDialog(wx.Dialog):
     @property
     def claude_chrome(self) -> bool:
         return self._claude_chrome.GetValue()
+
+    @property
+    def codex_browser(self) -> bool:
+        return self._codex_browser.GetValue()
+
+    @property
+    def prompt_suggestions(self) -> bool:
+        return self._suggestions.GetValue()
 
     @property
     def sounds_enabled(self) -> bool:
@@ -14925,6 +15128,8 @@ class MainFrame(wx.Frame):
         SETTINGS.read_back_sent = dialog.read_back_sent
         SETTINGS.send_with_ctrl_enter = dialog.send_with_ctrl_enter
         SETTINGS.claude_chrome = dialog.claude_chrome
+        SETTINGS.codex_browser = dialog.codex_browser
+        SETTINGS.prompt_suggestions = dialog.prompt_suggestions
         SETTINGS.progress_cue = dialog.progress_cue
         SETTINGS.progress_cue_seconds = dialog.progress_interval
         SETTINGS.model_refresh_minutes = dialog.model_refresh_minutes

@@ -49,6 +49,7 @@ class WorkerCallbacks:
     on_tasks: Callable[..., None] | None = None
     on_remote: Callable[[dict], None] | None = None
     on_unsolicited: Callable[[], None] | None = None
+    on_suggestion: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class ClaudeOptions:
     fork_source: str = ""
     fork_at: str = ""
     api_key: str = ""
+    agent: str = ""
 
 
 _UNSET = object()

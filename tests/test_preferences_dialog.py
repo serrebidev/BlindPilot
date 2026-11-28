@@ -213,6 +213,8 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
         read_back_sent = False
         send_with_ctrl_enter = True
         claude_chrome = False
+        codex_browser = False
+        prompt_suggestions = True
         appearance = app.APPEARANCE_SYSTEM
         progress_cue = app.CUE_OFF
         progress_interval = 30
@@ -233,6 +235,8 @@ def test_applying_the_dialog_updates_the_settings_and_the_menus(wx_app, monkeypa
     assert app.SETTINGS.read_back_sent is False
     assert app.SETTINGS.send_with_ctrl_enter is True
     assert app.SETTINGS.claude_chrome is False
+    assert app.SETTINGS.codex_browser is False
+    assert app.SETTINGS.prompt_suggestions is True
     assert app.SETTINGS.progress_cue == app.CUE_OFF
     assert app.SETTINGS.progress_cue_seconds == 30
     assert app.SETTINGS.model_refresh_minutes == 0
@@ -333,6 +337,8 @@ def test_changing_the_appearance_says_it_takes_effect_next_launch(wx_app, monkey
         read_back_sent = app.SETTINGS.read_back_sent
         send_with_ctrl_enter = app.SETTINGS.send_with_ctrl_enter
         claude_chrome = app.SETTINGS.claude_chrome
+        codex_browser = app.SETTINGS.codex_browser
+        prompt_suggestions = app.SETTINGS.prompt_suggestions
         sounds_enabled = app.SETTINGS.sounds_enabled
         sound_cues = dict(app.SETTINGS.sound_cues)
         text_view = app.SETTINGS.text_view
